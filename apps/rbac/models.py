@@ -419,9 +419,10 @@ class UserProfile(TimeStampedModel):
             user_profile=self,
             role__is_active=True
         ).values_list('role_id', flat=True)
+        accepted_codes = [module_code]
         return Module.objects.filter(
             roles__id__in=user_role_ids,
-            code=module_code,
+            code__in=accepted_codes,
             is_active=True
         ).exists()
     

@@ -308,7 +308,9 @@ def user_has_module_access(user, module_code: str) -> bool:
             return False
         
         user_modules = profile.get_all_modules()
-        return any(module.code == module_code for module in user_modules)
+        from .service_catalogue import SERVICE_PARENTS
+        codes = {module_code} | {code for code, parent in SERVICE_PARENTS.items() if parent == module_code}
+        return any(module.code in codes for module in user_modules)
     except Exception:
         return False
 
@@ -318,13 +320,16 @@ def get_users_with_module_access(module_code: str) -> List:
     try:
         from apps.rbac.models import UserProfile, Module
         
-        module = Module.objects.filter(code=module_code, is_active=True).first()
-        if not module:
+        from .service_catalogue import SERVICE_PARENTS
+        codes = {module_code} | {code for code, parent in SERVICE_PARENTS.items() if parent == module_code}
+        modules = Module.objects.filter(code__in=codes, is_active=True)
+        if not modules.exists():
             return []
         
         profiles = UserProfile.objects.filter(
             is_deleted=False,
-            userrole__role__rolemodule__module=module
+            userrole__role__is_active=True,
+            userrole__role__rolemodule__module__in=modules
         ).distinct()
         
         return [profile.user.id for profile in profiles]

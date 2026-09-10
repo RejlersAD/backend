@@ -15,6 +15,7 @@ Cross-verified against:
 # Each entry maps to Module.code in the DB.
 # ─────────────────────────────────────────────────────────────────────────────
 ALL_MODULES_CATALOGUE = [
+    {'code': 'ai_champion', 'name': 'AI Champion', 'icon': 'Trophy', 'order': 54, 'description': 'AI engagement leaderboard and recognition'},
     # ── Core Engineering ──────────────────────────────────────────────────
     {'code': 'pid_analysis',           'name': 'P&ID Analysis',               'icon': 'FileText',    'order': 1,  'description': 'P&ID document analysis and processing'},
     {'code': 'pfd_to_pid',             'name': 'PFD to P&ID Converter',        'icon': 'RefreshCw',   'order': 2,  'description': 'AI-powered conversion of PFD to P&ID drawings'},
@@ -75,8 +76,6 @@ ALL_MODULES_CATALOGUE = [
     # SOFT-CODED: hr_self_service moved to COMMON section (order 35) — accessible to all users
     {'code': 'hr_onboarding',          'name': 'Onboarding | Offboarding',     'icon': 'UserPlus',    'order': 74, 'description': 'Employee lifecycle management — onboarding pipeline and offboarding exits'},
     # ── Business Modules ──────────────────────────────────────────────────
-    {'code': 'finance',                'name': 'Finance',                      'icon': 'CreditCard',  'order': 80, 'description': 'Invoice tracking, billing and financial management'},
-    {'code': 'sales',                  'name': 'Sales',                        'icon': 'TrendingUp',  'order': 81, 'description': 'Internal sales pipeline and business development'},
     {'code': 'project_control',        'name': 'Project Control',              'icon': 'Briefcase',   'order': 82, 'description': 'Project planning, tracking and schedule control'},
     # SOFT-CODED: 6.2 Planning Package — split out from 'project_control' so it can be
     # granted/revoked independently in Role & Access Management (mirrors the QHSE/
@@ -87,6 +86,12 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'procurement_requisitions', 'name': 'Purchase Recommendations',  'icon': 'DocumentText','order': 85, 'description': 'Purchase recommendation workflow and approvals'},
     {'code': 'procurement_orders',       'name': 'Purchase Orders',            'icon': 'DocumentPlus','order': 86, 'description': 'Create and manage purchase orders'},
     {'code': 'procurement_receipts',     'name': 'Goods Receipt',              'icon': 'Folder',      'order': 87, 'description': 'Goods receipt and delivery confirmation'},
+]
+
+from .service_catalogue import SERVICE_MODULES
+ALL_MODULES_CATALOGUE += [
+    {'code': code, 'name': name, 'icon': 'LayoutGrid', 'order': 900 + index, 'description': description}
+    for index, (code, name, parent, description) in enumerate(SERVICE_MODULES)
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,7 +328,7 @@ SUCCESS_MESSAGES = {
 #   ❌ 6. Procurement  
 #   ❌ 7. QHSE
 #   ❌ 8. AI/ML (Sales)
-#   ✅ 9.6 Enquiry Management (shared operational access)
+#   ✅ 9.6 Enquiry Management requires an explicit role grant
 #   ❌ Other Admin modules
 # 
 # To add/remove modules: edit this list, then run: python manage.py sync_default_role
@@ -357,7 +362,6 @@ DEFAULT_ROLE_MODULES = [
     'designiq',
     'data_mining',
     'hr_self_service',  # SOFT-CODED: My Profile (moved to COMMON section 2.5) — always accessible
-    'enquiry_management',  # Shared enquiry register for every authenticated Default user
 ]
 
 ENGINEERING_SECTION_MODULES = [
@@ -428,8 +432,7 @@ ROLE_MODULE_POLICY = {
         'audit_logs',
         'reports',
         'api_access',
-        'finance',
-        'sales',
+        *[code for code, *_ in SERVICE_MODULES],
         'project_control',
         'planning_package',
         'procurement',

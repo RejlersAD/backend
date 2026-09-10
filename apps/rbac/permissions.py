@@ -83,29 +83,27 @@ class HasPermission(permissions.BasePermission):
 
 
 class HasModuleAccess(permissions.BasePermission):
-    """
-    Permission class to check if user has access to specific module
-    Usage: permission_classes = [HasModuleAccess]
-           module_required = 'pid_analysis'
-    """
+    """Require the assigned service or its explicit full-suite parent grant."""
+    message = 'Your role does not grant access to this service.'
+
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        if not request.user or not request.user.is_authenticated or not request.user.is_active:
             return False
-        
-        # Super admin has all module access
+        if request.user.is_superuser:
+            return True
         try:
             profile = request.user.rbac_profile
-            if profile.roles.filter(code='super_admin', is_active=True).exists():
-                return True
         except UserProfile.DoesNotExist:
             return False
-        
-        # Check for specific module access
-        module_required = getattr(view, 'module_required', None)
-        if not module_required:
-            return True  # No specific module required
-        
-        return profile.has_module_access(module_required)
+        if profile.is_deleted:
+            return False
+        from .service_catalogue import required_service
+        module_required = required_service(view) or getattr(self, 'module_required', None)
+        return bool(module_required and profile.has_module_access(module_required))
+
+
+class CanViewFinanceOverview(HasModuleAccess):
+    module_required = 'finance_overview'
 
 
 class IsOwnerOrAdmin(permissions.BasePermission):

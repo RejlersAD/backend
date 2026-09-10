@@ -31,7 +31,7 @@ from apps.core.enquiry_workflow import (
     DEFAULT_ROUTING, add_initial_message, add_response, confirm_resolution, escalate_enquiry,
     normalize_inquiry_type, propose_resolution, route_enquiry, submit_feedback,
 )
-from apps.core.config.enquiry_access_config import user_has_enquiry_access
+from apps.core.config.enquiry_access_config import user_has_enquiry_access, CanManageEnquiries
 from apps.rbac.permissions import HasModuleAccess
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def _notify_admins_of_enquiry(enquiry_obj, service, user_email, user_name):
         # Django admins OR RBAC admin/super_admin roles
         # We use is_staff/is_superuser as the widest safe net; role-based
         # filtering happens in the RBAC layer for finer control if needed.
-        Q(is_superuser=True) | Q(is_staff=True)
+        Q(pk__in=[u.pk for u in User.objects.filter(is_active=True) if user_has_enquiry_access(u)])
     ).distinct()
 
     NotificationService.bulk_notify(
@@ -604,7 +604,7 @@ def _managed_queryset(user):
     queryset = Enquiry.objects.select_related('requester', 'assigned_to', 'assigned_by', 'approved_by')
     if _can_manage_enquiries(user):
         return queryset
-    return queryset.filter(assigned_to=user)
+    return queryset.none()
 
 
 def _requester_queryset(user):
@@ -614,7 +614,7 @@ def _requester_queryset(user):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def list_enquiries(request):
     """List enquiries with optional filters: ?status=&urgency=&service=&search=&page=&page_size="""  
     qs = _managed_queryset(request.user)
@@ -671,7 +671,7 @@ def list_enquiries(request):
     })
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def enquiry_stats(request):
     """Aggregate counts for dashboard widgets at the top of the admin page."""
     enquiries = _managed_queryset(request.user)
@@ -734,7 +734,7 @@ def enquiry_stats(request):
     })
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def enquiry_detail(request, pk: int):
     """Retrieve, update (status / admin_notes), or delete a single enquiry."""
     enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
@@ -840,7 +840,7 @@ def enquiry_detail(request, pk: int):
     return Response({'success': True, 'enquiry': _serialize_enquiry(enquiry, detail=True, include_internal=True)})
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def enquiry_response(request, pk: int):
     enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
     try:
@@ -855,7 +855,7 @@ def enquiry_response(request, pk: int):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def enquiry_escalate(request, pk: int):
     enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
     escalate_enquiry(enquiry, actor=request.user, reason=request.data.get('reason'))
@@ -864,7 +864,7 @@ def enquiry_escalate(request, pk: int):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def enquiry_propose_resolution(request, pk: int):
     enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
     try:
@@ -940,7 +940,7 @@ def enquiry_attachment_download(request, pk: int, attachment_id: int):
         enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
     else:
         enquiry = get_object_or_404(
-            Enquiry.objects.filter(Q(assigned_to=request.user) | Q(requester=request.user) | Q(requester__isnull=True, email__iexact=request.user.email)).distinct(),
+            Enquiry.objects.filter(Q(requester=request.user) | Q(requester__isnull=True, email__iexact=request.user.email)).distinct(),
             pk=pk,
         )
     attachment = get_object_or_404(enquiry.attachments.all(), pk=attachment_id)
@@ -998,7 +998,7 @@ def enquiry_options(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanManageEnquiries])
 def enquiry_representatives(request):
     if not _can_manage_enquiries(request.user):
         return Response({'detail': 'Enquiry management access is required.'}, status=status.HTTP_403_FORBIDDEN)

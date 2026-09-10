@@ -7,6 +7,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from apps.rbac.permissions import HasModuleAccess
 from django.db import transaction
 from django.utils import timezone
 from decimal import Decimal
@@ -53,7 +54,8 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
     """
     queryset = SalarySlip.objects.all()
     serializer_class = SalarySlipSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'finance_salary'
     
     def get_serializer_class(self):
         """Use different serializers for different actions"""
