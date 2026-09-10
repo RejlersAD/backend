@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -10,6 +10,7 @@ from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from .identity import EmployeeIdentityService
@@ -82,7 +83,7 @@ from .governance import audit, employee_for_user, is_manager
 from .microsoft_graph import GraphConfigurationError, MicrosoftGraphService
 
 
-HR_ROLE_CODES = {'hr_manager', 'hr_admin', 'human_resource', 'admin', 'super_admin'}
+HR_ROLE_CODES = {'hr_manager', 'hr_admin', 'human_resource', 'admin', 'super_admin', 'superadmin'}
 
 
 def _role_codes(user):
@@ -323,6 +324,8 @@ class HRWorkflowInstanceViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _decision(self, request, decision):
         instance = self.get_object()
+        if instance.subject_type in {'payroll.leave_request', 'hr.overtime_request'}:
+            raise ValidationError('Use the request approval or cancellation action to keep its status synchronized.')
         HRWorkflowService.decide(instance, request.user, decision, request.data.get('note', ''))
         instance.refresh_from_db()
         return Response(self.get_serializer(instance).data)
@@ -338,6 +341,8 @@ class HRWorkflowInstanceViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         instance = self.get_object()
+        if instance.subject_type in {'payroll.leave_request', 'hr.overtime_request'}:
+            raise ValidationError('Use the request approval or cancellation action to keep its status synchronized.')
         if not (_is_hr(request.user) or instance.requested_by_id == request.user.id):
             raise PermissionDenied('Only the requester or HR can cancel this workflow.')
         HRWorkflowService.cancel(instance, request.user, request.data.get('note', ''))
@@ -792,55 +797,154 @@ class ShiftAssignmentViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
+class OvertimePagination(PageNumberPagination):
+    page_size = 10
+
+
 class OvertimeRequestViewSet(viewsets.ModelViewSet):
+    pagination_class = OvertimePagination
     serializer_class = OvertimeRequestSerializer
     permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['employee', 'work_date', 'status']
+    search_fields = ['employee__first_name', 'employee__last_name', 'employee__employee_code']
 
     def get_queryset(self):
-        return OvertimeRequest.objects.select_related('employee', 'assignment', 'workflow_instance__current_stage').filter(
-            employee__in=EmployeeMaster.objects.filter(_employee_scope(self.request.user))
-        )
+        from .overtime import direct_reports, is_final_reviewer
+        qs = OvertimeRequest.objects.select_related('employee__user', 'requested_by', 'assignment', 'workflow_instance__current_stage').order_by('-created_at')
+        if self.request.query_params.get('scope') == 'mine':
+            return qs.filter(employee__user=self.request.user)
+        if not is_final_reviewer(self.request.user):
+            qs = qs.filter(Q(employee__user=self.request.user) | Q(requested_by=self.request.user) | Q(employee__in=direct_reports(self.request.user)))
+        return qs
 
+    @action(detail=False, methods=['get'], url_path='available-days')
+    def available_days(self, request):
+        from .overtime import direct_reports
+        from .overtime_attendance import eligible_days
+        allowed = {str(e.pk): e for e in direct_reports(request.user)}
+        allowed.update({str(e.pk): e for e in EmployeeMaster.objects.filter(user=request.user).select_related('user')})
+        employee = allowed.get(request.query_params.get('employee'))
+        if not employee:
+            raise PermissionDenied('Select yourself or a direct report.')
+        return Response({'days': eligible_days(employee)})
+
+    @action(detail=True, methods=['post'], url_path='apply-benefit')
+    def apply_benefit(self, request, pk=None):
+        from .overtime_conversion import apply_benefit
+        overtime = apply_benefit(self.get_object().pk, request.user, request.data)
+        return Response(self.get_serializer(overtime).data)
+
+    @action(detail=False, methods=['get'])
+    def employees(self, request):
+        from .overtime import direct_reports
+        team = direct_reports(request.user)
+        own = list(EmployeeMaster.objects.filter(user=request.user).select_related('user'))
+        return Response({'is_manager': bool(team), 'employees': [
+            {'id': str(e.pk), 'name': e.get_display_name(), 'code': e.employee_code, 'is_self': e.user_id == request.user.pk}
+            for e in [*own, *team] if e.user_id and e.user.is_active]})
+
+    @action(detail=False, methods=['post'], url_path='submit-days')
+    @transaction.atomic
+    def submit_days(self, request):
+        days = request.data.get('days')
+        if not isinstance(days, list) or not 1 <= len(days) <= 31:
+            raise ValidationError({'days': 'Select between 1 and 31 recorded days.'})
+        serializers = []
+        dates = set()
+        for day in days:
+            if not isinstance(day, dict):
+                raise ValidationError({'days': 'Each day requires a date and hours.'})
+            serializer = self.get_serializer(data={
+                'employee': request.data.get('employee'), 'reason': request.data.get('reason'),
+                'compensation_type': request.data.get('compensation_type', ''),
+                'work_date': day.get('work_date'), 'requested_hours': day.get('requested_hours'),
+            })
+            serializer.is_valid(raise_exception=True)
+            date = serializer.validated_data['work_date']
+            if date in dates:
+                raise ValidationError({'days': 'Select each day only once.'})
+            dates.add(date)
+            serializers.append(serializer)
+        from decimal import Decimal
+        entries = sorted([{'work_date': str(s.validated_data['work_date']),
+                           'requested_hours': str(s.validated_data['requested_hours'])} for s in serializers], key=lambda d: d['work_date'])
+        serializer = serializers[0]
+        serializer.validated_data['day_entries'] = entries
+        serializer.validated_data['work_date'] = min(dates)
+        serializer.validated_data['requested_hours'] = sum((Decimal(d['requested_hours']) for d in entries), Decimal('0'))
+        self.perform_create(serializer)
+        return Response({'results': [serializer.data]}, status=201)
+
+    @transaction.atomic
     def perform_create(self, serializer):
-        employee = serializer.validated_data['employee']
-        if not _is_hr(self.request.user) and employee.user_id != self.request.user.id:
-            raise PermissionDenied('Employees can only request overtime for themselves.')
-        overtime = serializer.save(requested_by=self.request.user, status='pending')
+        from .overtime import direct_reports
+        from apps.payroll.services.leave_approval import manager_for_employee
+        employee = EmployeeMaster.objects.select_for_update().get(pk=serializer.validated_data['employee'].pk)
+        team = direct_reports(self.request.user)
+        is_self = employee.user_id == self.request.user.pk
+        if not is_self and employee.pk not in {e.pk for e in team}:
+            raise PermissionDenied('Request overtime only for yourself or your direct reports.')
+        if not employee.user_id or not employee.user.is_active:
+            raise ValidationError({'employee': 'An active employee account is required.'})
+        manager_initiated = bool(team) if is_self else True
+        manager = manager_for_employee(employee)
+        if not manager_initiated and manager and (not manager.user_id or not manager.user.is_active or manager.user_id == employee.user_id):
+            raise ValidationError({'manager': 'Ask HR to correct the assigned manager before submitting overtime.'})
+        from .overtime_attendance import validate_recorded_hours, claimed_dates
+        entries = serializer.validated_data.get('day_entries') or [{
+            'work_date': str(serializer.validated_data['work_date']),
+            'requested_hours': str(serializer.validated_data['requested_hours'])}]
+        claimed = claimed_dates(employee)
+        for entry in entries:
+            if entry['work_date'] in claimed:
+                raise ValidationError({'work_date': 'An active overtime request already includes this date.'})
+            validate_recorded_hours(employee, entry['work_date'], entry['requested_hours'])
+        overtime = serializer.save(requested_by=self.request.user, status='pending', approved_hours=None)
         workflow = HRWorkflowService.start(
             'overtime_request_v1', 'hr.overtime_request', overtime.pk,
             employee=employee, requested_by=self.request.user,
-            context={'work_date': str(overtime.work_date), 'requested_hours': str(overtime.requested_hours)},
+            context={'work_date': str(overtime.work_date), 'requested_hours': str(overtime.requested_hours),
+                     'employee_name': employee.get_display_name(), 'manager_initiated': manager_initiated},
         )
         overtime.workflow_instance = workflow
         overtime.save(update_fields=['workflow_instance', 'updated_at'])
 
     def perform_update(self, serializer):
-        overtime = self.get_object()
-        if overtime.status != 'draft' and not _is_hr(self.request.user):
-            raise ValidationError({'status': 'Only draft overtime requests can be edited.'})
-        serializer.save()
+        raise ValidationError('Cancel the pending request and submit a corrected request.')
 
     def perform_destroy(self, instance):
-        if instance.status != 'draft':
-            raise ValidationError({'status': 'Only draft overtime requests can be deleted.'})
-        if instance.employee.user_id != self.request.user.id and not _is_hr(self.request.user):
-            raise PermissionDenied('You cannot delete this overtime request.')
-        instance.delete()
+        raise ValidationError('Use Cancel to preserve overtime approval history.')
 
+    @transaction.atomic
     def _decide(self, request, decision):
-        overtime = self.get_object()
-        approved_hours = request.data.get('approved_hours', overtime.requested_hours)
-        if decision == 'approve' and float(approved_hours) > float(overtime.requested_hours):
-            raise ValidationError({'approved_hours': 'Approved hours cannot exceed requested hours.'})
+        from decimal import Decimal, InvalidOperation
+        from .overtime import notify_result
+        overtime = self.get_queryset().select_for_update(of=('self',)).get(pk=self.get_object().pk)
+        if overtime.status != 'pending' or not overtime.workflow_instance_id:
+            raise ValidationError('This overtime request is no longer awaiting approval.')
+        try:
+            hours = Decimal(str(request.data.get('approved_hours', overtime.requested_hours)))
+        except (InvalidOperation, ValueError, TypeError):
+            raise ValidationError({'approved_hours': 'Enter valid overtime hours.'})
+        if decision == 'approve' and (not hours.is_finite() or hours <= 0 or hours > overtime.requested_hours or hours.as_tuple().exponent < -2):
+            raise ValidationError({'approved_hours': 'Approved hours must be positive and no greater than requested hours, with at most two decimals.'})
+        if decision == 'approve':
+            from .overtime_attendance import validate_recorded_hours
+            from .overtime_attendance import validate_request_attendance
+            validate_request_attendance(overtime)
+            if overtime.day_entries and hours != overtime.requested_hours:
+                raise ValidationError('Approve the complete multi-day request or reject it for correction.')
+        # Manager review authorizes the request; final HR/Finance approval sets payable hours.
         workflow = HRWorkflowService.decide(overtime.workflow_instance, request.user, decision, request.data.get('note', ''))
-        overtime.status = workflow.status if workflow.status != 'pending' else 'pending'
+        overtime.status = workflow.status
         if workflow.status == 'approved':
-            overtime.approved_hours = approved_hours
+            overtime.approved_hours = hours
+        if workflow.status in {'approved', 'rejected'}:
             overtime.reviewed_at = timezone.now()
-        elif workflow.status == 'rejected':
-            overtime.reviewed_at = timezone.now()
+        overtime.workflow_instance = workflow
         overtime.save(update_fields=['status', 'approved_hours', 'reviewed_at', 'updated_at'])
+        notify_result(overtime)
         return Response(self.get_serializer(overtime).data)
 
     @action(detail=True, methods=['post'])
@@ -852,13 +956,16 @@ class OvertimeRequestViewSet(viewsets.ModelViewSet):
         return self._decide(request, 'reject')
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def cancel(self, request, pk=None):
-        overtime = self.get_object()
-        if overtime.employee.user_id != request.user.id and not _is_hr(request.user):
-            raise PermissionDenied('Only the employee or HR can cancel overtime.')
+        from .overtime import notify_result
+        overtime = self.get_queryset().select_for_update(of=('self',)).get(pk=self.get_object().pk)
+        if overtime.requested_by_id != request.user.pk or overtime.status != 'pending':
+            raise PermissionDenied('Only the requester can cancel a pending request.')
         HRWorkflowService.cancel(overtime.workflow_instance, request.user, request.data.get('note', ''))
         overtime.status = 'cancelled'
         overtime.save(update_fields=['status', 'updated_at'])
+        notify_result(overtime)
         return Response(self.get_serializer(overtime).data)
 
 

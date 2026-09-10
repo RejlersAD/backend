@@ -927,8 +927,6 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
     def accounting_export(self, request, pk=None):
         self._require_payroll_admin(request)
         run = self.get_object()
-        if run.status not in {catalog.Status.FINANCE_APPROVED, catalog.Status.RELEASED}:
-            return Response({'error': 'Finance approval is required before journal generation.'}, status=409)
         entries = [
             {'account': 'PAYROLL_EXPENSE', 'description': f'Gross payroll {run.cycle_code}', 'debit': str(run.total_gross), 'credit': '0.00'},
             {'account': 'PAYROLL_DEDUCTIONS_PAYABLE', 'description': f'Deductions {run.cycle_code}', 'debit': '0.00', 'credit': str(run.total_deductions)},
@@ -1316,6 +1314,8 @@ class PayrollAdjustmentViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
 
     def _block_if_applied(self, instance):
+        if hasattr(instance, 'ot_conversion'):
+            return Response({'error': 'Applied OT benefits cannot be edited or cancelled as manual adjustments.'}, status=409)
         if instance.status == catalog.AdjustmentStatus.APPLIED:
             return Response(
                 {'error': (
@@ -1351,6 +1351,9 @@ class PayrollAdjustmentViewSet(viewsets.ModelViewSet):
     def cancel(self, request, pk=None):
         """Mark a pending adjustment as cancelled. Idempotent for already-cancelled."""
         adj = self.get_object()
+        blocker = self._block_if_applied(adj)
+        if blocker is not None:
+            return blocker
         if adj.status == catalog.AdjustmentStatus.APPLIED:
             return Response(
                 {'error': 'Cannot cancel an adjustment that has already been applied.'},
@@ -1366,6 +1369,8 @@ class PayrollAdjustmentViewSet(viewsets.ModelViewSet):
     def reopen(self, request, pk=None):
         """Move a cancelled adjustment back to pending so it can be reused."""
         adj = self.get_object()
+        from .services.adjustment_period import require_current_or_future
+        require_current_or_future(adj.target_year, adj.target_month)
         if adj.status != catalog.AdjustmentStatus.CANCELLED:
             return Response(
                 {'error': 'Only cancelled adjustments can be re-opened.'},
@@ -1383,7 +1388,7 @@ class PayrollAdjustmentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Provide a non-empty list of ids.'}, status=400)
         qs = (PayrollAdjustment.objects
               .filter(id__in=ids)
-              .exclude(status=catalog.AdjustmentStatus.APPLIED))
+              .exclude(status=catalog.AdjustmentStatus.APPLIED).filter(ot_conversion__isnull=True))
         updated = qs.update(status=catalog.AdjustmentStatus.CANCELLED)
         return Response({'cancelled': updated, 'requested': len(ids)})
 

@@ -220,6 +220,8 @@ def import_full_payroll(file_or_path, year: int, month: int) -> ImportSummary:
     Call run_generator.generate_monthly_run(year, month) afterwards to
     create the Draft PayrollRun.
     """
+    from .adjustment_period import require_current_or_future
+    require_current_or_future(year, month)
     summary = ImportSummary()
     wb = _open_workbook(file_or_path)
     ws = wb[wb.sheetnames[0]]
@@ -241,6 +243,8 @@ def import_adjustments(file_or_path, year: int, month: int) -> ImportSummary:
     authoritative). Employees that don't exist yet get auto-created from
     the row (so HR doesn't have to seed master separately).
     """
+    from .adjustment_period import require_current_or_future
+    require_current_or_future(year, month)
     summary = ImportSummary()
     wb = _open_workbook(file_or_path)
     ws = wb[wb.sheetnames[0]]

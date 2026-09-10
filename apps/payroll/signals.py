@@ -1,57 +1,44 @@
-from django.db.models import Sum
-from django.db.models.signals import post_save, post_delete
+"""Apply request deltas without replacing imported leave history."""
+from decimal import Decimal
+from django.db.models import F
+from django.db.models.signals import pre_save, post_save, post_delete
 from django.dispatch import receiver
-from .models import LeaveRequest, EmployeeLeaveRecord, LeaveCategory
-from django.utils import timezone
+from .models import LeaveRequest, EmployeeLeaveRecord
 
 
-def _recalculate_total_taken(employee_code, year):
-    """Recompute total_taken from scratch — sum of every currently-APPROVED
-    Annual Leave LeaveRequest for this employee/year — instead of
-    incrementing/decrementing a running total. Idempotent regardless of how
-    many times a signal fires.
+def contribution(request):
+    if not request or request.status != 'APPROVED' or request.leave_type.category != 'annual':
+        return {}
+    from .services.leave_approval import working_days_by_year
+    return {(request.employee_code, year): days for year, days in working_days_by_year(request).items()}
 
-    Only LeaveType.category == 'annual' counts here: EmployeeLeaveRecord's
-    total_taken/leave_balance track the Annual Leave entitlement specifically,
-    so Sick/Unpaid/Emergency/Compensatory/etc. requests must not reduce it —
-    they're tracked on the LeaveRequest itself but have no paid-annual-leave
-    balance to draw down. Filtering by category (LeaveType's own canonical
-    key, editable via Django admin without code changes) instead of name is
-    deliberate — leave_type.name is free text HR can rename, category isn't.
 
-    Must run post_save/post_delete, not pre_save: this queries the DB for the
-    current APPROVED set, so it needs the triggering row's own change already
-    committed, or the aggregate lags one save behind.
-    """
-    try:
-        record = EmployeeLeaveRecord.objects.get(employee_code=employee_code, year=year)
-    except EmployeeLeaveRecord.DoesNotExist:
+@receiver(pre_save, sender=LeaveRequest)
+def remember_leave_contribution(sender, instance, raw=False, **kwargs):
+    if raw:
         return
+    previous = sender.objects.select_related('leave_type').filter(pk=instance.pk).first() if instance.pk else None
+    instance._previous_leave_contribution = contribution(previous)
 
-    total = LeaveRequest.objects.filter(
-        employee_code=employee_code,
-        status='APPROVED',
-        start_date__year=year,
-        leave_type__category=LeaveCategory.ANNUAL,
-    ).aggregate(t=Sum('days_requested'))['t'] or 0
 
-    if record.total_taken == total:
-        return  # avoid a redundant save when nothing actually changed
-
-    record.total_taken = total
-    record.leave_balance = record.total_earned - record.total_taken - record.total_encashed + record.carryforward
-    record.save(update_fields=['total_taken', 'leave_balance'])
+def apply_delta(before, after):
+    for code, year in before.keys() | after.keys():
+        change = after.get((code, year), Decimal('0')) - before.get((code, year), Decimal('0'))
+        if change:
+            EmployeeLeaveRecord.objects.filter(employee_code=code, year=year).update(
+                total_taken=F('total_taken') + change,
+                leave_balance=F('leave_balance') - change,
+            )
 
 
 @receiver(post_save, sender=LeaveRequest)
-def update_leave_taken_on_approval(sender, instance, **kwargs):
-    year = instance.start_date.year if instance.start_date else timezone.now().year
-    _recalculate_total_taken(instance.employee_code, year)
+def update_leave_taken_on_approval(sender, instance, raw=False, **kwargs):
+    if not raw:
+        # Read persisted fields so save(update_fields=...) cannot apply unsaved changes.
+        persisted = sender.objects.select_related('leave_type').get(pk=instance.pk)
+        apply_delta(getattr(instance, '_previous_leave_contribution', {}), contribution(persisted))
 
 
 @receiver(post_delete, sender=LeaveRequest)
 def update_leave_taken_on_delete(sender, instance, **kwargs):
-    if instance.status != 'APPROVED':
-        return
-    year = instance.start_date.year if instance.start_date else timezone.now().year
-    _recalculate_total_taken(instance.employee_code, year)
+    apply_delta(contribution(instance), {})

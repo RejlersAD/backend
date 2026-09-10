@@ -12,6 +12,7 @@ import logging
 
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum, Count, Q, Avg
 from django.utils import timezone
 from rest_framework import viewsets, status
@@ -19,7 +20,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.finance.salary_models import (
     EmployeeSalaryInfo,
@@ -510,7 +511,7 @@ class EmployeeLeaveRecordViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         if not _is_hr_manager(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Only HR Managers can update leave records.')
         instance = serializer.save()
         # Recalculate leave_balance from its components — same formula as
@@ -556,7 +557,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     # Soft-coded: RBAC role codes that always have full (all-employee) visibility
     # and final-stage approval rights, matching APPROVAL_TYPES.LEAVE.allowedRoles
     # in frontend/src/config/approvalsSystem.config.js
-    HR_REVIEW_ROLE_CODES = ['hr_manager', 'hr_admin', 'super_admin', 'admin']
+    HR_REVIEW_ROLE_CODES = ['hr_manager', 'hr_admin', 'super_admin', 'superadmin', 'admin']
 
     @staticmethod
     def _user_employee_code(user):
@@ -568,32 +569,33 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
 
     @classmethod
     def _is_hr_or_admin(cls, user):
-        """True for superusers/staff or users holding an HR/Admin RBAC role."""
-        if user.is_staff or user.is_superuser:
-            return True
-        try:
-            return user.rbac_profile.roles.filter(
-                code__in=cls.HR_REVIEW_ROLE_CODES, is_active=True
-            ).exists()
-        except Exception:
-            return False
+        from .services.leave_approval import is_hr
+        return is_hr(user)
 
-    @staticmethod
-    def _is_reporting_manager(user, leave_request):
-        if not leave_request.employee_id:
-            return False
-        try:
-            from apps.hr_core.models import EmployeeMaster
-            return EmployeeMaster.objects.filter(
-                user_id=leave_request.employee_id, manager__user=user
-            ).exists()
-        except Exception:
-            return False
+    def get_object(self):
+        # All mutating decisions acquire the leave row before the workflow row.
+        obj = super().get_object()
+        if self.request.method == 'POST':
+            obj = LeaveRequest.objects.select_for_update().get(pk=obj.pk)
+        return obj
+
+    def update(self, request, *args, **kwargs):
+        raise ValidationError('Submitted requests cannot be edited. Cancel and submit a replacement.')
+
+    def destroy(self, request, *args, **kwargs):
+        raise ValidationError('Leave requests must be cancelled so their approval history is retained.')
+
+    @action(detail=False, methods=['get'], url_path='pending-for-me')
+    def pending_for_me(self, request):
+        from .services.leave_approval import can_review
+        items = [item for item in self.get_queryset().filter(status__in=['PENDING', 'RM_APPROVED'])
+                 if can_review(item, request.user)]
+        return Response({'count': len(items), 'results': self.get_serializer(items, many=True).data})
 
     def get_queryset(self):
         qs = (
             LeaveRequest.objects
-            .select_related('leave_type', 'employee', 'reviewed_by')
+            .select_related('leave_type', 'employee', 'reviewed_by', 'canonical_employee__manager__user', 'workflow_instance')
             .all()
         )
         user = self.request.user
@@ -617,16 +619,15 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             # view — never included for an explicit "mine only" request.
             if not mine_only:
                 try:
+                    from apps.hr_core.models import EmployeeMaster
+                    subordinates = EmployeeMaster.objects.filter(manager__user=user).exclude(user__rbac_profile__manager__isnull=False)
+                    own_q |= Q(canonical_employee__in=subordinates) | Q(employee_id__in=subordinates.values('user_id'))
                     from apps.rbac.models import UserProfile
-                    subordinates = UserProfile.objects.filter(manager__user=user, is_deleted=False)
-                    sub_user_ids = list(
-                        subordinates.exclude(user__isnull=True).values_list('user_id', flat=True)
-                    )
-                    sub_codes = [c for c in subordinates.values_list('employee_id', flat=True) if c]
-                    if sub_user_ids:
-                        own_q |= Q(employee_id__in=sub_user_ids)
-                    if sub_codes:
-                        own_q |= Q(employee_code__in=sub_codes)
+                    legacy_reports = UserProfile.objects.filter(
+                        manager__user=user, is_deleted=False, manager__is_deleted=False,
+                    ).values('user_id')
+                    own_q |= Q(employee_id__in=legacy_reports)
+
                 except Exception:
                     pass
 
@@ -663,88 +664,87 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         elif year:
             qs = qs.filter(start_date__year=int(year))
         if search:
-            qs = qs.filter(employee_name__icontains=search)
+            qs = qs.filter(Q(employee_name__icontains=search.strip()) | Q(employee_code__icontains=search.strip()))
         return qs.order_by('-created_at')
 
+    @transaction.atomic
     def perform_create(self, serializer):
-        """Auto-link the leave request to the authenticated user — unless HR/Admin
-        is submitting on behalf of a different employee (a different employee_code
-        was explicitly supplied), in which case link to THAT employee's own User
-        account instead. Previously `employee` was force-set to the submitter
-        unconditionally, so "on behalf of" submissions got mis-attributed to
-        whichever HR/Admin filed them rather than the actual target employee."""
-        user     = self.request.user
-        emp_code = self._user_employee_code(user)
-        emp_name = f'{user.first_name} {user.last_name}'.strip() or user.username
-        supplied_code = serializer.validated_data.get('employee_code')
+        from apps.hr_core.models import EmployeeMaster
+        from apps.hr_core.workflows import HRWorkflowService
+        from .services.leave_approval import require_manager, require_approval_route
 
-        extra = {}
-        if supplied_code and supplied_code != emp_code:
-            # Submitting on behalf of someone else — resolve their real User
-            # account so `employee` (FK) isn't mis-attributed to the submitter.
-            try:
-                from apps.rbac.models import UserProfile
-                target = UserProfile.objects.filter(
-                    employee_id=supplied_code, is_deleted=False
-                ).select_related('user').first()
-                if target and target.user_id:
-                    extra['employee'] = target.user
-            except Exception:
-                pass
-        else:
-            extra['employee'] = user
-            if emp_code and not supplied_code:
-                extra['employee_code'] = emp_code
+        user = self.request.user
+        data = serializer.validated_data
+        code = data.get('employee_code')
+        target_user = data.get('employee')
+        employee = EmployeeMaster.objects.filter(user=user).first()
+        if target_user and target_user != user:
+            if not self._is_hr_or_admin(user):
+                raise PermissionDenied('Only HR can submit leave for another employee.')
+            employee = EmployeeMaster.objects.filter(user=target_user).first()
+        if code and (not employee or str(code).strip() not in {employee.employee_code, employee.emp_code, employee.employee_number, self._user_employee_code(user)}):
+            if not self._is_hr_or_admin(user):
+                raise PermissionDenied('Only HR can submit leave for another employee.')
+            employee = EmployeeMaster.objects.filter(Q(employee_code=code) | Q(emp_code=code) | Q(employee_number=code)).first()
+        require_manager(employee)
+        require_approval_route(employee)
+        # Serialize submissions for the same employee to prevent overlapping concurrent requests.
+        EmployeeMaster.objects.select_for_update().get(pk=employee.pk)
+        start, end = data['start_date'], data['end_date']
+        if data.get('half_day') and start != end:
+            raise ValidationError({'half_day': 'Half-day leave must start and end on the same working day.'})
+        if start > end:
+            raise ValidationError({'end_date': 'End date must be on or after the start date.'})
+        if data['leave_type'].requires_document and not data.get('attachment'):
+            raise ValidationError({'attachment': 'This leave type requires a supporting document.'})
+        if not data['leave_type'].is_active:
+            raise ValidationError({'leave_type': 'Select an active leave type.'})
+        existing = LeaveRequest.objects.filter(
+            Q(canonical_employee=employee) | Q(employee_id=employee.user_id) if employee.user_id else Q(canonical_employee=employee),
+            status__in=['PENDING', 'RM_APPROVED', 'APPROVED'], start_date__lte=end, end_date__gte=start,
+        )
+        if existing.exists():
+            raise ValidationError({'start_date': 'These dates overlap an existing pending or approved leave request.'})
+        leave = serializer.save(
+            employee=employee.user, canonical_employee=employee,
+            employee_code=employee.employee_code or employee.emp_code or employee.employee_number,
+            employee_name=f'{employee.first_name} {employee.last_name}'.strip(), department=employee.department,
+        )
+        if leave.days_requested <= 0:
+            raise ValidationError({'start_date': 'The selected dates contain no working days.'})
+        from .services.leave_approval import validate_annual_balance
+        validate_annual_balance(leave)
+        workflow = HRWorkflowService.start(
+            'leave_request_v1', 'payroll.leave_request', leave.pk,
+            employee=employee, requested_by=user,
+            context={'employee_name': leave.employee_name, 'days_requested': str(leave.days_requested),
+                     'start_date': str(start), 'end_date': str(end), 'leave_type': leave.leave_type.name},
+        )
+        leave.workflow_instance = workflow
+        leave.save(update_fields=['workflow_instance', 'updated_at'])
 
-        # Only fill denormalised fields if the caller didn’t supply them
-        if not serializer.validated_data.get('employee_name'):
-            extra['employee_name'] = emp_name
-        leave_request = serializer.save(**extra)
-        try:
-            from apps.hr_core.identity import EmployeeIdentityService
-            from apps.hr_core.workflows import HRWorkflowService
-
-            canonical_employee = EmployeeIdentityService.resolve(
-                leave_request.employee_id or leave_request.employee_code
-            )
-            if canonical_employee:
-                workflow = HRWorkflowService.start(
-                    'leave_request_v1',
-                    'payroll.leave_request',
-                    leave_request.pk,
-                    employee=canonical_employee,
-                    requested_by=user,
-                    context={
-                        'leave_type': leave_request.leave_type.code,
-                        'start_date': str(leave_request.start_date),
-                        'end_date': str(leave_request.end_date),
-                        'days_requested': str(leave_request.days_requested),
-                    },
-                )
-                leave_request.canonical_employee = canonical_employee
-                leave_request.workflow_instance = workflow
-                leave_request.save(update_fields=['canonical_employee', 'workflow_instance', 'updated_at'])
-        except Exception:
-            logger.exception('Unable to attach shared workflow to leave request %s', leave_request.pk)
-
-    # Soft-coded: statuses from which the final (HR) approve/reject action is
-    # allowed. A request can be finalised either directly from PENDING
-    # (single-stage / HR self-service) or from RM_APPROVED (after the
-    # Reporting Manager has completed Stage 1).
-    FINAL_APPROVABLE_STATUSES = (LeaveRequestStatus.PENDING, LeaveRequestStatus.RM_APPROVED)
+    FINAL_APPROVABLE_STATUSES = (LeaveRequestStatus.RM_APPROVED,)
 
     @action(detail=True, methods=['post'], url_path='approve')
+    @transaction.atomic
     def approve(self, request, pk=None):
-        """Stage 2 (or single-stage): final approval — HR Manager / Admin."""
+        """Stage 2: final approval — HR Manager / Admin."""
         req = self.get_object()
+        from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
+
         if not self._is_hr_or_admin(request.user):
             raise PermissionDenied('Only HR can give final leave approval.')
-        if req.status not in self.FINAL_APPROVABLE_STATUSES:
+        if req.status not in self.FINAL_APPROVABLE_STATUSES and not (req.status == 'PENDING' and manager_for_request(req) is None):
             return Response(
                 {'error': f'Cannot approve a {req.status} request'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not can_review(req, request.user):
+            raise PermissionDenied('This leave request is not awaiting your approval.')
+        from .services.leave_approval import validate_annual_balance
+        validate_annual_balance(req)
         if req.workflow_instance_id:
+            prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
             if req.workflow_instance.current_stage_id and req.workflow_instance.current_stage.code == 'manager_review':
                 return Response(
@@ -759,20 +759,29 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req.reviewed_at  = timezone.now()
         req.reviewer_note = request.data.get('note', '')
         req.save()
-        return Response(LeaveRequestSerializer(req).data)
+        notify_employee(req)
+        return Response(self.get_serializer(req).data)
 
     @action(detail=True, methods=['post'], url_path='reject')
+    @transaction.atomic
     def reject(self, request, pk=None):
-        """Stage 2 (or single-stage): final rejection — HR Manager / Admin."""
+        """Stage 2: final rejection — HR Manager / Admin."""
         req = self.get_object()
+        from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
+
         if not self._is_hr_or_admin(request.user):
             raise PermissionDenied('Only HR can give final leave rejection.')
-        if req.status not in self.FINAL_APPROVABLE_STATUSES:
+        if req.status not in self.FINAL_APPROVABLE_STATUSES and not (req.status == 'PENDING' and manager_for_request(req) is None):
             return Response(
                 {'error': f'Cannot reject a {req.status} request'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not can_review(req, request.user):
+            raise PermissionDenied('This leave request is not awaiting your approval.')
+        if not str(request.data.get('note', '')).strip():
+            raise ValidationError({'note': 'A rejection reason is required.'})
         if req.workflow_instance_id:
+            prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
             if req.workflow_instance.current_stage_id and req.workflow_instance.current_stage.code == 'manager_review':
                 return Response(
@@ -787,59 +796,80 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req.reviewed_at  = timezone.now()
         req.reviewer_note = request.data.get('note', '')
         req.save()
-        return Response(LeaveRequestSerializer(req).data)
+        notify_employee(req)
+        return Response(self.get_serializer(req).data)
 
     @action(detail=True, methods=['post'], url_path='rm-approve')
+    @transaction.atomic
     def rm_approve(self, request, pk=None):
         """Stage 1: Direct Reporting Manager approval (PENDING → RM_APPROVED)."""
         req = self.get_object()
+        from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
+
         if req.status != LeaveRequestStatus.PENDING:
             return Response(
                 {'error': f'Cannot approve a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if manager_for_request(req) is None or not can_review(req, request.user):
+            raise PermissionDenied('This leave request is not awaiting your approval.')
         if req.workflow_instance_id:
+            prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
             HRWorkflowService.decide(
                 req.workflow_instance, request.user, 'approve', request.data.get('note', '')
             )
-        elif not self._is_reporting_manager(request.user, req):
-            raise PermissionDenied('Only the employee\'s reporting manager can review this request.')
         req.status         = LeaveRequestStatus.RM_APPROVED
         req.rm_reviewed_by = request.user
         req.rm_reviewed_at = timezone.now()
         req.rm_note        = request.data.get('note', '')
         req.save()
-        return Response(LeaveRequestSerializer(req).data)
+        if not req.workflow_instance_id:
+            from .services.leave_approval import notify_legacy_hr
+            notify_legacy_hr(req)
+        notify_employee(req)
+        return Response(self.get_serializer(req).data)
 
     @action(detail=True, methods=['post'], url_path='rm-reject')
+    @transaction.atomic
     def rm_reject(self, request, pk=None):
         """Stage 1: Direct Reporting Manager rejection (PENDING → RM_REJECTED)."""
         req = self.get_object()
+        from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
+
         if req.status != LeaveRequestStatus.PENDING:
             return Response(
                 {'error': f'Cannot reject a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if manager_for_request(req) is None or not can_review(req, request.user):
+            raise PermissionDenied('This leave request is not awaiting your approval.')
+        if not str(request.data.get('note', '')).strip():
+            raise ValidationError({'note': 'A rejection reason is required.'})
         if req.workflow_instance_id:
+            prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
             HRWorkflowService.decide(
                 req.workflow_instance, request.user, 'reject', request.data.get('note', '')
             )
-        elif not self._is_reporting_manager(request.user, req):
-            raise PermissionDenied('Only the employee\'s reporting manager can review this request.')
         req.status         = LeaveRequestStatus.RM_REJECTED
         req.rm_reviewed_by = request.user
         req.rm_reviewed_at = timezone.now()
         req.rm_note        = request.data.get('note', '')
         req.save()
-        return Response(LeaveRequestSerializer(req).data)
+        notify_employee(req)
+        return Response(self.get_serializer(req).data)
 
     @action(detail=True, methods=['post'], url_path='cancel')
+    @transaction.atomic
     def cancel(self, request, pk=None):
         req = self.get_object()
+        from .services.leave_approval import notify_employee
+
         if req.employee_id != request.user.id and not self._is_hr_or_admin(request.user):
             raise PermissionDenied('Only the employee or HR can cancel this request.')
+        if req.status not in ('PENDING', 'RM_APPROVED'):
+            raise ValidationError('Only pending leave requests can be cancelled.')
         if req.workflow_instance_id:
             from apps.hr_core.workflows import HRWorkflowService
             HRWorkflowService.cancel(
@@ -847,7 +877,8 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             )
         req.status = LeaveRequestStatus.CANCELLED
         req.save()
-        return Response(LeaveRequestSerializer(req).data)
+        notify_employee(req)
+        return Response(self.get_serializer(req).data)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -935,6 +966,8 @@ def leave_calendar(request):
                     'badge_bg':   req.leave_type.badge_bg,
                     'badge_text': req.leave_type.badge_text,
                     'request_id': str(req.id),
+                    'half_day': req.half_day,
+                    'days': 0.5 if req.half_day else 1,
                 }
             cur += _dt.timedelta(days=1)
 
@@ -972,7 +1005,7 @@ def _is_hr_manager(user) -> bool:
         if profile:
             codes = profile.roles.filter(is_active=True).values_list('code', flat=True)
             return any(
-                (code or '').lower().startswith('hr') or (code or '').lower() in ('admin', 'superadmin', 'manager')
+                (code or '').lower().startswith('hr') or (code or '').lower() in ('admin', 'superadmin', 'super_admin', 'manager')
                 for code in codes
             )
     except Exception:
@@ -1014,7 +1047,7 @@ class PublicHolidayViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         if not _is_hr_manager(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Only HR Managers can create public holidays.')
         serializer.save(
             created_by=self.request.user,
@@ -1024,14 +1057,14 @@ class PublicHolidayViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         if not _is_hr_manager(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Only HR Managers can update public holidays.')
         serializer.save(updated_by=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
         """Override destroy to deactivate instead of hard-delete."""
         if not _is_hr_manager(request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Only HR Managers can deactivate public holidays.')
         obj = self.get_object()
         obj.is_active = False
@@ -1078,7 +1111,7 @@ class AttendanceOverrideViewSet(viewsets.ModelViewSet):
 
     def _require_hr(self):
         if not _is_hr_manager(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Only HR Managers can edit attendance overrides.')
 
     def perform_create(self, serializer):
@@ -1144,7 +1177,7 @@ class SalaryComponentViewSet(viewsets.ModelViewSet):
 
     def _require_hr(self):
         if not _is_hr_manager(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('HR Manager role required.')
 
     def perform_create(self, serializer):
@@ -1158,7 +1191,7 @@ class SalaryComponentViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         """Soft-delete (deactivate) instead of hard delete."""
         if not _is_senior_hr(request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Senior HR role required to deactivate components.')
         obj = self.get_object()
         obj.is_active = False
@@ -1201,12 +1234,12 @@ class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
 
     def _require_hr(self):
         if not _is_hr_manager(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('HR Manager role required.')
 
     def _require_senior_hr(self):
         if not _is_senior_hr(self.request.user):
-            from rest_framework.exceptions import PermissionDenied
+            from rest_framework.exceptions import PermissionDenied, ValidationError
             raise PermissionDenied('Senior HR role required.')
 
     def perform_create(self, serializer):
@@ -1508,7 +1541,7 @@ def _encashment_period(request):
 
 def _require_encashment_manager(user):
     if not _is_hr_manager(user):
-        from rest_framework.exceptions import PermissionDenied
+        from rest_framework.exceptions import PermissionDenied, ValidationError
         raise PermissionDenied('HR Manager role required to manage leave encashment.')
 
 
@@ -1525,10 +1558,7 @@ def leave_encashment_status(request):
     from apps.payroll.services.leave_encashment import get_encashment_status
     result = get_encashment_status(year, month)
     if result is None:
-        return Response(
-            {'detail': f'No encashment run found for {year}-{month:02d}.'},
-            status=status.HTTP_404_NOT_FOUND,
-        )
+        return Response({'status': 'not_run', 'year': year, 'month': month})
     return Response(result)
 
 
@@ -2150,7 +2180,7 @@ def generate_master_payroll(request):
     from django.http import HttpResponse
 
     if not _is_hr_manager(request.user):
-        from rest_framework.exceptions import PermissionDenied
+        from rest_framework.exceptions import PermissionDenied, ValidationError
         raise PermissionDenied('HR Manager role required.')
 
     now   = timezone.now()
@@ -2590,7 +2620,7 @@ def master_payroll_download(request, import_id):
     from apps.payroll.storage import PayrollExportStorage, S3_AVAILABLE
 
     if not _is_hr_manager(request.user):
-        from rest_framework.exceptions import PermissionDenied
+        from rest_framework.exceptions import PermissionDenied, ValidationError
         raise PermissionDenied('HR Manager role required.')
 
     try:
