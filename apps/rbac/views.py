@@ -212,12 +212,67 @@ class RoleViewSet(viewsets.ModelViewSet):
         # Anyone who can manage users can also view the roles list (same
         # broader check — role code OR user_mgmt module OR users.manage
         # permission — instead of the stricter role-code-only IsAdmin).
+        if self.action == 'review_access':
+            return [IsAuthenticated(), IsSuperAdmin()]
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated(), CanManageUsers()]
         if self.action in ['assign_module', 'revoke_module',
                            'assign_permission', 'revoke_permission']:
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), CanManageRoles()]
+
+    @action(detail=True, methods=['post'], url_path='review-access')
+    def review_access(self, request, pk=None):
+        """Apply a reviewed role grant set atomically, rejecting stale drafts."""
+        from rest_framework import serializers
+
+        class ChangeSerializer(serializers.Serializer):
+            module_ids = serializers.ListField(child=serializers.UUIDField())
+            permission_ids = serializers.ListField(child=serializers.UUIDField())
+            original_module_ids = serializers.ListField(child=serializers.UUIDField())
+            original_permission_ids = serializers.ListField(child=serializers.UUIDField())
+            reason = serializers.CharField(max_length=1000, allow_blank=False, trim_whitespace=True)
+
+        payload = ChangeSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        values = payload.validated_data
+        self.get_object()
+        with transaction.atomic():
+            role = Role.objects.select_for_update().get(pk=pk)
+            if role.code == 'super_admin' or UserRole.objects.filter(
+                role=role, user_profile__user=request.user, user_profile__is_deleted=False,
+            ).exists():
+                return Response({'detail': 'You cannot change your own effective access or the Super Administrator role here.'}, status=403)
+            before_modules = set(role.modules.values_list('id', flat=True))
+            before_permissions = set(role.permissions.values_list('id', flat=True))
+            if before_modules != set(values['original_module_ids']) or before_permissions != set(values['original_permission_ids']):
+                return Response({'detail': 'This role changed while you were editing. Reload the role and review again.'}, status=409)
+            modules = set(values['module_ids'])
+            permissions = set(values['permission_ids'])
+            added_modules, added_permissions = modules - before_modules, permissions - before_permissions
+            if Module.objects.filter(pk__in=added_modules, is_active=True).exclude(code__in=['finance', 'sales']).count() != len(added_modules):
+                raise serializers.ValidationError({'module_ids': 'One or more applications are unavailable.'})
+            if Permission.objects.filter(pk__in=added_permissions, is_active=True, module__is_active=True).count() != len(added_permissions):
+                raise serializers.ValidationError({'permission_ids': 'One or more permissions are unavailable.'})
+            RoleModule.objects.filter(role=role, module_id__in=before_modules - modules).delete()
+            RolePermission.objects.filter(role=role, permission_id__in=before_permissions - permissions).delete()
+            for identifier in added_modules:
+                RoleModule.objects.create(role=role, module_id=identifier, granted_by=request.user)
+            for identifier in added_permissions:
+                RolePermission.objects.create(role=role, permission_id=identifier, granted_by=request.user)
+            self._lock_from_auto_sync(role)
+            create_audit_log(
+                user=request.user, action='update', resource_type='Role', resource_id=role.id,
+                resource_repr=role.name,
+                changes={
+                    'modules': {'before': sorted(map(str, before_modules)), 'after': sorted(map(str, modules))},
+                    'permissions': {'before': sorted(map(str, before_permissions)), 'after': sorted(map(str, permissions))},
+                },
+                metadata={'reason': values['reason'], 'audit_source': 'role_access_review',
+                          'action_label': 'Reviewed role access changes'},
+                ip_address=request.META.get('REMOTE_ADDR'),
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=pk)).data)
 
     @staticmethod
     def _lock_from_auto_sync(role):
@@ -676,7 +731,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         SUPER_ADMIN_ONLY_ACTIONS = {
             'create', 'reset_password', 'activate', 'deactivate', 'soft_delete',
-            'bulk_deactivate_by_roles', 'total_count',
+            'bulk_deactivate_by_roles', 'total_count', 'permission_overrides',
         }
         # Admin (level 2+) can assign/revoke roles — but the action itself guards
         # against assigning the super_admin role without super_admin privileges
@@ -691,6 +746,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), CanManageUsers()]
     
+    @action(detail=True, methods=['get', 'patch'], url_path='permission-overrides')
+    def permission_overrides(self, request, pk=None):
+        from .user_permissions import user_permission_response
+        return user_permission_response(self, request)
+
     def get_queryset(self):
         """
         Filter users based on role with optimized query performance
@@ -700,6 +760,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         - prefetch_related: Fetch roles and userrole_set efficiently
         - Reduces N+1 query problem from 276+ queries to ~3 queries
         """
+        if self.action == 'permission_overrides':
+            # This action is restricted to Super Administrators above.
+            return UserProfile.objects.filter(is_deleted=False).select_related('user')
         user = self.request.user
         queryset = UserProfile.objects.select_related(
             'user', 'organization', 'manager__user',
@@ -2198,6 +2261,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 else self.get_serializer(profile)
             )
             data = serializer.data
+            if not profile_view:
+                from .action_policy import effective_action_map
+                data['module_actions'] = effective_action_map(profile)
             print(f"[DEBUG /rbac/users/me/] Serialization successful")
             print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
             print(f"[DEBUG /rbac/users/me/] Phone: {data.get('phone')}, Profile Photo: {data.get('profile_photo')}")
@@ -2927,7 +2993,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['user_email', 'action', 'resource_type']
     ordering_fields = ['-timestamp']
-    filterset_fields = ['action', 'resource_type', 'success']
+    filterset_fields = ['action', 'resource_type', 'resource_id', 'success']
 
     def list(self, request, *args, **kwargs):
         scope = request.query_params.get('scope', 'all')
@@ -2935,6 +3001,8 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({'scope': 'Choose all, today, or failed.'})
         queryset = self.filter_queryset(self.get_queryset())
+        if request.query_params.get('reviewed') == 'true':
+            queryset = queryset.filter(metadata__audit_source='role_access_review')
         today = Q(timestamp__date=timezone.localdate())
         summary = queryset.aggregate(
             total=Count('pk'), today=Count('pk', filter=today),

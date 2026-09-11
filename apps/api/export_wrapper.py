@@ -9,14 +9,14 @@ from apps.pid_analysis.export_service import PIDReportExportService
 
 
 @api_view(['GET'])
-@permission_classes([permissions.AllowAny])
+@permission_classes([permissions.IsAuthenticated])
 def pid_export_wrapper(request, pk):
     """Lightweight wrapper that calls PIDReportExportService for exports.
     This avoids touching existing core export logic and provides a stable URL.
     """
     print(f"[WRAPPER EXPORT] Called PK={pk}")
     try:
-        drawing = PIDDrawing.objects.get(id=pk)
+        drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
     except PIDDrawing.DoesNotExist:
         return Response({'error': 'Drawing not found'}, status=404)
 

@@ -18,6 +18,7 @@ router.register(r'analyses', DesignAnalysisViewSet, basename='designiq-analysis'
 router.register(r'optimizations', DesignOptimizationViewSet, basename='designiq-optimization')
 router.register(r'templates', DesignTemplateViewSet, basename='designiq-template')
 router.register(r'lists', EngineeringListItemViewSet, basename='designiq-list')
+router.register(r'critical-lists', EngineeringListItemViewSet, basename='designiq-critical-list')
 
 urlpatterns = [
     path('', include(router.urls)),

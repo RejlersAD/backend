@@ -755,7 +755,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
     
-    @action(detail=True, methods=['get'], url_path='export', permission_classes=[permissions.AllowAny])
+    @action(detail=True, methods=['get'], url_path='export', permission_classes=[permissions.IsAuthenticated])
     def export(self, request, pk=None):
         """
         Export report in different formats (PDF, Excel, CSV)
@@ -779,9 +779,9 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         print(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
         print(f"[EXPORT] Drawing ID: {pk}")
         
-        # Get drawing without user filter for testing
+        # Enforce the same ownership boundary as the drawing detail endpoint.
         try:
-            drawing = PIDDrawing.objects.get(id=pk)
+            drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
             print(f"[EXPORT] Drawing found: {drawing.drawing_number}")
         except PIDDrawing.DoesNotExist:
             print(f"[EXPORT ERROR] Drawing {pk} does not exist")
