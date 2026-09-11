@@ -96,8 +96,9 @@ INDEPENDENT_WORKFLOWS = {
         'my_enquiry_resolution', 'my_enquiry_feedback', 'enquiry_attachment_download')},
 }
 
-# Account bootstrap reads must remain available before module grants are loaded.
+# Account bootstrap and owner-scoped profile operations do not require module grants.
 SELF_SERVICE_ACTIONS = {
+    'EmployeeProfileViewSet': {'my_employee_profile', 'upload_my_profile_photo', 'my_signature'},
     'UserProfileViewSet': {'me', 'my_profile', 'my_permissions', 'my_modules', 'change_password'},
     'PermissionViewSet': {'check_permission', 'my_permissions'},
     'ModuleViewSet': {'my_modules'},
