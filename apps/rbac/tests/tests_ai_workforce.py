@@ -92,13 +92,13 @@ class WorkforceAdoptionTests(TestCase):
         t = self.report()['totals']
         self.assertEqual((t['previous_wau'], t['returning'], t['repeat_rate']), (2, 1, 50))
 
-    def test_browser_failed_unknown_apps_and_end_boundary_are_excluded(self):
+    def test_page_visits_count_and_end_boundary_is_excluded(self):
         p = self.employee('boundaries')
         ActivityEvent.objects.create(user=p.user, application='test-ai', timestamp=self.start)
         self.usage(p, success=False)
         self.usage(p, application='unconfigured')
         self.usage(p, self.start + timedelta(weeks=1))
-        self.assertEqual(self.report()['totals']['wau'], 0)
+        self.assertEqual(self.report()['totals']['wau'], 1)
         self.usage(p, self.start)
         self.assertEqual(self.report()['totals']['wau'], 1)
 
@@ -154,3 +154,25 @@ class WorkforceAdoptionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['totals']['eligible'], 1)
         self.assertEqual(response.data['scope'], 'Your organization')
+
+    @override_settings(AI_ADOPTION_MODULE_APPLICATIONS=None)
+    def test_default_cohort_includes_all_active_radai_modules_and_visits(self):
+        from apps.rbac.ai_cohort import current_cohort
+        module = Module.objects.create(code='radai_sales_test', name='RADAI Sales Cohort Test')
+        person = self.employee('sales-only')
+        self.role.modules.set([module])
+        ActivityEvent.objects.create(user=person.user, application=module.code, action_type='view', timestamp=self.start)
+        cohort, _, modules, _ = current_cohort(organization_id=self.org.pk)
+        self.assertIn(person.user_id, cohort)
+        self.assertIn(module, modules)
+        self.assertEqual(self.report(organization_id=self.org.pk)['totals']['wau'], 1)
+
+    def test_old_eligibility_snapshots_are_not_reused_under_new_policy(self):
+        from apps.rbac.ai_measurement_models import AIWorkforceSnapshot
+        from apps.rbac.ai_snapshots import cohort_at
+        person = self.employee('new-policy')
+        AIWorkforceSnapshot.objects.create(organization=self.org, capture_date=self.start.date(),
+            captured_at=self.start, policy_version='eligible-linked-active-v1', people={}, quality={})
+        cohort, _, _, _, basis = cohort_at(self.start, organization_id=self.org.pk)
+        self.assertIn(person.user_id, cohort)
+        self.assertEqual(basis['basis'], 'current_fallback')

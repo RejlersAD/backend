@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 
-VERSION = 'observed-engagement-40-30-30-v1'
+VERSION = 'radai-engagement-40-30-30-v2'
 
 
 def engagement_score(active_days, modules_used, entitled_modules, start, end):

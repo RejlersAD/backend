@@ -15,7 +15,10 @@ DEFAULT_MODULES = {
 
 
 def current_cohort(user_ids=None, organization_id=None):
-    mapping = getattr(settings, 'AI_ADOPTION_MODULE_APPLICATIONS', DEFAULT_MODULES)
+    mapping = getattr(settings, 'AI_ADOPTION_MODULE_APPLICATIONS', None)
+    if mapping is None:
+        mapping = {code: DEFAULT_MODULES.get(code, [code, code.replace('_', '-')])
+                   for code in Module.objects.filter(is_active=True).values_list('code', flat=True)}
     modules = list(Module.objects.filter(code__in=mapping, is_active=True))
     modules = [m for m in modules if is_module_enabled(m.code)]
     codes = {m.code for m in modules}

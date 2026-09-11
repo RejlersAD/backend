@@ -6,20 +6,23 @@ from .ai_measurement_models import AIWorkforceSnapshot
 from .models import Organization
 
 
+POLICY_VERSION = 'radai-linked-active-v2'
+
+
 def capture_workforce():
     now = timezone.now()
     created = 0
     for org in Organization.objects.all().iterator():
         people, quality, _, _ = current_cohort(organization_id=org.pk)
         _, added = AIWorkforceSnapshot.objects.get_or_create(organization=org, capture_date=now.astimezone(utc.utc).date(),
-            defaults={'captured_at': now, 'people': {str(uid): person for uid, person in people.items()}, 'quality': quality})
+            defaults={'policy_version': POLICY_VERSION, 'captured_at': now, 'people': {str(uid): person for uid, person in people.items()}, 'quality': quality})
         created += added
     return created
 
 
 def cohort_at(at, user_ids=None, organization_id=None, current_data=None):
     current, quality, modules, mapping = current_data or current_cohort(user_ids, organization_id)
-    snapshots = AIWorkforceSnapshot.objects.filter(captured_at__lte=at, captured_at__gte=at - timedelta(hours=36)).order_by('organization_id', '-captured_at')
+    snapshots = AIWorkforceSnapshot.objects.filter(policy_version=POLICY_VERSION, captured_at__lte=at, captured_at__gte=at - timedelta(hours=36)).order_by('organization_id', '-captured_at')
     if organization_id is not None:
         snapshots = snapshots.filter(organization_id=organization_id)
     allowed = {str(uid) for uid in user_ids} if user_ids is not None else None

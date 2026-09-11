@@ -2,15 +2,14 @@
 from datetime import datetime, timedelta, timezone as utc
 from collections import defaultdict
 
-from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .ai_champion_models import AIUsageLog
+from .radai_activity import activity_days
 from .models import UserProfile
 from .ai_engagement import engagement_score, VERSION
 
-from .ai_cohort import DEFAULT_MODULES, current_cohort
+from .ai_cohort import current_cohort
 
 
 def workforce_adoption(week=None, user_ids=None, now=None, organization_id=None):
@@ -35,21 +34,18 @@ def workforce_adoption(week=None, user_ids=None, now=None, organization_id=None)
     current_data = current_cohort(user_ids, organization_id)
     eligible, cohort_quality, modules, mapping, history = cohort_at(start, user_ids, organization_id, current_data)
     codes = {m.code for m in modules}
-    applications = {a for code in codes for a in mapping[code]}
     trend_start = start - timedelta(weeks=7)
     earliest = min(trend_start, month_start)
-    logs = AIUsageLog.objects.filter(user_id__in=eligible, success=True, application__in=applications,
-                                     timestamp__gte=earliest, timestamp__lt=end).exclude(provenance='client')
-    # Distinct employee/day activity makes model fan-out and retries irrelevant to WAU.
+    observations = activity_days(earliest, end, eligible, organization_id)
     days = defaultdict(set)
-    for uid, day in logs.order_by().annotate(day=TruncDate('timestamp', tzinfo=utc.utc)).values_list('user_id', 'day').distinct().iterator():
-        days[uid].add(day)
+    for row in observations:
+        days[row['user_id']].add(row['day'])
 
     def active(a, b):
         return {uid for uid, values in days.items() if any(a.date() <= day <= (b - timedelta(microseconds=1)).date() for day in values)}
 
     current = active(start, end)
-    previous = set(logs.filter(timestamp__gte=previous_start, timestamp__lt=previous_end).values_list('user_id', flat=True).distinct())
+    previous = {r['user_id'] for r in activity_days(previous_start, previous_end, eligible, organization_id)}
     monthly = active(month_start, end)
     retained = current & previous
     def pct(n, d):
@@ -74,15 +70,18 @@ def workforce_adoption(week=None, user_ids=None, now=None, organization_id=None)
         a = trend_start + timedelta(weeks=n)
         b = min(a + timedelta(weeks=1), end)
         period_cohort, _, _, _, period_basis = cohort_at(a, user_ids, organization_id, current_data)
-        count = AIUsageLog.objects.filter(user_id__in=period_cohort, success=True, application__in=applications, timestamp__gte=a, timestamp__lt=b).exclude(provenance='client').values('user_id').distinct().count()
+        count = len({r['user_id'] for r in activity_days(a, b, period_cohort, organization_id)})
         trend.append({'week_start': a.date().isoformat(), 'wau': count, 'eligible': len(period_cohort), 'adoption_rate': pct(count, len(period_cohort)), 'basis': period_basis['basis']})
     # Use complete UTC days so the 28-day score is comparable during a partial week.
     engagement_end = end.replace(hour=0, minute=0, second=0, microsecond=0)
     engagement_start = engagement_end - timedelta(days=28)
     application_modules = {a: code for code in codes for a in mapping[code]}
     used_modules = defaultdict(set)
-    for uid, application in logs.filter(timestamp__gte=engagement_start, timestamp__lt=engagement_end).order_by().values_list('user_id', 'application').distinct():
-        used_modules[uid].add(application_modules[application])
+    for row in observations:
+        if engagement_start.date() <= row['day'] < engagement_end.date():
+            module = application_modules.get(row['application'])
+            if module:
+                used_modules[row['user_id']].add(module)
     engagement = []
     for uid, person in eligible.items():
         engagement.append({'user_id': str(uid), 'name': person['name'],
@@ -104,7 +103,7 @@ def workforce_adoption(week=None, user_ids=None, now=None, organization_id=None)
     return {
         'engagement': {'version': VERSION, 'start': engagement_start, 'end': engagement_end,
                        'people': engagement,
-                       'methodology': '40% frequency (20 active days target), 30% entitled AI module breadth, 30% consistency (four active weeks). Trailing 28 complete UTC days. Entitlements follow the selected cohort basis. Scores describe observed engagement, not productivity or award eligibility. No observations means unknown; coverage is not established.'},
+                       'methodology': '40% frequency (20 active days target), 30% entitled RADAI module breadth, 30% consistency (four active weeks). Trailing 28 complete UTC days. Entitlements follow the selected cohort basis. Scores describe observed engagement, not productivity or award eligibility. No observations means unknown; coverage is not established.'},
         'generated_at': now, 'scope': 'All organizations' if user_ids is None and organization_id is None else 'Your organization',
         'window': {'start': start, 'end': end, 'partial': end < start + timedelta(weeks=1), 'timezone': 'UTC',
                    'previous_start': previous_start, 'previous_end': previous_end, 'month_start': month_start},
@@ -114,9 +113,9 @@ def workforce_adoption(week=None, user_ids=None, now=None, organization_id=None)
                    'average_active_days': round(sum(len({d for d in days[uid] if start.date() <= d <= (end - timedelta(microseconds=1)).date()}) for uid in current) / len(current), 2) if current else None},
         'departments': grouped('departments'), 'teams': grouped('teams'), 'trend': trend,
         'quality': {**cohort_quality, 'coverage_percent': None, 'snapshot': history,
-                    'eligibility_basis': 'Current active accounts linked to active canonical employees, entitled to at least one configured active AI module. Explicitly excluded accounts are omitted.',
+                    'eligibility_basis': 'Current active accounts linked to active canonical employees, entitled to at least one configured active RADAI module. Explicitly excluded accounts are omitted.',
                     'history_basis': history['description'],
-                    'usage_basis': 'Successful server or historical AI requests in a configured application. Browser-submitted telemetry is excluded. Legacy origin is not attested. Monthly and retention metrics use the cohort of the selected week.',
+                    'usage_basis': 'All recorded RADAI activity, including page visits. Platform events take precedence over workflows and non-client provider telemetry for each user/module/UTC day. Provider APIs are internal RADAI services, not separate employee tools. Monthly and retention metrics use the cohort of the selected week.',
                     'missing_data': 'No observed use does not prove non-use: full pipeline coverage has not been established.',
                     'modules': [{'code': m.code, 'name': m.name, 'applications': mapping[m.code]} for m in modules]},
         'effectiveness': {'verified_hours_saved': round(minutes / 60, 2) if minutes is not None else None,

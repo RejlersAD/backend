@@ -4,7 +4,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
 from .ai_outcome_models import AIOutcomeEvidence
 from .models import AuditLog, Module
-from .ai_workforce_service import DEFAULT_MODULES
+from .ai_cohort import DEFAULT_MODULES
 from django.conf import settings
 from decimal import Decimal
 from .ai_measurement_models import AIWorkflowRun
