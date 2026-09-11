@@ -1,24 +1,23 @@
-"""Reviewed monthly awards based on recorded AI requests, never browsing."""
+"""Reviewed RADAI engagement awards, including recorded page visits."""
 import hashlib
 import json
 from datetime import datetime, timezone as utc
 
 from django.contrib.auth import get_user_model
 from django.db import transaction, IntegrityError
-from django.db.models import Count, Q, Sum
-from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .ai_champion_models import AIUsageLog, MonthlyChampionPublication
+from .ai_champion_models import MonthlyChampionPublication
 
 METHOD = {
-    'version': 'ai-request-engagement-v3',
-    'weights': {'successful_requests': 50, 'request_success_rate': 30, 'active_days': 20},
-    'description': '50% successful request volume relative to the cohort maximum, 30% request success rate, 20% active AI days relative to the cohort maximum. Ties: successful requests, active days, then user ID.',
-    'eligibility': 'Active account with at least one successful server or legacy AI request in the UTC calendar month. Explicit client telemetry is excluded.',
-    'limitations': 'Recorded request engagement, not verified business outcomes. Historical request origin and deduplication are not attested. Browsing, spend and token volume do not earn points.',
+    'version': 'radai-platform-engagement-v1',
+    'weights': {'activity_volume': 50, 'recorded_success_rate': 30, 'active_days': 20},
+    'description': '50% recorded RADAI activity volume relative to the cohort maximum, 30% recorded success rate, 20% active RADAI days relative to the cohort maximum. Ties: activity volume, active days, then user ID.',
+    'eligibility': 'Active account with at least one recorded RADAI activity in the UTC calendar month, including page visits. A model API call is not required.',
+    'limitations': 'RADAI engagement, not employee performance or verified productivity. Page visits count. Platform events are preferred; workflows and non-client provider telemetry fill missing user/module/day observations. Provider names describe APIs used inside RADAI, not external employee AI tools. Published historical awards retain their original rules.',
 }
+
 
 
 def month_window(year, month):
@@ -32,30 +31,37 @@ def month_window(year, month):
 
 def candidates(year, month, user_ids=None):
     start, end = month_window(year, month)
-    logs = AIUsageLog.objects.filter(timestamp__gte=start, timestamp__lt=min(end, timezone.now()), user__is_active=True).exclude(provenance='client')
+    from .radai_activity import activity_days
+    from collections import defaultdict
+    active_users = get_user_model().objects.filter(is_active=True)
     if user_ids is not None:
-        logs = logs.filter(user_id__in=user_ids)
-    rows = list(logs.order_by().values('user_id').annotate(
-        requests=Count('id'), successful_requests=Count('id', filter=Q(success=True)),
-        active_days=Count(TruncDate('timestamp', tzinfo=utc.utc), distinct=True),
-        modules=Count('application', distinct=True, filter=~Q(application='')),
-        tokens=Sum('total_tokens'), cost=Sum('cost_usd')).filter(successful_requests__gt=0))
-    maximum_requests = max((r['successful_requests'] for r in rows), default=1)
+        active_users = active_users.filter(pk__in=user_ids)
+    grouped = defaultdict(lambda: {'requests': 0, 'successful_requests': 0, 'days': set(), 'applications': set()})
+    for observation in activity_days(start, min(end, timezone.now()), active_users.values('pk')):
+        row = grouped[observation['user_id']]
+        row['requests'] += observation['count']
+        row['successful_requests'] += observation['successful']
+        row['days'].add(observation['day'])
+        row['applications'].add(observation['application'])
+    rows = [{'user_id': uid, 'requests': r['requests'], 'successful_requests': r['successful_requests'],
+             'activity_count': r['requests'], 'active_days': len(r['days']), 'modules': len(r['applications'])}
+            for uid, r in grouped.items()]
+    maximum_requests = max((r['requests'] for r in rows), default=1)
     maximum_days = max((r['active_days'] for r in rows), default=1)
     people = {u.pk: u for u in get_user_model().objects.filter(pk__in=[r['user_id'] for r in rows])}
     for row in rows:
         user = people[row['user_id']]
         row['user_id'] = str(row['user_id'])
         row['user'] = {'id': str(user.pk), 'name': user.get_full_name() or user.email, 'email': user.email}
-        row['cost_usd'] = float(row.pop('cost') or 0)
+        row['cost_usd'] = None  # Provider spending is not a RADAI engagement measure.
         row['success_rate'] = round(row['successful_requests'] / row['requests'] * 100, 2)
         row['breakdown'] = {
-            'successful_requests': round(row['successful_requests'] / maximum_requests * 50, 2),
-            'request_success_rate': round(row['successful_requests'] / row['requests'] * 30, 2),
+            'activity_volume': round(row['requests'] / maximum_requests * 50, 2),
+            'recorded_success_rate': round(row['successful_requests'] / row['requests'] * 30, 2),
             'active_days': round(row['active_days'] / maximum_days * 20, 2),
         }
         row['score'] = round(sum(row['breakdown'].values()), 2)
-    rows.sort(key=lambda r: (-r['score'], -r['successful_requests'], -r['active_days'], r['user_id']))
+    rows.sort(key=lambda r: (-r['score'], -r['requests'], -r['active_days'], r['user_id']))
     for rank, row in enumerate(rows, 1):
         row['rank'] = rank
     return rows
@@ -83,13 +89,27 @@ def serialize_publication(publication, user_ids=None):
             'podium': podium, 'methodology': publication.snapshot['methodology']}
 
 
-def monthly_report(year, month, user_ids=None, can_publish=False):
+def monthly_report(year, month, user_ids=None, can_publish=False, request=None):
     start, end = month_window(year, month)
     preview = snapshot(year, month, user_ids)
     publication = MonthlyChampionPublication.objects.filter(period_year=year, period_month=month).first()
     history = [serialize_publication(p, user_ids) for p in MonthlyChampionPublication.objects.all()[:24]]
-    return {**preview, 'period': {'start': start, 'end': end, 'closed': end <= timezone.now()},
-            'publication': serialize_publication(publication, user_ids),
+    # Current portraits are presentation data, never part of immutable award scores.
+    from .models import UserProfile
+    from .serializers import _profile_photo_url
+    from types import SimpleNamespace
+    visible_publication = serialize_publication(publication, user_ids)
+    visible_rows = list(preview['candidates'])
+    for award in [visible_publication, *history]:
+        if award:
+            visible_rows.extend(award['podium'])
+    visible_ids = {row['user_id'] for row in visible_rows}
+    profiles = UserProfile.objects.filter(user_id__in=visible_ids, is_deleted=False).select_related(
+        'canonical_employee', 'user__employee_master')
+    photo_context = SimpleNamespace(context={'request': request})
+    photos = {str(profile.user_id): _profile_photo_url(photo_context, profile) for profile in profiles}
+    return {**preview, 'profile_photos': photos, 'period': {'start': start, 'end': end, 'closed': end <= timezone.now()},
+            'publication': visible_publication,
             'period_published': publication is not None,
             'history': [p for p in history if p], 'can_publish': can_publish,
             'scope': 'All organizations' if user_ids is None else 'Your organization'}

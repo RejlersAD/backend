@@ -33,6 +33,12 @@ def adoption_dashboard(start, end, user_ids=None):
                              successful=Count('id', filter=Q(success=True)),
                              tokens=Sum('total_tokens'), cost=Sum('cost_usd'),
                              latency=Avg('latency_ms', filter=Q(latency_ms__gt=0)), latest=Max('timestamp'))
+    from .radai_activity import activity_days
+    observations = activity_days(start, end, user_ids)
+    radai = {'users': len({r['user_id'] for r in observations}),
+             'activities': sum(r['count'] for r in observations),
+             'modules': len({r['application'] for r in observations}),
+             'basis': 'Recorded RADAI activity, including page visits; workflows and non-client provider telemetry fill missing user/module/day observations.'}
     requests = totals['requests']
     tracked_users = activity.order_by().values_list('user_id', flat=True).union(
         usage.order_by().values_list('user_id', flat=True)).count()
@@ -143,9 +149,10 @@ def adoption_dashboard(start, end, user_ids=None):
     activity_only = sum(a['telemetry_status'] == 'activity_only' for a in applications)
     if activity_only:
         flags.append({'code': 'activity_only', 'title': 'Some applications report activity only',
-                      'detail': f'{activity_only} applications have activity events but no AI request records in this period. They may not use AI or may need instrumentation.'})
+                      'detail': f'{activity_only} applications have activity events but no AI request records in this period. RADAI activity still counts toward adoption and champion eligibility; provider calls are separate technical evidence.'})
     return {
         'window': {'start': start, 'end': end, 'timezone': 'UTC'}, 'generated_at': end,
+        'radai': radai,
         'totals': {'tracked_users': tracked_users, 'activity_users': events['users'],
                    'ai_users': totals['users'], 'events': events['events'], 'page_views': events['views'],
                    'other_events': events['events'] - events['views'], 'requests': requests,

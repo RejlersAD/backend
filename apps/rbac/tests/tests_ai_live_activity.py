@@ -47,6 +47,42 @@ class LiveActivityTests(TestCase):
         self.assertEqual({r['state'] for r in report['results']}, {'quiet'})
         self.assertTrue(all(r['last_signal_at'] is None for r in report['results']))
 
+    def test_module_filter_and_catalogue_remain_in_organization_scope(self):
+        ActivityEvent.objects.create(user=self.member, application='documents', action_type='view', timestamp=self.now - timedelta(minutes=1))
+        ActivityEvent.objects.create(user=self.outsider, application='private_module', action_type='view', timestamp=self.now - timedelta(minutes=1))
+        report = live_activity(self.org.pk, module='documents', now=self.now)
+        self.assertEqual(report['count'], 1)
+        self.assertEqual(report['results'][0]['id'], str(self.member.pk))
+        self.assertEqual(report['modules'], ['documents'])
+        self.assertEqual(live_activity(self.org.pk, module='private_module', now=self.now)['count'], 0)
+
+    def test_sorting_applies_before_pagination(self):
+        self.admin.first_name, self.member.first_name = 'Zed', 'Amy'
+        self.admin.save(); self.member.save()
+        first = live_activity(self.org.pk, ordering='user', page_size=1, now=self.now)
+        last = live_activity(self.org.pk, ordering='-user', page_size=1, now=self.now)
+        self.assertEqual(first['results'][0]['id'], str(self.member.pk))
+        self.assertEqual(last['results'][0]['id'], str(self.admin.pk))
+
+    def test_detail_counts_profile_link_and_separate_request_history(self):
+        run = self.run_for(status='completed')
+        AIUsageLog.objects.create(user=self.member, provider='openai', model_name='test', application='planning_package', provenance='server', workflow=run, timestamp=self.now - timedelta(minutes=2))
+        for n in range(25):
+            ActivityEvent.objects.create(user=self.member, application='documents', action_type='view', timestamp=self.now - timedelta(seconds=n+1))
+        detail = live_activity(self.org.pk, selected_user=self.member.pk, now=self.now)['selected']
+        self.assertEqual(detail['profile_id'], str(self.member.rbac_profile.pk))
+        self.assertEqual(detail['events_24h'], 25)
+        self.assertEqual(detail['ai_calls_24h'], 1)
+        self.assertEqual(len(detail['ai_requests']), 1)  # not hidden behind newer events
+        self.assertEqual(len(detail['activity_log']), 20)
+        expanded = live_activity(self.org.pk, selected_user=self.member.pk, timeline_limit=100, now=self.now)['selected']
+        self.assertEqual(len(expanded['activity_log']), 25)
+        self.assertEqual(expanded['workflow_checks'], 0)
+
+    def test_invalid_sort_and_history_limit_are_rejected(self):
+        self.assertEqual(self.request(ordering='email;drop').status_code, 400)
+        self.assertEqual(self.request(timeline_limit=10000).status_code, 400)
+
     def test_submitted_activity_does_not_become_ai_usage(self):
         ActivityEvent.objects.create(user=self.member, application='documents', action_type='view',
                                      timestamp=self.now - timedelta(minutes=1), metadata={'secret': 'must-not-appear'})

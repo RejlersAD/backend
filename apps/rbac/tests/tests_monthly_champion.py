@@ -35,25 +35,30 @@ class MonthlyChampionTests(TestCase):
             force_authenticate(request, user=user)
         return AIChampionViewSet.as_view({method: 'monthly_award'})(request)
 
-    def test_browsing_failed_only_and_inactive_users_do_not_qualify(self):
+    def test_page_visits_qualify_without_provider_calls_and_inactive_users_are_excluded(self):
         ActivityEvent.objects.create(user=self.user, application='documents', action_type='view', timestamp=self.when)
         self.usage(success=False)
         self.other.is_active = False
         self.other.save()
         self.usage(user=self.other)
-        self.assertEqual(candidates(2025, 7), [])
+        rows = candidates(2025, 7)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['user_id'], str(self.user.pk))
+        self.assertEqual(rows[0]['activity_count'], 1)
 
-    def test_score_uses_ai_requests_and_days_not_browsing_or_spending(self):
+    def test_score_counts_radai_activity_and_does_not_duplicate_provider_calls(self):
         self.usage()
         self.usage(when=self.when + timedelta(days=1))
         self.usage(user=self.other)
         row = candidates(2025, 7)[0]
         self.assertEqual(row['user_id'], str(self.user.pk))
         self.assertEqual(row['score'], 100)
-        self.assertEqual(row['breakdown'], {'successful_requests': 50, 'request_success_rate': 30, 'active_days': 20})
+        self.assertEqual(row['breakdown'], {'activity_volume': 50, 'recorded_success_rate': 30, 'active_days': 20})
         before = snapshot(2025, 7)['fingerprint']
         ActivityEvent.objects.create(user=self.other, application='documents', timestamp=self.when)
         self.assertEqual(snapshot(2025, 7)['fingerprint'], before)
+        ActivityEvent.objects.create(user=self.other, application='documents', timestamp=self.when)
+        self.assertNotEqual(snapshot(2025, 7)['fingerprint'], before)
 
     def test_calendar_window_and_ties_are_deterministic(self):
         self.usage()
@@ -134,3 +139,18 @@ class MonthlyChampionTests(TestCase):
             with self.assertRaises(RuntimeError):
                 publish(2025, 7, snapshot(2025, 7)['fingerprint'], 'Reviewed contribution.', self.root)
         self.assertFalse(MonthlyChampionPublication.objects.exists())
+
+    def test_visit_only_candidate_and_provider_fanout_do_not_inflate_activity(self):
+        ActivityEvent.objects.create(user=self.user, application='planning-package', action_type='view', timestamp=self.when)
+        ActivityEvent.objects.create(user=self.user, application='planning_package', action_type='view', timestamp=self.when)
+        preview = snapshot(2025, 7)
+        self.assertEqual(preview['candidates'][0]['activity_count'], 2)
+        for _ in range(4):
+            AIUsageLog.objects.create(user=self.user, application='planning_package', provider='internal-api',
+                                      model_name='test', timestamp=self.when, success=True)
+        self.assertEqual(snapshot(2025, 7)['fingerprint'], preview['fingerprint'])
+
+    def test_client_provider_claim_alone_is_not_radai_activity(self):
+        AIUsageLog.objects.create(user=self.user, application='documents', provider='external-tool',
+                                  model_name='test', provenance='client', timestamp=self.when)
+        self.assertEqual(candidates(2025, 7), [])

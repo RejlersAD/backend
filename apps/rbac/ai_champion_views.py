@@ -159,7 +159,7 @@ class AIChampionViewSet(viewsets.ViewSet):
             org_id = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
             user_ids = list(UserProfile.objects.filter(organization_id=org_id, is_deleted=False)
                             .values_list('user_id', flat=True)) if org_id else []
-        return Response(monthly_report(values['year'], values['month'], user_ids, can_publish=root))
+        return Response(monthly_report(values['year'], values['month'], user_ids, can_publish=root, request=request))
 
     @action(detail=False, methods=['get'], url_path='adoption-dashboard')
     def adoption_dashboard(self, request):
@@ -213,6 +213,9 @@ class AIChampionViewSet(viewsets.ViewSet):
             page = serializers.IntegerField(min_value=1, default=1)
             page_size = serializers.ChoiceField(choices=[10, 25, 50], default=10)
             user = serializers.IntegerField(min_value=1, required=False)
+            module = serializers.CharField(max_length=120, allow_blank=True, default='')
+            ordering = serializers.ChoiceField(choices=['signal', 'user', '-user', 'state', '-state', 'latest', '-latest'], default='signal')
+            timeline_limit = serializers.ChoiceField(choices=[20, 100], default=20)
 
         query = Query(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -223,14 +226,15 @@ class AIChampionViewSet(viewsets.ViewSet):
             if org is None:
                 return Response({'detail': 'An organization profile is required.'}, status=403)
         return Response(live_activity(org, values['search'], values['state'], values['page'],
-                                      values['page_size'], values.get('user')))
+                                      values['page_size'], values.get('user'), module=values['module'],
+                                      ordering=values['ordering'], timeline_limit=values['timeline_limit']))
 
     @action(detail=False, methods=['get', 'post', 'patch'], url_path='outcomes')
     def outcomes(self, request):
         from .ai_outcome_models import AIOutcomeEvidence
         from .ai_outcome_service import submit, review, serialize
         from .ai_measurement_service import monetary_values
-        from .ai_workforce_service import DEFAULT_MODULES
+        from .ai_cohort import DEFAULT_MODULES
         from .models import Module
         from django.conf import settings
         from django.db.models import Sum, F
