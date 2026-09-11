@@ -121,6 +121,11 @@ def _sync_module_catalogue():
         ],
         ignore_conflicts=True,
     )
+    # bulk_create bypasses the Module post-save signal.
+    from .module_actions import ensure_module_actions
+    ensure_module_actions(Module, Permission, module_ids=Module.objects.filter(
+        code__in=[module['code'] for module in missing],
+    ).values_list('pk', flat=True))
 
 
 class Permission(TimeStampedModel):
@@ -387,6 +392,9 @@ class UserProfile(TimeStampedModel):
 
     def has_permission(self, permission_code):
         """Check if user has specific permission through any active role"""
+        override = self.permission_overrides.filter(permission__code=permission_code, permission__is_active=True).first()
+        if override is not None:
+            return override.allowed
         if self.is_super_admin():
             return True
         from apps.rbac.models import UserRole
@@ -427,24 +435,18 @@ class UserProfile(TimeStampedModel):
         ).exists()
     
     def get_all_permissions(self):
-        """Get all permissions from all assigned roles (with caching)"""
-        from django.core.cache import cache
-        cache_key = f'user_permissions_{self.id}'
-        permissions = cache.get(cache_key)
-        
-        if permissions is None:
-            if self.is_super_admin():
-                permissions = list(Permission.objects.filter(is_active=True))
-            else:
-                permissions = list(Permission.objects.filter(
-                    roles__in=self.roles.filter(is_active=True),
-                    is_active=True
-                ).distinct())
-            # Cache for 5 minutes
-            cache.set(cache_key, permissions, 300)
-        
-        return permissions
-    
+        """Effective action permissions: explicit user decisions override role grants."""
+        # Read overrides on every request so a revoke cannot be masked by a stale cache.
+        permissions = Permission.objects.filter(is_active=True)
+        if not self.is_super_admin():
+            permissions = permissions.filter(
+                models.Q(roles__in=self.roles.filter(is_active=True)) |
+                models.Q(user_overrides__user_profile=self, user_overrides__allowed=True)
+            )
+        return list(permissions.exclude(
+            id__in=self.permission_overrides.filter(allowed=False).values('permission_id')
+        ).distinct())
+
     def get_all_modules(self):
         """
         Get all accessible modules from all assigned roles (with caching)
@@ -498,6 +500,16 @@ class UserProfile(TimeStampedModel):
             cache.set(cache_key, modules, 60)
         
         return modules
+
+
+class UserPermissionOverride(TimeStampedModel):
+    """An individual allow/deny decision; never changes the user's assigned roles."""
+    user_profile = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name='permission_overrides')
+    permission = models.ForeignKey(Permission, on_delete=models.CASCADE, related_name='user_overrides')
+    allowed = models.BooleanField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user_profile', 'permission'], name='rbac_unique_user_permission')]
 
 
 class UserRole(TimeStampedModel):

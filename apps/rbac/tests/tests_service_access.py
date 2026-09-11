@@ -10,7 +10,7 @@ from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 from apps.core.config.enquiry_access_config import user_has_enquiry_access
 from apps.core.models import Enquiry
 from apps.finance.views import InvoiceViewSet, dashboard_stats
-from apps.rbac.models import Module, Organization, Role, RoleModule, UserProfile, UserRole, _sync_module_catalogue
+from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, RolePermission, UserProfile, UserRole, _sync_module_catalogue
 from apps.rbac.rbac_config import ALL_MODULES_CATALOGUE, DEFAULT_ROLE_MODULES
 from apps.rbac.service_catalogue import SERVICE_MODULES, VIEW_SERVICE_MODULES
 
@@ -30,7 +30,12 @@ class ServiceAccessTests(TestCase):
         self.factory = APIRequestFactory()
 
     def grant(self, code):
-        return RoleModule.objects.get_or_create(role=self.role, module=Module.objects.get(code=code))[0]
+        module = Module.objects.get(code=code)
+        from apps.rbac.module_actions import ensure_module_actions
+        ensure_module_actions(Module, Permission, module_ids=[module.pk])
+        for permission in Permission.objects.filter(module=module, is_active=True):
+            RolePermission.objects.get_or_create(role=self.role, permission=permission)
+        return RoleModule.objects.get_or_create(role=self.role, module=module)[0]
 
     def finance(self, action='list', method='get'):
         request = getattr(self.factory, method)('/api/v1/finance/invoices/')
@@ -64,6 +69,7 @@ class ServiceAccessTests(TestCase):
         self.assertEqual(self.finance().status_code, 403)
         migration = import_module('apps.rbac.migrations.0052_replace_broad_business_grants')
         migration.replace_broad_grants(apps, SimpleNamespace(connection=connection))
+        import_module('apps.rbac.migrations.0055_explicit_legacy_module_actions').backfill_legacy_actions(apps, SimpleNamespace(connection=connection))
         self.assertEqual(self.finance().status_code, 200)
         self.assertEqual(self.client.get('/api/v1/invoice-tracker/invoices/').status_code, 200)
         self.assertTrue(self.profile.has_module_access('finance_overview'))

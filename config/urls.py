@@ -170,6 +170,8 @@ urlpatterns = [
 
 # ✨ SMART URL LOADING - Conditionally include optional app URLs
 if is_app_installed('apps.qhse'):
+    for area in ('detailed', 'quality', 'health-safety', 'environmental', 'energy'):
+        urlpatterns.append(path(f'api/v1/qhse/areas/{area}/', include(('apps.qhse.urls', 'qhse'), namespace=f'qhse-{area}')))
     urlpatterns.append(path('api/v1/qhse/', include('apps.qhse.urls')))
     print("[URL] ✅ QHSE URLs registered")
 
@@ -274,3 +276,7 @@ elif not getattr(settings, 'USE_S3', False):
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', serve_static_media, {'document_root': settings.MEDIA_ROOT}),
     ]
+
+# Add module/action enforcement without replacing existing view/object policies.
+from apps.rbac.route_guard import secure_module_endpoints
+secure_module_endpoints(urlpatterns)
