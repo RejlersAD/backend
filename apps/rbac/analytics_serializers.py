@@ -123,12 +123,25 @@ class ErrorLogAnalyticsSerializer(serializers.ModelSerializer):
 
 class SystemHealthCheckSerializer(serializers.ModelSerializer):
     """Serializer for system health checks"""
+    authentication_status = serializers.SerializerMethodField()
+    ai_status = serializers.SerializerMethodField()
+    disk_status = serializers.SerializerMethodField()
+
+    def get_disk_status(self, obj):
+        return obj.resource_usage.get('disk_status', 'unknown')
+
+    def get_authentication_status(self, obj):
+        return obj.resource_usage.get('service_statuses', {}).get('authentication', 'unknown')
+
+    def get_ai_status(self, obj):
+        return obj.resource_usage.get('service_statuses', {}).get('ai', 'unknown')
     
     class Meta:
         model = SystemHealthCheck
         fields = [
             'id', 'check_time',
             'database_status', 'redis_status', 'celery_status', 'storage_status', 'api_status',
+            'authentication_status', 'ai_status', 'disk_status',
             'overall_status', 'health_score',
             'response_times', 'error_rates', 'resource_usage',
             'issues_found', 'warnings',
@@ -171,6 +184,9 @@ class DashboardStatsSerializer(serializers.Serializer):
 
 class RealTimeActivitySerializer(serializers.Serializer):
     """Real-time activity feed"""
+    id = serializers.CharField()
+    actor_name = serializers.CharField(allow_blank=True)
+    target = serializers.CharField()
     activity_type = serializers.CharField()
     user_email = serializers.EmailField()
     description = serializers.CharField()

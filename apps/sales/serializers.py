@@ -3,11 +3,162 @@ Sales Serializers
 DRF serializers for Sales Management API
 """
 
+import re
+from datetime import datetime
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Client, Contact, Deal, Quote, SalesActivity, SalesForecast
+from .models import (
+    Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
+    ProjectHandover, Quote, SalesActivity, SalesEmailIntake, SalesForecast,
+    SalesMailboxConnection,
+)
 
 User = get_user_model()
+
+
+class SalesEmailIntakeSerializer(serializers.ModelSerializer):
+    """Employee-facing intake record with immutable email provenance."""
+
+    reviewed_by_name = serializers.CharField(
+        source='reviewed_by.get_full_name', read_only=True,
+    )
+    opportunity_name = serializers.CharField(
+        source='opportunity.deal_name', read_only=True,
+    )
+    duplicate_of_subject = serializers.CharField(
+        source='duplicate_of.subject', read_only=True,
+    )
+    extracted_information = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalesEmailIntake
+        fields = [
+            'id', 'source_message_id', 'internet_message_id', 'subject',
+            'sender_name', 'sender_email', 'received_at', 'body_preview',
+            'has_attachments', 'importance', 'status', 'opportunity',
+            'opportunity_name', 'reviewed_by', 'reviewed_by_name',
+            'reviewed_at', 'resolution_note', 'duplicate_of',
+            'duplicate_of_subject', 'created_at', 'updated_at',
+            'extracted_information',
+        ]
+        read_only_fields = fields
+
+    def get_extracted_information(self, obj):
+        content = f'{obj.subject}\n{obj.body_preview}'
+        lower_content = content.lower()
+        request_types = [
+            ('rfq', 'Request for quotation'),
+            ('request for quotation', 'Request for quotation'),
+            ('rfp', 'Request for proposal'),
+            ('request for proposal', 'Request for proposal'),
+            ('itt', 'Invitation to tender'),
+            ('tender', 'Tender'),
+            ('clarification', 'Clarification'),
+            ('purchase order', 'Purchase order'),
+            ('complaint', 'Complaint'),
+            ('invoice', 'Invoice'),
+            ('meeting', 'Meeting request'),
+        ]
+        request_type = next(
+            (label for keyword, label in request_types if keyword in lower_content),
+            'General client email',
+        )
+        direct_reference_match = re.search(
+            r'\b((?:RFQ|RFP|ITT)[-_/][A-Z0-9][A-Z0-9._/-]{2,})\b',
+            content,
+            flags=re.IGNORECASE,
+        )
+        labelled_reference_match = re.search(
+            r'\b(?:RFQ|RFP|ITT|Tender)\s*(?:No\.?|Number|Ref(?:erence)?|#)\s*[:#-]?\s*'
+            r'([A-Z0-9][A-Z0-9._/-]{2,})',
+            content,
+            flags=re.IGNORECASE,
+        )
+        deadline_match = re.search(
+            r'\b(?:proposal deadline|submission deadline|required by|proposal required by|'
+            r'required submission date|submission date|due date|deadline)\s*[:\-]?\s*'
+            r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
+            r'\d{4}-\d{2}-\d{2})',
+            content,
+            flags=re.IGNORECASE,
+        )
+        award_date_match = re.search(
+            r'\b(?:expected award date|anticipated award date|contract award date|award expected by)\s*[:\-]?\s*'
+            r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
+            r'\d{4}-\d{2}-\d{2})',
+            content,
+            flags=re.IGNORECASE,
+        )
+        field_patterns = {
+            'company_name': r'^\s*(?:Company|Client|Customer|Organisation|Organization) name\s*:\s*(.+?)\s*$',
+            'declared_client_domain': r'^\s*Client domain\s*:\s*([^\s]+)\s*$',
+            'contact_name': r'^\s*Contact person\s*:\s*(.+?)\s*$',
+            'contact_email': r'^\s*Contact email\s*:\s*([^\s]+)\s*$',
+            'contact_phone': r'^\s*Contact phone\s*:\s*(.+?)\s*$',
+            'location': r'^\s*Project location\s*:\s*(.+?)\s*$',
+            'industry': r'^\s*Industry\s*:\s*(.+?)\s*$',
+            'scope_summary': r'^\s*(?:Scope summary|Project scope|Scope of work)\s*:\s*(.+?)\s*$',
+        }
+        extracted_fields = {}
+        for name, pattern in field_patterns.items():
+            match = re.search(pattern, content, flags=re.IGNORECASE | re.MULTILINE)
+            extracted_fields[name] = match.group(1).strip() if match else ''
+
+        value_match = re.search(
+            r'^\s*(?:Estimated contract value|Estimated value|Contract value|Budget)\s*:\s*'
+            r'([A-Z]{3})?\s*([\d,]+(?:\.\d{1,2})?)',
+            content,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        deadline_text = deadline_match.group(1) if deadline_match else ''
+        award_date_text = award_date_match.group(1) if award_date_match else ''
+
+        def parse_email_date(value):
+            for date_format in ('%d %B %Y', '%d %b %Y', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d'):
+                try:
+                    return datetime.strptime(value, date_format).date().isoformat()
+                except ValueError:
+                    continue
+            return ''
+
+        deadline_date = parse_email_date(deadline_text)
+        expected_award_date = parse_email_date(award_date_text)
+
+        industry_text = extracted_fields['industry'].lower()
+        industry_type = 'other'
+        if any(term in industry_text for term in ('energy', 'power', 'utilities')):
+            industry_type = 'power_generation'
+        elif any(term in industry_text for term in ('oil', 'gas')):
+            industry_type = 'oil_gas'
+        elif 'water' in industry_text:
+            industry_type = 'water_treatment'
+
+        scope_type = 'other'
+        if 'pre-feed' in lower_content or 'pre feed' in lower_content:
+            scope_type = 'pre_feed'
+        elif 'feed' in lower_content:
+            scope_type = 'feed'
+        elif 'feasibility' in lower_content or 'study' in lower_content:
+            scope_type = 'feasibility'
+        sender_domain = obj.sender_email.rsplit('@', 1)[-1].lower()
+        return {
+            'request_type': request_type,
+            'client_domain': sender_domain,
+            'tender_reference': (
+                direct_reference_match.group(1)
+                if direct_reference_match
+                else labelled_reference_match.group(1) if labelled_reference_match else ''
+            ),
+            'deadline_text': deadline_text,
+            'deadline_date': deadline_date,
+            'expected_award_date': expected_award_date,
+            'estimated_value': value_match.group(2).replace(',', '') if value_match else '',
+            'currency': value_match.group(1).upper() if value_match and value_match.group(1) else 'AED',
+            'industry_type': industry_type,
+            'scope_type': scope_type,
+            **extracted_fields,
+        }
 
 
 # ==============================================================================
@@ -55,6 +206,9 @@ class ClientListSerializer(serializers.ModelSerializer):
             'status', 'account_manager', 'account_manager_name', 'health_score',
             'churn_risk', 'lifetime_value', 'last_contact_date', 'created_at',
             'primary_contact', 'active_deals_count', 'total_deal_value', 'tags'
+            , 'legal_name', 'trading_name', 'parent_client', 'country',
+            'market_sectors', 'verification_status', 'new_proposals_permitted',
+            'email', 'website'
         ]
         read_only_fields = ['id', 'created_at', 'health_score']
     
@@ -63,11 +217,11 @@ class ClientListSerializer(serializers.ModelSerializer):
         return contact.full_name if contact else None
     
     def get_active_deals_count(self, obj):
-        return obj.deals.exclude(stage__in=['closed_won', 'closed_lost']).count()
+        return obj.deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
     
     def get_total_deal_value(self, obj):
         from django.db.models import Sum
-        total = obj.deals.exclude(stage='closed_lost').aggregate(Sum('estimated_value'))
+        total = obj.deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).aggregate(Sum('estimated_value'))
         return total['estimated_value__sum'] or 0
 
 
@@ -92,11 +246,11 @@ class ClientDetailSerializer(serializers.ModelSerializer):
         deals = obj.deals.all()
         return {
             'total_count': deals.count(),
-            'active_count': deals.exclude(stage__in=['closed_won', 'closed_lost']).count(),
-            'won_count': deals.filter(stage='closed_won').count(),
-            'lost_count': deals.filter(stage='closed_lost').count(),
+            'active_count': deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count(),
+            'won_count': deals.filter(stage__in=['awarded', 'converted']).count(),
+            'lost_count': deals.filter(stage='lost').count(),
             'total_value': deals.aggregate(Sum('estimated_value'))['estimated_value__sum'] or 0,
-            'pipeline_value': deals.exclude(stage__in=['closed_won', 'closed_lost']).aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0,
+            'pipeline_value': deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0,
         }
 
 
@@ -106,6 +260,17 @@ class ClientCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client
         exclude = ['health_score', 'churn_risk', 'lifetime_value', 'created_at', 'updated_at']
+        extra_kwargs = {'client_code': {'required': False}}
+
+    def validate(self, attrs):
+        company_name = attrs.get('company_name', getattr(self.instance, 'company_name', '')).strip()
+        legal_name = attrs.get('legal_name', getattr(self.instance, 'legal_name', '')).strip()
+        candidates = Client.objects.exclude(pk=getattr(self.instance, 'pk', None))
+        if candidates.filter(company_name__iexact=company_name).exists():
+            raise serializers.ValidationError({'company_name': 'A possible duplicate client already exists.'})
+        if legal_name and candidates.filter(legal_name__iexact=legal_name).exists():
+            raise serializers.ValidationError({'legal_name': 'A client with this legal identity already exists.'})
+        return attrs
     
     def create(self, validated_data):
         # Auto-generate client code if not provided
@@ -115,6 +280,29 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             validated_data['client_code'] = f"CLT-{prefix}-{get_random_string(6, '0123456789')}"
         
         return super().create(validated_data)
+
+
+class FrameworkAgreementSerializer(serializers.ModelSerializer):
+    client_name = serializers.CharField(source='client.company_name', read_only=True)
+    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    remaining_value = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    is_eligible = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = FrameworkAgreement
+        fields = '__all__'
+        read_only_fields = ['id', 'approved_by', 'approved_at', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        effective = attrs.get('effective_date', getattr(self.instance, 'effective_date', None))
+        expiry = attrs.get('expiry_date', getattr(self.instance, 'expiry_date', None))
+        if effective and expiry and expiry < effective:
+            raise serializers.ValidationError({'expiry_date': 'Expiry must be after the effective date.'})
+        ceiling = attrs.get('ceiling_value', getattr(self.instance, 'ceiling_value', None))
+        committed = attrs.get('committed_value', getattr(self.instance, 'committed_value', 0))
+        if ceiling is not None and committed > ceiling:
+            raise serializers.ValidationError({'committed_value': 'Committed value cannot exceed the framework ceiling.'})
+        return attrs
 
 
 # ==============================================================================
@@ -127,6 +315,7 @@ class DealListSerializer(serializers.ModelSerializer):
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
     stage_display = serializers.SerializerMethodField()
     days_in_stage = serializers.SerializerMethodField()
+    framework_number = serializers.CharField(source='framework.framework_number', read_only=True)
     
     class Meta:
         model = Deal
@@ -134,7 +323,13 @@ class DealListSerializer(serializers.ModelSerializer):
             'id', 'deal_code', 'deal_name', 'client', 'client_name', 'stage',
             'stage_display', 'probability', 'priority', 'estimated_value',
             'weighted_value', 'currency', 'expected_close_date', 'owner',
-            'owner_name', 'ai_win_probability', 'created_at', 'days_in_stage'
+            'owner_name', 'ai_win_probability', 'created_at', 'days_in_stage',
+            'scope_type', 'location', 'client_reference', 'submission_due_date',
+            'next_action_date', 'bid_decision', 'award_status', 'award_value',
+            'converted_project', 'stage_entered_at',
+            'framework', 'framework_number', 'client_contact', 'disciplines',
+            'estimated_hours', 'delivery_office', 'opportunity_source',
+            'next_action', 'risk_level',
         ]
         read_only_fields = ['id', 'weighted_value', 'created_at']
     
@@ -144,7 +339,29 @@ class DealListSerializer(serializers.ModelSerializer):
     
     def get_days_in_stage(self, obj):
         from django.utils import timezone
-        return (timezone.now().date() - obj.updated_at.date()).days
+        entered = obj.stage_entered_at or obj.updated_at
+        return (timezone.now().date() - entered.date()).days
+
+
+class OpportunityAuditEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OpportunityAuditEvent
+        fields = [
+            'id', 'event_type', 'from_stage', 'to_stage', 'reason', 'data',
+            'actor', 'actor_name', 'occurred_at',
+        ]
+        read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        if not obj.actor:
+            return ''
+        return (
+            obj.actor.get_full_name()
+            or obj.actor.username
+            or obj.actor.email
+        )
 
 
 class DealDetailSerializer(serializers.ModelSerializer):
@@ -155,6 +372,7 @@ class DealDetailSerializer(serializers.ModelSerializer):
     quotes = serializers.SerializerMethodField()
     activities = serializers.SerializerMethodField()
     stage_history = serializers.SerializerMethodField()
+    permitted_actions = serializers.SerializerMethodField()
     
     class Meta:
         model = Deal
@@ -170,8 +388,61 @@ class DealDetailSerializer(serializers.ModelSerializer):
         return SalesActivityListSerializer(activities, many=True).data
     
     def get_stage_history(self, obj):
-        # This would track stage changes - implement with signals or audit log
-        return []
+        history = list(
+            OpportunityAuditEventSerializer(
+                obj.audit_events.select_related('actor').all()[:100],
+                many=True,
+            ).data
+        )
+        creation_events = {
+            'opportunity_created', 'opportunity_created_from_email',
+        }
+        if not any(item['event_type'] in creation_events for item in history):
+            source = obj.custom_fields or {}
+            owner_name = ''
+            if obj.owner:
+                owner_name = obj.owner.get_full_name() or obj.owner.username
+            history.append({
+                'id': f'created-{obj.id}',
+                'event_type': (
+                    'opportunity_created_from_email'
+                    if source.get('source_email_intake_id')
+                    else 'opportunity_created'
+                ),
+                'from_stage': '',
+                'to_stage': 'lead',
+                'reason': '',
+                'data': {
+                    key: source[key]
+                    for key in (
+                        'source_email_intake_id', 'source_message_id',
+                        'internet_message_id', 'sender_email', 'received_at',
+                    )
+                    if source.get(key)
+                },
+                'actor': obj.owner_id,
+                'actor_name': owner_name,
+                'occurred_at': obj.created_at,
+            })
+        return sorted(
+            history,
+            key=lambda item: str(item.get('occurred_at') or ''),
+            reverse=True,
+        )
+
+    def get_permitted_actions(self, obj):
+        actions = {
+            'lead': ['submit_qualification'],
+            'qualified': ['bid_decision'],
+            'proposal': ['enter_negotiation'],
+            'negotiation': ['submit_award'],
+            'award_pending': ['approve_award', 'reject_award'],
+            'awarded': ['convert_to_project'],
+        }
+        permitted = actions.get(obj.stage, [])
+        if obj.stage not in {'awarded', 'converted', 'lost', 'no_bid', 'cancelled'}:
+            permitted = [*permitted, 'close']
+        return permitted
 
 
 class DealCreateSerializer(serializers.ModelSerializer):
@@ -180,6 +451,23 @@ class DealCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         exclude = ['weighted_value', 'ai_win_probability', 'ai_recommended_actions', 'created_at', 'updated_at']
+        extra_kwargs = {'deal_code': {'required': False}}
+        read_only_fields = [
+            'stage', 'stage_entered_at', 'bid_decision', 'bid_decision_reason',
+            'bid_decided_by', 'bid_decided_at', 'award_status', 'award_submitted_by',
+            'award_submitted_at', 'award_approved_by', 'award_approved_at',
+            'award_rejection_reason', 'converted_project', 'converted_by',
+            'converted_at', 'actual_close_date',
+        ]
+
+    def validate(self, attrs):
+        framework = attrs.get('framework', getattr(self.instance, 'framework', None))
+        client = attrs.get('client', getattr(self.instance, 'client', None))
+        if framework and framework.client_id != getattr(client, 'id', None):
+            raise serializers.ValidationError({
+                'framework': 'The framework must belong to the selected client.',
+            })
+        return attrs
     
     def create(self, validated_data):
         # Auto-generate deal code if not provided
@@ -217,6 +505,8 @@ class QuoteListSerializer(serializers.ModelSerializer):
             'client_name', 'status', 'total_amount', 'currency', 'issue_date',
             'valid_until', 'prepared_by', 'prepared_by_name', 'created_at',
             'days_until_expiry'
+            , 'estimated_cost', 'expected_margin_percent', 'approved_by',
+            'approved_at', 'submitted_version_hash', 'submission_recipient'
         ]
         read_only_fields = ['id', 'created_at']
     
@@ -238,6 +528,41 @@ class QuoteDetailSerializer(serializers.ModelSerializer):
         model = Quote
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        deal = attrs.get('deal', getattr(self.instance, 'deal', None))
+        client = attrs.get('client', getattr(self.instance, 'client', None))
+        if deal and client and deal.client_id != client.id:
+            raise serializers.ValidationError({
+                'client': 'Proposal client must match its opportunity.',
+            })
+        if not self.instance and deal and deal.stage != 'proposal':
+            raise serializers.ValidationError({
+                'deal': 'A proposal can only be created after an approved bid decision.',
+            })
+        if client and (client.status != 'active' or not client.new_proposals_permitted):
+            raise serializers.ValidationError({
+                'client': 'This client is not currently permitted for new proposals.',
+            })
+        return attrs
+
+
+class ProjectHandoverSerializer(serializers.ModelSerializer):
+    opportunity_code = serializers.CharField(source='opportunity.deal_code', read_only=True)
+    opportunity_name = serializers.CharField(source='opportunity.deal_name', read_only=True)
+    client_name = serializers.CharField(source='opportunity.client.company_name', read_only=True)
+    proposal_number = serializers.CharField(source='proposal.quote_number', read_only=True)
+    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    project_manager_name = serializers.CharField(source='project_manager.get_full_name', read_only=True)
+    accepted_by_name = serializers.CharField(source='accepted_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = ProjectHandover
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'opportunity', 'proposal', 'owner', 'contract_value', 'currency',
+            'accepted_by', 'accepted_at', 'project', 'created_at', 'updated_at',
+        ]
 
 
 # ==============================================================================
@@ -295,6 +620,40 @@ class SalesForecastSerializer(serializers.ModelSerializer):
         if obj.actual_revenue and obj.predicted_revenue:
             return float(obj.actual_revenue - obj.predicted_revenue)
         return None
+
+    def validate_manual_adjustments(self, value):
+        invalid = [index for index, item in enumerate(value) if not item.get('reason')]
+        if invalid:
+            raise serializers.ValidationError('Every manual adjustment requires a reason.')
+        return value
+
+
+class SalesMailboxConnectionSerializer(serializers.ModelSerializer):
+    secret_configured = serializers.SerializerMethodField()
+    token_encryption_configured = serializers.SerializerMethodField()
+    delegated_connected = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalesMailboxConnection
+        exclude = ['encrypted_refresh_token']
+        read_only_fields = [
+            'id', 'last_status', 'last_health_check_at', 'last_error',
+            'mailbox_display_name', 'total_item_count', 'unread_item_count',
+            'delegated_account_id', 'delegated_account_name', 'delegated_scopes',
+            'connected_at',
+            'created_by', 'updated_by', 'created_at', 'updated_at',
+        ]
+
+    def get_secret_configured(self, obj):
+        import os
+        return bool(os.environ.get('RADAI_SALES_GRAPH_CLIENT_SECRET', '').strip())
+
+    def get_token_encryption_configured(self, obj):
+        from .graph_crypto import is_configured
+        return is_configured()
+
+    def get_delegated_connected(self, obj):
+        return bool(obj.auth_mode == 'delegated' and obj.encrypted_refresh_token)
 
 
 # ==============================================================================

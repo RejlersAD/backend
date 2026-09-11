@@ -645,6 +645,7 @@ class LeaveRequest(models.Model):
     )
     start_date       = models.DateField()
     end_date         = models.DateField()
+    half_day         = models.BooleanField(default=False)
     # Computed Mon–Fri count stored for fast balance checks
     days_requested   = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('0'))
     reason           = models.TextField(blank=True)
@@ -752,7 +753,7 @@ class LeaveRequest(models.Model):
                 if cur.weekday() < 5:
                     days += 1
                 cur += _dt.timedelta(days=1)
-            self.days_requested = Decimal(str(days))
+            self.days_requested = Decimal('0.5') if self.half_day and days == 1 else Decimal(str(days))
         super().save(*args, **kwargs)
 
 

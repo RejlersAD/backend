@@ -48,12 +48,15 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
         with self.assertRaises(ValidationError):
             view.get_queryset()
 
+    @patch('apps.onboarding.views.EmployeeMaster.objects.filter')
     @patch('apps.onboarding.views.OffboardingRecord.objects.filter')
     @patch('apps.onboarding.views.OnboardingRecord.objects.filter')
     def test_command_center_pending_combines_lifecycle_requests(
-        self, mock_onboarding_filter, mock_offboarding_filter
+        self, mock_onboarding_filter, mock_offboarding_filter, mock_employee_filter
     ):
         created_at = '2026-08-14T10:00:00Z'
+        active_employee_ids = MagicMock()
+        mock_employee_filter.return_value.values.return_value = active_employee_ids
         mock_onboarding_filter.return_value.values.return_value = [{
             'id': 1, 'user_id': 10, 'employee_name': 'New Employee',
             'employee_email': 'new@example.com', 'employee_id': 'EMP-10',
@@ -76,7 +79,11 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
         self.assertEqual(response.data[0]['display_status'], 'Initiated')
         self.assertEqual(response.data[1]['request_type'], 'Offboarding')
         self.assertEqual(response.data[1]['display_status'], 'In Progress')
-        mock_onboarding_filter.assert_called_once_with(status__in=ONBOARDING_ACTIVE_STATUSES)
+        mock_employee_filter.assert_called_once_with(user__is_active=True)
+        mock_onboarding_filter.assert_called_once_with(
+            status__in=ONBOARDING_ACTIVE_STATUSES,
+            user_id__in=active_employee_ids,
+        )
         mock_offboarding_filter.assert_called_once_with(status__in=OFFBOARDING_ACTIVE_STATUSES)
 
     @patch('apps.onboarding.views.ensure_onboarding_record')

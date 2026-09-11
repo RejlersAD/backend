@@ -254,6 +254,13 @@ class PayrollAdjustmentSerializer(serializers.ModelSerializer):
     employee_no = serializers.CharField(source='employee.employee_no', read_only=True)
     employee_name = serializers.CharField(source='employee.full_name', read_only=True)
 
+    def validate(self, attrs):
+        from .services.adjustment_period import require_current_or_future
+        require_current_or_future(
+            attrs.get('target_year', getattr(self.instance, 'target_year', None)),
+            attrs.get('target_month', getattr(self.instance, 'target_month', None)))
+        return attrs
+
     class Meta:
         model = PayrollAdjustment
         fields = [

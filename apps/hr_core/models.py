@@ -968,6 +968,8 @@ class ShiftAssignment(TimeStampedModel):
 class OvertimeRequest(TimeStampedModel):
     STATUS_CHOICES = [('draft', 'Draft'), ('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('cancelled', 'Cancelled')]
 
+    day_entries = models.JSONField(default=list, blank=True)
+    compensation_type = models.CharField(max_length=12, choices=[('cash', 'Encashment'), ('day_off', 'Off day')], blank=True, default='')
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='overtime_requests')
     assignment = models.ForeignKey(ShiftAssignment, null=True, blank=True, on_delete=models.SET_NULL, related_name='overtime_requests')
@@ -1247,4 +1249,40 @@ class LegacyEmployeeArchive(models.Model):
         ordering = ['source_table', 'source_pk']
         constraints = [
             models.UniqueConstraint(fields=['source_table', 'source_pk'], name='hr_legacy_archive_source_unique'),
+        ]
+
+
+class OvertimeConversion(TimeStampedModel):
+    """Immutable consumption of approved OT, with its payroll or day-off outcome."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.PROTECT, related_name='overtime_conversions')
+    method = models.CharField(max_length=12, choices=[('cash', 'Encashment'), ('day_off', 'Day-off credit')])
+    basic_salary = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    multiplier = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    target_year = models.PositiveSmallIntegerField(null=True, blank=True)
+    target_month = models.PositiveSmallIntegerField(null=True, blank=True)
+    hours = models.DecimalField(max_digits=8, decimal_places=2)
+    hourly_rate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    cash_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    hours_per_day = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    days_credited = models.DecimalField(max_digits=10, decimal_places=4, default=0)
+    payroll_adjustment = models.OneToOneField('payroll_engine.PayrollAdjustment', null=True, blank=True, on_delete=models.PROTECT, related_name='ot_conversion')
+    converted_by = models.ForeignKey('users.User', on_delete=models.PROTECT, related_name='overtime_conversions')
+    note = models.TextField(blank=True)
+    idempotency_key = models.UUIDField(unique=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [models.CheckConstraint(check=models.Q(hours__gt=0), name='ot_conversion_positive')]
+
+
+class OvertimeConversionAllocation(models.Model):
+    conversion = models.ForeignKey(OvertimeConversion, on_delete=models.PROTECT, related_name='allocations')
+    request = models.ForeignKey(OvertimeRequest, on_delete=models.PROTECT, related_name='conversion_allocations')
+    hours = models.DecimalField(max_digits=8, decimal_places=2)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['conversion', 'request'], name='ot_conversion_request_unique'),
+            models.CheckConstraint(check=models.Q(hours__gt=0), name='ot_allocation_positive'),
         ]

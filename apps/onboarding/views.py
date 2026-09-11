@@ -504,8 +504,12 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='command-center-pending')
     def command_center_pending(self, request):
         """Return active onboarding and offboarding requests for HR Command Center."""
+        active_employee_user_ids = EmployeeMaster.objects.filter(
+            user__is_active=True,
+        ).values('user_id')
         onboarding_requests = OnboardingRecord.objects.filter(
-            status__in=ONBOARDING_ACTIVE_STATUSES
+            status__in=ONBOARDING_ACTIVE_STATUSES,
+            user_id__in=active_employee_user_ids,
         ).values(
             'id', 'user_id', 'employee_name', 'employee_email', 'employee_id',
             'department', 'status', 'joining_date', 'initiated_date', 'created_at',

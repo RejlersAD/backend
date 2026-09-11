@@ -527,10 +527,57 @@ class OvertimeRequestSerializer(serializers.ModelSerializer):
     workflow_status = serializers.CharField(source='workflow_instance.status', read_only=True)
     current_stage = serializers.CharField(source='workflow_instance.current_stage.name', read_only=True)
 
+    employee_code = serializers.CharField(source='employee.employee_code', read_only=True)
+    requested_by_name = serializers.SerializerMethodField()
+    can_review = serializers.SerializerMethodField()
+    can_cancel = serializers.SerializerMethodField()
+    history = serializers.SerializerMethodField()
+    stage_code = serializers.CharField(source='workflow_instance.current_stage.code', read_only=True)
+
+    application = serializers.SerializerMethodField()
+    can_apply = serializers.SerializerMethodField()
+
+    def get_application(self, obj):
+        allocation = obj.conversion_allocations.select_related('conversion').first()
+        if not allocation:
+            return None
+        c = allocation.conversion
+        return {'method': c.method, 'amount': str(c.cash_amount), 'days': str(c.days_credited),
+                'year': c.target_year, 'month': c.target_month}
+
+    def get_can_apply(self, obj):
+        from .overtime import is_final_reviewer
+        return obj.status == 'approved' and is_final_reviewer(self.context['request'].user) and not obj.conversion_allocations.exists()
+
+    def get_requested_by_name(self, obj):
+        return (obj.requested_by.get_full_name() or obj.requested_by.username) if obj.requested_by else ''
+
+    def get_can_review(self, obj):
+        from .workflows import HRWorkflowService
+        if not obj.workflow_instance_id or obj.status != 'pending':
+            return False
+        task = obj.workflow_instance.tasks.filter(status='pending', stage=obj.workflow_instance.current_stage).first()
+        return bool(task and HRWorkflowService.can_act(task, self.context['request'].user))
+
+    def get_can_cancel(self, obj):
+        return obj.status == 'pending' and obj.requested_by_id == self.context['request'].user.pk
+
+    def get_history(self, obj):
+        if not obj.workflow_instance_id:
+            return []
+        return [{'action': event.event_type, 'actor': event.actor.get_full_name() if event.actor else '',
+                 'note': event.note, 'at': event.created_at} for event in obj.workflow_instance.events.select_related('actor').order_by('created_at')
+                if event.event_type in {'started', 'approved', 'rejected', 'cancelled'}]
+
+    def validate_reason(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('Enter a reason for overtime.')
+        return value.strip()
+
     class Meta:
         model = OvertimeRequest
         fields = '__all__'
-        read_only_fields = ['id', 'status', 'requested_by', 'workflow_instance', 'reviewed_at', 'created_at', 'updated_at']
+        read_only_fields = ['day_entries', 'id', 'status', 'approved_hours', 'requested_by', 'workflow_instance', 'reviewed_at', 'created_at', 'updated_at']
 
     def validate_requested_hours(self, value):
         if value <= 0 or value > 24:

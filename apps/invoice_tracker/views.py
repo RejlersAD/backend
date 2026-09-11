@@ -1,3 +1,4 @@
+from apps.rbac.permissions import HasModuleAccess
 """
 Invoice Tracker DRF views.
 
@@ -43,7 +44,7 @@ class CustomerInvoicePagination(PageNumberPagination):
 class CustomerInvoiceViewSet(viewsets.ModelViewSet):
     queryset = CustomerInvoice.objects.all().prefetch_related('attachments')
     serializer_class = CustomerInvoiceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = [
@@ -183,7 +184,7 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
 
     # ── Finance-engine config (read-only) ──────────────────────────
     @action(detail=False, methods=['get'], url_path='config',
-            permission_classes=[IsAuthenticated])
+            permission_classes=[IsAuthenticated, HasModuleAccess])
     def config(self, request):
         """Return the soft-coded FINANCE_RULES so the frontend can render
         FX rates, VAT, ICV, and status labels without re-hard-coding them."""
@@ -217,7 +218,7 @@ class InvoiceAttachmentViewSet(viewsets.GenericViewSet):
     """Slim viewset — only DELETE is exposed for attachments."""
     queryset = InvoiceAttachment.objects.all()
     serializer_class = InvoiceAttachmentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
 
     def destroy(self, request, pk=None):
         att = self.get_object()

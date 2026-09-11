@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 # RBAC - Module-level access control (soft-coded)
-from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.permissions import HasModuleAccess, CanViewFinanceOverview
 from django.core.files.storage import default_storage
 from django.shortcuts import get_object_or_404
 from django.views.decorators.clickjacking import xframe_options_exempt
@@ -47,7 +47,7 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     """
     # Data visibility configuration
     visibility_module_code = 'finance'
-    visibility_owner_field = 'created_by'
+    visibility_owner_field = 'submitted_by'
     
     queryset = Invoice.objects.all().order_by('-created_at')
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -343,9 +343,15 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                     status=status.HTTP_401_UNAUTHORIZED
                 )
 
+        # A valid login token is not an invoice-service grant. Apply the same
+        # role and row-level checks used by the authenticated API routes.
+        request.user = user
+        if not HasModuleAccess().has_permission(request, self):
+            return Response({'detail': 'Incoming invoice access is required.'}, status=status.HTTP_403_FORBIDDEN)
+
         # Get invoice
         try:
-            invoice = Invoice.objects.get(id=pk)
+            invoice = self.get_queryset().get(id=pk)
         except Invoice.DoesNotExist:
             return Response(
                 {'error': 'Invoice not found'},
@@ -909,7 +915,7 @@ def approval_action(request, token):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, CanViewFinanceOverview])
 def dashboard_stats(request):
     """Get dashboard statistics"""
     try:

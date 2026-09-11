@@ -6,29 +6,230 @@ DRF ViewSets with AI-powered actions
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 
 # RBAC - Module-level access control (soft-coded)
-from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.permissions import HasModuleAccess, IsAdmin
 from django.db.models import Q, Count, Sum, Avg, F
 from django.utils import timezone
+from django.conf import settings
+from django.core import signing
+from django.core.cache import cache
+from django.shortcuts import redirect
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
+import secrets
 
-from .models import Client, Contact, Deal, Quote, SalesActivity, SalesForecast
+from .models import (
+    Client, Contact, Deal, FrameworkAgreement, ProjectHandover, Quote,
+    SalesActivity, SalesForecast, SalesMailboxConnection,
+)
 from .serializers import (
     ClientListSerializer, ClientDetailSerializer, ClientCreateSerializer,
     ContactSerializer, DealListSerializer, DealDetailSerializer, DealCreateSerializer,
     QuoteListSerializer, QuoteDetailSerializer, SalesActivityListSerializer,
     SalesActivityDetailSerializer, SalesForecastSerializer, SalesDashboardSerializer,
-    AIInsightSerializer
+    AIInsightSerializer, FrameworkAgreementSerializer, ProjectHandoverSerializer,
+    SalesMailboxConnectionSerializer,
 )
 from .ai_service import SalesAIService
+from .microsoft_graph import SalesMicrosoftGraphService
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+from .workflow import (
+    _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
+    decide_handover, submit_award, submit_handover_for_acceptance,
+    submit_qualification,
+)
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
+    """User-owned delegated Outlook connections and governed admin connections."""
+
+    queryset = SalesMailboxConnection.objects.all()
+    serializer_class = SalesMailboxConnectionSerializer
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
+
+    def get_permissions(self):
+        if self.action == 'oauth_callback':
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def _is_admin(self):
+        return IsAdmin().has_permission(self.request, self)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.query_params.get('mine', '').lower() in {'1', 'true', 'yes'}:
+            return queryset.filter(created_by=self.request.user)
+        if self._is_admin():
+            return queryset
+        return queryset.filter(created_by=self.request.user)
+
+    def perform_create(self, serializer):
+        auth_mode = serializer.validated_data.get('auth_mode', 'delegated')
+        if not self._is_admin():
+            auth_mode = 'delegated'
+        serializer.save(
+            auth_mode=auth_mode,
+            created_by=self.request.user,
+            updated_by=self.request.user,
+        )
+
+    def perform_update(self, serializer):
+        auth_mode = serializer.validated_data.get('auth_mode', self.get_object().auth_mode)
+        if not self._is_admin():
+            auth_mode = 'delegated'
+        serializer.save(auth_mode=auth_mode, updated_by=self.request.user)
+
+    def _authorization_response(self, request, connection):
+        if connection.auth_mode != 'delegated':
+            connection.auth_mode = 'delegated'
+            connection.save(update_fields=['auth_mode', 'updated_at'])
+        nonce = secrets.token_urlsafe(32)
+        state_payload = {
+            'connection_id': str(connection.id),
+            'user_id': str(request.user.id),
+            'nonce': nonce,
+        }
+        cache.set(f'sales-graph-oauth:{nonce}', state_payload, timeout=600)
+        state_token = signing.dumps(state_payload, salt='sales-graph-oauth')
+        try:
+            authorization_url = SalesMicrosoftGraphService(
+                connection
+            ).delegated_authorization_url(state_token)
+        except Exception as exc:
+            cache.delete(f'sales-graph-oauth:{nonce}')
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'authorization_url': authorization_url,
+            'expires_in_seconds': 600,
+        })
+
+    @action(detail=False, methods=['post'], url_path='connect-my-outlook')
+    def connect_my_outlook(self, request):
+        """Start one-click delegated OAuth using RADAI's central Entra app."""
+        try:
+            tenant_id, client_id = SalesMicrosoftGraphService.delegated_runtime_configuration()
+        except Exception as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        mailbox_address = (request.user.email or '').strip().lower()
+        if not mailbox_address:
+            return Response(
+                {
+                    'detail': (
+                        'Your RADAI profile needs an email address before '
+                        'Outlook can be connected.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        connection = SalesMailboxConnection.objects.filter(
+            created_by=request.user,
+            auth_mode='delegated',
+        ).order_by('created_at').first()
+        if connection is None:
+            existing_mailbox = SalesMailboxConnection.objects.filter(
+                mailbox_address__iexact=mailbox_address,
+            ).first()
+            if existing_mailbox:
+                if existing_mailbox.created_by_id != request.user.id:
+                    return Response(
+                        {'detail': 'This mailbox is already connected to another RADAI user.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                connection = existing_mailbox
+            else:
+                connection = SalesMailboxConnection.objects.create(
+                    name='My Outlook account',
+                    auth_mode='delegated',
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    mailbox_address=mailbox_address,
+                    enabled=False,
+                    created_by=request.user,
+                    updated_by=request.user,
+                )
+
+        changed_fields = []
+        for field, value in (
+            ('tenant_id', tenant_id),
+            ('client_id', client_id),
+            ('updated_by', request.user),
+        ):
+            if getattr(connection, field) != value:
+                setattr(connection, field, value)
+                changed_fields.append(field)
+        if changed_fields:
+            connection.save(update_fields=[*changed_fields, 'updated_at'])
+        return self._authorization_response(request, connection)
+
+    @action(detail=True, methods=['post'], url_path='test-connection')
+    def test_connection(self, request, pk=None):
+        result = SalesMicrosoftGraphService(self.get_object()).health_check()
+        response_status = status.HTTP_200_OK if result['connected'] else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=response_status)
+
+    @action(detail=True, methods=['post'], url_path='connect-outlook')
+    def connect_outlook(self, request, pk=None):
+        return self._authorization_response(request, self.get_object())
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='oauth/callback',
+        url_name='oauth-callback',
+    )
+    def oauth_callback(self, request):
+        frontend_url = str(settings.FRONTEND_URL).rstrip('/')
+
+        def finish(result, reason=''):
+            query = urlencode({'outlook': result, 'reason': reason})
+            return redirect(f'{frontend_url}/sales?{query}')
+
+        if request.query_params.get('error'):
+            return finish('error', 'Microsoft sign-in was cancelled or denied.')
+        state_token = request.query_params.get('state', '')
+        code = request.query_params.get('code', '')
+        if not state_token or not code:
+            return finish('error', 'Microsoft sign-in returned an incomplete response.')
+        try:
+            payload = signing.loads(
+                state_token,
+                salt='sales-graph-oauth',
+                max_age=600,
+            )
+            nonce = payload['nonce']
+            expected = cache.get(f'sales-graph-oauth:{nonce}')
+            cache.delete(f'sales-graph-oauth:{nonce}')
+            if expected != payload:
+                raise signing.BadSignature('OAuth state has expired or was already used.')
+            connection = SalesMailboxConnection.objects.get(
+                id=payload['connection_id'],
+                created_by_id=payload['user_id'],
+            )
+            result = SalesMicrosoftGraphService(
+                connection
+            ).complete_delegated_authorization(code)
+            if not result['connected']:
+                return finish('error', result.get('error', 'Mailbox verification failed.'))
+        except Exception as exc:
+            logger.warning('Sales Outlook OAuth callback failed: %s', exc)
+            return finish('error', str(exc)[:300])
+        return finish('connected')
+
+    @action(detail=True, methods=['post'], url_path='disconnect-outlook')
+    def disconnect_outlook(self, request, pk=None):
+        connection = self.get_object()
+        SalesMicrosoftGraphService(connection).disconnect()
+        return Response(self.get_serializer(connection).data)
 
 
 # ==============================================================================
@@ -193,6 +394,42 @@ class ContactViewSet(viewsets.ModelViewSet):
         })
 
 
+class FrameworkAgreementViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    """Client framework terms, eligibility, rate versions, and value control."""
+
+    visibility_module_code = 'sales'
+    visibility_owner_field = 'owner'
+    queryset = FrameworkAgreement.objects.select_related('client', 'owner', 'approved_by')
+    serializer_class = FrameworkAgreementSerializer
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'client', 'owner', 'currency']
+    search_fields = ['framework_number', 'title', 'client__company_name']
+    ordering_fields = ['effective_date', 'expiry_date', 'ceiling_value', 'created_at']
+
+    def perform_create(self, serializer):
+        serializer.save(owner=serializer.validated_data.get('owner') or self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def activate(self, request, pk=None):
+        framework = self.get_object()
+        if framework.owner_id == request.user.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'approver': 'The framework owner cannot approve their own agreement.'})
+        if not framework.signed_document:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'signed_document': 'A signed agreement is required before activation.'})
+        if not framework.effective_date <= timezone.now().date() <= framework.expiry_date:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'validity': 'The framework is outside its effective dates.'})
+        framework.status = 'active'
+        framework.approved_by = request.user
+        framework.approved_at = timezone.now()
+        framework.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        return Response(self.get_serializer(framework).data)
+
+
 # ==============================================================================
 # SALES PIPELINE VIEWSETS
 # ==============================================================================
@@ -233,9 +470,97 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Set owner to current user if not specified"""
         if not serializer.validated_data.get('owner'):
-            serializer.save(owner=self.request.user)
+            opportunity = serializer.save(owner=self.request.user)
         else:
-            serializer.save()
+            opportunity = serializer.save()
+        _audit(
+            opportunity, self.request.user, 'opportunity_created',
+            to_stage=opportunity.stage,
+            data={'opportunity_source': opportunity.opportunity_source},
+        )
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        client = self.get_object()
+        client.verification_status = 'verified'
+        client.verified_by = request.user
+        client.verified_at = timezone.now()
+        client.save(update_fields=['verification_status', 'verified_by', 'verified_at', 'updated_at'])
+        return Response(ClientDetailSerializer(client).data)
+
+    def _detail_response(self, deal, **extra):
+        return Response({'success': True, 'opportunity': DealDetailSerializer(deal).data, **extra})
+
+    @action(detail=True, methods=['post'], url_path='submit-qualification')
+    def submit_qualification(self, request, pk=None):
+        return self._detail_response(submit_qualification(self.get_object(), request.user))
+
+    @action(detail=True, methods=['post'], url_path='bid-decision')
+    def bid_decision(self, request, pk=None):
+        deal = record_bid_decision(
+            self.get_object(), request.user,
+            request.data.get('decision'), request.data.get('reason', ''),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        deal = close_opportunity(
+            self.get_object(), request.user,
+            outcome=request.data.get('outcome'), reason=request.data.get('reason', ''),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'], url_path='enter-negotiation')
+    def enter_negotiation(self, request, pk=None):
+        return self._detail_response(enter_negotiation(
+            self.get_object(), request.user, request.data.get('reason', ''),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='submit-award')
+    def submit_award(self, request, pk=None):
+        try:
+            award_value = Decimal(str(request.data.get('award_value')))
+        except Exception as exc:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'award_value': 'Enter a valid award value.'}) from exc
+        deal = submit_award(
+            self.get_object(), request.user,
+            reference=request.data.get('award_reference'),
+            award_date=request.data.get('award_date'),
+            award_value=award_value,
+            handover_data=request.data.get('handover_data'),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'], url_path='approve-award')
+    def approve_award(self, request, pk=None):
+        return self._detail_response(decide_award(
+            self.get_object(), request.user, approved=True, reason=request.data.get('reason', ''),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='reject-award')
+    def reject_award(self, request, pk=None):
+        return self._detail_response(decide_award(
+            self.get_object(), request.user, approved=False, reason=request.data.get('reason', ''),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='convert-to-project')
+    def convert_to_project(self, request, pk=None):
+        deal, project, created = convert_to_project(
+            self.get_object().pk, request.user,
+            project_code=request.data.get('project_code'),
+            project_name=request.data.get('project_name'),
+        )
+        return self._detail_response(deal, project={
+            'id': project.id, 'code': project.code, 'name': project.name,
+        }, created=created)
+
+    @action(detail=True, methods=['get'], url_path='audit-events')
+    def audit_events(self, request, pk=None):
+        from .serializers import OpportunityAuditEventSerializer
+        deal = self.get_object()
+        return Response(OpportunityAuditEventSerializer(deal.audit_events.all(), many=True).data)
     
     @action(detail=True, methods=['post'])
     def calculate_win_probability(self, request, pk=None):
@@ -300,7 +625,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         """
         Get pipeline summary by stage
         """
-        pipeline = self.get_queryset().exclude(stage__in=['closed_won', 'closed_lost'])
+        pipeline = self.get_queryset().filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending'])
         
         summary = {
             'total_deals': pipeline.count(),
@@ -313,7 +638,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         # Group by stage
         from .models import DEAL_STAGES
         for stage_key, stage_info in DEAL_STAGES.items():
-            if stage_key not in ['closed_won', 'closed_lost']:
+            if stage_key in ['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']:
                 stage_deals = pipeline.filter(stage=stage_key)
                 summary['by_stage'][stage_key] = {
                     'name': stage_info['name'],
@@ -341,6 +666,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         """
         Move deal to different stage
         """
+        return Response({
+            'success': False,
+            'error': 'Direct stage movement is disabled. Use the governed lifecycle command for the current stage.',
+        }, status=status.HTTP_409_CONFLICT)
+
+        # Legacy implementation retained below temporarily for migration
+        # compatibility; it is unreachable by design.
         deal_id = request.data.get('deal_id')
         new_stage = request.data.get('stage')
         
@@ -395,13 +727,73 @@ class QuoteViewSet(viewsets.ModelViewSet):
     search_fields = ['quote_number', 'client__company_name', 'deal__deal_name']
     
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action in ['retrieve', 'create', 'update', 'partial_update']:
             return QuoteDetailSerializer
         return QuoteListSerializer
     
     def perform_create(self, serializer):
         """Set prepared_by to current user"""
-        serializer.save(prepared_by=self.request.user)
+        quote = serializer.save(prepared_by=self.request.user)
+        _audit(
+            quote.deal, self.request.user, 'proposal_revision_created',
+            data={
+                'proposal_id': str(quote.id),
+                'proposal_number': quote.quote_number,
+                'version': quote.version,
+            },
+        )
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().status in {'submitted', 'sent', 'viewed', 'won', 'lost'}:
+            return Response(
+                {'detail': 'Submitted proposal versions are immutable. Create a new revision.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if self.get_object().status not in {'draft', 'cancelled'}:
+            return Response(
+                {'detail': 'Only draft or cancelled proposal versions may be deleted.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        from rest_framework.exceptions import ValidationError
+        quote = self.get_object()
+        missing = [name for name, value in [
+            ('scope', quote.scope), ('deliverables', quote.deliverables),
+            ('estimated_hours', quote.estimated_hours), ('valid_until', quote.valid_until),
+        ] if not value]
+        if missing:
+            raise ValidationError({'missing_fields': missing})
+        if quote.total_amount <= 0:
+            raise ValidationError({'total_amount': 'Proposed price must be greater than zero.'})
+        quote.expected_margin_percent = (
+            (quote.total_amount - quote.estimated_cost) / quote.total_amount * 100
+        )
+        quote.approved_by = request.user
+        quote.approved_at = timezone.now()
+        quote.status = 'ready_to_submit'
+        history = list(quote.approval_history)
+        history.append({
+            'decision': 'approved', 'actor_id': str(request.user.id),
+            'at': quote.approved_at.isoformat(), 'comment': request.data.get('comment', ''),
+        })
+        quote.approval_history = history
+        quote.save()
+        _audit(
+            quote.deal, request.user, 'proposal_revision_approved',
+            reason=request.data.get('comment', ''),
+            data={
+                'proposal_id': str(quote.id),
+                'proposal_number': quote.quote_number,
+                'version': quote.version,
+            },
+        )
+        return Response(QuoteDetailSerializer(quote).data)
     
     @action(detail=True, methods=['post'])
     def send_to_client(self, request, pk=None):
@@ -409,9 +801,38 @@ class QuoteViewSet(viewsets.ModelViewSet):
         Mark quote as sent to client
         """
         quote = self.get_object()
-        quote.status = 'sent'
+        from rest_framework.exceptions import ValidationError
+        if quote.status == 'submitted':
+            raise ValidationError({'submission': 'This exact proposal version has already been submitted.'})
+        if quote.status != 'ready_to_submit' or not quote.approved_at:
+            raise ValidationError({'approval': 'Only an approved proposal version can be submitted.'})
+        recipient = request.data.get('recipient', '').strip()
+        if not recipient:
+            raise ValidationError({'recipient': 'The submission recipient is required.'})
+        import hashlib
+        fingerprint = '|'.join([
+            str(quote.id), str(quote.version), str(quote.total_amount),
+            quote.currency, quote.approved_at.isoformat(),
+        ])
+        quote.submitted_version_hash = hashlib.sha256(fingerprint.encode()).hexdigest()
+        quote.submission_recipient = recipient
+        quote.submission_evidence = request.data.get('evidence', '')
+        quote.status = 'submitted'
         quote.sent_date = timezone.now()
-        quote.save()
+        quote.save(update_fields=[
+            'submitted_version_hash', 'submission_recipient', 'submission_evidence',
+            'status', 'sent_date', 'updated_at',
+        ])
+        _audit(
+            quote.deal, request.user, 'proposal_revision_issued',
+            data={
+                'proposal_id': str(quote.id),
+                'proposal_number': quote.quote_number,
+                'version': quote.version,
+                'recipient': recipient,
+                'evidence': quote.submission_evidence,
+            },
+        )
         
         # Log activity
         SalesActivity.objects.create(
@@ -446,6 +867,60 @@ class QuoteViewSet(viewsets.ModelViewSet):
             'quote_id': str(quote.id),
             'viewed_date': quote.viewed_date
         })
+
+
+class ProjectHandoverViewSet(viewsets.ModelViewSet):
+    """Formal delivery acceptance queue; records are initiated by approved awards."""
+
+    queryset = ProjectHandover.objects.select_related(
+        'opportunity__client', 'proposal', 'owner', 'project_manager', 'accepted_by', 'project',
+    )
+    serializer_class = ProjectHandoverSerializer
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'owner', 'project_manager']
+    search_fields = [
+        'opportunity__deal_code', 'opportunity__deal_name',
+        'opportunity__client__company_name', 'signed_contract_reference',
+    ]
+    ordering_fields = ['created_at', 'updated_at', 'contract_value']
+    http_method_names = ['get', 'patch', 'post', 'head', 'options']
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {'detail': 'Handovers are initiated automatically from independently approved awards.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().status in {'accepted', 'project_created', 'closed'}:
+            return Response(
+                {'detail': 'Accepted handover records are immutable.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'], url_path='submit-for-acceptance')
+    def submit_for_acceptance(self, request, pk=None):
+        handover = submit_handover_for_acceptance(self.get_object(), request.user)
+        return Response(self.get_serializer(handover).data)
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        handover = decide_handover(
+            self.get_object(), request.user, accepted=True,
+            comment=request.data.get('comment', ''),
+        )
+        return Response(self.get_serializer(handover).data)
+
+    @action(detail=True, methods=['post'])
+    def return_for_correction(self, request, pk=None):
+        handover = decide_handover(
+            self.get_object(), request.user, accepted=False,
+            comment=request.data.get('reason', ''),
+        )
+        return Response(self.get_serializer(handover).data)
 
 
 class SalesActivityViewSet(viewsets.ModelViewSet):
@@ -531,6 +1006,29 @@ class SalesForecastViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
     ordering = ['-forecast_date']
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().status in {'approved', 'superseded'}:
+            return Response(
+                {'detail': 'Approved forecast snapshots are immutable.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        forecast = self.get_object()
+        if forecast.generated_by_id == request.user.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'approver': 'The forecast preparer cannot approve their own snapshot.'})
+        SalesForecast.objects.filter(
+            forecast_period=forecast.forecast_period, status='approved',
+        ).exclude(pk=forecast.pk).update(status='superseded')
+        forecast.status = 'approved'
+        forecast.approved_by = request.user
+        forecast.approved_at = timezone.now()
+        forecast.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        return Response(self.get_serializer(forecast).data)
     
     @action(detail=False, methods=['post'])
     def generate_forecast(self, request):
@@ -641,16 +1139,16 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         # Deal metrics
         deals = Deal.objects.all()
         total_deals = deals.count()
-        active_deals = deals.exclude(stage__in=['closed_won', 'closed_lost']).count()
+        active_deals = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
         
         # Pipeline value
-        pipeline_value = deals.exclude(stage__in=['closed_won', 'closed_lost']).aggregate(
+        pipeline_value = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).aggregate(
             Sum('weighted_value')
         )['weighted_value__sum'] or Decimal('0')
         
         # Won deals this month
         won_mtd = deals.filter(
-            stage='closed_won',
+            stage__in=['awarded', 'converted'],
             actual_close_date__gte=start_of_month
         ).aggregate(Sum('actual_value'))['actual_value__sum'] or Decimal('0')
         
@@ -658,13 +1156,13 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         avg_deal_size = deals.aggregate(Avg('estimated_value'))['estimated_value__avg'] or Decimal('0')
         
         # Win rate
-        closed_deals = deals.filter(stage__in=['closed_won', 'closed_lost'])
-        won_deals = closed_deals.filter(stage='closed_won').count()
+        closed_deals = deals.filter(stage__in=['awarded', 'converted', 'lost'])
+        won_deals = closed_deals.filter(stage__in=['awarded', 'converted']).count()
         win_rate = (won_deals / closed_deals.count() * 100) if closed_deals.count() > 0 else 0
         
         # Average sales cycle
         won_with_dates = deals.filter(
-            stage='closed_won',
+            stage__in=['awarded', 'converted'],
             actual_close_date__isnull=False
         )
         if won_with_dates.exists():
@@ -680,7 +1178,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         top_clients = clients.order_by('-lifetime_value')[:5]
         
         # Top deals
-        top_deals = deals.exclude(stage='closed_lost').order_by('-weighted_value')[:5]
+        top_deals = deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).order_by('-weighted_value')[:5]
         
         # Recent activities
         recent_activities = SalesActivity.objects.order_by('-activity_date')[:10]
@@ -699,7 +1197,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
             industry = client.get_industry_type_display()
             client_pipeline = deals.filter(
                 client=client
-            ).exclude(stage='closed_lost').aggregate(
+            ).exclude(stage__in=['lost', 'no_bid', 'cancelled']).aggregate(
                 Sum('weighted_value')
             )['weighted_value__sum'] or Decimal('0')
             revenue_by_industry[industry] = revenue_by_industry.get(industry, 0) + float(client_pipeline)
@@ -761,7 +1259,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
             })
         
         # Insight 2: Stagnant deals
-        stagnant_deals = Deal.objects.exclude(stage__in=['closed_won', 'closed_lost']).filter(
+        stagnant_deals = Deal.objects.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).filter(
             updated_at__lt=timezone.now() - timedelta(days=30)
         ).count()
         
@@ -793,12 +1291,12 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         
         # Insight 4: Win rate trend
         recent_closed = Deal.objects.filter(
-            stage__in=['closed_won', 'closed_lost'],
+            stage__in=['awarded', 'converted', 'lost'],
             actual_close_date__gte=timezone.now().date() - timedelta(days=90)
         )
         
         if recent_closed.count() > 5:
-            win_rate = recent_closed.filter(stage='closed_won').count() / recent_closed.count() * 100
+            win_rate = recent_closed.filter(stage__in=['awarded', 'converted']).count() / recent_closed.count() * 100
             
             if win_rate < 30:
                 severity = 'high'

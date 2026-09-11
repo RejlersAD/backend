@@ -54,8 +54,10 @@ class UsageTrackingMiddleware:
             if path.startswith(prefix):
                 return
 
-        # Only authenticated users
-        if not getattr(request, 'user', None) or not request.user.is_authenticated:
+        # Include authentication outcomes so failed logins and token requests
+        # reach health telemetry, without recording credentials or request bodies.
+        authenticated = bool(getattr(request, 'user', None) and request.user.is_authenticated)
+        if not authenticated and not path.startswith('/api/v1/auth/'):
             return
 
         from .models import UsageLog, classify_discipline
@@ -63,15 +65,15 @@ class UsageTrackingMiddleware:
         elapsed_ms = int((time.monotonic() - start) * 1000)
         discipline_key, discipline_label = classify_discipline(path)
 
-        user = request.user
-        full_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        user = request.user if authenticated else None
+        full_name = (f"{user.first_name} {user.last_name}".strip() or user.username) if user else ''
 
         # Isolate optional tracking writes so a missing/temporarily unavailable
         # analytics table cannot break the business transaction being served.
         with transaction.atomic():
             UsageLog.objects.create(
                 user=user,
-                user_email=user.email or '',
+                user_email=(user.email or '') if user else '',
                 user_full_name=full_name,
                 discipline_key=discipline_key,
                 discipline_label=discipline_label,

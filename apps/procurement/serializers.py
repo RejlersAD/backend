@@ -116,13 +116,19 @@ class VendorSerializer(serializers.ModelSerializer):
             'created_by', 'created_by_name', 'notes', 'attachments', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+        extra_kwargs = {'vendor_code': {'required': False, 'allow_blank': True}}
     
     def create(self, validated_data):
         validated_data.pop('remove_logo', None)
+        if not validated_data.get('vendor_code', '').strip():
+            from uuid import uuid4
+            validated_data['vendor_code'] = f'VEN-{uuid4().hex[:16].upper()}'
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
+        if 'vendor_code' in validated_data and not validated_data['vendor_code'].strip():
+            validated_data.pop('vendor_code')
         remove_logo = validated_data.pop('remove_logo', False)
         if remove_logo and instance.logo:
             instance.logo.delete(save=False)

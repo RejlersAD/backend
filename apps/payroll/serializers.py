@@ -215,6 +215,10 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     reviewed_by_name     = serializers.SerializerMethodField()
     rm_reviewed_by_name  = serializers.SerializerMethodField()
     substitute_employee_name = serializers.SerializerMethodField()
+    can_review = serializers.SerializerMethodField()
+    employee_photo_url = serializers.SerializerMethodField()
+    line_manager_name = serializers.SerializerMethodField()
+    review_stage = serializers.SerializerMethodField()
     workflow_status = serializers.SerializerMethodField()
     workflow_stage = serializers.SerializerMethodField()
 
@@ -223,7 +227,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'employee', 'canonical_employee', 'employee_code', 'employee_name', 'department',
             'leave_type', 'leave_type_detail',
-            'start_date', 'end_date', 'days_requested', 'reason',
+            'start_date', 'end_date', 'half_day', 'days_requested', 'reason',
             # SOFT-CODED: Additional fields for enhanced leave tracking
             'contact_number', 'substitute_employee', 'substitute_employee_name', 
             'substitute_name', 'attachment',
@@ -231,16 +235,52 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
             # Stage-1 Reporting Manager fields
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at', 'rm_note',
-            'workflow_instance', 'workflow_status', 'workflow_stage',
+            'workflow_instance', 'workflow_status', 'workflow_stage', 'can_review', 'line_manager_name', 'review_stage', 'employee_photo_url',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'id', 'days_requested', 'status', 'status_display',
+            'id', 'days_requested', 'status', 'status_display', 'rm_note', 'reviewer_note',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at',
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at',
             'canonical_employee', 'workflow_instance', 'workflow_status', 'workflow_stage',
             'created_at', 'updated_at', 'leave_type_detail', 'substitute_employee_name',
         ]
+
+    def get_can_review(self, obj):
+        from .services.leave_approval import can_review
+        request = self.context.get('request')
+        return bool(request and can_review(obj, request.user))
+
+    def get_employee_photo_url(self, obj):
+        from types import SimpleNamespace
+        from apps.rbac.models import UserProfile
+        from apps.rbac.serializers import _profile_photo_url
+        from .services.leave_approval import employee_for_request
+        employee = employee_for_request(obj)
+        user_id = obj.employee_id or (employee.user_id if employee else None)
+        profile = UserProfile.objects.select_related('canonical_employee', 'user__employee_master').filter(user_id=user_id, is_deleted=False).first() if user_id else None
+        if profile:
+            return _profile_photo_url(self, profile)
+        # Employees without a legacy profile may still have a canonical photo.
+        return _profile_photo_url(self, SimpleNamespace(
+            canonical_employee=employee, canonical_employee_id=employee.pk if employee else None,
+            user=obj.employee, profile_photo=None,
+        ))
+
+    def get_review_stage(self, obj):
+        from .services.leave_approval import manager_for_request
+        if obj.status not in ('PENDING', 'RM_APPROVED'):
+            return None
+        return 'manager_review' if obj.status == 'PENDING' and manager_for_request(obj) else 'hr_review'
+
+    def get_line_manager_name(self, obj):
+        from .services.leave_approval import manager_for_request
+        manager = manager_for_request(obj)
+        if not manager:
+            return None
+        if manager.user_id:
+            return manager.user.get_full_name() or manager.user.username
+        return f'{manager.first_name} {manager.last_name}'.strip() or None
 
     def get_reviewed_by_name(self, obj):
         if obj.reviewed_by:

@@ -27,6 +27,7 @@ from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from apps.rbac.permissions import HasModuleAccess
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +302,8 @@ class SalesPipelineAnalyticsView(APIView):
     Groups users by email domain as "client companies".
     Assigns pipeline stage based on engagement depth.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
 
     def get(self, request):
         SystemActivity = _get_activity_model()
@@ -492,7 +494,8 @@ class SalesClientsAnalyticsView(APIView):
     GET /api/v1/sales/analytics/clients/
     Returns top clients + at-risk clients derived from usage patterns.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
 
     def get(self, request):
         SystemActivity = _get_activity_model()
@@ -599,7 +602,8 @@ class SalesAIInsightsView(APIView):
     Generates AI-style insights from real usage + user data.
     All logic is soft-coded through INSIGHT_RULES patterns.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
 
     def get(self, request):
         SystemActivity = _get_activity_model()
@@ -770,7 +774,8 @@ class SalesActivitiesView(APIView):
     GET /api/v1/sales/analytics/activities/
     Returns upcoming follow-up activities synthesised from dormant/at-risk users.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
 
     def get(self, request):
         User = _get_user_model()

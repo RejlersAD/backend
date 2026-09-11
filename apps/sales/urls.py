@@ -5,8 +5,9 @@ Sales App URL Configuration
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    ClientViewSet, ContactViewSet, DealViewSet, QuoteViewSet,
-    SalesActivityViewSet, SalesForecastViewSet, SalesDashboardViewSet
+    ClientViewSet, ContactViewSet, DealViewSet, FrameworkAgreementViewSet,
+    ProjectHandoverViewSet, QuoteViewSet, SalesActivityViewSet,
+    SalesForecastViewSet, SalesDashboardViewSet, SalesMailboxConnectionViewSet,
 )
 from .analytics_views import (
     SalesPipelineAnalyticsView,
@@ -14,6 +15,7 @@ from .analytics_views import (
     SalesAIInsightsView,
     SalesActivitiesView,
 )
+from .intake_views import SalesEmailIntakeViewSet, sales_email_intake
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -21,9 +23,13 @@ router.register(r'clients', ClientViewSet, basename='client')
 router.register(r'contacts', ContactViewSet, basename='contact')
 router.register(r'deals', DealViewSet, basename='deal')
 router.register(r'quotes', QuoteViewSet, basename='quote')
+router.register(r'frameworks', FrameworkAgreementViewSet, basename='framework')
+router.register(r'project-handovers', ProjectHandoverViewSet, basename='project-handover')
 router.register(r'activities', SalesActivityViewSet, basename='sales-activity')
 router.register(r'forecasts', SalesForecastViewSet, basename='sales-forecast')
 router.register(r'dashboard', SalesDashboardViewSet, basename='sales-dashboard')
+router.register(r'mailbox-connections', SalesMailboxConnectionViewSet, basename='sales-mailbox-connection')
+router.register(r'email-intakes', SalesEmailIntakeViewSet, basename='sales-email-intake-review')
 
 # Analytics endpoints — powered by real platform data (no CRM tables needed)
 analytics_urlpatterns = [
@@ -35,6 +41,7 @@ analytics_urlpatterns = [
 
 # URL patterns
 urlpatterns = analytics_urlpatterns + [
+    path('email-intake/', sales_email_intake, name='sales-email-intake'),
     path('', include(router.urls)),
 ]
 

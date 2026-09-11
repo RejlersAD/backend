@@ -70,7 +70,7 @@ class SalesAIService:
         
         historical_deals = Deal.objects.filter(
             actual_close_date__gte=start_date,
-            stage='closed_won'
+            stage__in=['awarded', 'converted']
         )
         
         # Calculate historical metrics
@@ -81,7 +81,7 @@ class SalesAIService:
         avg_monthly_revenue = historical_revenue / historical_months if historical_months > 0 else Decimal('0')
         
         # Get current pipeline
-        pipeline_deals = Deal.objects.exclude(stage__in=['closed_won', 'closed_lost'])
+        pipeline_deals = Deal.objects.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending'])
         
         total_pipeline_value = pipeline_deals.aggregate(
             total=Sum('weighted_value')
@@ -115,6 +115,8 @@ class SalesAIService:
         top_deals = list(pipeline_deals.order_by('-weighted_value')[:5].values(
             'deal_code', 'deal_name', 'weighted_value', 'probability'
         ))
+        for deal in top_deals:
+            deal['weighted_value'] = float(deal['weighted_value'] or 0)
         
         forecast_data = {
             'forecast_period': period,
