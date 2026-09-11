@@ -81,7 +81,7 @@ class PIDPrecisionEnhancer:
     def client(self):
         """Lazy-init OpenAI client."""
         if self._client is None:
-            from openai import OpenAI
+            from apps.rbac.ai_telemetry import observed_openai as OpenAI
             self._client = OpenAI(api_key=config('OPENAI_API_KEY'))
         return self._client
 

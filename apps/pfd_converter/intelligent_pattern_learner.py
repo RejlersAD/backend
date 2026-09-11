@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import re
 
 from decouple import config
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 
 logger = logging.getLogger(__name__)
 

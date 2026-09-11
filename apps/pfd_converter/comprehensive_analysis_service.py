@@ -13,7 +13,7 @@ Configuration-driven approach:
 """
 
 import openai
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 import json
 import base64

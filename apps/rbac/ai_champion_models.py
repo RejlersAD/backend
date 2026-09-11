@@ -115,6 +115,9 @@ class AIUsageLog(TimeStampedModel):
     application = models.CharField(max_length=64, blank=True, db_index=True)  # e.g. 'pid-verification'
     feature = models.CharField(max_length=64, blank=True, db_index=True)      # e.g. 'ocr-extract'
     request_id = models.CharField(max_length=64, blank=True)                  # client correlation id
+    provenance = models.CharField(max_length=16, default='legacy', db_index=True)
+    workflow = models.ForeignKey('rbac.AIWorkflowRun', null=True, on_delete=models.SET_NULL, related_name='requests')
+    pricing_recorded = models.BooleanField(null=True)
 
     # Token + cost data
     tokens_input = models.IntegerField(default=0)
@@ -136,6 +139,7 @@ class AIUsageLog(TimeStampedModel):
             models.Index(fields=['application', '-timestamp']),
             models.Index(fields=['-timestamp', 'success']),
         ]
+        constraints = [models.UniqueConstraint(fields=['workflow', 'provider', 'request_id'], condition=models.Q(provenance='server') & ~models.Q(request_id=''), name='unique_ai_server_workflow_request')]
 
     def __str__(self):
         return f"{self.user_id} {self.provider}/{self.model_name} ${self.cost_usd}"
@@ -190,6 +194,23 @@ class ActivityEvent(TimeStampedModel):
 # ---------------------------------------------------------------------------
 # Monthly Champion — historical record (the "trophy cabinet")
 # ---------------------------------------------------------------------------
+class MonthlyChampionPublication(models.Model):
+    """Immutable reviewed award. Legacy recomputation cannot overwrite it."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    period_year = models.PositiveSmallIntegerField()
+    period_month = models.PositiveSmallIntegerField()
+    published_at = models.DateTimeField(default=timezone.now)
+    reviewer_id = models.CharField(max_length=64)
+    reviewer_name = models.CharField(max_length=254)
+    reason = models.TextField()
+    snapshot = models.JSONField(default=dict)
+
+    class Meta:
+        db_table = 'monthly_champion_publication'
+        ordering = ['-period_year', '-period_month']
+        constraints = [models.UniqueConstraint(fields=['period_year', 'period_month'], name='unique_champion_publication_period')]
+
+
 class MonthlyChampion(TimeStampedModel):
     """
     One row per (period_year, period_month, rank). Top-3 stored per month.

@@ -14,7 +14,7 @@ from pathlib import Path
 
 # Try to import OpenAI
 try:
-    from openai import OpenAI
+    from apps.rbac.ai_telemetry import observed_openai as OpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False

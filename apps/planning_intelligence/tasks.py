@@ -5,6 +5,7 @@ import logging
 
 from celery import shared_task
 from django.utils import timezone
+from apps.rbac.ai_telemetry import tracked_planning_job
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ def parse_uploaded_planning_file(file_id):
     bind=True, acks_late=True, reject_on_worker_lost=True,
     name='apps.planning_intelligence.tasks.run_planning_job',
 )
+@tracked_planning_job
 def run_planning_job(self, job_id):
     """Run a durable analysis/generation job and persist progress for polling."""
     from .models import PlanningJob

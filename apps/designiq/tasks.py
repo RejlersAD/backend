@@ -3,6 +3,7 @@ DesignIQ Celery Tasks
 Background tasks for long-running operations like P&ID OCR processing
 """
 
+from apps.rbac.ai_telemetry import tracked_user_job
 from celery import shared_task
 from django.utils import timezone
 from django.core.cache import cache
@@ -290,7 +291,7 @@ def call_openai_stress_criticality_batch(lines_data, section_7_text):
     import json
     try:
         from decouple import config
-        from openai import OpenAI
+        from apps.rbac.ai_telemetry import observed_openai as OpenAI
 
         api_key = config('OPENAI_API_KEY', default=None)
         if not api_key:
@@ -361,6 +362,7 @@ def call_openai_stress_criticality_batch(lines_data, section_7_text):
 
 
 @shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
+@tracked_user_job('designiq')
 def process_pid_upload_async(
     self, 
     file_path, 
@@ -1013,7 +1015,8 @@ def process_pid_upload_async(
 
 
 @shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
-def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore'):
+@tracked_user_job('designiq')
+def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore', user_id=None):
     """
     🎯 Async Celery task for Line List base extraction (P&ID only)
 
