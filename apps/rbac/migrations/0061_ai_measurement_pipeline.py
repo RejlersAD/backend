@@ -3,6 +3,7 @@
 import django.db.models.deletion
 import django.utils.timezone
 import uuid
+from importlib import import_module
 from django.conf import settings
 from django.db import migrations, models
 
@@ -15,6 +16,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(
+            import_module('apps.rbac.migrations.0060_ai_outcome_evidence').ensure_ai_reference_keys,
+            migrations.RunPython.noop,
+        ),
         migrations.CreateModel(
             name='AIWorkforceSnapshot',
             fields=[

@@ -2,7 +2,7 @@ from django.db import migrations, models
 import django.db.models.deletion
 
 
-def ensure_override_reference_keys(apps, schema_editor):
+def ensure_override_reference_keys(apps, schema_editor, model_labels=None):
     """Repair missing PostgreSQL reference keys without changing identities.
 
     A restored database can record 0001 as applied while missing its indexes.
@@ -14,8 +14,8 @@ def ensure_override_reference_keys(apps, schema_editor):
         return
     quote = schema_editor.quote_name
     with connection.cursor() as cursor:
-        for name in ('Permission', 'UserProfile'):
-            model = apps.get_model('rbac', name)
+        for app_label, name in (model_labels or [('rbac', 'Permission'), ('rbac', 'UserProfile')]):
+            model = apps.get_model(app_label, name)
             table, column = model._meta.db_table, model._meta.pk.column
             # Hold the lock through validation and constraint creation, avoiding
             # concurrent inserts between the duplicate check and ALTER TABLE.

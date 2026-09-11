@@ -3,8 +3,19 @@
 import django.db.models.deletion
 import django.utils.timezone
 import uuid
+from importlib import import_module
 from django.conf import settings
 from django.db import migrations, models
+
+
+def ensure_ai_reference_keys(apps, schema_editor):
+    # Restored databases may mark 0001 applied without restoring its indexes.
+    # Repair here: a later migration cannot unblock deferred foreign keys in 0060.
+    repair = import_module('apps.rbac.migrations.0053_user_permission_overrides').ensure_override_reference_keys
+    repair(apps, schema_editor, [
+        ('rbac', 'Module'), ('rbac', 'Organization'),
+        tuple(settings.AUTH_USER_MODEL.split('.')),
+    ])
 
 
 class Migration(migrations.Migration):
@@ -15,6 +26,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_ai_reference_keys, migrations.RunPython.noop),
         migrations.CreateModel(
             name='AIOutcomeEvidence',
             fields=[
