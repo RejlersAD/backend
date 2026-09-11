@@ -701,35 +701,9 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             )
 
         if request.method == 'GET':
-            if not employee.photo_file_path:
-                return Response({'error': 'Profile photo not found'}, status=status.HTTP_404_NOT_FOUND)
-            try:
-                if getattr(settings, 'USE_S3', False):
-                    from apps.core.s3_service import S3Service
-                    result = S3Service().download_file(employee.photo_file_path)
-                    body = result.get('body') if result.get('success') else None
-                    if body is None:
-                        raise RuntimeError(result.get('error') or 'Profile photo could not be read')
-                    response = StreamingHttpResponse(
-                        body.iter_chunks(),
-                        content_type=employee.photo_mime_type or 'application/octet-stream',
-                    )
-                else:
-                    response = FileResponse(
-                        default_storage.open(employee.photo_file_path, 'rb'),
-                        content_type=employee.photo_mime_type or 'application/octet-stream',
-                    )
-                response['Cache-Control'] = 'private, no-cache, must-revalidate'
-                response['Content-Disposition'] = 'inline'
-                return response
-            except FileNotFoundError:
-                return Response({'error': 'Profile photo file not found'}, status=status.HTTP_404_NOT_FOUND)
-            except Exception as exc:
-                return Response(
-                    {'error': f'Profile photo could not be loaded: {exc}'},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-        
+            from .profile_photos import profile_photo_response
+            return profile_photo_response(employee)
+
         # Check if file is provided
         if 'photo' not in request.FILES:
             return Response(

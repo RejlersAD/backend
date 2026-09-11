@@ -47,6 +47,32 @@ class ProfilePhotoUploadAPITests(TestCase):
         )
         self.client.force_authenticate(self.user)
 
+    @override_settings(USE_S3=False)
+    def test_managed_photo_uses_canonical_storage_and_infers_missing_mime(self):
+        self.user.is_superuser = True
+        self.user.is_staff = True
+        self.user.save(update_fields=['is_superuser', 'is_staff'])
+        organization = Organization.objects.create(name='Photo Read', code='PHOTO-READ')
+        profile, _ = UserProfile.objects.get_or_create(user=self.user, defaults={'organization': organization})
+        profile.canonical_employee = self.employee
+        profile.save(update_fields=['canonical_employee'])
+        self.employee.photo_file_path = 'employee_photos/example.png'
+        self.employee.photo_mime_type = ''
+        self.employee.save(update_fields=['photo_file_path', 'photo_mime_type'])
+        with patch('apps.users.profile_photos.default_storage.open', side_effect=lambda *args: BytesIO(b'photo-bytes')):
+            for path in ['/api/v1/users/employees/my-profile-photo/', f'/api/v1/rbac/users/{profile.pk}/profile-photo/']:
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response['Content-Type'], 'image/png')
+                self.assertEqual(b''.join(response.streaming_content), b'photo-bytes')
+                self.assertIn('private', response['Cache-Control'])
+
+    def test_managed_photo_rejects_users_without_user_management_access(self):
+        organization = Organization.objects.create(name='Photo Scope', code='PHOTO-SCOPE')
+        profile, _ = UserProfile.objects.get_or_create(user=self.user, defaults={'organization': organization})
+        response = self.client.get(f'/api/v1/rbac/users/{profile.pk}/profile-photo/')
+        self.assertEqual(response.status_code, 403)
+
     @staticmethod
     def image_file(content_type='image/png'):
         # A valid 1x1 transparent PNG.
