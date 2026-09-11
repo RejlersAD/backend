@@ -10,6 +10,7 @@ from apps.instrument_tools.views import IOListView
 from apps.procurement.views import PurchaseRequisitionViewSet, PurchaseOrderViewSet
 
 urlpatterns = [
+    path('api/v1/users/', include('apps.users.urls')),
     path('', include('config.urls_rbac_test')),
     path('api/v1/sales/', include('apps.sales.urls')),
     path('api/v1/rbac/', include('apps.rbac.urls')),

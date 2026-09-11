@@ -27,7 +27,7 @@ TEST_MIDDLEWARE = [
 ]
 
 
-@override_settings(MIDDLEWARE=TEST_MIDDLEWARE)
+@override_settings(MIDDLEWARE=TEST_MIDDLEWARE, ROOT_URLCONF='config.urls_permissions_test')
 class ProfilePhotoUploadAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -61,6 +61,33 @@ class ProfilePhotoUploadAPITests(TestCase):
             ),
             content_type=content_type,
         )
+
+    def test_self_service_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        for path, method in [('my-profile-photo', 'post'), ('my-employee-profile', 'patch'), ('my-signature', 'post')]:
+            with self.subTest(path=path):
+                response = getattr(self.client, method)(f'/api/v1/users/employees/{path}/', {})
+                self.assertIn(response.status_code, (401, 403))
+
+    def test_employee_directory_still_requires_hr_permission(self):
+        response = self.client.get('/api/v1/users/employees/active_employees/')
+        self.assertEqual(response.status_code, 403)
+
+    def test_profile_update_without_hr_grants_is_scoped_to_current_user(self):
+        other = User.objects.create_user(username='other.employee', email='other@example.com')
+        response = self.client.patch(
+            '/api/v1/users/employees/my-employee-profile/',
+            {'phone_number': '+971501234567', 'user_id': str(other.pk)},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.phone_number, '+971501234567')
+        self.assertEqual(self.employee.user_id, self.user.pk)
+
+    def test_signature_read_without_hr_grants_reaches_owner_handler(self):
+        response = self.client.get('/api/v1/users/employees/my-signature/')
+        self.assertIn(response.status_code, (200, 404))
 
     @patch('apps.users.views.EmployeeService.upload_employee_photo')
     def test_upload_uses_existing_canonical_employee(self, upload_photo):
