@@ -6,7 +6,7 @@ import os
 import json
 import base64
 import logging
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from django.conf import settings
 import fitz  # PyMuPDF
 

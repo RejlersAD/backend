@@ -1,5 +1,6 @@
 """Schedule pipeline shared by HTTP orchestration and Celery workers."""
 from collections import Counter
+from apps.rbac.ai_telemetry import tracked_planning
 from django.db import transaction
 from django.db.models import Max
 
@@ -84,6 +85,7 @@ def preview_schedule(project, *, user=None, overrides=None):
     }
 
 
+@tracked_planning('generate_schedule')
 def generate_schedule(project, *, user=None, overrides=None, input_fingerprint=None):
     if input_fingerprint:
         existing = project.generations.filter(

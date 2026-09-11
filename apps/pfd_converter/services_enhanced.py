@@ -7,7 +7,7 @@ STANDARDS: ISA-5.1, ISO 10628, ADNOC DEP, API
 OUTPUT: Draft P&ID PDF with assumption reports
 """
 import openai
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 from django.utils import timezone
 import json

@@ -1,6 +1,7 @@
 """
 PFD Converter Views
 """
+from apps.rbac.ai_telemetry import tracked_http
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -61,6 +62,7 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         return PFDDocument.objects.filter(uploaded_by=user)
     
     @action(detail=False, methods=['post'])
+    @tracked_http('pfd_to_pid')
     def upload(self, request):
         """
         Upload PFD document and extract process data
@@ -315,6 +317,7 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             )
     
     @action(detail=True, methods=['post'])
+    @tracked_http('pfd_to_pid')
     def analyze_five_stages(self, request, pk=None):
         """
         Execute 5-stage PFD analysis with RAG (Retrieval Augmented Generation)
@@ -406,6 +409,7 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             )
     
     @action(detail=True, methods=['get', 'post'])
+    @tracked_http('pfd_to_pid')
     def analyze(self, request, pk=None):
         """
         Analyze PFD or get existing analysis
@@ -492,6 +496,7 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         return self.analyze(request, pk)
     
     @action(detail=True, methods=['post'])
+    @tracked_http('pfd_to_pid')
     def reprocess(self, request, pk=None):
         """
         Reprocess PFD document with current extraction pipeline
@@ -690,6 +695,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     filterset_fields = ['status', 'pfd_document']
     
     @action(detail=False, methods=['post'])
+    @tracked_http('pfd_to_pid')
     def generate(self, request):
         """
         Generate P&ID from PFD document
@@ -909,6 +915,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             )
     
     @action(detail=True, methods=['get'])
+    @tracked_http('pfd_to_pid', methods=('GET',))
     def download_drawing(self, request, pk=None):
         """
         Download P&ID drawing PDF with intelligent caching prevention
@@ -1031,6 +1038,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             )
     
     @action(detail=False, methods=['post'], url_path='verify-pid')
+    @tracked_http('pfd_to_pid')
     def verify_pid(self, request):
         """
         Run P&ID Design Verification on converted P&ID
@@ -1292,6 +1300,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         return Response(PIDConversionSerializer(conversion).data)
     
     @action(detail=True, methods=['get'], url_path='load-to-canvas')
+    @tracked_http('pfd_to_pid', methods=('GET',))
     def load_to_canvas(self, request, pk=None):
         """
         Convert programmatic P&ID to editable canvas format
@@ -1556,6 +1565,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
 
     @action(detail=False, methods=['post'], url_path='intelligent-generate')
+    @tracked_http('pfd_to_pid')
     def intelligent_generate(self, request):
         """
         Generate P&ID using intelligent pattern learning

@@ -65,6 +65,13 @@ class TrackActivitySerializer(serializers.Serializer):
     metadata = serializers.JSONField(required=False, default=dict)
 
 
+class MonthlyAwardSerializer(serializers.Serializer):
+    year = serializers.IntegerField(min_value=2000, max_value=9998)
+    month = serializers.IntegerField(min_value=1, max_value=12)
+    fingerprint = serializers.CharField(max_length=64, required=False)
+    reason = serializers.CharField(max_length=2000, required=False, allow_blank=True)
+
+
 class TrackAIUsageSerializer(serializers.Serializer):
     provider = serializers.CharField(max_length=32)
     model_name = serializers.CharField(max_length=128)
@@ -123,13 +130,131 @@ class AIChampionViewSet(viewsets.ViewSet):
         # Admin gating for analytics actions
         admin_actions = {
             'leaderboard', 'current', 'history', 'cost_report',
-            'monthly_summary', 'export_csv',
+            'monthly_summary', 'export_csv', 'adoption_dashboard', 'monthly_award', 'workforce_adoption', 'outcomes', 'measurements', 'live_activity',
         }
-        if self.action == 'recompute':
+        if self.action == 'recompute' or (self.action == 'monthly_award' and self.request.method == 'POST'):
             return [IsAuthenticated(), IsSuperAdmin()]
         if self.action in admin_actions:
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated()]
+
+    @action(detail=False, methods=['get', 'post'], url_path='monthly-award')
+    def monthly_award(self, request):
+        from .monthly_champion_service import monthly_report, publish
+        from .models import UserProfile
+        now = timezone.now()
+        params = request.data if request.method == 'POST' else {
+            'year': request.query_params.get('year', now.year),
+            'month': request.query_params.get('month', now.month),
+        }
+        serializer = MonthlyAwardSerializer(data=params)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        if request.method == 'POST':
+            return Response(publish(values['year'], values['month'], values.get('fingerprint', ''),
+                                    values.get('reason', ''), request.user), status=201)
+        root = IsSuperAdmin().has_permission(request, self)
+        user_ids = None
+        if not root:
+            org_id = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
+            user_ids = list(UserProfile.objects.filter(organization_id=org_id, is_deleted=False)
+                            .values_list('user_id', flat=True)) if org_id else []
+        return Response(monthly_report(values['year'], values['month'], user_ids, can_publish=root))
+
+    @action(detail=False, methods=['get'], url_path='adoption-dashboard')
+    def adoption_dashboard(self, request):
+        from .ai_adoption_service import adoption_dashboard
+        from .models import UserProfile
+        start, end = _window_from_days(request)
+        user_ids = None
+        if not IsSuperAdmin().has_permission(request, self):
+            profile = getattr(request.user, 'rbac_profile', None)
+            org_id = getattr(profile, 'organization_id', None)
+            user_ids = (UserProfile.objects.filter(organization_id=org_id, is_deleted=False)
+                        .values_list('user_id', flat=True)) if org_id is not None else []
+        result = adoption_dashboard(start, end, user_ids=user_ids)
+        result['scope'] = 'All organizations' if user_ids is None else 'Your organization'
+        return Response(result)
+
+    @action(detail=False, methods=['get'], url_path='workforce-adoption')
+    def workforce_adoption(self, request):
+        from .ai_workforce_service import workforce_adoption
+        organization_id = None
+        if not IsSuperAdmin().has_permission(request, self):
+            organization_id = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
+            if organization_id is None:
+                return Response(workforce_adoption(request.query_params.get('week'), []))
+        return Response(workforce_adoption(request.query_params.get('week'), organization_id=organization_id))
+
+    @action(detail=False, methods=['get'], url_path='measurements')
+    def measurements(self, request):
+        from .ai_measurement_service import measurement_report
+        organization_id = None
+        if not IsSuperAdmin().has_permission(request, self):
+            organization_id = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
+            if organization_id is None:
+                return Response({'detail': 'An organization profile is required.'}, status=403)
+        try:
+            days = max(1, min(365, int(request.query_params.get('days', 30))))
+            page = max(1, int(request.query_params.get('page', 1)))
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid reporting period or page.'}, status=400)
+        return Response(measurement_report(days, organization_id, page, request.query_params.get('module', ''),
+                        request.query_params.get('search', '')[:200], request.query_params.get('status', '')))
+
+    @action(detail=False, methods=['get'], url_path='live-activity')
+    def live_activity(self, request):
+        from rest_framework import serializers
+        from .ai_live_activity import live_activity
+
+        class Query(serializers.Serializer):
+            search = serializers.CharField(max_length=120, required=False, allow_blank=True, default='')
+            state = serializers.ChoiceField(choices=['', 'processing', 'recent', 'attention', 'quiet'], default='')
+            page = serializers.IntegerField(min_value=1, default=1)
+            page_size = serializers.ChoiceField(choices=[10, 25, 50], default=10)
+            user = serializers.IntegerField(min_value=1, required=False)
+
+        query = Query(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        values = query.validated_data
+        org = None
+        if not IsSuperAdmin().has_permission(request, self):
+            org = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
+            if org is None:
+                return Response({'detail': 'An organization profile is required.'}, status=403)
+        return Response(live_activity(org, values['search'], values['state'], values['page'],
+                                      values['page_size'], values.get('user')))
+
+    @action(detail=False, methods=['get', 'post', 'patch'], url_path='outcomes')
+    def outcomes(self, request):
+        from .ai_outcome_models import AIOutcomeEvidence
+        from .ai_outcome_service import submit, review, serialize
+        from .ai_measurement_service import monetary_values
+        from .ai_workforce_service import DEFAULT_MODULES
+        from .models import Module
+        from django.conf import settings
+        from django.db.models import Sum, F
+        rows = AIOutcomeEvidence.objects.select_related('submitted_by', 'module')
+        if not IsSuperAdmin().has_permission(request, self):
+            org = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
+            rows = rows.filter(organization_id=org) if org else rows.none()
+        if request.method == 'POST':
+            return Response(submit(request.data, request.user, IsSuperAdmin().has_permission(request, self)), status=201)
+        if request.method == 'PATCH':
+            return Response(review(request.data, request.user, rows))
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+        except (ValueError, TypeError):
+            return Response({'detail': 'Invalid page.'}, status=400)
+        approved = rows.filter(status='approved')
+        def minutes(kind):
+            return approved.filter(measurement=kind).aggregate(total=Sum(F('baseline_minutes') - F('ai_minutes') - F('review_minutes') - F('rework_minutes')))['total']
+        return Response({'count': rows.count(), 'page': page,
+                         'results': [serialize(r, request.user.pk) for r in rows[(page-1)*10:page*10]],
+                         'totals': {'approved': approved.count(), 'pending': rows.filter(status='pending').count(),
+                                    'measured_minutes_saved': minutes('measured'), 'self_reported_minutes_saved': minutes('self_reported')},
+                         'estimated_values': monetary_values(approved),
+                         'modules': list(Module.objects.filter(is_active=True, code__in=getattr(settings, 'AI_ADOPTION_MODULE_APPLICATIONS', DEFAULT_MODULES)).values('code', 'name'))})
 
     # -------------------------------------------------------------------
     # POST /track/activity/
@@ -163,6 +288,7 @@ class AIChampionViewSet(viewsets.ViewSet):
             application=data.get('application', ''),
             feature=data.get('feature', ''),
             request_id=data.get('request_id', ''),
+            provenance='client',
             tokens_input=data['tokens_input'],
             tokens_output=data['tokens_output'],
             cost_usd=cost,

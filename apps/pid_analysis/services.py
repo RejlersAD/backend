@@ -10,7 +10,7 @@ import re
 import uuid
 from typing import Dict, List, Any, Optional, Set, Tuple
 from django.conf import settings
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
 import fitz  # PyMuPDF
 from PIL import Image
 from .reference_processor import ReferenceDocumentProcessor
@@ -394,7 +394,7 @@ class PIDAnalysisService:
             if not api_key:
                 print('[WARNING] Gemini enabled but GEMINI_API_KEY env var not set — Gemini disabled')
                 return
-            self._gemini_client = genai.Client(api_key=api_key)
+            self._gemini_client = observed_google(genai.Client(api_key=api_key))
             print(f'[INFO] Google Gemini client initialized (primary={self._GEMINI_PRIMARY_MODEL})')
         except ImportError:
             print('[WARNING] google-genai not installed — Gemini disabled. '

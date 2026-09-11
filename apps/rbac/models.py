@@ -604,6 +604,13 @@ class EngineerProfile(TimeStampedModel):
         ('principal', 'Principal'),
         ('lead',      'Lead'),
         ('manager',   'Engineering Manager'),
+        ('fellow',    'Engineering Fellow'),
+        ('corp_associate', 'Associate'),
+        ('corp_specialist', 'Specialist'),
+        ('corp_senior', 'Senior Specialist'),
+        ('corp_lead', 'Team Lead'),
+        ('corp_manager', 'Manager'),
+        ('corp_head', 'Department Head'),
     ]
     AVAILABILITY_CHOICES = [
         ('available',  'Available'),
@@ -1077,9 +1084,12 @@ class ProfileDocument(TimeStampedModel):
 
 
 # Re-export the AI Champion models so Django discovers them as part of this app.
+from .ai_outcome_models import AIOutcomeEvidence  # noqa: E402,F401
+from .ai_measurement_models import AIWorkflowRun, AIWorkforceSnapshot  # noqa: E402,F401
 from .ai_champion_models import (  # noqa: E402,F401
     AIPricingConfig,
     AIUsageLog,
     ActivityEvent,
     MonthlyChampion,
+    MonthlyChampionPublication,
 )

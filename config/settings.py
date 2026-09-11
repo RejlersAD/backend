@@ -1074,6 +1074,10 @@ else:
 # and the calendar day matches the configured day_of_month / days_after_month_end.
 from celery.schedules import crontab  # noqa: E402
 CELERY_BEAT_SCHEDULE = {
+    'ai-workforce-daily-snapshot': {
+        'task': 'rbac.capture_ai_workforce',
+        'schedule': crontab(hour=0, minute=5),
+    },
     'enquiry-sla-escalation-every-15-minutes': {
         'task': 'core.process_enquiry_sla_escalations',
         'schedule': crontab(minute='*/15'),
