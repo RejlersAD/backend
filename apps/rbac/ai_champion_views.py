@@ -66,6 +66,7 @@ class TrackActivitySerializer(serializers.Serializer):
 
 
 class MonthlyAwardSerializer(serializers.Serializer):
+    selected_user_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), max_length=20, required=False, allow_empty=True)
     year = serializers.IntegerField(min_value=2000, max_value=9998)
     month = serializers.IntegerField(min_value=1, max_value=12)
     fingerprint = serializers.CharField(max_length=64, required=False)
@@ -147,19 +148,21 @@ class AIChampionViewSet(viewsets.ViewSet):
             'year': request.query_params.get('year', now.year),
             'month': request.query_params.get('month', now.month),
         }
+        if request.method == 'GET' and 'selected_user_ids' in request.query_params:
+            params['selected_user_ids'] = [uid for uid in request.query_params.get('selected_user_ids', '').split(',') if uid]
         serializer = MonthlyAwardSerializer(data=params)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
         if request.method == 'POST':
             return Response(publish(values['year'], values['month'], values.get('fingerprint', ''),
-                                    values.get('reason', ''), request.user), status=201)
+                                    values.get('reason', ''), request.user, values.get('selected_user_ids')), status=201)
         root = IsSuperAdmin().has_permission(request, self)
         user_ids = None
         if not root:
             org_id = getattr(getattr(request.user, 'rbac_profile', None), 'organization_id', None)
             user_ids = list(UserProfile.objects.filter(organization_id=org_id, is_deleted=False)
                             .values_list('user_id', flat=True)) if org_id else []
-        return Response(monthly_report(values['year'], values['month'], user_ids, can_publish=root, request=request))
+        return Response(monthly_report(values['year'], values['month'], user_ids, can_publish=root, request=request, selected_user_ids=values.get('selected_user_ids')))
 
     @action(detail=False, methods=['get'], url_path='adoption-dashboard')
     def adoption_dashboard(self, request):
