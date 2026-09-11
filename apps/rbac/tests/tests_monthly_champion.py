@@ -154,3 +154,52 @@ class MonthlyChampionTests(TestCase):
         AIUsageLog.objects.create(user=self.user, application='documents', provider='external-tool',
                                   model_name='test', provenance='client', timestamp=self.when)
         self.assertEqual(candidates(2025, 7), [])
+
+    def test_shortlist_is_capped_at_twenty_and_only_top_ten_are_recognized(self):
+        people = [get_user_model().objects.create_user(username=f'shortlist-{i}', email=f'shortlist-{i}@example.test') for i in range(22)]
+        for user in people:
+            ActivityEvent.objects.create(user=user, application='documents', action_type='view', timestamp=self.when)
+        preview = snapshot(2025, 7)
+        self.assertEqual(len(preview['candidates']), 20)
+        self.assertEqual([r['rank'] for r in preview['candidates']], list(range(1, 21)))
+        award = publish(2025, 7, preview['fingerprint'], 'Reviewed the activity shortlist.', self.root, preview['selected_user_ids'])
+        self.assertEqual(len(award['podium']), 10)
+        self.assertEqual([r['rank'] for r in award['podium']], list(range(1, 11)))
+        stored = MonthlyChampionPublication.objects.get().snapshot
+        self.assertEqual(len(stored['selected_user_ids']), 20)
+        self.assertEqual(len(stored['candidates']), 20)
+
+    def test_shortlist_validation_and_selection_bound_fingerprint(self):
+        self.usage()
+        self.usage(user=self.other)
+        selected = [str(self.other.pk)]
+        preview = snapshot(2025, 7, selected_user_ids=selected)
+        self.assertEqual(preview['candidates'][0]['user_id'], str(self.other.pk))
+        self.assertEqual(preview['candidates'][0]['rank'], 1)
+        for invalid in [[str(self.root.pk)], selected * 2, selected * 21]:
+            with self.assertRaises(ValidationError):
+                snapshot(2025, 7, selected_user_ids=invalid)
+        with self.assertRaises(ValidationError):
+            snapshot(2025, 7, user_ids=[self.user.pk], selected_user_ids=selected)
+        with self.assertRaises(ValidationError):
+            publish(2025, 7, preview['fingerprint'], 'Reviewed selected employees.', self.root, [str(self.user.pk)])
+        report = self.api(self.root, data={'year': 2025, 'month': 7, 'selected_user_ids': str(self.other.pk)})
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual(report.data['selected_user_ids'], selected)
+        self.assertEqual(len(report.data['candidates']), 2)
+        self.assertEqual(len(report.data['shortlist']), 1)
+
+    def test_empty_shortlist_cannot_be_published(self):
+        self.usage()
+        preview = snapshot(2025, 7, selected_user_ids=[])
+        self.assertEqual(preview['candidates'], [])
+        with self.assertRaises(ValidationError):
+            publish(2025, 7, preview['fingerprint'], 'Reviewed empty shortlist.', self.root, [])
+
+    def test_older_published_awards_keep_three_places(self):
+        from apps.rbac.monthly_champion_service import serialize_publication
+        from types import SimpleNamespace
+        rows = [{'rank': i, 'user_id': str(i)} for i in range(1, 6)]
+        legacy = SimpleNamespace(snapshot={'candidates': rows, 'methodology': {'version': 'old'}},
+            pk='old', period_year=2025, period_month=7, published_at=self.when, reviewer_name='Reviewer', reason='Original review')
+        self.assertEqual(len(serialize_publication(legacy)['podium']), 3)
