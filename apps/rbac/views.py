@@ -909,10 +909,20 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             except Exception:
                 pass
 
-    @action(detail=True, methods=['post'], url_path='profile-photo')
+    @action(detail=True, methods=['get', 'post'], url_path='profile-photo')
     def upload_profile_photo(self, request, pk=None):
         """Upload an employee photo from the managed HR profile drawer."""
         profile = self.get_object()
+        employee = profile.canonical_employee
+        if employee is None:
+            try:
+                employee = profile.user.employee_master
+            except Exception:
+                employee = None
+        if request.method == 'GET':
+            from apps.users.profile_photos import profile_photo_response
+            return profile_photo_response(employee, profile.profile_photo)
+
         photo = request.FILES.get('photo')
         if not photo:
             return Response(
@@ -920,12 +930,6 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        employee = profile.canonical_employee
-        if employee is None:
-            try:
-                employee = profile.user.employee_master
-            except Exception:
-                employee = None
         if employee is None:
             return Response(
                 {'error': 'This user is not linked to an employee record.'},
