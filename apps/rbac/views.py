@@ -736,7 +736,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         # Admin (level 2+) can assign/revoke roles — but the action itself guards
         # against assigning the super_admin role without super_admin privileges
         ADMIN_ACTIONS = {'assign_role', 'revoke_role'}
-        AUTH_ONLY_ACTIONS = {'me', 'profile_completeness', 'change_password', 'engineers'}
+        AUTH_ONLY_ACTIONS = {'me', 'profile_completeness', 'change_password', 'engineers', 'reporting_managers'}
 
         if self.action in AUTH_ONLY_ACTIONS:
             return [IsAuthenticated()]
@@ -2202,6 +2202,23 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = 'attachment; filename="employee_bulk_upload_template.xlsx"'
         return response
 
+    @action(detail=False, methods=['get'], url_path='reporting-managers')
+    def reporting_managers(self, request):
+        """Minimal, unpaginated employee choices for self-service profiles."""
+        profiles = UserProfile.objects.filter(
+            is_deleted=False, user__is_active=True,
+        ).exclude(user=request.user).select_related('user').order_by(
+            'user__first_name', 'user__last_name', 'user__email', 'pk',
+        )
+        return Response({'results': [{
+            'id': str(profile.pk),
+            'name': profile.user.get_full_name() or profile.user.email or profile.user.username,
+            'email': profile.user.email,
+            'employee_id': profile.employee_id or '',
+            'department': profile.department or '',
+            'job_title': profile.job_title or '',
+        } for profile in profiles]})
+
     @action(detail=False, methods=['get', 'patch'], url_path='me')
     def me(self, request):
         """Get or update current user's profile"""
@@ -2353,6 +2370,19 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
+            # Validate the selected manager before changing any profile fields.
+            selected_manager = None
+            if request.data.get('manager_id'):
+                from django.core.exceptions import ValidationError
+                try:
+                    selected_manager = UserProfile.objects.select_related('user').get(
+                        pk=request.data['manager_id'], is_deleted=False, user__is_active=True,
+                    )
+                except (UserProfile.DoesNotExist, ValidationError, ValueError, TypeError):
+                    return Response({'manager_id': 'Select a valid active employee.'}, status=400)
+                if selected_manager.pk == profile.pk:
+                    return Response({'manager_id': 'You cannot be your own reporting manager.'}, status=400)
+
             # Track changes for audit log
             changes = {}
             
@@ -2387,12 +2417,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             if 'manager_id' in request.data:
                 manager_id = request.data['manager_id']
                 if manager_id:
-                    try:
-                        manager_profile = UserProfile.objects.get(id=manager_id, is_deleted=False)
-                        profile.manager = manager_profile
-                        changes['manager'] = f"{manager_profile.user.get_full_name() or manager_profile.user.username} ({manager_id})"
-                    except UserProfile.DoesNotExist:
-                        pass  # Silently ignore invalid manager_id
+                    profile.manager = selected_manager
+                    changes['manager'] = f"{selected_manager.user.get_full_name() or selected_manager.user.username} ({manager_id})"
                 else:
                     # Empty string or null = clear the manager
                     profile.manager = None
