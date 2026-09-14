@@ -9,6 +9,7 @@ from django.utils import timezone
 
 
 ROUTE_MODULES = {
+    'dashboard/executive/': 'executive_dashboard',
     'pid/pressure-instruments/': 'process_datasheet',
     'pid/instrument-index/': 'instrument_index',
     'pid/cable-block-diagram/': 'instrument_datasheet',
