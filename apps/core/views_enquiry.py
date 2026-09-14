@@ -23,8 +23,11 @@ from django.db import transaction
 from django.db.models import Case, Count, F, IntegerField, Q, When
 from django.db.models.functions import TruncMonth
 from django.contrib.auth import get_user_model
+from datetime import timedelta
 import logging
 from pathlib import Path
+import re
+from statistics import median
 
 from apps.core.models import Enquiry, EnquiryActivity, EnquiryAttachment, EnquiryFeedback, EnquiryMessage, EnquiryRoutingRule
 from apps.core.enquiry_workflow import (
@@ -627,7 +630,31 @@ def list_enquiries(request):
     f_type = request.query_params.get('inquiry_type')
     f_department = request.query_params.get('department')
     f_assignee = request.query_params.get('assigned_to')
+    f_queue = request.query_params.get('queue', 'all')
+    f_sla = request.query_params.get('sla')
     f_search  = request.query_params.get('search', '').strip()
+
+    now = timezone.now()
+    completed_statuses = ('resolved', 'closed', 'spam')
+    deadline_exclusions = (*completed_statuses, 'pending_confirmation')
+    if f_queue == 'mine':
+        qs = qs.filter(assigned_to=request.user).exclude(status__in=completed_statuses)
+    elif f_queue == 'unassigned':
+        qs = qs.filter(assigned_to__isnull=True).exclude(status__in=completed_statuses)
+    elif f_queue == 'at_risk':
+        qs = qs.filter(due_at__lt=now).exclude(status__in=deadline_exclusions)
+
+    if f_sla in ('overdue', 'on_track', 'due_today', 'no_deadline'):
+        qs = qs.exclude(status__in=deadline_exclusions)
+        if f_sla == 'overdue':
+            qs = qs.filter(due_at__lt=now)
+        elif f_sla == 'on_track':
+            qs = qs.filter(due_at__gte=now)
+        elif f_sla == 'due_today':
+            day_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+            qs = qs.filter(due_at__gte=day_start, due_at__lt=day_start + timedelta(days=1))
+        else:
+            qs = qs.filter(due_at__isnull=True)
 
     if f_status:
         qs = qs.filter(status=f_status)
@@ -643,14 +670,25 @@ def list_enquiries(request):
         qs = qs.filter(assigned_to=request.user)
     elif f_assignee == 'unassigned':
         qs = qs.filter(assigned_to__isnull=True)
+    elif f_assignee and re.fullmatch(r'[0-9]+', f_assignee):
+        # Keep arbitrary owner selection inside the already authorized queryset.
+        # Bounding to the model's integer key range also avoids database overflows.
+        owner_id = int(f_assignee) if len(f_assignee) <= 19 else None
+        qs = qs.filter(assigned_to_id=owner_id) if owner_id is not None and 0 < owner_id <= 9223372036854775807 else qs.none()
     if f_search:
-        qs = qs.filter(
+        search_filter = (
             Q(name__icontains=f_search) |
             Q(email__icontains=f_search) |
             Q(company__icontains=f_search) |
             Q(subject__icontains=f_search) |
             Q(message__icontains=f_search)
         )
+        reference = re.fullmatch(r'(?:ENQ-)?([0-9]+)', f_search, flags=re.IGNORECASE)
+        if reference and len(reference[1]) <= 19:
+            reference_id = int(reference[1])
+            if 0 < reference_id <= 9223372036854775807:
+                search_filter |= Q(pk=reference_id)
+        qs = qs.filter(search_filter)
 
     try:
         page      = max(1, int(request.query_params.get('page', 1)))
@@ -697,6 +735,23 @@ def enquiry_stats(request):
         for created, first_response in enquiries.filter(first_response_at__isnull=False)
         .values_list('created_at', 'first_response_at')
     ]
+    # New response KPIs use an explicit valid cohort. The historical completion
+    # SLA and average fields below retain their original contract.
+    response_records = list(enquiries.filter(
+        first_response_at__isnull=False,
+        first_response_at__gte=F('created_at'),
+    ).values_list('created_at', 'first_response_at', 'due_at'))
+    valid_response_hours = [(response - created).total_seconds() / 3600 for created, response, _ in response_records]
+    first_response_sla = [
+        response <= due for created, response, due in response_records
+        if due is not None and due >= created
+    ]
+    now = timezone.now()
+    local_today = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = local_today - timedelta(days=local_today.weekday())
+    owner_counts = enquiries.filter(assigned_to__isnull=False).values(
+        'assigned_to_id', 'assigned_to__first_name', 'assigned_to__last_name', 'assigned_to__username',
+    ).annotate(count=Count('id')).order_by('assigned_to__first_name', 'assigned_to__last_name', 'assigned_to__username')
     priority_order = Case(
         When(urgency='urgent', then=0), When(urgency='high', then=1),
         When(urgency='normal', then=2), default=3, output_field=IntegerField(),
@@ -709,6 +764,19 @@ def enquiry_stats(request):
     return Response({
         'success':   True,
         'total':     enquiries.count(),
+        'open_count': active.count(),
+        'active_unassigned': active.filter(assigned_to__isnull=True).count(),
+        'median_response_hours': round(median(valid_response_hours), 1) if valid_response_hours else None,
+        'response_sample_count': len(valid_response_hours),
+        'first_response_sla_compliance': round(sum(first_response_sla) / len(first_response_sla) * 100, 1) if first_response_sla else None,
+        'first_response_sla_sample_count': len(first_response_sla),
+        'resolved_this_week': completed.filter(resolved_at__gte=week_start, resolved_at__lte=now).count(),
+        'owners': [
+            {'id': owner['assigned_to_id'],
+             'name': f"{owner['assigned_to__first_name']} {owner['assigned_to__last_name']}".strip() or owner['assigned_to__username'],
+             'count': owner['count']}
+            for owner in owner_counts
+        ],
         'new':       enquiries.filter(status='new').count(),
         'assigned_to_me': enquiries.filter(assigned_to=request.user).exclude(status__in=['resolved', 'closed', 'spam']).count(),
         'unassigned': enquiries.filter(assigned_to__isnull=True).count(),

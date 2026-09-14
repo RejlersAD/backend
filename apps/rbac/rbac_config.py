@@ -15,6 +15,7 @@ Cross-verified against:
 # Each entry maps to Module.code in the DB.
 # ─────────────────────────────────────────────────────────────────────────────
 ALL_MODULES_CATALOGUE = [
+    {'code': 'executive_dashboard', 'name': 'Executive overview', 'icon': 'ChartBar', 'order': 0, 'description': 'Read-only executive overview of separately authorized operational registers'},
     {'code': 'ai_champion', 'name': 'AI Champion', 'icon': 'Trophy', 'order': 54, 'description': 'AI engagement leaderboard and recognition'},
     # ── Core Engineering ──────────────────────────────────────────────────
     {'code': 'pid_analysis',           'name': 'P&ID Analysis',               'icon': 'FileText',    'order': 1,  'description': 'P&ID document analysis and processing'},
