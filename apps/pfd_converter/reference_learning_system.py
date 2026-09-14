@@ -14,7 +14,7 @@ This learned knowledge is then used to generate accurate P&IDs
 """
 
 import openai
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 import json
 import base64

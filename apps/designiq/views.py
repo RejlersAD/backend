@@ -3,6 +3,7 @@ DesignIQ Views - AI-Powered Design Analysis API
 Intelligent design verification, optimization, and recommendations
 """
 
+from apps.rbac.ai_telemetry import tracked_http, tracked_user_job
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -71,7 +72,7 @@ def _extract_pid_no_per_page(file_path: str) -> dict:
     return page_map
 
 
-def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type, legend_file_path=None):
+def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type, legend_file_path=None, user_id=None):
     """Spawn a daemon thread that runs P&ID OCR and writes progress to /tmp/."""
     progress_file = f'/tmp/base_extraction_{task_id}.json'
 
@@ -104,7 +105,8 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
             lines_so_far=lines_so_far, phase=phase,
         )
 
-    def _run():
+    @tracked_user_job('designiq')
+    def _run(user_id=None, task_id=None):
         try:
             logger.info(f'[base_extract_thread] START task_id={task_id} file={filename}')
             from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
@@ -212,6 +214,7 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
             }
             _write('SUCCESS', 100, 'Extraction complete!', result=result)
             logger.info(f'[base_extract_thread] DONE task_id={task_id} lines={len(base_data)}')
+            return result
         except Exception as exc:
             logger.error(f'[base_extract_thread] FAILED task_id={task_id}: {exc}', exc_info=True)
             if os.path.exists(file_path):
@@ -220,8 +223,9 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 except Exception:
                     pass
             _write('FAILURE', 0, 'Extraction failed', error=str(exc))
+            return {'success': False}
 
-    t = threading.Thread(target=_run, name=f'base_extract_{task_id}', daemon=True)
+    t = threading.Thread(target=_run, kwargs={'user_id': user_id, 'task_id': task_id}, name=f'base_extract_{task_id}', daemon=True)
     t.start()
 
 # Global singleton for PIDLineExtractorV2 to avoid reinitialization
@@ -1019,6 +1023,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    @tracked_http('designiq')
     def upload_enriched_pid(self, request):
         """
         🧠 4-Document Smart Enrichment Upload
@@ -2683,6 +2688,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             if is_eager:
                 logger.info('⚡ EAGER mode — running task synchronously')
                 task = base_extract_lines_async.delay(
+                    user_id=request.user.pk,
                     file_path=tmp_path,
                     filename=pid_file.name,
                     include_area=include_area,
@@ -2711,6 +2717,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 _tpe    = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                 _future = _tpe.submit(
                     base_extract_lines_async.delay,
+                    user_id=request.user.pk,
                     file_path=tmp_path,
                     filename=pid_file.name,
                     include_area=include_area,
@@ -2735,7 +2742,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 _mode        = 'thread'
                 _run_base_extraction_in_thread(
                     _task_id_str, tmp_path, pid_file.name,
-                    include_area, format_type, legend_tmp_path,
+                    include_area, format_type, legend_tmp_path, user_id=request.user.pk,
                 )
 
             # ------------------------------------------------------------------

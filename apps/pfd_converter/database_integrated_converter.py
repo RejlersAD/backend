@@ -16,7 +16,7 @@ import os
 from decouple import config
 import logging
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 import re
 from collections import defaultdict
 

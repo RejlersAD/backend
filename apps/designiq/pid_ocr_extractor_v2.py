@@ -12,7 +12,7 @@ import logging
 import json
 from typing import List, Dict, Optional, Tuple
 import numpy as np
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from django.conf import settings
 import base64
 

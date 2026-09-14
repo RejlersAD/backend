@@ -8,7 +8,7 @@ import base64
 import io
 from typing import Dict, List, Any
 import fitz  # PyMuPDF
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
 import os
 
 

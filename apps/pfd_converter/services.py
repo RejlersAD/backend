@@ -4,8 +4,9 @@ Advanced AI-powered conversion using GPT-4o Vision and engineering intelligence
 Enhanced with RAG (Retrieval Augmented Generation) for improved pattern recognition
 Enhanced DALL-E 3 Integration for AI-Generated P&ID Drawings
 """
+from apps.rbac.ai_telemetry import observed_client
 import openai
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 from django.utils import timezone
 import json
@@ -124,7 +125,7 @@ class PFDToPIDConverter:
                 logger.info("Using default extraction prompt")
             
             # Call OpenAI API
-            response = openai.chat.completions.create(
+            response = observed_client(openai).chat.completions.create(
                 model=self.model,
                 messages=[
                     {
@@ -178,7 +179,7 @@ class PFDToPIDConverter:
                 prompt = self._get_pid_generation_prompt(pfd_data)
                 logger.info("Using default P&ID generation prompt")
             
-            response = openai.chat.completions.create(
+            response = observed_client(openai).chat.completions.create(
                 model=self.model,
                 messages=[
                     {
@@ -813,7 +814,7 @@ Return JSON with:
 - missing_elements: list
 """
             
-            response = openai.chat.completions.create(
+            response = observed_client(openai).chat.completions.create(
                 model=self.model,
                 messages=[
                     {

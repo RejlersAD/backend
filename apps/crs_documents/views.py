@@ -2,6 +2,7 @@
 CRS Documents API Views
 """
 
+from apps.rbac.ai_telemetry import tracked_http
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -99,6 +100,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
     # ========================================================================
     
     @action(detail=True, methods=['post'], url_path='process-pdf-comments')
+    @tracked_http('crs_documents')
     def process_pdf_comments(self, request, pk=None):
         """
         NEW ACTION: Extract comments from PDF and populate CRS template
@@ -210,6 +212,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['post'], url_path='extract-comments-only')
+    @tracked_http('crs_documents')
     def extract_comments_only(self, request, pk=None):
         """
         NEW ACTION: Extract comments from PDF and return as JSON
@@ -327,6 +330,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'], url_path='upload-and-process')
+    @tracked_http('crs_documents')
     def upload_and_process(self, request):
         """
         UNIFIED ENDPOINT: Upload CRS file (PDF or Excel) and process it

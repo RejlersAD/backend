@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from PIL import Image
 import openai
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 from django.conf import settings
 

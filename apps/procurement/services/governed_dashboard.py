@@ -61,7 +61,7 @@ def _decimal(value):
 def _money_rows(queryset, amount_field, currency_field='currency'):
     rows = queryset.values(currency_field).annotate(amount=Sum(amount_field)).order_by(currency_field)
     return [
-        {'currency': (row[currency_field] or 'UNSPECIFIED').upper(), 'amount': str(_decimal(row['amount']))}
+        {'currency': (row[currency_field] or 'UNSPECIFIED').upper(), 'amount': str(_decimal(row['amount']).quantize(Decimal('0.01')))}
         for row in rows
     ]
 

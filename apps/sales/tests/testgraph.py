@@ -1,3 +1,4 @@
+from .access_fixtures import grant_sales_actions
 import os
 from unittest.mock import Mock, patch
 
@@ -121,17 +122,12 @@ class SalesMailboxConnectionOAuthTests(TestCase):
     endpoint = '/api/v1/sales/mailbox-connections/connect-my-outlook/'
 
     def setUp(self):
-        permission = patch(
-            'apps.rbac.permissions.HasModuleAccess.has_permission',
-            return_value=True,
-        )
-        permission.start()
-        self.addCleanup(permission.stop)
         self.user = get_user_model().objects.create_user(
             username='sales-employee',
             email='sales.employee@example.com',
             password='test',
         )
+        grant_sales_actions(self.user, 'sales_email_intake')
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 

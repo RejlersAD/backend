@@ -5,7 +5,7 @@ Provides unified interface for both models with automatic fallback
 import os
 from typing import List, Dict, Any, Optional
 from django.conf import settings
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
 try:
     from google import genai as google_genai
     from google.genai import types as genai_types
@@ -51,11 +51,11 @@ class MultiModelAIService:
             try:
                 if GENAI_SDK == 'new':
                     # New google-genai SDK: use Client object
-                    self.gemini_client = google_genai.Client(api_key=gemini_key)
+                    self.gemini_client = observed_google(google_genai.Client(api_key=gemini_key))
                 else:
                     # Legacy google-generativeai SDK
                     google_genai.configure(api_key=gemini_key)
-                    self.gemini_client = google_genai
+                    self.gemini_client = observed_google(google_genai)
                 self.gemini_api_key = gemini_key
                 print(f"[AI SERVICE] ✅ Gemini client initialized (SDK: {GENAI_SDK}, using stable 2.0-flash)")
             except Exception as e:

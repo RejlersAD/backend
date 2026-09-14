@@ -45,7 +45,7 @@ from django.http import HttpResponse
 
 # Export endpoint - using test-export pattern because drawings/pk/export doesn't work
 @api_view(['GET'])
-@permission_classes([permissions.AllowAny])
+@permission_classes([permissions.IsAuthenticated])
 def test_export(request, pk):
     """Export drawing report in PDF/Excel/CSV format - accessible at /test-export/{pk}/"""
     from .models import PIDDrawing
@@ -54,7 +54,7 @@ def test_export(request, pk):
     print(f"[EXPORT via TEST] Reached export endpoint! PK={pk}")
     
     try:
-        drawing = PIDDrawing.objects.get(id=pk)
+        drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
         print(f"[EXPORT via TEST] Drawing found: {drawing.drawing_number}")
     except PIDDrawing.DoesNotExist:
         return Response({'error': 'Drawing not found'}, status=404)
@@ -84,7 +84,7 @@ def test_export(request, pk):
 
 # Export endpoint - EXACT COPY of test_export but with export logic
 @api_view(['GET'])
-@permission_classes([permissions.AllowAny])
+@permission_classes([permissions.IsAuthenticated])
 def export_drawing(request, pk):
     """Export drawing report in PDF/Excel/CSV format"""
     from .models import PIDDrawing
@@ -93,7 +93,7 @@ def export_drawing(request, pk):
     print(f"[EXPORT DRAWING] Reached export endpoint! PK={pk}")
     
     try:
-        drawing = PIDDrawing.objects.get(id=pk)
+        drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
         print(f"[EXPORT DRAWING] Drawing found: {drawing.drawing_number}")
     except PIDDrawing.DoesNotExist:
         return Response({'error': 'Drawing not found'}, status=404)
@@ -123,7 +123,7 @@ def export_drawing(request, pk):
 
 # Direct export handler that bypasses ViewSet
 @api_view(['GET'])
-@permission_classes([permissions.AllowAny])
+@permission_classes([permissions.IsAuthenticated])
 def direct_export(request, pk):
     """Direct export endpoint that doesn't rely on ViewSet"""
     from .models import PIDDrawing
@@ -133,7 +133,7 @@ def direct_export(request, pk):
     print(f"[DIRECT EXPORT] PK: {pk}, Format: {request.query_params.get('format', 'pdf')}")
     
     try:
-        drawing = PIDDrawing.objects.get(id=pk)
+        drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
     except PIDDrawing.DoesNotExist:
         return Response({'error': 'Drawing not found'}, status=404)
     

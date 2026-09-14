@@ -69,8 +69,6 @@ class HasPermission(permissions.BasePermission):
         # Super admin has all permissions
         try:
             profile = request.user.rbac_profile
-            if profile.roles.filter(code='super_admin', is_active=True).exists():
-                return True
         except UserProfile.DoesNotExist:
             return False
         
@@ -83,23 +81,16 @@ class HasPermission(permissions.BasePermission):
 
 
 class HasModuleAccess(permissions.BasePermission):
-    """Require the assigned service or its explicit full-suite parent grant."""
-    message = 'Your role does not grant access to this service.'
+    """Require module access and the effective action grant for this operation."""
+    message = 'You do not have permission for this service operation.'
 
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated or not request.user.is_active:
-            return False
-        if request.user.is_superuser:
+        from .action_policy import request_action_allowed, operation_action, request_module
+        module = request_module(request, view) or getattr(self, 'module_required', None)
+        action = operation_action(request, view)
+        if getattr(request, 'method', '') == 'OPTIONS':
             return True
-        try:
-            profile = request.user.rbac_profile
-        except UserProfile.DoesNotExist:
-            return False
-        if profile.is_deleted:
-            return False
-        from .service_catalogue import required_service
-        module_required = required_service(view) or getattr(self, 'module_required', None)
-        return bool(module_required and profile.has_module_access(module_required))
+        return bool(module and action and request_action_allowed(request, module, action))
 
 
 class CanViewFinanceOverview(HasModuleAccess):

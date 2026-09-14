@@ -144,3 +144,14 @@ def assign_default_role_on_profile_creation(sender, instance, created, **kwargs)
         # Never let default-role assignment block profile creation itself —
         # the profile has already been saved by this point.
         print(f"[RBAC] WARNING Failed to assign default role to profile {instance.id}: {exc}")
+
+
+@receiver(post_save, sender='rbac.Module')
+def ensure_saved_module_actions(sender, instance, using, raw=False, **kwargs):
+    """New or re-enabled modules receive the same editable action catalogue."""
+    if raw or not instance.is_active:
+        return
+    from .models import Permission
+    from .module_actions import ensure_module_actions
+    from django.db import transaction
+    transaction.on_commit(lambda: ensure_module_actions(sender, Permission, using=using, module_ids=[instance.pk]), using=using)

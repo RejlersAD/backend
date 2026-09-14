@@ -9,3 +9,4 @@ class RbacConfig(AppConfig):
     def ready(self):
         """Import signals when app is ready"""
         import apps.rbac.signals
+        import apps.rbac.ai_measurement_signals  # noqa: F401

@@ -78,14 +78,18 @@ class UserStats:
     success_rate: float = 100.0
 
 
-def _gather_user_stats(start: datetime, end: datetime) -> Dict[int, UserStats]:
+def _gather_user_stats(start: datetime, end: datetime, user_ids=None) -> Dict[int, UserStats]:
     """Aggregate per-user stats from ActivityEvent + AIUsageLog tables."""
     stats: Dict[int, UserStats] = {}
 
     # Activity-derived metrics
+    activity = ActivityEvent.objects.filter(timestamp__gte=start, timestamp__lt=end)
+    ai_usage = AIUsageLog.objects.filter(timestamp__gte=start, timestamp__lt=end)
+    if user_ids is not None:
+        activity = activity.filter(user_id__in=user_ids)
+        ai_usage = ai_usage.filter(user_id__in=user_ids)
     activity_qs = (
-        ActivityEvent.objects
-        .filter(timestamp__gte=start, timestamp__lt=end)
+        activity
         .values('user_id')
         .annotate(
             total_actions=Count('id'),
@@ -105,8 +109,7 @@ def _gather_user_stats(start: datetime, end: datetime) -> Dict[int, UserStats]:
 
     # AI usage metrics
     ai_qs = (
-        AIUsageLog.objects
-        .filter(timestamp__gte=start, timestamp__lt=end)
+        ai_usage
         .values('user_id')
         .annotate(
             total_ai_requests=Count('id'),
@@ -146,7 +149,7 @@ def _normalise(values: Dict[int, float], invert: bool = False) -> Dict[int, floa
 # ---------------------------------------------------------------------------
 # Public API: compute_scores
 # ---------------------------------------------------------------------------
-def compute_scores(start: datetime, end: datetime) -> List[dict]:
+def compute_scores(start: datetime, end: datetime, user_ids=None) -> List[dict]:
     """
     Returns ranked list of users for the [start, end) window.
 
@@ -161,7 +164,7 @@ def compute_scores(start: datetime, end: datetime) -> List[dict]:
       ...
     ]
     """
-    stats = _gather_user_stats(start, end)
+    stats = _gather_user_stats(start, end, user_ids=user_ids)
     if not stats:
         return []
 

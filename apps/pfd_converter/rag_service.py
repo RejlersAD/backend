@@ -17,7 +17,7 @@ import logging
 from typing import Dict, List, Optional
 from .s3_pfd_service import S3PFDService
 from .five_stage_analyzer import FiveStageAnalyzer
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 import json
 

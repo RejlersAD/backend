@@ -2,6 +2,7 @@
 PFD Analyzer Service - Phase 1 Analysis
 Intelligent analysis of PFD documents to extract modules, connectivity, and complexity
 """
+from apps.rbac.ai_telemetry import observed_client
 import logging
 import openai
 from django.conf import settings
@@ -149,7 +150,7 @@ Return ONLY a valid JSON array of modules. Example format:
 ]"""
         
         try:
-            response = openai.chat.completions.create(
+            response = observed_client(openai).chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are an expert process engineer specializing in PFD analysis. Always return valid JSON arrays."},
@@ -213,7 +214,7 @@ Return ONLY valid JSON in this format:
 }}"""
         
         try:
-            response = openai.chat.completions.create(
+            response = observed_client(openai).chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are an expert in process flow analysis. Always return valid JSON."},

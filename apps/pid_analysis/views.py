@@ -1,3 +1,4 @@
+from apps.rbac.ai_telemetry import tracked_pid
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -158,6 +159,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         serializer.save(uploaded_by=self.request.user)
     
     @action(detail=False, methods=['post', 'options'], permission_classes=[permissions.AllowAny])
+    @tracked_pid
     def upload(self, request):
         """
         Upload P&ID drawing and optionally start analysis
@@ -167,7 +169,6 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         print(f"[UPLOAD_VIEW] === UPLOAD REQUEST RECEIVED ===")
         print(f"[UPLOAD_VIEW] Method: {request.method}")
         print(f"[UPLOAD_VIEW] User: {request.user} (authenticated: {request.user.is_authenticated})")
-        print(f"[UPLOAD_VIEW] Auth header: {request.META.get('HTTP_AUTHORIZATION', 'MISSING')}")
         print(f"[UPLOAD_VIEW] Origin: {request.META.get('HTTP_ORIGIN', 'NO ORIGIN')}")
         print(f"[UPLOAD_VIEW] Content-Type: {request.content_type}")
         print(f"[UPLOAD_VIEW] Files: {list(request.FILES.keys())}")
@@ -470,6 +471,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         )
     
     @action(detail=True, methods=['post'])
+    @tracked_pid
     def analyze(self, request, pk=None):
         """
         Trigger analysis for a specific drawing using HYBRID PIPELINE
@@ -596,6 +598,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             )
     
     @action(detail=True, methods=['post'])
+    @tracked_pid
     def analyze_hybrid(self, request, pk=None):
         """
         Analyze drawing using NEW HYBRID PIPELINE (Discriminative + Deterministic + Agentic)
@@ -755,7 +758,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
     
-    @action(detail=True, methods=['get'], url_path='export', permission_classes=[permissions.AllowAny])
+    @action(detail=True, methods=['get'], url_path='export', permission_classes=[permissions.IsAuthenticated])
     def export(self, request, pk=None):
         """
         Export report in different formats (PDF, Excel, CSV)
@@ -779,9 +782,9 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         print(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
         print(f"[EXPORT] Drawing ID: {pk}")
         
-        # Get drawing without user filter for testing
+        # Enforce the same ownership boundary as the drawing detail endpoint.
         try:
-            drawing = PIDDrawing.objects.get(id=pk)
+            drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
             print(f"[EXPORT] Drawing found: {drawing.drawing_number}")
         except PIDDrawing.DoesNotExist:
             print(f"[EXPORT ERROR] Drawing {pk} does not exist")

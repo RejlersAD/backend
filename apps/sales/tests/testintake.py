@@ -1,3 +1,4 @@
+from .access_fixtures import grant_sales_actions
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -77,17 +78,12 @@ class SalesEmailIntakeTests(TestCase):
 
 class SalesEmailIntakeReviewTests(TestCase):
     def setUp(self):
-        permission = patch(
-            'apps.rbac.permissions.HasModuleAccess.has_permission',
-            return_value=True,
-        )
-        permission.start()
-        self.addCleanup(permission.stop)
         self.user = User.objects.create_superuser(
             username='sales-reviewer',
             email='reviewer@example.com',
             password='test-password',
         )
+        grant_sales_actions(self.user, 'sales_email_intake', 'sales_proposals')
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         self.intake = SalesEmailIntake.objects.create(
@@ -265,17 +261,12 @@ class SalesEmailIntakeReviewTests(TestCase):
 
 class ProposalApprovalTests(TestCase):
     def setUp(self):
-        permission = patch(
-            'apps.rbac.permissions.HasModuleAccess.has_permission',
-            return_value=True,
-        )
-        permission.start()
-        self.addCleanup(permission.stop)
         self.user = User.objects.create_user(
             username='proposal-owner',
             email='proposal-owner@example.com',
             password='test-password',
         )
+        grant_sales_actions(self.user, 'sales_proposals')
         self.client_record = Client.objects.create(
             client_code='CLIENT-PROPOSAL-001',
             company_name='Proposal Client',

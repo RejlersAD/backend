@@ -5,7 +5,7 @@ Stores vectors in PostgreSQL for persistence
 import os
 import json
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
 import numpy as np
 
 

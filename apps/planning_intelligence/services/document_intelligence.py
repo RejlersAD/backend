@@ -368,6 +368,10 @@ def compile_run_intelligence(run):
     return intelligence
 
 
+from apps.rbac.ai_telemetry import tracked_planning
+
+
+@tracked_planning('document_intelligence')
 def run_document_intelligence(project, *, user=None, files=None):
     files = list(files if files is not None else project.files.filter(is_deleted=False, parse_status='done'))
     if not files:

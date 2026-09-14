@@ -14,7 +14,7 @@ import os
 from typing import Dict, List, Any, Optional
 from django.conf import settings
 import base64
-from openai import OpenAI
+from apps.rbac.ai_telemetry import observed_openai as OpenAI
 
 logger = logging.getLogger(__name__)
 

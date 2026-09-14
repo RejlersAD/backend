@@ -2,6 +2,7 @@
 Enhanced PFD Converter Views
 API endpoints for AI-assisted PFD to P&ID conversion
 """
+from apps.rbac.ai_telemetry import tracked_http
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@tracked_http('pfd_to_pid')
 def ai_assisted_conversion(request):
     """
     AI-Assisted PFD to P&ID Conversion (6-Step Workflow)
@@ -95,6 +97,7 @@ def ai_assisted_conversion(request):
         
         pid_conversion = PIDConversion.objects.create(
             pfd_document=pfd_document,
+            converted_by=request.user,
             conversion_method='ai_assisted_6step',
             status='completed',
             conversion_data={

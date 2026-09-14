@@ -129,36 +129,9 @@ def _log_usage(*, project, user, model, feature, tokens_input, tokens_output, la
         # No authenticated user context (e.g. background/system call) — skip
         # logging rather than writing a row with a null FK.
         return
-    try:
-        from decimal import Decimal
-
-        # NOTE: AIPricingConfig and AIUsageLog removed with AI Champion feature
-        # from apps.rbac.ai_champion_models import AIPricingConfig, AIUsageLog
-
-        # cost_usd = Decimal('0')
-        # pricing = (
-        #     AIPricingConfig.objects
-        #     .filter(provider='anthropic', model_name=model, is_active=True)
-        #     .order_by('-effective_from')
-        #     .first()
-        # )
-        # if pricing:
-        #     cost_usd = pricing.compute_cost(tokens_input, tokens_output)
-
-        # AIUsageLog.objects.create(
-        #     user=user,
-        #     provider='anthropic',
-        #     model_name=model,
-        #     application='planning_intelligence',
-        #     feature=feature,
-        #     request_id=str(getattr(project, 'id', '') or ''),
-        #     tokens_input=tokens_input,
-        #     tokens_output=tokens_output,
-        #     cost_usd=cost_usd,
-        #     latency_ms=latency_ms,
-        #     success=success,
-        #     error_code=error_code,
-        # )
-        pass  # AI usage logging disabled
-    except Exception as exc:  # noqa: BLE001 — usage logging must never break the pipeline
-        logger.warning('[Planning BYOK] Failed to write AIUsageLog: %s', exc)
+    from apps.rbac.ai_telemetry import record_usage
+    record_usage(user=user, provider='anthropic', model=model, feature=feature,
+                 application='planning_intelligence', tokens_input=tokens_input,
+                 tokens_output=tokens_output, latency_ms=latency_ms,
+                 success=success, error_code=error_code,
+                 usage_available=success or bool(tokens_input or tokens_output))

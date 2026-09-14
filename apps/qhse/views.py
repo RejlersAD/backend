@@ -50,6 +50,16 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     search_fields = ['project_no', 'project_title', 'client', 'project_manager']
     ordering_fields = ['sr_no', 'project_starting_date', 'project_closing_date', 'updated_at']
     ordering = ['sr_no']
+
+    def get_visibility_filter(self):
+        from apps.rbac.action_policy import route_module, request_action_allowed
+        from django.db.models import Q
+        module = route_module(self.request.path)
+        if module in {'qhse_detailed', 'qhse_quality', 'qhse_health_safety', 'qhse_environmental', 'qhse_energy'}:
+            # QHSE projects are a shared team register; each area has its own
+            # module grant while retaining the existing team visibility model.
+            return Q() if request_action_allowed(self.request, module, 'read') else Q(pk=None)
+        return super().get_visibility_filter()
     
     def create(self, request, *args, **kwargs):
         """
