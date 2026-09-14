@@ -28,6 +28,7 @@ from .salary_views import (
 
 # Import workflow views
 from .workflow_views import PayrollWorkflowViewSet
+from .command_center_views import FinanceCommandCenterView
 
 app_name = 'finance'
 
@@ -61,6 +62,7 @@ urlpatterns = [
     path('approve/<uuid:token>/', approval_action, name='approval-action'),
     
     # Dashboard
+    path('dashboard/command-center/', FinanceCommandCenterView.as_view(), name='command-center'),
     path('dashboard/stats/', dashboard_stats, name='dashboard-stats'),
 
     # Salary slip PDF download (presigned S3 URL or local stream)

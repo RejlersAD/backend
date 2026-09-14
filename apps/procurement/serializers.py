@@ -1049,7 +1049,24 @@ class ReceiptSerializer(serializers.ModelSerializer):
             'delivery_note_number', 'notes', 'attachments', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'receipt_number', 'receipt_date', 'received_by', 'created_at', 'updated_at']
-    
+
+    def validate(self, attrs):
+        from apps.rbac.action_policy import request_action_allowed
+        from rest_framework.exceptions import PermissionDenied
+
+        if self.instance is None:
+            changes_disposition = attrs.get('status', 'pending') != 'pending'
+        else:
+            changes_disposition = 'status' in attrs and attrs['status'] != self.instance.status
+        request = self.context.get('request')
+        if changes_disposition and not (request and request_action_allowed(request, 'procurement_receipts', 'approve')):
+            raise PermissionDenied('Receipt approval access is required to set or change its inspection disposition.')
+        return super().validate(attrs)
+
+    def to_representation(self, instance):
+        from .services.receipt_inspection import enrich_receipt
+        return enrich_receipt(super().to_representation(instance), instance, self.context.get('request'))
+
     def create(self, validated_data):
         validated_data['receipt_number'] = ReceiptNumberService.next_number()
         validated_data['received_by'] = self.context['request'].user
