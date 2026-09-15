@@ -5,6 +5,61 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def ensure_procurement_reference_keys(apps, schema_editor):
+    """Restore PostgreSQL FK target keys without changing business identities.
+
+    Restored databases can record procurement migrations as applied while their
+    ID indexes are absent. Repair before this migration's deferred foreign keys;
+    adding a new predecessor would invalidate already-applied EPC histories.
+    """
+    connection = schema_editor.connection
+    if connection.vendor != 'postgresql':
+        return
+    quote = schema_editor.quote_name
+    with connection.cursor() as cursor:
+        for name in ('PurchaseRequisition', 'PurchaseOrder'):
+            model = apps.get_model('procurement', name)
+            table, column = model._meta.db_table, model._meta.pk.column
+            # Retain this lock until the atomic migration finishes, so writes
+            # cannot invalidate validation before the new key/FKs are created.
+            cursor.execute(f'LOCK TABLE {quote(table)} IN ACCESS EXCLUSIVE MODE')
+            cursor.execute('''
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_index i
+                    JOIN pg_attribute a ON a.attrelid = i.indrelid
+                    WHERE i.indrelid = to_regclass(%s) AND a.attname = %s
+                      AND i.indisunique AND i.indisvalid AND i.indisready
+                      AND i.indimmediate AND i.indpred IS NULL
+                      AND i.indexprs IS NULL AND i.indnkeyatts = 1
+                      AND i.indkey[0] = a.attnum
+                )
+            ''', [table, column])
+            if cursor.fetchone()[0]:
+                continue
+            cursor.execute(f'SELECT EXISTS (SELECT 1 FROM {quote(table)} WHERE {quote(column)} IS NULL)')
+            if cursor.fetchone()[0]:
+                raise RuntimeError(
+                    f'Cannot repair {table}.{column}: null IDs exist. '
+                    'Reconcile the source identities before retrying migrations; '
+                    'no procurement rows or IDs were changed.'
+                )
+            cursor.execute(f'''SELECT EXISTS (
+                SELECT 1 FROM {quote(table)} GROUP BY {quote(column)} HAVING COUNT(*) > 1
+            )''')
+            if cursor.fetchone()[0]:
+                raise RuntimeError(
+                    f'Cannot repair {table}.{column}: duplicate IDs exist. '
+                    'Reconcile the source identities before retrying migrations; '
+                    'no procurement rows or IDs were changed.'
+                )
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(%s) AND contype = 'p')",
+                [table],
+            )
+            kind = 'UNIQUE' if cursor.fetchone()[0] else 'PRIMARY KEY'
+            schema_editor.execute(f'ALTER TABLE {quote(table)} ADD {kind} ({quote(column)})')
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -16,6 +71,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_procurement_reference_keys, migrations.RunPython.noop),
         migrations.CreateModel(
             name='IntegratedBaseline',
             fields=[
