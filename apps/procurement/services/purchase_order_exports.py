@@ -25,8 +25,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
-    CondPageBreak,
     Image,
+    KeepInFrame,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -380,8 +380,10 @@ def _main_pdf(order):
     tax = float(order.tax_amount or 0)
     total = float(order.total_amount or subtotal + tax)
     vendor = getattr(order, 'vendor', None)
-    preview = styles['preview']
-    preview_bold = styles['preview_bold']
+    # The signed commercial cover is one page. Use compact, readable cover
+    # typography without changing the scope/price-summary pages that follow.
+    preview = ParagraphStyle('POCoverField', parent=styles['preview'], fontSize=9.5, leading=11.5)
+    preview_bold = ParagraphStyle('POCoverFieldBold', parent=preview, fontName='Helvetica-Bold')
 
     def pair_rows(rows):
         return _FlowTable(
@@ -395,8 +397,8 @@ def _main_pdf(order):
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 1.5 * mm),
-                ('TOPPADDING', (0, 0), (-1, -1), 2.2),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 3.2),
+                ('TOPPADDING', (0, 0), (-1, -1), 1.5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
             ]),
         )
 
@@ -465,7 +467,7 @@ def _main_pdf(order):
         ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-        ('TOPPADDING', (0, 0), (-1, -1), 2.2 * mm), ('BOTTOMPADDING', (0, 0), (-1, -1), 2.2 * mm),
+        ('TOPPADDING', (0, 0), (-1, -1), 1.5 * mm), ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5 * mm),
     ]))
     approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
     approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE)
@@ -477,7 +479,7 @@ def _main_pdf(order):
         signature_image.hAlign = 'LEFT'
         approved.extend([Spacer(1, 2 * mm), signature_image, Spacer(1, 2 * mm)])
     else:
-        approved.append(Spacer(1, 23 * mm))
+        approved.append(Spacer(1, 16 * mm))
     approved.append(Paragraph(
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
         f'{JARMO_COMPANY}<br/><b>Date:</b> {escape(_value(getattr(order, "approved_date", None), ""))}', preview,
@@ -505,7 +507,7 @@ def _main_pdf(order):
             '<b>Order Confirmation:</b><br/>We acknowledge receipt of your documents and will perform according to this PO.',
             preview,
         ),
-        Spacer(1, 4 * mm),
+        Spacer(1, 2 * mm),
         _FlowTable(
             [[Paragraph(f'<b>{escape(label)}:</b>', preview),
               Paragraph(escape(value).replace('\n', '<br/>'), preview)]
@@ -517,32 +519,35 @@ def _main_pdf(order):
                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
                 ('TOPPADDING', (0, 0), (-1, -1), 1),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
                 ('LINEBELOW', (1, 0), (1, 0), 0.6, colors.HexColor('#64748b')),
             ]),
         ),
     ]
-    # Let ReportLab measure wrapped addresses, contacts and signatures. Fixed
-    # row heights paint overflowing text on top of following fields/footer.
-    # In-row splitting also handles a single field longer than a whole page.
+    # Keep measured row heights: fixed heights allow wrapped fields to overlap.
     approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], splitInRow=1, style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LINEBEFORE', (2, 0), (2, 0), 0.5, colors.HexColor('#64748b')),
         ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
         ('LEFTPADDING', (2, 0), (2, 0), 3 * mm), ('RIGHTPADDING', (2, 0), (2, 0), 0),
     ]))
-    # Keep the signature, approver identity and confirmation together whenever
-    # they fit a fresh page. Unusually long blocks can still continue safely.
-    approval_height = approval_table.wrap(document.width, document.height)[1]
-    story = [
+    cover = [
         Spacer(1, 1 * mm), details, Spacer(1, 1 * mm), commercial, Spacer(1, 2 * mm),
         summary_table, Spacer(1, 2 * mm),
-        CondPageBreak(min(approval_height, document.height - 12)),
-        approval_table, PageBreak(),
+        approval_table,
+    ]
+    # Measure the complete cover and proportionally fit unusually long values
+    # inside the first-page frame. Never clip text or move approval/confirmation
+    # to a continuation page. The frame reserves the branded header and footer;
+    # SimpleDocTemplate's default frame adds 6pt padding on each side.
+    story = [
+        KeepInFrame(document.width - 12, document.height - 12, cover,
+                    mode='shrink', hAlign='CENTER', vAlign='TOP', fakeWidth=False),
+        PageBreak(),
         Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
         Paragraph(
             f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
-            f'<b>{escape(_value(getattr(vendor, "name", None)))}</b> (Seller).', preview,
+            f'<b>{escape(_value(getattr(vendor, "name", None)))}</b> (Seller).', styles['preview'],
         ),
         Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']),
     ]
