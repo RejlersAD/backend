@@ -1,11 +1,15 @@
+import base64
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
+import fitz
 from docx import Document
+from PIL import Image as PILImage
 from PyPDF2 import PdfReader
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
 from apps.procurement.services.purchase_order_exports import (
@@ -177,3 +181,104 @@ class PurchaseOrderExportTests(TestCase):
             _html_blocks('&lt;p&gt;Alpha&amp;nbsp;Beta&lt;/p&gt;<div>Gamma<br>Delta</div>'),
             ['Alpha Beta', 'Gamma', 'Delta'],
         )
+
+    def _assert_body_clear_of_footer(self, pdf):
+        # Branded page furniture is blue/white. Business text is slate/black;
+        # inspect actual glyph rectangles rather than page counts alone.
+        furniture_colors = {0x3275B6, 0x0870AA, 0xFFFFFF}
+        for page in pdf:
+            for block in page.get_text('dict')['blocks']:
+                for line in block.get('lines', []):
+                    for span in line['spans']:
+                        if span['color'] in furniture_colors or span['bbox'][1] < 34 * mm:
+                            continue
+                        self.assertLessEqual(
+                            span['bbox'][3], page.rect.height - 40 * mm,
+                            f'Page {page.number + 1} enters the footer: {span["text"]}',
+                        )
+
+    def _long_order(self):
+        order = self._order()
+        order.vendor.name = 'Synthetic International Instrumentation and Technical Services Limited'
+        order.seller_address = '\n'.join(f'Seller address level {index:02d}' for index in range(8))
+        order.invoicing_attn = 'Invoice contact: Synthetic Accounts and Commercial Administration'
+        order.invoicing_emails = [
+            f'accounting.department.region{index}.contract.invoices@example.invalid'
+            for index in range(4)
+        ]
+        order.company_fax = 'INVOICEFAX9988'
+        order.contact_persons = {'buyer_references': [
+            {'name': f'Synthetic Buyer {index}', 'designation': 'Senior Commercial Administrator',
+             'email': f'buyer{index}.regional.contracts@example.invalid'}
+            for index in range(4)
+        ]}
+        order.payment_terms = 'Payment follows receipt of a fully checked invoice and accepted deliverables.'
+        order.seller_contact_person = 'Synthetic Supplier Contact for Regional Commercial Administration'
+        order.seller_email = 'supplier.commercial.department.contract.administration@example.invalid'
+        order.approved_by_name = 'Synthetic Authorised Approver'
+        order.approved_by_title = 'Director of Commercial Operations\nRegional Engineering Division'
+        order.approved_date = '2026-09-12'
+        order.confirmation_date = '2026-09-13'
+        return order
+
+    def test_long_addresses_and_contacts_flow_before_following_fields_and_footer(self):
+        order = self._long_order()
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self._assert_body_clear_of_footer(pdf)
+            text = ''.join(page.get_text() for page in pdf)
+            compact_text = ''.join(text.split())
+            for value in [
+                order.vendor.name, order.seller_address, *order.invoicing_emails,
+                order.seller_contact_person, order.seller_email,
+                order.approved_by_name, order.approved_by_title,
+                order.payment_terms, order.approved_date,
+            ]:
+                self.assertIn(''.join(value.split()), compact_text)
+            for reference in order.contact_persons['buyer_references']:
+                self.assertIn(''.join(reference['email'].split()), compact_text)
+            fax = [(page.number, rect.y1) for page in pdf for rect in page.search_for('INVOICEFAX9988')]
+            payment = [(page.number, rect.y0) for page in pdf for rect in page.search_for('Payment Terms:')]
+            self.assertEqual(len(fax), 1)
+            self.assertEqual(len({page_number for page_number, _ in payment}), 1)
+            self.assertLess(fax[0], min(payment))
+            self.assertGreater(len(pdf), 3)
+
+    def test_single_address_taller_than_page_preserves_every_line(self):
+        order = self._order()
+        address_lines = [f'ADDRESSLINE{index:03d} Synthetic site location' for index in range(125)]
+        order.seller_address = '\n'.join(address_lines)
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self._assert_body_clear_of_footer(pdf)
+            text = '\n'.join(page.get_text() for page in pdf)
+            for index in range(125):
+                self.assertEqual(text.count(f'ADDRESSLINE{index:03d}'), 1)
+            for label in ('Payment Terms:', 'Order Confirmation:', 'Phone Number:', 'SUMMARY OF PRICES'):
+                self.assertIn(''.join(label.split()), ''.join(text.split()))
+            self.assertIn('USD 105.00', text)
+            self.assertGreater(len(pdf), 4)
+
+    def test_signature_approver_and_confirmation_stay_together_after_long_details(self):
+        order = self._long_order()
+        signature = BytesIO()
+        PILImage.new('RGB', (180, 50), 'navy').save(signature, format='PNG')
+        order.approval_signature = 'data:image/png;base64,' + base64.b64encode(signature.getvalue()).decode()
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self._assert_body_clear_of_footer(pdf)
+            approval_pages = [page for page in pdf if page.search_for('Approved by:')]
+            self.assertEqual(len(approval_pages), 1)
+            page = approval_pages[0]
+            heading = page.search_for('Approved by:')[0]
+            approver = page.search_for(order.approved_by_name)[0]
+            self.assertTrue(page.search_for('Order Confirmation:'))
+            signature_images = [image for image in page.get_images() if image[2:4] == (180, 50)]
+            self.assertEqual(len(signature_images), 1)
+            signature_rect = page.get_image_rects(signature_images[0][0])[0]
+            self.assertLess(heading.y1, signature_rect.y0)
+            self.assertLess(signature_rect.y1, approver.y0)
+            self.assertAlmostEqual(signature_rect.x0, approver.x0, delta=1)

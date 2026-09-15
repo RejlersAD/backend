@@ -25,6 +25,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
+    CondPageBreak,
     Image,
     PageBreak,
     Paragraph,
@@ -63,6 +64,19 @@ DEFAULT_INVOICE_ADDRESS = (
     'Fax: +971 2 639 7448'
 )
 USD_TO_AED_RATE = 3.6725
+
+
+class _FlowTable(Table):
+    """Expose measured size when ReportLab splits a table inside a cell.
+
+    ReportLab 4.0's in-row splitter reads the standard Flowable ``height``
+    attribute, while Table.wrap() only sets its private ``_height``. Retain
+    the measured public dimensions so nested fields can continue onto pages.
+    """
+
+    def wrap(self, availWidth, availHeight):
+        self.width, self.height = super().wrap(availWidth, availHeight)
+        return self.width, self.height
 
 
 def _value(value, fallback='—'):
@@ -370,12 +384,13 @@ def _main_pdf(order):
     preview_bold = styles['preview_bold']
 
     def pair_rows(rows):
-        return Table(
+        return _FlowTable(
             [[
                 Paragraph(f'<b>{escape(label)}:</b>', preview),
                 value if isinstance(value, Paragraph) else _paragraph(value, preview, strong),
             ] for label, value, strong in rows],
             colWidths=[30 * mm, 52 * mm],
+            splitInRow=1,
             style=TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
@@ -414,7 +429,7 @@ def _main_pdf(order):
         ('Quote Ref.', getattr(order, 'quote_ref', None), False),
         ('License No.', getattr(order, 'seller_license_no', None), False),
         ('Buyer Reference', Paragraph(_buyer_reference(order), preview), False),
-    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], rowHeights=[73 * mm], style=TableStyle([
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], splitInRow=1, style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
@@ -429,14 +444,14 @@ def _main_pdf(order):
         ('Delivery terms', getattr(order, 'delivery_terms', None), False),
         ('Delivery date', _date_text(getattr(order, 'expected_delivery', None)), False),
         ('Marking', getattr(order, 'marking', None) or order.po_number, True),
-    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], rowHeights=[34 * mm], style=TableStyle([
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], splitInRow=1, style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     summary_table = Table([[
         Paragraph(f'<b>Purchase Summary:</b><br/><b>{escape(_value(getattr(order, "summary", None) or order.title))}</b>', preview),
         '',
-        Table([
+        _FlowTable([
             [Paragraph('<b>Total Purchase Price:</b>', preview), Paragraph(escape(f'{subtotal:,.2f} {currency}'), styles['right'])],
             [Paragraph(f'<b>VAT ({float(getattr(order, "vat_percentage", 0) or 0):g}%):</b>', preview), Paragraph(escape(f'{tax:,.2f} {currency}'), styles['right'])],
             [Paragraph('<b>Total Sum:</b>', preview_bold), Paragraph(escape(f'{total:,.2f} {currency}'), styles['right'])],
@@ -445,7 +460,7 @@ def _main_pdf(order):
             ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
             ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
         ])),
-    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], style=TableStyle([
+    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], splitInRow=1, style=TableStyle([
         ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -459,6 +474,7 @@ def _main_pdf(order):
     if signature_stream:
         signature_image = Image(signature_stream)
         signature_image._restrictSize(52 * mm, 20 * mm)
+        signature_image.hAlign = 'LEFT'
         approved.extend([Spacer(1, 2 * mm), signature_image, Spacer(1, 2 * mm)])
     else:
         approved.append(Spacer(1, 23 * mm))
@@ -490,9 +506,12 @@ def _main_pdf(order):
             preview,
         ),
         Spacer(1, 4 * mm),
-        Table(
-            [[Paragraph(f'<b>{escape(label)}:</b>', preview), Paragraph(escape(value), preview)] for label, value in confirmation_rows],
+        _FlowTable(
+            [[Paragraph(f'<b>{escape(label)}:</b>', preview),
+              Paragraph(escape(value).replace('\n', '<br/>'), preview)]
+             for label, value in confirmation_rows],
             colWidths=[30 * mm, 49 * mm],
+            splitInRow=1,
             style=TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
@@ -503,15 +522,23 @@ def _main_pdf(order):
             ]),
         ),
     ]
-    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], rowHeights=[69 * mm], style=TableStyle([
+    # Let ReportLab measure wrapped addresses, contacts and signatures. Fixed
+    # row heights paint overflowing text on top of following fields/footer.
+    # In-row splitting also handles a single field longer than a whole page.
+    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], splitInRow=1, style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LINEBEFORE', (2, 0), (2, 0), 0.5, colors.HexColor('#64748b')),
         ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
         ('LEFTPADDING', (2, 0), (2, 0), 3 * mm), ('RIGHTPADDING', (2, 0), (2, 0), 0),
     ]))
+    # Keep the signature, approver identity and confirmation together whenever
+    # they fit a fresh page. Unusually long blocks can still continue safely.
+    approval_height = approval_table.wrap(document.width, document.height)[1]
     story = [
         Spacer(1, 1 * mm), details, Spacer(1, 1 * mm), commercial, Spacer(1, 2 * mm),
-        summary_table, Spacer(1, 2 * mm), approval_table, PageBreak(),
+        summary_table, Spacer(1, 2 * mm),
+        CondPageBreak(min(approval_height, document.height - 12)),
+        approval_table, PageBreak(),
         Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
         Paragraph(
             f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
