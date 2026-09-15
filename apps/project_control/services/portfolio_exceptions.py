@@ -12,6 +12,7 @@ from ..models import (
     BudgetAllocation, ControlAccount, CostLedgerEntry, IntegratedReportingSnapshot,
     ReconciliationRun, ReportingPeriod,
 )
+from .project_metadata import confirmed_project_metadata
 
 
 SEVERITY_RANK = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
@@ -39,11 +40,14 @@ def _issue(code, severity, category, title, detail, *, target_view, owner, metri
 def _project_exceptions(project, today, data):
     thresholds = PORTFOLIO_EXCEPTION_THRESHOLDS
     issues = []
+    snapshot = data['snapshots'].get(project.pk)
+    metadata = confirmed_project_metadata(project, snapshot=snapshot)
+    operational_status = project.status if metadata['operational_status_confirmed'] else None
     project_accounts = data['accounts'].get(project.pk, [])
     active_accounts = [account for account in project_accounts if account.status == 'active']
     submitted_accounts = [account for account in project_accounts if account.status == 'submitted']
 
-    if project.status in {'planning', 'active', 'on_hold'} and not active_accounts:
+    if operational_status in {'planning', 'active', 'on_hold'} and not active_accounts:
         issues.append(_issue(
             'missing_active_control_account', 'high', 'governance', 'No active Control Account',
             'Project scope has no approved accountable control point.', target_view='controls-periods',
@@ -84,7 +88,7 @@ def _project_exceptions(project, today, data):
             target_view='controls-periods', owner=project.owner,
             metric='days_overdue', value=days, threshold=0,
         ))
-    if project.status in {'planning', 'active', 'on_hold'} and not periods:
+    if operational_status in {'planning', 'active', 'on_hold'} and not periods:
         issues.append(_issue(
             'missing_reporting_period', 'medium', 'reporting', 'No reporting period established',
             'Open a governed reporting period before recording progress and actuals.',
@@ -110,7 +114,6 @@ def _project_exceptions(project, today, data):
             metric='unmapped_actuals', value=unmapped_actuals, threshold=0,
         ))
 
-    snapshot = data['snapshots'].get(project.pk)
     if snapshot:
         cpi = float(snapshot.cpi) if snapshot.cpi is not None else None
         spi = float(snapshot.spi) if snapshot.spi is not None else None
@@ -143,21 +146,21 @@ def _project_exceptions(project, today, data):
                 threshold=thresholds['forecast_overrun_critical_pct'],
             ))
         age = (today - snapshot.data_date).days
-        if age > thresholds['snapshot_stale_days'] and project.status in {'active', 'on_hold'}:
+        if age > thresholds['snapshot_stale_days'] and operational_status in {'active', 'on_hold'}:
             issues.append(_issue(
                 'stale_reporting_snapshot', 'medium', 'reporting', f'Reporting data is {age} days old',
                 'Open and close the next reporting period to refresh the management position.',
                 target_view='controls-periods', owner=project.owner,
                 metric='snapshot_age_days', value=age, threshold=thresholds['snapshot_stale_days'],
             ))
-    elif project.status in {'active', 'on_hold'}:
+    elif operational_status in {'active', 'on_hold'}:
         issues.append(_issue(
             'missing_reporting_snapshot', 'medium', 'reporting', 'No sealed management snapshot',
             'Complete reconciliation, submit the reporting period and lock it to establish KPI evidence.',
             target_view='controls-periods', owner=project.owner,
         ))
 
-    if project.is_overdue:
+    if metadata['operational_status_confirmed'] and project.is_overdue:
         days = (today - project.end_date).days
         issues.append(_issue(
             'project_finish_overdue', 'critical', 'schedule', f'Project finish is overdue by {days} day(s)',
@@ -173,7 +176,7 @@ def _project_exceptions(project, today, data):
             'id': project.pk, 'code': project.code, 'name': project.name,
             'status': project.status, 'priority': project.priority,
             'owner': {'id': project.owner_id, 'name': _name(project.owner)},
-            'currency': project.currency or 'AED', 'progress_pct': project.progress or 0,
+            'currency': project.currency or 'AED', **metadata,
         },
         'overall_severity': overall,
         'exception_count': len(issues),

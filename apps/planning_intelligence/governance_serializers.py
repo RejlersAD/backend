@@ -7,6 +7,66 @@ from apps.users.models import User
 from .models import GovernanceComment, GovernanceItem, ScheduleReview, ScheduleReviewDecision
 
 
+class RiskControlSerializer(serializers.Serializer):
+    """Explicit assessments, never inferred from ordinal scores or cost impact."""
+    category = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    cause = serializers.CharField(required=False, allow_blank=True, max_length=4000)
+    event = serializers.CharField(required=False, allow_blank=True, max_length=4000)
+    effect = serializers.CharField(required=False, allow_blank=True, max_length=4000)
+    response_strategy = serializers.ChoiceField(
+        choices=['avoid', 'reduce', 'transfer', 'accept', 'exploit', 'enhance', 'share', 'unset'], required=False,
+    )
+    inherent_probability = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=5)
+    inherent_impact = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=5)
+    residual_probability = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=5)
+    residual_impact = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=5)
+    inherent_cost_exposure = serializers.DecimalField(required=False, allow_null=True, min_value=0, max_digits=16, decimal_places=2)
+    residual_cost_exposure = serializers.DecimalField(required=False, allow_null=True, min_value=0, max_digits=16, decimal_places=2)
+    currency = serializers.RegexField(r'^[A-Z]{3}$', required=False, allow_blank=True)
+    cost_impact_assessed = serializers.BooleanField(required=False)
+    schedule_impact_assessed = serializers.BooleanField(required=False)
+
+    def to_internal_value(self, data):
+        if not isinstance(data, dict):
+            raise serializers.ValidationError('Risk control must be an object.')
+        unknown = set(data) - set(self.fields)
+        if unknown:
+            raise serializers.ValidationError({key: 'Unknown assessment field.' for key in sorted(unknown)})
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        # Merge first so partial updates can change one side of an existing pair.
+        previous = self.context.get('risk_control', {})
+        combined = {**previous, **attrs}
+        for basis in ('inherent', 'residual'):
+            probability, impact = combined.get(f'{basis}_probability'), combined.get(f'{basis}_impact')
+            if (probability is None) != (impact is None):
+                raise serializers.ValidationError({f'{basis}_probability': 'Probability and impact must both be recorded or both cleared.'})
+            if combined.get(f'{basis}_cost_exposure') is not None and not combined.get('currency'):
+                raise serializers.ValidationError({'currency': 'A currency is required for recorded cost exposure.'})
+        if combined.get('cost_impact_assessed') and not combined.get('currency'):
+            raise serializers.ValidationError({'currency': 'A currency is required for an assessed cost impact.'})
+        # Decimal objects are not supported by the model JSONField encoder.
+        return {key: str(value) if key.endswith('_cost_exposure') and value is not None else value for key, value in attrs.items()}
+
+
+class GovernanceMetadataField(serializers.Field):
+    def to_internal_value(self, data):
+        if not isinstance(data, dict) or set(data) - {'risk_control'}:
+            raise serializers.ValidationError('Only risk_control metadata can be edited.')
+        if 'risk_control' not in data:
+            return {}
+        previous = self.context.get('metadata', {})
+        previous = previous.get('risk_control', {}) if isinstance(previous, dict) else {}
+        previous = previous if isinstance(previous, dict) else {}
+        serializer = RiskControlSerializer(data=data['risk_control'], context={'risk_control': previous})
+        serializer.is_valid(raise_exception=True)
+        return {'risk_control': {**previous, **serializer.validated_data}}
+
+    def to_representation(self, value):
+        return value
+
+
 class GovernanceUserSerializer(serializers.ModelSerializer):
     name = serializers.SerializerMethodField()
 
@@ -61,9 +121,16 @@ class GovernanceItemInputSerializer(serializers.Serializer):
     owner = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     schedule_impact_days = serializers.DecimalField(max_digits=10, decimal_places=2, default=0)
     cost_impact = serializers.DecimalField(max_digits=16, decimal_places=2, default=0)
+    metadata = GovernanceMetadataField(required=False)
 
 
 class GovernanceItemUpdateSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255, required=False)
+    description = serializers.CharField(required=False, allow_blank=True)
+    activity = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    schedule_impact_days = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    cost_impact = serializers.DecimalField(max_digits=16, decimal_places=2, required=False)
+    metadata = GovernanceMetadataField(required=False)
     status = serializers.ChoiceField(choices=GovernanceItem.STATUS_CHOICES, required=False)
     priority = serializers.ChoiceField(choices=GovernanceItem.PRIORITY_CHOICES, required=False)
     owner = serializers.IntegerField(required=False, allow_null=True, min_value=1)
@@ -110,6 +177,7 @@ class ScheduleReviewInputSerializer(serializers.Serializer):
 
 
 class ReviewDecisionInputSerializer(serializers.Serializer):
+    review_id = serializers.IntegerField(min_value=1)
     decision = serializers.ChoiceField(choices=['approved', 'changes_requested', 'rejected'])
     comment = serializers.CharField(required=False, allow_blank=True, default='', max_length=4000)
 

@@ -927,3 +927,7 @@ class PlanningPackage(BaseModel):
             delta = self.planned_end - date.today()
             return delta.days
         return None
+
+# Additive EPC models are registered in the project_control app.
+from .epc_models import IntegratedBaseline, RequisitionWBSLink, WBSActivityLink  # noqa: E402,F401
+from .execution_models import EPCWorkEvent, EPCWorkItem  # noqa: E402,F401

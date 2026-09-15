@@ -57,6 +57,7 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 /media
+/private/
 /staticfiles
 # Runtime upload roots (MEDIA_ROOT subdirs)
 /spec_customization/paper_specs/
@@ -143,6 +144,8 @@ htmlcov/
 pytestdebug.log
 nosetests.xml
 test-results/
+/test-results-*/
+/artifacts/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -163,12 +166,21 @@ test-results/
 # Test files and utility scripts folder
 test/
 test_*.py
+# Application regression suites and their isolated test app configuration.
+!apps/procurement/tests/test_*.py
+!apps/project_control/tests/test_estimate_control.py
+!apps/planning_intelligence/tests/test_risk_change_control.py
+!config/test_app_configs.py
 # Keep the authoritative PO-numbering regression coverage under version control.
 !apps/procurement/tests/test_purchase_order_numbering.py
 !apps/procurement/tests/test_project_relationships.py
 !apps/project_control/tests/test_cost_ledger.py
 !apps/project_control/tests/test_control_governance.py
 !apps/project_control/tests/test_actuals_and_snapshots.py
+!apps/project_control/tests/test_cumulative_actuals.py
+!apps/project_control/tests/test_document_control.py
+!apps/planning_intelligence/tests/test_schedule_approval.py
+!apps/planning_intelligence/tests/test_control_observation_history.py
 !apps/project_control/tests/test_portfolio_exceptions.py
 !apps/hr_core/tests/test_graph_assistant_governance.py
 *.md
@@ -228,3 +240,17 @@ system_activity_dump.sql
 # Local PR OCR diagnostic screenshots (repo root)
 /pr[0-9][0-9][0-9][0-9]-audit.png
 /pr[0-9][0-9][0-9][0-9]-page.png
+
+# File Server Replica implementation, regression checks, and operator runbook.
+!apps/file_replica/tests/test_*.py
+!scripts/tests/test_file_replica_sync.py
+!docs/file-server-replica.md
+!docs/database-maintenance.md
+!requirements-file-replica-agent.txt
+
+# EPC lifecycle and planning reliability regression coverage.
+!apps/planning_intelligence/tests/test_trustworthy_generation.py
+!apps/planning_intelligence/tests/test_trustworthy_inputs.py
+!apps/planning_intelligence/tests/test_operational_reliability.py
+!apps/planning_intelligence/tests/test_document_intelligence.py
+!apps/project_control/tests/test_epc_*.py

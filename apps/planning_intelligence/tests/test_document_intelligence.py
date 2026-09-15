@@ -39,6 +39,9 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
         self.assertEqual(len(profile.checksum_sha256), 64)
 
     def test_fact_extraction_retains_file_and_line_provenance(self):
+        # This success case has consistent workspace and documentary evidence.
+        self.project.name = 'North Field Upgrade'
+        self.project.save(update_fields=['name'])
         file_obj = self.source(
             'sow.txt', 'sow',
             'Project Name: North Field Upgrade\n'
@@ -52,7 +55,7 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
 
         self.assertEqual(run.status, 'succeeded')
         self.assertEqual(intelligence['detected_project_name'], 'North Field Upgrade')
-        project_fact = run.facts.get(fact_type='project_name', extraction_method='deterministic')
+        project_fact = run.facts.get(fact_type='project_name', source_file=file_obj, extraction_method='deterministic')
         self.assertEqual(project_fact.source_file_id, file_obj.id)
         self.assertEqual(project_fact.source_locator['line'], 1)
         self.assertIn('Project Name', project_fact.source_excerpt)
@@ -60,6 +63,21 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
         self.assertTrue(run.facts.filter(fact_type='hse_study').exists())
         self.assertTrue(run.facts.filter(fact_type='requirement').exists())
         self.assertEqual(run.facts.filter(fact_type='calendar').count(), 2)
+
+    def test_workspace_name_disagreement_is_retained_as_a_reviewable_conflict(self):
+        file_obj = self.source('scope.txt', 'sow', 'Project Name: North Field Upgrade')
+        run, intelligence = run_document_intelligence(self.project, user=self.owner)
+
+        self.assertIsNone(intelligence['detected_project_name'])
+        conflict = run.conflicts.get(key='project_name:project_name')
+        document_fact = run.facts.get(fact_type='project_name', source_file=file_obj)
+        workspace_fact = run.facts.get(fact_type='project_name', source_file__isnull=True)
+        self.assertEqual(document_fact.value, 'North Field Upgrade')
+        self.assertEqual(workspace_fact.value, self.project.name)
+        self.assertEqual(workspace_fact.source_locator['source'], 'project_record')
+        self.assertEqual(set(conflict.fact_ids), {document_fact.pk, workspace_fact.pk})
+        self.assertEqual(document_fact.status, 'conflicted')
+        self.assertEqual(workspace_fact.status, 'conflicted')
 
     def test_unchanged_source_set_reuses_reviewable_run(self):
         self.source('sow.txt', 'sow', 'Project Name: Reusable Project')
@@ -70,6 +88,21 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
 
         self.assertEqual(first.id, second.id)
         self.assertNotEqual(first.id, forced.id)
+
+    def test_older_extraction_version_is_reprocessed_without_rewriting_its_history(self):
+        self.source('scope.txt', 'sow', f'Project Name: {self.project.name}')
+        old_run, _ = get_or_run_document_intelligence(self.project, user=self.owner)
+        old_run.engine_version = '3.0'
+        old_run.save(update_fields=['engine_version'])
+        old_fact_ids = list(old_run.facts.order_by('id').values_list('id', flat=True))
+
+        current_run, _ = get_or_run_document_intelligence(self.project, user=self.owner)
+
+        self.assertNotEqual(current_run.pk, old_run.pk)
+        self.assertNotEqual(current_run.engine_version, old_run.engine_version)
+        old_run.refresh_from_db()
+        self.assertEqual(old_run.status, 'succeeded')
+        self.assertEqual(list(old_run.facts.order_by('id').values_list('id', flat=True)), old_fact_ids)
 
     def test_explicit_scope_exclusion_is_flagged_against_positive_mention(self):
         self.source(

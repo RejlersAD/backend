@@ -53,6 +53,93 @@ def _date(value: str):
     return None
 
 
+_SELLER_FIELD_END = (
+    r"\bSeller\s*(?:Address|Reference|Contact|E[- ]?mail|Phone|Telephone|Fax|Signature)\b"
+    # Two-column OCR may put the address value between 'Seller' and 'Address:'.
+    r"|\bSeller\s*(?=\s+(?:Unit|Suite|Office|Building|P\.?\s*O\.?\s*Box)\b)"
+    r"|\b(?:Address|Invoicing(?:\s+Address)?|Invoice\s+Address|Buyer\s+Reference)\s*:"
+    r"|\bInvoicing\b"
+    r"|\b(?:Quote\s*Ref(?:erence)?\.?|License\s*No\.?|Payment\s+(?:Terms?|Mode)"
+    r"|Delivery\s+(?:Terms?|Date)|Project|Purchase\s+Summary|Total\s+Purchase\s+Price)\s*:"
+)
+
+
+def _seller_name(text: str) -> str:
+    """Read the seller value without absorbing neighboring PO header fields."""
+    start = re.search(r"\bSeller\s*:\s*", text or "", re.IGNORECASE)
+    if not start:
+        return ""
+    value = text[start.end():]
+    end = re.search(_SELLER_FIELD_END, value, re.IGNORECASE)
+    if end:
+        value = value[:end.start()]
+    else:
+        # With no recognizable following label, don't consume the rest of an
+        # arbitrary page. Wrapped company names remain supported before labels.
+        value = value.split("\n\n", 1)[0]
+    return re.sub(r"\s+", " ", value).strip(" |\r\n\t")
+
+
+def _native_seller_name(pdf_bytes: bytes) -> str:
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as document:
+            for page in document:
+                value = _seller_name(page.get_text("text", sort=True))
+                if value:
+                    return value
+    except Exception:
+        pass
+    return ""
+
+
+_PO_SUMMARY_END = (
+    r"\b(?:Total\s+(?:Purchase\s+)?Price|Total\s+Sum|Net\s+Total|VAT\s*(?:\([^)]*\))?)\s*:"
+    r"|\b(?:Approved\s+by|Approvals?|Order\s+Confirmation|Seller\s+(?:Name|Signature|Ref(?:erence)?\.?))\s*:"
+    r"|\b(?:Scope|Prices|Summary\s+of\s+Prices|Payment|Terms\s*&\s*Conditions"
+    r"|Delivery\s*(?:&\s*Installation|Place)|Software\s+Maintenance\s+Support)\s*:"
+    r"|\bWe\s*,\s*|\bThe\s+total\s+purchase\s+price\b"
+    r"|---\s*Page\s+\d+\s*---|\bRAD-(?:GEN|PRJ)-PUR-\d{4}_"
+)
+
+
+def _bounded_po_summary(value: str) -> str:
+    # Keep wrapped title lines, but never absorb the next paragraph or field.
+    value = re.split(r"\n\s*\n", value.strip(), maxsplit=1)[0]
+    value = re.split(_PO_SUMMARY_END, value, maxsplit=1, flags=re.IGNORECASE)[0]
+    value = re.sub(r"\s+", " ", value).strip(" |\t\r\n")
+    # A missing boundary should produce a missing title, not a page of text.
+    return value if len(value) <= 300 and re.search(r"[A-Za-z]{2}", value) else ""
+
+
+def normalize_po_summary(text: str) -> str:
+    """Extract a bounded PO title from source OCR or an old flattened summary.
+
+    Prefer the explicit scope-page title over a two-column cover-page summary.
+    Already clean titles are returned unchanged; no document-specific values
+    are inferred when a title cannot be separated from neighboring fields.
+    """
+    text = str(text or "").replace("\r\n", "\n").strip()
+    for heading in re.finditer(r"\bPURCHASE\s+ORDER\s*:\s*", text, re.IGNORECASE):
+        title = _bounded_po_summary(text[heading.end():])
+        if title:
+            return title
+
+    heading = re.search(r"\bPurchase\s+Summary\s*:\s*", text, re.IGNORECASE)
+    value = text[heading.end():] if heading else text
+    # Cover-page OCR can interleave the right-hand price column immediately
+    # after the summary label, before the actual title on the following line.
+    value = re.sub(
+        r"^Total\s+Purchase\s+Price\s*:\s*"
+        r"(?:(?:USD|AED|EUR|GBP)\s*[\d,]+\.\d{2}|[\d,]+\.\d{2}\s*(?:USD|AED|EUR|GBP))\s*",
+        "", value, count=1, flags=re.IGNORECASE,
+    )
+    if not heading and re.match(r"(?:---\s*Page|PURCHASE\s+ORDER\b|Seller\s*:|RAD-(?:GEN|PRJ)-PUR-)", value, re.IGNORECASE):
+        return ""
+    return _bounded_po_summary(value)
+
+
 def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
     text = extract_text_from_pdf_tesseract(pdf_bytes)
     source_number = _match(r"(RAD-(?:GEN|PRJ)-PUR-\d{4}_\s*[A-Z]{3}\d{4})", text)
@@ -71,11 +158,11 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
     gross, gross_currency = _money(r"Total\s+Sum", text)
     currency = currency or vat_currency or gross_currency or "USD"
 
-    vendor_name = _match(r"Seller\s*:\s*(.+?)\s+Seller\s+Reference", text)
+    raw_vendor_name = _match(r"Seller\s*:\s*(.+?)(?:\s+Seller\s+Reference|\Z)", text)
+    native_vendor_name = _native_seller_name(pdf_bytes)
+    vendor_name = native_vendor_name or _seller_name(text)
     project_number = _match(r"Project\s*:\s*(\d{5,12})", text)
-    summary = _match(r"Purchase\s+Summary\s*:\s*(.+?)\s+Total\s+Purchase\s+Price", text)
-    if not summary:
-        summary = _match(r"PURCHASE\s+ORDER\s*:\s*(.+?)(?:\n\s*for\s+1\s+Month|\n\n)", text)
+    summary = normalize_po_summary(text)
 
     return {
         "ocr_text_length": len(text),
@@ -83,6 +170,8 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
         "po_number": po_number,
         "po_date": _date(po_date_text),
         "vendor_name": vendor_name,
+        "ocr_vendor_name_raw": raw_vendor_name,
+        "vendor_name_source": "native" if native_vendor_name else "ocr",
         "vendor_license_no": _match(r"License\s+No\.\s*(CN-\d+)", text),
         "seller_reference": _match(r"Seller\s+Reference\s*:\s*(Mr\.\s+[A-Za-z ]+)", text),
         "quote_ref": _match(r"Quote\s+Ref\.\s*:\s*([^\n]+)", text),
@@ -96,11 +185,29 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
         "tax_amount": vat or Decimal("0.00"),
         "gross_amount": gross or ((net or Decimal("0.00")) + (vat or Decimal("0.00"))),
         "currency": currency,
-        "items": [
-            {"position": 1, "description": "SPI License (CH EPC)", "quantity": 6, "unit_price": "1200.00", "total": "7200.00", "currency": currency},
-            {"position": 2, "description": "SPEL Licenses (CH EPC)", "quantity": 2, "unit_price": "1200.00", "total": "2400.00", "currency": currency},
-        ] if re.search(r"\bSP[I1l]\s*License", text, re.IGNORECASE) and re.search(r"\bSPEL", text, re.IGNORECASE) else [],
+        "items": [],
     }
+
+
+def _store_source_pdf(pdf_bytes, fields, filename, user):
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    document = PODocument.objects.filter(extracted_data__source_sha256=digest).first()
+    if document:
+        return document, digest
+    source_date = fields["po_date"] or timezone.localdate()
+    safe_name = build_procurement_pdf_filename(fields["po_number"], "po", source_date)
+    key = default_storage.save(
+        f"procurement/signed_documents/{source_date.year}/{safe_name}", ContentFile(pdf_bytes),
+    )
+    return PODocument.objects.create(
+        original_filename=filename, s3_key=key, s3_url=default_storage.url(key),
+        file_size_bytes=len(pdf_bytes), uploaded_by=user,
+    ), digest
+
+
+def _serializable_fields(fields):
+    return {key: value.isoformat() if hasattr(value, "isoformat") else str(value) if isinstance(value, Decimal) else value
+            for key, value in fields.items()}
 
 
 @transaction.atomic
@@ -123,19 +230,28 @@ def import_signed_po_pdf(
     if not verified:
         raise SignedPOImportError(message)
 
-    pr = PurchaseRequisition.objects.filter(
+    po = PurchaseOrder.objects.select_for_update().filter(
+        Q(po_number=po_number) | Q(po_number=source_number)
+    ).annotate(
+        canonical_first=Case(When(po_number=po_number, then=Value(0)), default=Value(1), output_field=IntegerField()),
+    ).order_by("canonical_first").first()
+    candidates = list(PurchaseRequisition.objects.filter(
         Q(po_number_reference__iexact=source_number) | Q(po_number_reference__iexact=po_number)
-    ).first()
+    )[:2])
+    pr = po.pr_reference if po and po.pr_reference_id else candidates[0] if len(candidates) == 1 else None
+    reconciliation_issues = []
+    if pr:
+        verified, message = PurchaseOrderNumberService.verify(po_number, pr.pr_number)
+        if not verified and not (po and po.pr_reference_id):
+            pr = None
+            reconciliation_issues.append(message)
     if not pr:
-        raise SignedPOImportError(f"No RADAI requisition references {source_number} or {po_number}.")
-    verified, message = PurchaseOrderNumberService.verify(po_number, pr.pr_number)
-    if not verified:
-        raise SignedPOImportError(message)
+        reconciliation_issues.append("PR link pending. Upload saved; link the correct purchase recommendation during reconciliation.")
 
     mapping_issues = []
     fields["ocr_vendor_name"] = fields["vendor_name"]
     fields["ocr_summary"] = fields["summary"]
-    if pr.product_service:
+    if pr and pr.product_service:
         fields["summary"] = pr.product_service
         if len(fields["ocr_summary"]) > 500:
             mapping_issues.append(
@@ -143,7 +259,7 @@ def import_signed_po_pdf(
             )
 
     vendors = list(Vendor.objects.all().only("id", "vendor_code", "name"))
-    if pr.vendor_id:
+    if pr and pr.vendor_id:
         vendor_match = {
             "matched": True,
             "source": fields["ocr_vendor_name"],
@@ -159,19 +275,34 @@ def import_signed_po_pdf(
                 "OCR captured a truncated seller name; vendor was mapped from the uniquely linked PR vendor master."
             )
     else:
-        vendor_match = _match_vendor(pr.supplier_name or fields["vendor_name"], vendors)
+        vendor_match = _match_vendor((pr.supplier_name if pr else "") or fields["vendor_name"], vendors)
     if not vendor_match.get("matched"):
-        raise SignedPOImportError("The PDF seller could not be matched unambiguously to the vendor master.")
-
-    po = PurchaseOrder.objects.select_for_update().filter(
-        Q(po_number=po_number) | Q(po_number=source_number)
-    ).annotate(
-        canonical_first=Case(
-            When(po_number=po_number, then=Value(0)),
-            default=Value(1),
-            output_field=IntegerField(),
-        )
-    ).order_by("canonical_first").first()
+        reconciliation_issues.append("Supplier match pending. Select the correct supplier during reconciliation.")
+        document, digest = _store_source_pdf(pdf_bytes, fields, filename, user)
+        document.document_type = "purchase_order"
+        document.extraction_status = "completed"
+        document.extraction_error = ""
+        document.extracted_data = {
+            **_serializable_fields(fields), "source_sha256": digest,
+            "reconciliation_required": True, "reconciliation_issues": reconciliation_issues,
+            "signature_verified": signature_verified, "stamp_verified": stamp_verified,
+            "approved_by_name": approved_by_name, "approved_by_title": approved_by_title,
+            "approved_date": approved_date, "vendor_match": vendor_match,
+            "pr_id": str(pr.pk) if pr else None, "pr_number": pr.pr_number if pr else "",
+            "vendor_id": None,
+        }
+        document.save()
+        return {
+            "success": True, "operation": "uploaded", "document_id": str(document.pk),
+            "purchase_order_id": str(document.confirmed_po_id) if document.confirmed_po_id else None,
+            "po_number": po_number, "source_document_url": document.s3_url,
+            "pr_id": str(pr.pk) if pr else None, "pr_number": pr.pr_number if pr else "",
+            "vendor_id": None, "vendor_name": fields["vendor_name"],
+            "database_verified": True, "reconciliation_required": True,
+            "reconciliation_issues": reconciliation_issues, "extracted_data": document.extracted_data,
+            "mapping_issues": mapping_issues, "workflow_issues": [],
+            "signature_verified": signature_verified, "stamp_verified": stamp_verified,
+        }
     created = po is None
     if created:
         po = PurchaseOrder(po_number=po_number, created_by=user)
@@ -186,7 +317,7 @@ def import_signed_po_pdf(
     po.rad_project_no = fields["project_number"]
     po.title = (fields["summary"] or f"Purchase Order {po_number}")[:300]
     po.description = fields["summary"]
-    po.category = "software_licenses"
+    po.category = (pr.category if pr else "") or po.category or "other"
     po.status = "sent"
     po.total_amount = fields["total_amount"]
     po.tax_amount = fields["tax_amount"]
@@ -197,7 +328,7 @@ def import_signed_po_pdf(
     po.delivery_terms = fields["delivery_terms"]
     po.marking = re.sub(r"_\d{4}$", "", po_number)
     po.expected_delivery = fields["expected_delivery"]
-    po.items = fields["items"]
+    po.items = fields["items"] or po.items or []
     po.seller_reference = fields["seller_reference"]
     po.quote_ref = fields["quote_ref"]
     po.seller_license_no = fields["vendor_license_no"]
@@ -211,25 +342,7 @@ def import_signed_po_pdf(
         PurchaseOrder.objects.filter(pk=po.pk).update(po_date=fields["po_date"])
         po.po_date = fields["po_date"]
 
-    digest = hashlib.sha256(pdf_bytes).hexdigest()
-    document = PODocument.objects.filter(extracted_data__source_sha256=digest).first()
-    if not document:
-        safe_name = build_procurement_pdf_filename(
-            po_number,
-            "po",
-            fields["po_date"] or timezone.localdate(),
-        )
-        storage_key = default_storage.save(
-            f"procurement/signed_documents/{fields['po_date'].year if fields['po_date'] else timezone.localdate().year}/{safe_name}",
-            ContentFile(pdf_bytes),
-        )
-        document = PODocument.objects.create(
-            original_filename=filename,
-            s3_key=storage_key,
-            s3_url=default_storage.url(storage_key),
-            file_size_bytes=len(pdf_bytes),
-            uploaded_by=user,
-        )
+    document, digest = _store_source_pdf(pdf_bytes, fields, filename, user)
     evidence_url = f"{document.s3_url}#page=1"
     po.approval_signature = evidence_url if signature_verified else ""
     po.approval_stamp = evidence_url if stamp_verified else ""
@@ -249,12 +362,16 @@ def import_signed_po_pdf(
         "filename": filename,
         "url": document.s3_url,
         "sha256": digest,
+        "source_po_number": source_number,
+        "canonical_po_number": po_number,
+        "reconciliation_required": bool(reconciliation_issues),
+        "reconciliation_issues": reconciliation_issues,
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,
         "procurement_register": {
             "PO Number": po_number,
-            "PR Number": pr.pr_number,
-            "PR Accepted Date": pr.issued_date.isoformat() if pr.issued_date else "",
+            "PR Number": pr.pr_number if pr else "",
+            "PR Accepted Date": pr.issued_date.isoformat() if pr and pr.issued_date else "",
             "Suppl.Name": vendor_match["vendor_name"],
             "Summary of Purchase": fields["summary"],
             "Project short name/ Code": fields["project_number"],
@@ -266,8 +383,8 @@ def import_signed_po_pdf(
             "Curr.": fields["currency"],
             "Amount including VAT": str(fields["gross_amount"]),
             "Amount Inc VAT in AED": str(fields["gross_amount"]) if fields["currency"] == "AED" else "",
-            "Country": getattr(pr.vendor, "country", "") if pr.vendor_id else "",
-            "Remarks": "Signed PO imported and approval evidence verified.",
+            "Country": getattr(pr.vendor, "country", "") if pr and pr.vendor_id else "",
+            "Remarks": "Signed PO PDF uploaded." + (" Reconciliation pending." if reconciliation_issues else ""),
         },
     }
     po.attachments = [
@@ -276,10 +393,11 @@ def import_signed_po_pdf(
     ] + [attachment]
     po.save(update_fields=["approval_signature", "approval_stamp", "approval_log", "attachments", "updated_at"])
 
-    pr.po_applicable = True
-    pr.po_number_reference = po_number
-    pr.status = "converted"
-    pr.save(update_fields=["po_applicable", "po_number_reference", "status", "updated_at"])
+    if pr:
+        pr.po_applicable = True
+        pr.po_number_reference = po_number
+        pr.status = "converted"
+        pr.save(update_fields=["po_applicable", "po_number_reference", "status", "updated_at"])
 
     workflow_issues = []
     pending_pr_approvals = [
@@ -288,7 +406,7 @@ def import_signed_po_pdf(
             "manager_projects_approval_status", "vp_op_approval_status",
         ) if getattr(pr, field, "pending") != "approved"
     ]
-    if pending_pr_approvals:
+    if pr and pending_pr_approvals:
         workflow_issues.append(
             "The historical PR is linked and converted, but RADAI does not contain its individual internal approval/signature evidence."
         )
@@ -305,8 +423,10 @@ def import_signed_po_pdf(
         "po_date": fields["po_date"].isoformat() if fields["po_date"] else None,
         "expected_delivery": fields["expected_delivery"].isoformat() if fields["expected_delivery"] else None,
         "source_sha256": digest,
-        "pr_number": pr.pr_number,
-        "pr_id": str(pr.id),
+        "pr_number": pr.pr_number if pr else "",
+        "pr_id": str(pr.id) if pr else None,
+        "reconciliation_required": bool(reconciliation_issues),
+        "reconciliation_issues": reconciliation_issues,
         "vendor_id": vendor_match["id"],
         "vendor_match": vendor_match,
         "signature_verified": signature_verified,
@@ -328,11 +448,14 @@ def import_signed_po_pdf(
         "document_id": str(document.id),
         "purchase_order_id": str(persisted.id),
         "po_number": persisted.po_number,
-        "pr_id": str(persisted.pr_reference_id),
-        "pr_number": persisted.pr_reference.pr_number,
+        "pr_id": str(persisted.pr_reference_id) if persisted.pr_reference_id else None,
+        "pr_number": persisted.pr_reference.pr_number if persisted.pr_reference_id else "",
         "vendor_id": str(persisted.vendor_id),
         "vendor_name": persisted.vendor.name,
         "database_verified": True,
+        "source_document_url": document.s3_url,
+        "reconciliation_required": bool(reconciliation_issues),
+        "reconciliation_issues": reconciliation_issues,
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,
         "extracted_data": extracted_data,

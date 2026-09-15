@@ -125,6 +125,9 @@ def normalize_ceo_workflow(workflow, po_reference='', po_applicable=None):
             normalized.append(raw_stage)
             continue
         stage = dict(raw_stage)
+        if stage.get('external') and stage.get('source') == 'signed_purchase_requisition_pdf':
+            normalized.append(stage)
+            continue
         if is_jarmo_ceo_stage(stage):
             if skip_ceo:
                 continue

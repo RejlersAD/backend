@@ -158,6 +158,8 @@ DISCIPLINE_DEFAULT_DELIVERABLES = {
 # references like "P&IDs", "SLD", "MTO" are recognised as the same document.
 # Keep entries lower-case for cheap case-insensitive matching.
 DELIVERABLE_ALIASES = {
+    'Visual Inspection Report': ['visual inspection report'],
+    'NDT Findings Report': ['ndt findings report'],
     'Process Flow Diagram (PFD)': ['pfd', 'process flow diagram', 'process flow diagrams'],
     'Piping & Instrumentation Diagram (P&ID) - Process': [
         'p&id', 'p&ids', 'p & id', 'pid', 'pids',

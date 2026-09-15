@@ -615,11 +615,13 @@ class GovernanceAPITests(ScheduleFixture):
         self.assertEqual(dashboard.data['items'][0]['comments'][0]['author']['id'], self.reviewer.id)
 
     def test_multi_reviewer_workflow_approves_calculated_version(self):
+        run_schedule_assurance(self.version)
+        approve_schedule_assurance(self.version, self.owner)
         review_response = self.owner_client.post(
             f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/reviews/',
             {
                 'title': 'Level 4 Schedule Approval', 'description': 'Formal baseline review.',
-                'reviewer_ids': [self.reviewer.id], 'due_date': '2026-08-28',
+                'reviewer_ids': [self.reviewer.id, self.owner.id], 'due_date': '2026-08-28',
             }, format='json',
         )
         decision_response = self.reviewer_client.post(
@@ -630,6 +632,13 @@ class GovernanceAPITests(ScheduleFixture):
 
         self.assertEqual(review_response.status_code, 201)
         self.assertEqual(decision_response.status_code, 200)
+        self.assertEqual(decision_response.data['status'], 'pending')
+        decision_response = self.owner_client.post(
+            f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/review-decision/',
+            {'review_id': review_response.data['id'], 'decision': 'approved', 'comment': 'Authorized.'},
+            format='json',
+        )
+        self.assertEqual(decision_response.status_code, 200)
         self.assertEqual(decision_response.data['status'], 'approved')
         self.version.refresh_from_db()
         self.assertEqual(self.version.status, 'approved')
@@ -637,7 +646,7 @@ class GovernanceAPITests(ScheduleFixture):
     def test_changes_requested_requires_comment_and_outsider_cannot_access_review(self):
         review = self.owner_client.post(
             f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/reviews/',
-            {'title': 'Schedule Review', 'reviewer_ids': [self.reviewer.id]}, format='json',
+            {'title': 'Schedule Review', 'reviewer_ids': [self.reviewer.id, self.owner.id]}, format='json',
         )
         missing_comment = self.reviewer_client.post(
             f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/review-decision/',

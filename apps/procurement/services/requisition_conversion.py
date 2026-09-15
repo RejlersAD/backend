@@ -1,6 +1,8 @@
 """Atomic Purchase Requisition to Purchase Order conversion."""
 
 from decimal import Decimal, InvalidOperation
+import re
+import unicodedata
 
 from django.db import transaction
 from django.db.models import Q
@@ -11,6 +13,7 @@ from ..models import PurchaseOrder, PurchaseRequisition, Vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
 from .requisition_status import canonicalize_pr_status
 from .employee_display import normalize_ceo_workflow
+from .pr_document_reconciliation import compare_existing_pr
 
 
 class RequisitionConversionService:
@@ -34,6 +37,50 @@ class RequisitionConversionService:
         if amount <= 0:
             raise ValidationError({'error': 'A positive requisition total is required before conversion.'})
         return amount
+
+    @staticmethod
+    def _supplier_identity(value):
+        # Ignore presentation punctuation/case, but keep the actual company
+        # name and legal suffix; fuzzy name similarity cannot authorize a PO.
+        normalized = unicodedata.normalize('NFKC', str(value or '')).casefold().replace('&', 'and')
+        return re.sub(r'[^\w]', '', normalized, flags=re.UNICODE)
+
+    @classmethod
+    def _signed_document_snapshot(cls, pr):
+        verification = (getattr(pr, 'price_remarks_data', None) or {}).get('signed_document_verification') or {}
+        if not verification.get('signed_off') and not verification.get('attach_only'):
+            return None
+        snapshot = verification.get('approved_fields') or verification.get('source_fields')
+        if not snapshot:
+            raise ValidationError({'error': 'Review the approved values from the signed PDF before creating a purchase order.'})
+        compared = dict(snapshot)
+        if verification.get('approved_fields') and not verification.get('attach_only'):
+            # The creation/update import recorded the reviewer's corrections as
+            # its approved snapshot. Raw attachment identity remains stricter.
+            compared['field_confidence'] = {**compared.get('field_confidence', {}), 'pr_number': 'reviewed'}
+            compared['field_provenance'] = {**compared.get('field_provenance', {}),
+                                           'pr_number': {'source': 'approved_document_review'}}
+        comparison = compare_existing_pr(pr, compared)
+        differences = [field['label'] for field in comparison['fields'] if field['status'] == 'mismatch']
+        if not comparison['identity_matched']:
+            differences.append('PR number')
+        try:
+            source_total = Decimal(str(snapshot.get('net_total', '')).replace(',', ''))
+            current_total = cls._total_amount(pr)
+            money_matches = (source_total.is_finite() and current_total.is_finite()
+                             and source_total.quantize(Decimal('0.01')) == current_total.quantize(Decimal('0.01')))
+        except (InvalidOperation, ValueError, TypeError):
+            money_matches = False
+        if not money_matches:
+            differences.append('Purchase order amount')
+        if not snapshot.get('currency'):
+            differences.append('PDF currency')
+        elif str(getattr(pr, 'currency', '') or 'USD').strip().upper() != str(snapshot['currency']).strip().upper():
+            differences.append('Currency')
+        if differences:
+            raise ValidationError({'error': 'Resolve the differences between this recommendation and its signed PDF before creating a purchase order: '
+                                            + ', '.join(dict.fromkeys(differences)) + '.'})
+        return snapshot
 
     @classmethod
     def _items(cls, pr, total_amount):
@@ -120,6 +167,7 @@ class RequisitionConversionService:
             raise ValidationError({'error': 'This requisition has already been converted.'})
         if current_status != 'approved':
             raise ValidationError({'error': 'Only approved requisitions can be converted to a purchase order.'})
+        signed_snapshot = cls._signed_document_snapshot(pr)
         workflow = normalize_ceo_workflow(
             pr.approval_workflow_config,
             pr.po_number_reference,
@@ -142,6 +190,10 @@ class RequisitionConversionService:
         vendor, vendor_was_linked = cls._resolve_vendor(pr)
         if vendor.status != 'active':
             raise ValidationError({'error': 'The linked vendor must be active before conversion.'})
+        if signed_snapshot:
+            source_supplier = signed_snapshot.get('supplier_name') or signed_snapshot.get('preferred_supplier')
+            if not cls._supplier_identity(source_supplier) or cls._supplier_identity(vendor.name) != cls._supplier_identity(source_supplier):
+                raise ValidationError({'error': 'The selected vendor does not match the supplier on the signed PDF. Select the correct vendor before creating a purchase order.'})
 
         total_amount = cls._total_amount(pr)
         po_number = cls._po_number(pr)

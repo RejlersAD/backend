@@ -14,15 +14,17 @@ URL roots (wired in apps.project_control.urls):
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Count, Max, Prefetch, Q, Sum
+from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from apps.core.project_models import Project
@@ -55,9 +57,9 @@ from .services.finance_sync import sync_project_spend
 from .services.kpis import compute_project_kpis
 from .services.portfolio_exceptions import build_portfolio_exception_dashboard
 from .services.cost_ledger import source_record
+from .services.financial_scope import require_owned_financial_record
 from .services.actuals import create_integrated_snapshot, reconcile_reporting_period
 from .services.commercial_dashboard import project_commercial_dashboard
-from .services.s3 import presign_document_download
 from .services.variance import compute_variance
 from .tasks import parse_uploaded_document
 
@@ -102,34 +104,111 @@ class _ProjectFilteredMixin:
 # ─────────────────────────────────────────────────────────────────────────────
 # Estimate viewset
 # ─────────────────────────────────────────────────────────────────────────────
+def _locked_estimate(estimate_id):
+    estimate = Estimate.objects.select_for_update().filter(pk=estimate_id, is_deleted=False).first()
+    if estimate is None:
+        raise NotFound('This estimate is no longer available.')
+    return estimate
+
+
+def _locked_draft_estimate(estimate_id):
+    estimate = _locked_estimate(estimate_id)
+    if estimate.status != 'draft':
+        raise ValidationError({'status': 'Approved and superseded estimates are read-only. Copy a new version to make changes.'})
+    return estimate
+
+
+def _recalculate_estimate(estimate):
+    amount = estimate.line_items.filter(is_deleted=False).aggregate(total=Sum('line_total'))['total'] or Decimal('0')
+    if abs(amount) >= Decimal('1000000000000'):
+        raise ValidationError({'total_amount': 'The total exceeds the supported estimate amount.'})
+    estimate.total_amount = amount
+    estimate.save(update_fields=['total_amount', 'updated_at'])
+
+
 class EstimateViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
-    queryset = Estimate.objects.all().select_related('project').prefetch_related('line_items')
+    queryset = Estimate.objects.all().select_related('project')
+
+    def get_queryset(self):
+        queryset = super().get_queryset().annotate(active_line_count=Count('line_items', filter=Q(line_items__is_deleted=False))).order_by('-created_at', '-id')
+        if self.action != 'list':
+            queryset = queryset.prefetch_related(Prefetch('line_items', queryset=EstimateLineItem.objects.filter(is_deleted=False), to_attr='active_lines'))
+        return queryset
 
     def get_serializer_class(self):
         if self.action == 'list':
             return EstimateListSerializer
         return EstimateSerializer
 
+    @transaction.atomic
     def perform_create(self, serializer):
         project = serializer.validated_data.get('project')
         if not can_write_enterprise_project(self.request.user, project):
             raise PermissionDenied('You cannot modify this project.')
-        serializer.save(created_by=self.request.user)
+        Project.objects.select_for_update().get(pk=project.pk)
+        kind = serializer.validated_data.get('kind', 'estimate')
+        version = (Estimate.objects.filter(project=project, kind=kind).aggregate(value=Max('version'))['value'] or 0) + 1
+        serializer.save(created_by=self.request.user, version=version, status='draft', source='manual', total_amount=0)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        serializer.instance = _locked_draft_estimate(serializer.instance.pk)
+        serializer.save()
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        _locked_draft_estimate(instance.pk).soft_delete()
+
+    @action(detail=True, methods=['post'], url_path='copy-version')
+    @transaction.atomic
+    def copy_version(self, request, pk=None):
+        source = self.get_object()
+        Project.objects.select_for_update().get(pk=source.project_id)
+        source = _locked_estimate(source.pk)
+        if source.source_document_id and source.source_document.project_id != source.project_id:
+            raise ValidationError({'source_document': 'The source document must belong to this project before copying.'})
+        title = request.data.get('title', source.title)
+        if not isinstance(title, str) or len(title) > 255:
+            raise ValidationError({'title': 'The title must contain at most 255 characters.'})
+        version = (Estimate.objects.filter(project=source.project, kind=source.kind).aggregate(value=Max('version'))['value'] or 0) + 1
+        copy = Estimate.objects.create(
+            project=source.project, kind=source.kind, version=version, source='manual', status='draft',
+            title=title, currency=source.currency, notes=source.notes, snapshot_date=source.snapshot_date,
+            source_document=source.source_document, created_by=request.user, total_amount=source.total_amount,
+        )
+        fields = ('wbs_code', 'description', 'discipline', 'category', 'unit', 'quantity', 'unit_rate', 'line_total', 'sort_order', 'source_row')
+        EstimateLineItem.objects.bulk_create([
+            EstimateLineItem(estimate=copy, **{field: getattr(line, field) for field in fields})
+            for line in source.line_items.filter(is_deleted=False)
+        ])
+        # A copy preserves the recorded header, including legacy Sales awards
+        # with an aggregate value but no cost lines. Subsequent line edits
+        # recalculate the draft, and approval reconciles it before locking.
+        return Response(self.get_serializer(copy).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        est = self.get_object()
+        est = _locked_estimate(self.get_object().pk)
+        if est.status == 'approved':
+            return Response(self.get_serializer(est).data)
+        est = _locked_draft_estimate(est.pk)
+        if not est.line_items.filter(is_deleted=False).exists():
+            raise ValidationError({'line_items': 'Add at least one estimate line before approving this version.'})
+        _recalculate_estimate(est)
         est.status = 'approved'
         est.save(update_fields=['status', 'updated_at'])
-        return Response(EstimateSerializer(est).data)
+        return Response(self.get_serializer(est).data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def supersede(self, request, pk=None):
         est = self.get_object()
+        est = _locked_estimate(est.pk)
         est.status = 'superseded'
         est.save(update_fields=['status', 'updated_at'])
-        return Response(EstimateSerializer(est).data)
+        return Response(self.get_serializer(est).data)
 
 
 class EstimateLineItemViewSet(viewsets.ModelViewSet):
@@ -137,18 +216,40 @@ class EstimateLineItemViewSet(viewsets.ModelViewSet):
     serializer_class = EstimateLineItemSerializer
     queryset = EstimateLineItem.objects.all().filter(is_deleted=False)
 
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        # Acquire the parent lock before DRF reads quantity/rate for validation.
+        # Concurrent line edits and approval therefore use one coherent total.
+        _locked_draft_estimate(self.get_object().estimate_id)
+        return super().update(request, *args, **kwargs)
+
     def get_queryset(self):
-        qs = super().get_queryset().filter(estimate__project__in=accessible_enterprise_projects(self.request.user))
+        qs = super().get_queryset().filter(estimate__is_deleted=False, estimate__project__in=accessible_enterprise_projects(self.request.user))
         est = self.request.query_params.get('estimate')
         if est:
             qs = qs.filter(estimate_id=est)
         return qs
 
+    @transaction.atomic
     def perform_create(self, serializer):
         project = serializer.validated_data['estimate'].project
         if not can_write_enterprise_project(self.request.user, project):
             raise PermissionDenied('You cannot modify this project.')
+        estimate = _locked_draft_estimate(serializer.validated_data['estimate'].pk)
+        serializer.save(estimate=estimate)
+        _recalculate_estimate(estimate)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        estimate = _locked_draft_estimate(serializer.instance.estimate_id)
         serializer.save()
+        _recalculate_estimate(estimate)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        estimate = _locked_draft_estimate(instance.estimate_id)
+        instance.soft_delete()
+        _recalculate_estimate(estimate)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,8 +260,64 @@ class WBSNodeViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     serializer_class = WBSNodeSerializer
     queryset = WBSNode.objects.all()
 
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        node = self.get_object()
+        Project.objects.select_for_update().get(pk=node.project_id)
+        return super().update(request, *args, **kwargs)
 
-class ControlAccountViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        from django.db.models.deletion import ProtectedError
+        from .serializers import wbs_has_approved_scope
+        Project.objects.select_for_update().get(pk=instance.project_id)
+        pending, visited = [instance], set()
+        while pending:
+            node = pending.pop()
+            if node.pk in visited:
+                continue
+            visited.add(node.pk)
+            if wbs_has_approved_scope(node):
+                raise ValidationError('Approved WBS scope cannot be deleted. Create a revised scope instead.')
+            pending.extend(node.children.all())
+        try:
+            instance.delete()
+        except ProtectedError:
+            raise ValidationError('This WBS is used by project control records and cannot be deleted.')
+
+
+class _FinancialScopeMixin:
+    """Serialize financial mutations with project ownership changes."""
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        try:
+            project_id = int(request.data.get('project'))
+        except (TypeError, ValueError):
+            raise ValidationError({'project': 'Select a valid project.'})
+        project = Project.objects.select_for_update().filter(pk=project_id, is_deleted=False).first()
+        if project is None:
+            raise ValidationError({'project': 'Select an active project.'})
+        if not can_write_enterprise_project(request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        return super().create(request, *args, **kwargs)
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        current = self.get_object()
+        Project.objects.select_for_update().get(pk=current.project_id, is_deleted=False)
+        return super().update(request, *args, **kwargs)
+
+    def _locked_financial_object(self):
+        current = self.get_object()
+        Project.objects.select_for_update().get(pk=current.project_id, is_deleted=False)
+        # Approval reloads after the project lock; nullable related joins are not locked.
+        current = self.get_queryset().select_for_update(of=('self',)).get(pk=current.pk)
+        require_owned_financial_record(current)
+        return current
+
+
+class ControlAccountViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
     """Governed WBS responsibility with submit/approve/close transitions."""
 
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
@@ -189,7 +346,7 @@ class ControlAccountViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
         with transaction.atomic():
-            account = ControlAccount.objects.select_for_update().get(pk=self.get_object().pk)
+            account = self._locked_financial_object()
             if account.status != 'draft':
                 raise ValidationError('Only a draft Control Account can be submitted.')
             account.status = 'submitted'
@@ -203,7 +360,7 @@ class ControlAccountViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         if not can_approve_commercial(request.user):
             raise PermissionDenied('Project Control or Finance approval access is required.')
         with transaction.atomic():
-            account = ControlAccount.objects.select_for_update().get(pk=self.get_object().pk)
+            account = self._locked_financial_object()
             if account.status != 'submitted':
                 raise ValidationError('Only a submitted Control Account can be approved.')
             if account.submitted_by_id == request.user.id and not request.user.is_superuser:
@@ -372,7 +529,7 @@ class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
                     'period': 'Submit the current open reporting period before reopening this one.',
                 })
             self._transition(
-                request, period, expected={'locked'}, target='reopened',
+                request, period, expected={'submitted', 'locked'}, target='reopened',
                 action_name='reopened', reason=reason,
             )
         return Response(self.get_serializer(period).data)
@@ -383,7 +540,7 @@ class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         return Response(ReportingPeriodAuditSerializer(period.audit_events.all(), many=True).data)
 
 
-class ApprovedHourEntryViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+class ApprovedHourEntryViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
     """Two-person approval workflow for project-attributed labour actuals."""
 
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
@@ -410,7 +567,7 @@ class ApprovedHourEntryViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
         with transaction.atomic():
-            entry = ApprovedHourEntry.objects.select_for_update().get(pk=self.get_object().pk)
+            entry = self._locked_financial_object()
             if entry.status != 'draft':
                 raise ValidationError('Only a draft hour entry can be submitted.')
             if not entry.reporting_period.is_entry_allowed:
@@ -426,7 +583,7 @@ class ApprovedHourEntryViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         if not can_approve_commercial(request.user):
             raise PermissionDenied('Project Control or Finance approval access is required.')
         with transaction.atomic():
-            entry = ApprovedHourEntry.objects.select_for_update().get(pk=self.get_object().pk)
+            entry = self._locked_financial_object()
             if entry.status != 'submitted':
                 raise ValidationError('Only a submitted hour entry can be approved.')
             if entry.submitted_by_id == request.user.id and not request.user.is_superuser:
@@ -466,7 +623,7 @@ class ApprovedHourEntryViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         return Response(self.get_serializer(entry).data)
 
 
-class BudgetAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+class BudgetAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = BudgetAllocationSerializer
@@ -480,10 +637,11 @@ class BudgetAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         super().perform_update(serializer)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        allocation = self.get_object()
         if not can_approve_commercial(request.user):
             raise PermissionDenied('Finance or Project Control approval access is required.')
+        allocation = self._locked_financial_object()
         allocation.status = 'approved'
         allocation.approved_by = request.user
         allocation.approved_at = timezone.now()
@@ -492,7 +650,7 @@ class BudgetAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         return Response(self.get_serializer(allocation).data)
 
 
-class CostAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+class CostAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = CostAllocationSerializer
@@ -538,12 +696,13 @@ class CostAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
             sync_project_spend(project, user=user)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        allocation = self.get_object()
-        if allocation.allocated_by_id == request.user.id and not request.user.is_superuser:
-            raise PermissionDenied('The allocator cannot approve their own cost allocation.')
         if not can_approve_commercial(request.user):
             raise PermissionDenied('Finance or Project Control approval access is required.')
+        allocation = self._locked_financial_object()
+        if allocation.allocated_by_id == request.user.id and not request.user.is_superuser:
+            raise PermissionDenied('The allocator cannot approve their own cost allocation.')
         allocation.status = 'approved'
         allocation.approved_by = request.user
         allocation.approved_at = timezone.now()
@@ -584,8 +743,28 @@ class CostLedgerEntryViewSet(_ProjectFilteredMixin, viewsets.ReadOnlyModelViewSe
 class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = ProjectDocumentSerializer
-    parser_classes = [MultiPartParser, FormParser]
-    queryset = ProjectDocument.objects.all().select_related('project', 'uploaded_by')
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    queryset = ProjectDocument.objects.all().select_related('project', 'uploaded_by').order_by('-created_at', '-id')
+
+    def list(self, request, *args, **kwargs):
+        project = None
+        project_id = request.query_params.get('project')
+        if project_id:
+            try:
+                project = accessible_enterprise_projects(request.user).filter(pk=project_id).first()
+            except (ValueError, TypeError):
+                raise ValidationError({'project': 'A valid project ID is required.'})
+        response = super().list(request, *args, **kwargs)
+        capabilities = {
+            'can_upload': bool(project and can_write_enterprise_project(request.user, project)),
+            'max_document_bytes': MAX_DOCUMENT_BYTES,
+            'document_kinds': [{'value': value, 'label': label} for value, label in ProjectDocument._meta.get_field('kind').choices],
+        }
+        if isinstance(response.data, dict):
+            response.data['capabilities'] = capabilities
+        else:
+            response.data = {'count': len(response.data), 'next': None, 'previous': None, 'results': response.data, 'capabilities': capabilities}
+        return response
 
     def perform_create(self, serializer):
         file = serializer.validated_data.get('file')
@@ -610,11 +789,45 @@ class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
             except Exception as inner:  # noqa: BLE001
                 logger.warning('inline parse_uploaded_document failed: %s', inner)
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        document = ProjectDocument.objects.select_for_update().filter(pk=serializer.instance.pk, is_deleted=False).first()
+        if document is None:
+            raise NotFound('This document is no longer available.')
+        serializer.instance = document
+        serializer.save()
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        document = ProjectDocument.objects.select_for_update().filter(pk=instance.pk, is_deleted=False).first()
+        if document is None:
+            raise NotFound('This document is no longer available.')
+        document.soft_delete()
+
+    @action(detail=True, methods=['get'], url_path='download')
+    def download(self, request, pk=None):
+        document = self.get_object()
+        if not document.file:
+            raise NotFound('This document has no stored file.')
+        try:
+            stream = document.file.open('rb')
+        except FileNotFoundError:
+            raise NotFound('The stored file is no longer available.')
+        except Exception:
+            logger.warning('Project document %s storage download failed.', document.pk, exc_info=True)
+            return Response({'detail': 'Document storage is unavailable. Please retry.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        filename = (document.original_filename or document.file.name).replace('\\', '/').rsplit('/', 1)[-1]
+        filename = ''.join(char for char in filename if ord(char) >= 32 and ord(char) != 127) or 'document'
+        response = FileResponse(stream, as_attachment=True, filename=filename, content_type='application/octet-stream')
+        response['X-Content-Type-Options'] = 'nosniff'
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
     @action(detail=True, methods=['get'], url_path='presign-download')
     def presign_download(self, request, pk=None):
         doc = self.get_object()
-        url = presign_document_download(doc)
-        return Response({'document_id': doc.id, 'download_url': url})
+        url = self.get_serializer(doc).data['download_url']
+        return Response({'document_id': doc.id, 'download_url': url, 'requires_auth': True})
 
     @action(detail=False, methods=['post'], url_path='import-boq')
     def import_boq(self, request):
@@ -636,9 +849,16 @@ class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         except Project.DoesNotExist:
             return Response({'error': 'project not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        if not can_write_enterprise_project(request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
         kind = request.data.get('kind') or 'estimate'
         title = request.data.get('title', '')
         notes = request.data.get('notes', '')
+        estimate_input = EstimateSerializer(data={
+            'project': project.pk, 'kind': kind, 'title': title, 'notes': notes,
+            'currency': request.data.get('currency') or project.currency or 'AED',
+        }, context=self.get_serializer_context())
+        estimate_input.is_valid(raise_exception=True)
 
         # Save as document first so the estimate retains an audit link.
         doc = ProjectDocument.objects.create(
@@ -657,6 +877,7 @@ class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
             summary = import_boq_excel(
                 project=project, file_obj=doc.file, kind=kind,
                 title=title, notes=notes, user=request.user, source_document=doc,
+                currency=estimate_input.validated_data['currency'],
             )
         except Exception as exc:  # noqa: BLE001
             doc.parse_status = 'failed'
@@ -670,7 +891,7 @@ class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
             except Exception:
                 pass
 
-        return Response({'document': ProjectDocumentSerializer(doc).data, 'summary': summary},
+        return Response({'document': self.get_serializer(doc).data, 'summary': summary},
                         status=status.HTTP_201_CREATED)
 
 
@@ -854,10 +1075,19 @@ class ProjectAnalyticsViewSet(viewsets.ViewSet):
         base_id = request.query_params.get('base')
         cmp_id  = request.query_params.get('compare')
         group_by = request.query_params.get('group_by', 'wbs')
-        base = Estimate.objects.filter(pk=base_id, is_deleted=False).first() if base_id else None
-        cmp_ = Estimate.objects.filter(pk=cmp_id,  is_deleted=False).first() if cmp_id  else None
+        selected = {}
+        for field, estimate_id in [('base', base_id), ('compare', cmp_id)]:
+            if not estimate_id:
+                selected[field] = None
+                continue
+            try:
+                selected[field] = Estimate.objects.get(pk=estimate_id, project=project, is_deleted=False)
+            except (ValueError, TypeError):
+                raise ValidationError({field: 'Provide a valid estimate ID.'})
+            except Estimate.DoesNotExist:
+                raise NotFound('The selected estimate does not belong to this project or is unavailable.')
         return Response(compute_variance(
-            project=project, base_estimate=base, compare_estimate=cmp_, group_by=group_by,
+            project=project, base_estimate=selected['base'], compare_estimate=selected['compare'], group_by=group_by,
         ))
 
     @action(detail=False, methods=['post'], url_path='finance-sync')

@@ -203,6 +203,7 @@ def build_workable_plan(project, user, request_data, progress):
     }
 
 
+@transaction.atomic
 def approve_workable_baseline(project, user, version_id, name, progress):
     from ..models import ScheduleBaseline, ScheduleVersion
     from ..schedule_serializers import (
@@ -210,24 +211,29 @@ def approve_workable_baseline(project, user, version_id, name, progress):
         ScheduleBaselineSerializer, ScheduleVersionSerializer, ScheduleWBSNodeSerializer,
     )
     from .trustworthy_scheduling import approve_schedule_assurance, current_assurance
+    from .schedule_approval import approve_schedule_version, require_schedule_authority
+    from .audit import record_event
 
-    version = ScheduleVersion.objects.select_related('schedule__project').get(
+    version = ScheduleVersion.objects.select_for_update().get(
         pk=version_id, schedule__project=project, is_deleted=False,
     )
+    require_schedule_authority(version, user)
     existing = version.baselines.filter(is_deleted=False).first()
     if version.status == 'baselined' and existing:
         return {'state': 'baselined', 'baseline': ScheduleBaselineSerializer(existing).data}
     assurance = current_assurance(version)
-    if not assurance or assurance.blockers:
+    if not assurance or assurance.is_deleted or assurance.blockers:
         raise ValueError('Resolve the consolidated critical exceptions before baseline approval.')
+    if version.governance_items.filter(priority='critical', is_deleted=False).exclude(status__in=['closed', 'implemented', 'rejected']).exists():
+        raise ValueError('Resolve open critical governance items before baselining.')
     progress(25, 'Approving final schedule assurance', 'assurance_approval')
     with transaction.atomic():
         assurance = approve_schedule_assurance(version, user)
-        version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
-        if version.status != 'calculated':
-            raise ValueError('Only a calculated workable plan can be approved.')
-        version.status = 'approved'
-        version.save(update_fields=['status', 'updated_at'])
+        record_event(
+            project=project, actor=user, action='schedule.assurance_approved', entity=assurance,
+            after={'version_id': version.pk},
+        )
+        version = approve_schedule_version(version, user, route='workable_baseline')
         progress(60, 'Creating the controlled baseline snapshot', 'baseline_snapshot')
         snapshot = {
             'version': ScheduleVersionSerializer(version).data,
@@ -244,4 +250,8 @@ def approve_workable_baseline(project, user, version_id, name, progress):
         )
         version.status = 'baselined'
         version.save(update_fields=['status', 'updated_at'])
+        record_event(
+            project=project, actor=user, action='schedule.baselined', entity=baseline,
+            after={'version': version.version},
+        )
     return {'state': 'baselined', 'baseline': ScheduleBaselineSerializer(baseline).data}

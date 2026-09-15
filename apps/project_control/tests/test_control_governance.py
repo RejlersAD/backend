@@ -136,3 +136,21 @@ class ControlGovernanceApiTests(TestCase):
         })
         self.assertEqual(response.status_code, 400)
         self.assertIn('start_date', response.data)
+
+    def test_submitted_period_can_be_returned_for_correction_by_authorized_approver(self):
+        period = ReportingPeriod.objects.create(
+            project=self.project, sequence=1, name='January correction',
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+            data_date=date(2026, 1, 31), status='submitted', created_by=self.owner,
+        )
+        reason = {'reason': 'Backdated cost arrived after submission.'}
+        denied = self.call(ReportingPeriodViewSet, 'post', 'reopen', self.manager, reason, pk=period.id)
+        self.assertEqual(denied.status_code, 403)
+        period.refresh_from_db()
+        self.assertEqual(period.status, 'submitted')
+        reopened = self.call(ReportingPeriodViewSet, 'post', 'reopen', self.controller, reason, pk=period.id)
+        self.assertEqual(reopened.status_code, 200, reopened.data)
+        self.assertEqual(reopened.data['status'], 'reopened')
+        audit = ReportingPeriodAudit.objects.get(period=period)
+        self.assertEqual(audit.from_status, 'submitted')
+        self.assertEqual(audit.reason, reason['reason'])

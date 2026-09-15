@@ -207,6 +207,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     # API alias for frontend compatibility
     approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
     linked_po_id = serializers.SerializerMethodField()
+    linked_po_number = serializers.SerializerMethodField()
 
     SERVER_CONTROLLED_FIELDS = PR_SERVER_CONTROLLED_FIELDS
     
@@ -249,7 +250,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'management_approval', 'management_approval_remarks', 'management_approval_evidence',
             
             # Reference Section (Field 14) - Enhanced with PO Applicable
-            'po_applicable', 'po_number_reference', 'linked_po_id',
+            'po_applicable', 'po_number_reference', 'linked_po_id', 'linked_po_number',
             
             # Purchase Recommendation Section (Field 15) - RENAMED from special_notes
             'purchase_recommendation',
@@ -287,13 +288,22 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             *PR_SERVER_CONTROLLED_FIELDS,
         ]
 
-    def get_linked_po_id(self, obj):
-        linked_order = max(
+    @staticmethod
+    def _linked_purchase_order(obj):
+        # Consume the view's prefetched relation so register rows add no queries.
+        return max(
             obj.purchase_orders.all(),
             key=lambda order: order.created_at,
             default=None,
         )
+
+    def get_linked_po_id(self, obj):
+        linked_order = self._linked_purchase_order(obj)
         return str(linked_order.id) if linked_order else None
+
+    def get_linked_po_number(self, obj):
+        linked_order = self._linked_purchase_order(obj)
+        return linked_order.po_number if linked_order else None
 
     def _is_super_admin(self, user):
         if getattr(user, 'is_superuser', False):
@@ -309,6 +319,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
     def validate_approval_workflow_config(self, value):
         """Validate approver assignments and discard client-supplied approval state."""
+        verification = (getattr(self.instance, 'price_remarks_data', None) or {}).get('signed_document_verification') or {}
+        if verification.get('signed_off'):
+            # Editing commercial fields must not replace completed PDF decisions
+            # with the new-form approval route submitted by an older client.
+            return self.instance.approval_workflow_config
         if not isinstance(value, list):
             raise serializers.ValidationError('Approval workflow must be a list of stages.')
 
@@ -408,6 +423,19 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             normalized_workflow.append(normalized_stage)
 
         return normalized_workflow
+
+    def validate_price_remarks_data(self, value):
+        if value is not None and not isinstance(value, dict):
+            raise serializers.ValidationError('Pricing metadata must be an object.')
+        data = dict(value or {})
+        existing = getattr(self.instance, 'price_remarks_data', None) or {}
+        # Source-document decisions and comparison evidence are written only by
+        # the import/link services, never by ordinary form JSON.
+        for key in ('signed_document_verification', 'signed_approval_evidence', 'signed_pdf_attached', 'po_link'):
+            data.pop(key, None)
+            if key in existing:
+                data[key] = existing[key]
+        return data
 
     def validate_items(self, value):
         return normalize_line_items(value)
@@ -1082,12 +1110,64 @@ class ProcurementCategorySerializer(serializers.Serializer):
     color = serializers.CharField()
 
 
+class PODocumentReviewSerializer(serializers.Serializer):
+    """Editable business fields only; source, signatures and approval remain immutable."""
+    po_number = serializers.CharField(max_length=100, required=False)
+    summary = serializers.CharField(max_length=1000, required=False, allow_blank=True)
+    vendor_name = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    currency = serializers.CharField(max_length=3, min_length=3, required=False)
+    total_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
+    tax_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
+    gross_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
+    po_date = serializers.DateField(required=False, allow_null=True)
+    expected_delivery = serializers.DateField(required=False, allow_null=True)
+    pr_id = serializers.PrimaryKeyRelatedField(queryset=PurchaseRequisition.objects.all(), required=False, allow_null=True)
+
+    def validate_currency(self, value):
+        value = value.upper()
+        if len(value) != 3 or not value.isascii() or not value.isalpha():
+            raise serializers.ValidationError('Enter a three-letter currency code.')
+        return value
+
+    def validate_po_number(self, value):
+        from .services.po_excel_import import canonical_po_number
+        if not canonical_po_number(value):
+            raise serializers.ValidationError('Enter a valid RAD purchase order number.')
+        return value
+
+    def validate(self, attrs):
+        unknown = set(self.initial_data) - set(self.fields)
+        if unknown:
+            raise serializers.ValidationError({field: 'This field cannot be edited.' for field in unknown})
+        return attrs
+
+
 class PODocumentSerializer(serializers.ModelSerializer):
     """Serializer for uploaded PO/PR documents and their AI-extracted data."""
 
     uploaded_by_name = serializers.CharField(source='uploaded_by.get_full_name', read_only=True, allow_null=True)
     extraction_status_display = serializers.CharField(source='get_extraction_status_display', read_only=True)
     document_type_display = serializers.CharField(source='get_document_type_display', read_only=True)
+
+    def to_representation(self, instance):
+        result = super().to_representation(instance)
+        fields = result.get('extracted_data')
+        if instance.document_type == 'purchase_order' and isinstance(fields, dict) and fields.get('summary') and 'summary' not in fields.get('manually_reviewed_fields', []):
+            from .services.signed_po_pdf_import import normalize_po_summary
+            original_summary = fields['summary']
+            cleaned_summary = normalize_po_summary(original_summary)
+            if cleaned_summary != original_summary:
+                fields = {**fields, 'summary': cleaned_summary, 'ocr_summary_raw': fields.get('ocr_summary_raw', original_summary)}
+                result['extracted_data'] = fields
+        if instance.document_type == 'purchase_order' and isinstance(fields, dict) and fields.get('vendor_name') and not fields.get('vendor_name_source'):
+            # Older uploads used an unbounded OCR seller span. Keep the source
+            # evidence intact while presenting the actual company name.
+            from .services.signed_po_pdf_import import _seller_name
+            original = fields['vendor_name']
+            cleaned = _seller_name(f'Seller: {original}')
+            if cleaned and cleaned != original:
+                result['extracted_data'] = {**fields, 'vendor_name': cleaned, 'ocr_vendor_name_raw': fields.get('ocr_vendor_name_raw', original)}
+        return result
 
     class Meta:
         model = PODocument

@@ -30,7 +30,7 @@ def parse_uploaded_document(document_id: int):
     """
     from .models import ProjectDocument
     try:
-        doc = ProjectDocument.objects.get(pk=document_id)
+        doc = ProjectDocument.objects.get(pk=document_id, is_deleted=False)
     except ProjectDocument.DoesNotExist:
         logger.warning('parse_uploaded_document: doc %s not found', document_id)
         return {'document_id': document_id, 'error': 'not_found'}
@@ -40,7 +40,13 @@ def parse_uploaded_document(document_id: int):
         'phase': 1,
         'note': 'Metadata-only parse — AI extraction lands in Phase 2/4.',
     }
-    doc.save(update_fields=['parse_status', 'parsed_data', 'updated_at'])
+    # A queued metadata pass must not revive or change a document removed meanwhile.
+    from django.utils import timezone
+    updated = ProjectDocument.objects.filter(pk=doc.pk, is_deleted=False).update(
+        parse_status=doc.parse_status, parsed_data=doc.parsed_data, updated_at=timezone.now(),
+    )
+    if not updated:
+        return {'document_id': document_id, 'error': 'not_found'}
     return {'document_id': doc.id, 'parse_status': doc.parse_status}
 
 

@@ -19,7 +19,7 @@ from ..models import (
 )
 from .intelligence import analyze_project
 
-ENGINE_VERSION = '3.0'
+ENGINE_VERSION = '3.1'
 
 _DOCUMENT_NUMBER_RE = re.compile(
     r'\b(?=[A-Z0-9./_~\-]{6,100}\b)(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,}\b',
@@ -57,6 +57,19 @@ _REGISTER_ROW_RE = re.compile(
     r'(?P<existing>NEW|EXISTING)\s+(?P<class>\d{1,3})\s+(?P<revision>[A-Z0-9]{1,8})(?:\s.*)?$',
     re.I,
 )
+
+# A repeated phrase alone does not prove it is a collapsed AREA column: titles
+# commonly share endings such as "Inspection Report" or "For Company Review".
+_REGISTER_DOCUMENT_WORDS = {
+    'report', 'reports', 'study', 'studies', 'drawing', 'drawings', 'diagram', 'diagrams',
+    'plan', 'plans', 'procedure', 'procedures', 'assessment', 'specification', 'specifications',
+    'list', 'schedule', 'matrix', 'calculation', 'calculations', 'philosophy', 'datasheet',
+    'sheet', 'sheets', 'register', 'review', 'dossier',
+}
+_REGISTER_AREA_ENDINGS = {
+    'island', 'plant', 'site', 'area', 'zone', 'field', 'terminal', 'platform',
+    'facility', 'station', 'complex', 'yard', 'offshore', 'onshore',
+}
 
 
 def _normalize(value):
@@ -173,6 +186,9 @@ def _extract_register_rows(rows, file_obj, text):
     repeated_suffixes = [
         suffix for suffix, count in suffix_counts.items()
         if count >= threshold and len(suffix.split()) >= 2
+        and not set(suffix.split()).intersection(_REGISTER_DOCUMENT_WORDS)
+        and suffix.split()[-1] in _REGISTER_AREA_ENDINGS
+        and suffix.split()[0] not in {'for', 'of', 'in', 'on', 'at', 'to'}
     ]
     area_suffix = max(repeated_suffixes, key=lambda value: len(value.split()), default='')
 

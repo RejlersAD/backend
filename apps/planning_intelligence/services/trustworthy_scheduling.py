@@ -255,6 +255,7 @@ def run_schedule_assurance(version, *, requested_by=None):
 def current_assurance(version):
     from .operational_jobs import assurance_state_fingerprint
     review = version.assurance_reviews.filter(
+        is_deleted=False,
         status__in=['draft', 'ready', 'approved'], calculated_state_at=version.calculated_at,
         input_fingerprint=assurance_state_fingerprint(version),
     ).first()
@@ -263,6 +264,11 @@ def current_assurance(version):
 
 @transaction.atomic
 def approve_schedule_assurance(version, user):
+    # Callers may still hold the object from before CPM recalculated it.
+    # Serialize approval against schedule edits and check the persisted state.
+    version = type(version).objects.select_for_update().get(pk=version.pk, is_deleted=False)
+    from .schedule_approval import require_schedule_authority
+    require_schedule_authority(version, user)
     review = current_assurance(version)
     if not review:
         raise ValueError('Run Phase 3 assurance for the latest CPM calculation first.')

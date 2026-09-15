@@ -13,6 +13,7 @@ from ..models import (
     ReconciliationRun, ReportingPeriod, WBSNode,
 )
 from ..views import ProjectAnalyticsViewSet
+from ..services.kpis import compute_project_kpis
 
 
 class PortfolioExceptionDashboardTests(TestCase):
@@ -85,3 +86,55 @@ class PortfolioExceptionDashboardTests(TestCase):
         self.assertEqual(response.data['summary']['total_projects'], 1)
         hidden = self.get_dashboard({'search': 'PORT-HIDDEN'})
         self.assertEqual(hidden.data['summary']['total_projects'], 0)
+
+    def test_unconfirmed_setup_does_not_claim_zero_progress_or_operational_overdue(self):
+        project = Project.objects.create(
+            code='PORT-UNCONFIRMED', name='Document-only project setup', owner=self.owner,
+            status='planning', progress=0, end_date=timezone.localdate() - timedelta(days=20),
+            custom_fields={'control_setup': {
+                'operational_status_confirmed': False, 'progress_confirmed': False,
+            }},
+        )
+        row = self.get_dashboard({'search': project.code}).data['projects'][0]
+        self.assertEqual(row['project']['status'], 'planning')
+        self.assertFalse(row['project']['operational_status_confirmed'])
+        self.assertFalse(row['project']['progress_confirmed'])
+        self.assertIsNone(row['project']['progress_pct'])
+        self.assertNotIn('project_finish_overdue', {issue['code'] for issue in row['exceptions']})
+        kpis = compute_project_kpis(project)
+        self.assertFalse(kpis['progress_confirmed'])
+        self.assertIsNone(kpis['progress_pct'])
+        project.refresh_from_db()
+        self.assertEqual(project.progress, 0)
+        self.assertFalse(project.custom_fields['control_setup']['operational_status_confirmed'])
+
+    def test_sealed_progress_is_authoritative_without_confirming_operational_status(self):
+        self.project.progress = 0
+        self.project.custom_fields = {'control_setup': {
+            'operational_status_confirmed': False, 'progress_confirmed': False,
+        }}
+        self.project.save(update_fields=['progress', 'custom_fields'])
+        row = self.get_dashboard({'search': self.project.code}).data['projects'][0]
+        kpis = compute_project_kpis(self.project)
+        for facts in (row['project'], kpis):
+            self.assertFalse(facts['operational_status_confirmed'])
+            self.assertTrue(facts['progress_confirmed'])
+            self.assertEqual(facts['progress_pct'], Decimal('40'))
+        self.assertIn('cpi_below_threshold', {issue['code'] for issue in row['exceptions']})
+
+    def test_confirmed_zero_and_legacy_status_keep_their_meaning(self):
+        for setup in ({}, {'control_setup': {
+            'operational_status_confirmed': True, 'progress_confirmed': True,
+        }}):
+            with self.subTest(setup=setup):
+                project = Project.objects.create(
+                    code=f'PORT-ZERO-{bool(setup)}', name='Confirmed zero progress',
+                    owner=self.owner, status='active', progress=0,
+                    end_date=timezone.localdate() - timedelta(days=20), custom_fields=setup,
+                )
+                row = self.get_dashboard({'search': project.code}).data['projects'][0]
+                for facts in (row['project'], compute_project_kpis(project)):
+                    self.assertTrue(facts['operational_status_confirmed'])
+                    self.assertTrue(facts['progress_confirmed'])
+                    self.assertEqual(facts['progress_pct'], 0)
+                self.assertIn('project_finish_overdue', {issue['code'] for issue in row['exceptions']})

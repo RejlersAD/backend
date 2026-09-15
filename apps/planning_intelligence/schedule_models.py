@@ -385,11 +385,32 @@ class DailyFieldUpdate(BaseModel):
         ]
 
 
-class ScheduleControlSnapshot(BaseModel):
-    """Immutable EVM and forecast result captured for a schedule data date."""
+class ScheduleControlSnapshotQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValueError('Schedule control observations are immutable; capture a new revision.')
 
-    version = models.ForeignKey(ScheduleVersion, on_delete=models.CASCADE, related_name='control_snapshots')
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValueError('Schedule control observations are immutable; capture a new revision.')
+
+    def bulk_create(self, objs, batch_size=None, ignore_conflicts=False,
+                    update_conflicts=False, update_fields=None, unique_fields=None):
+        if update_conflicts:
+            raise ValueError('Schedule control observations are immutable; capture a new revision.')
+        return super().bulk_create(
+            objs, batch_size=batch_size, ignore_conflicts=ignore_conflicts,
+            update_conflicts=False, update_fields=update_fields, unique_fields=unique_fields,
+        )
+
+    def delete(self):
+        raise ValueError('Schedule control observations cannot be deleted.')
+
+
+class ScheduleControlSnapshot(BaseModel):
+    """Append-only EVM observation; corrections create a dated revision."""
+
+    version = models.ForeignKey(ScheduleVersion, on_delete=models.PROTECT, related_name='control_snapshots')
     data_date = models.DateField()
+    revision = models.PositiveIntegerField(default=1)
     bac = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     planned_value = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     earned_value = models.DecimalField(max_digits=16, decimal_places=2, default=0)
@@ -410,7 +431,20 @@ class ScheduleControlSnapshot(BaseModel):
         related_name='schedule_control_snapshots_captured',
     )
 
+    objects = ScheduleControlSnapshotQuerySet.as_manager()
+
     class Meta:
-        ordering = ['-data_date', '-created_at']
-        unique_together = [('version', 'data_date')]
+        ordering = ['-data_date', '-revision', '-created_at', '-id']
+        unique_together = [('version', 'data_date', 'revision')]
         indexes = [models.Index(fields=['version', '-data_date'])]
+        constraints = [models.CheckConstraint(
+            check=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
+        )]
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError('Schedule control observations are immutable; capture a new revision.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Schedule control observations cannot be deleted.')

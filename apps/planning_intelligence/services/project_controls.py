@@ -5,9 +5,11 @@ import datetime as dt
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 
-from django.db.models import Q, Sum
+from django.db import transaction
+from django.db.models import Max, Q, Sum
+from rest_framework.exceptions import ValidationError
 
-from ..models import ActivityProgressUpdate, ScheduleControlSnapshot
+from ..models import ActivityProgressUpdate, ScheduleControlSnapshot, ScheduleVersion
 
 
 ZERO = Decimal('0')
@@ -66,6 +68,64 @@ def _activity_budgets(version):
     return list(rows)
 
 
+def _ownership_scope(version, data_date, activities):
+    """Use frozen contractual membership, never activity titles or progress values."""
+    from apps.core.project_models import Project
+    from apps.project_control.epc_models import IntegratedBaseline, WBSActivityLink, control_scope
+    from apps.project_control.services.epc import wbs_options, wbs_phase
+
+    project = Project.objects.filter(pk=version.schedule.project.enterprise_project_id, is_deleted=False).first()
+    scope = control_scope(project.scope_type if project else 'epc')
+    current_ids = {row.pk for row in activities}
+    scope.update(ready=True, blockers=[], source='schedule', integrated_baseline_id=None,
+                 owned_activity_ids=sorted(current_ids), dependency_activity_ids=[])
+    if not project or project.scope_type != 'detailed_engineering':
+        return scope
+
+    scope.update(source='activity_links', owned_activity_ids=[], dependency_activity_ids=[])
+    baseline = IntegratedBaseline.objects.filter(project=project,
+        schedule_baseline__source_version=version, data_date__lte=data_date).order_by('-data_date', '-revision', '-id').first()
+    if baseline:
+        scope.update(source='integrated_baseline', integrated_baseline_id=baseline.pk)
+        manifest = baseline.manifest if isinstance(baseline.manifest, dict) else {}
+        frozen = manifest.get('control_scope') or {}
+        links = manifest.get('activity_links') or []
+        try:
+            owned_ids = {int(value) for value in manifest['owned_activity_ids']}
+            dependency_ids = {int(value) for value in manifest['dependency_activity_ids']}
+            all_ids = {int(row['activity']) for row in links}
+            link_owned = {int(row['activity']) for row in links if row.get('control_role') == 'owned' and row.get('link_type') == 'engineering'}
+            link_external = {int(row['activity']) for row in links if row.get('control_role') == 'dependency'
+                             and row.get('link_type') in scope['dependency_phases']}
+            valid = (frozen.get('scope_type') == 'detailed_engineering'
+                     and owned_ids and not owned_ids & dependency_ids
+                     and len(links) == len(all_ids) and owned_ids | dependency_ids == all_ids == current_ids
+                     and owned_ids == link_owned and dependency_ids == link_external)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            valid = False
+        if not valid:
+            scope['blockers'].append('The effective integrated baseline does not provide complete Engineering ownership evidence for this schedule version. Review and capture the approved scope.')
+        else:
+            scope.update(owned_activity_ids=sorted(owned_ids), dependency_activity_ids=sorted(dependency_ids))
+    else:
+        links = list(WBSActivityLink.objects.filter(project=project, activity__version=version,
+            activity__is_deleted=False, is_deleted=False).select_related('wbs_node'))
+        nodes = {row['id']: row for row in wbs_options(project)}
+        valid = {row.activity_id for row in links} == current_ids
+        try:
+            valid = valid and all(wbs_phase(row.wbs_node_id, nodes) == row.link_type for row in links)
+        except ValidationError:
+            valid = False
+        owned_ids = {row.activity_id for row in links if row.link_type == 'engineering'}
+        dependency_ids = {row.activity_id for row in links if row.link_type in scope['dependency_phases']}
+        if not valid or not owned_ids or owned_ids | dependency_ids != current_ids:
+            scope['blockers'].append('Map every activity to its EPC WBS phase, including at least one owned Engineering activity. Unmapped or invalid dependency scope cannot earn project progress.')
+        else:
+            scope.update(owned_activity_ids=sorted(owned_ids), dependency_activity_ids=sorted(dependency_ids))
+    scope['ready'] = not scope['blockers']
+    return scope
+
+
 def _calculate_at(version, data_date, activities, latest):
     bac = pv = ev = ac = ZERO
     budget_hours = earned_hours = actual_hours = ZERO
@@ -116,12 +176,16 @@ def _calculate_at(version, data_date, activities, latest):
 
         activity_rows.append({
             'id': activity.id,
+            'progress_update_id': update.pk if update else None,
+            'progress_reported_by_id': update.reported_by_id if update else None,
+            'progress_updated_at': update.updated_at if update else None,
             'external_id': activity.external_id,
             'name': activity.name,
             'wbs_code': wbs_key,
             'planned_start': activity.planned_start,
             'planned_finish': activity.planned_finish,
             'is_critical': activity.is_critical,
+            'duration_days': activity.duration_days,
             'budgeted_cost': _money(cost_budget),
             'budgeted_hours': _money(hours_budget),
             'planned_progress_pct': _money(planned_fraction * HUNDRED),
@@ -194,11 +258,31 @@ def _curve_dates(version, data_date, activities):
 def build_control_dashboard(version, data_date=None):
     data_date = data_date or version.schedule.data_date or dt.date.today()
     activities = _activity_budgets(version)
+    scope = _ownership_scope(version, data_date, activities)
+    owned_ids = set(scope['owned_activity_ids'])
+    dependency_ids = set(scope['dependency_activity_ids'])
+    owned = [row for row in activities if row.pk in owned_ids]
     latest = _latest_updates(version, data_date)
     result = _calculate_at(version, data_date, activities, latest)
+    all_rows = result['activities']
+    for row in all_rows:
+        row['control_role'] = 'owned' if row['id'] in owned_ids else ('dependency' if row['id'] in dependency_ids else 'unmapped')
+    if scope['scope_type'] == 'detailed_engineering':
+        result = _calculate_at(version, data_date, owned, latest)
+        result['activities'] = all_rows
+        if not any((latest.get(row.pk) and latest[row.pk].forecast_finish) or row.planned_finish for row in owned):
+            result['forecast_finish'] = None
+    result['control_scope'] = scope
+    if not scope['ready']:
+        for field in ('bac', 'planned_value', 'earned_value', 'actual_cost', 'schedule_variance',
+                      'cost_variance', 'spi', 'cpi', 'eac', 'etc', 'vac', 'budgeted_hours',
+                      'earned_hours', 'actual_hours', 'progress_pct', 'planned_progress_pct', 'forecast_finish'):
+            result[field] = None
+        result.update(curve=[], wbs_breakdown=[], snapshot_count=version.control_snapshots.filter(is_deleted=False).count())
+        return result
     curve = []
-    for curve_date in _curve_dates(version, data_date, activities):
-        point = _calculate_at(version, curve_date, activities, _latest_updates(version, curve_date))
+    for curve_date in _curve_dates(version, data_date, owned):
+        point = _calculate_at(version, curve_date, owned, _latest_updates(version, curve_date))
         curve.append({
             'date': curve_date, 'planned_value': point['planned_value'],
             'earned_value': point['earned_value'], 'actual_cost': point['actual_cost'],
@@ -209,8 +293,17 @@ def build_control_dashboard(version, data_date=None):
     return result
 
 
+@transaction.atomic
 def capture_control_snapshot(version, data_date, user):
+    # A stable parent lock also covers the first capture, when no observation
+    # exists to lock. Progress writers acquire this same lock before posting.
+    version = ScheduleVersion.objects.select_for_update().select_related('schedule').get(pk=version.pk)
+    revision = (ScheduleControlSnapshot.objects.filter(
+        version=version, data_date=data_date,
+    ).aggregate(value=Max('revision'))['value'] or 0) + 1
     dashboard = build_control_dashboard(version, data_date)
+    if not dashboard['control_scope']['ready']:
+        raise ValidationError({'control_scope': dashboard['control_scope']['blockers']})
     values = {
         field: dashboard[field] for field in (
             'bac', 'planned_value', 'earned_value', 'actual_cost', 'schedule_variance',
@@ -222,8 +315,20 @@ def capture_control_snapshot(version, data_date, user):
         'curve': dashboard['curve'], 'wbs_breakdown': dashboard['wbs_breakdown'],
         'budgeted_hours': dashboard['budgeted_hours'], 'earned_hours': dashboard['earned_hours'],
         'actual_hours': dashboard['actual_hours'],
-    }), captured_by=user, is_deleted=False, deleted_at=None)
-    snapshot, _ = ScheduleControlSnapshot.objects.update_or_create(
-        version=version, data_date=data_date, defaults=values,
+        'control_scope': dashboard['control_scope'],
+        # Progress rows remain editable operational records. Preserve the
+        # values used here as well as their IDs so later edits cannot rewrite
+        # the evidence behind an earlier published observation.
+        'activities': dashboard['activities'],
+        'source_manifest': {
+            'schema_version': 1, 'schedule_version_id': version.pk,
+            'schedule_id': version.schedule_id,
+            'planning_project_id': version.schedule.project_id,
+            'schedule_version_status': version.status,
+            'data_date': data_date, 'revision': revision,
+            'captured_by_id': getattr(user, 'pk', None),
+        },
+    }), captured_by=user)
+    return ScheduleControlSnapshot.objects.create(
+        version=version, data_date=data_date, revision=revision, **values,
     )
-    return snapshot
