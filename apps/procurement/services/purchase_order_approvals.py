@@ -307,7 +307,7 @@ def pending_entries_for(user, queryset):
 def record_decision(order, actor, decision, stage='', comment='', require_signature=False):
     from apps.procurement.models import PurchaseOrder
 
-    locked = PurchaseOrder.objects.select_for_update().select_related('created_by').get(pk=order.pk)
+    locked = PurchaseOrder.objects.select_for_update(of=('self',)).select_related('created_by').get(pk=order.pk)
     workflow = [dict(entry) for entry in (locked.approval_log or [])]
     candidate = None
     for index, entry in _active_entries(workflow):

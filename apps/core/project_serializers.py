@@ -2,6 +2,7 @@
 Project Management Serializers
 """
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import get_user_model
 from apps.core.project_models import Project, ProjectMember, ProjectTask, ProjectMilestone
 # Smart Project Collection Models
@@ -48,12 +49,33 @@ class ProjectTaskSerializer(serializers.ModelSerializer):
 
 class ProjectMilestoneSerializer(serializers.ModelSerializer):
     """Project milestone serializer"""
+    project = serializers.PrimaryKeyRelatedField(queryset=Project.objects.none())
+
     class Meta:
         model = ProjectMilestone
         fields = [
-            'id', 'name', 'description', 'target_date', 'completed_date',
+            'id', 'project', 'name', 'description', 'target_date', 'completed_date',
             'is_completed', 'created_at', 'updated_at'
         ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from apps.project_control.access import accessible_enterprise_projects
+        request = self.context.get('request')
+        self.fields['project'].queryset = accessible_enterprise_projects(
+            request.user if request else None,
+        )
+
+    def validate_project(self, project):
+        from apps.project_control.access import can_write_enterprise_project
+        from rest_framework.exceptions import PermissionDenied
+        if self.instance and self.instance.project_id != project.pk:
+            raise serializers.ValidationError('A milestone cannot be moved to another project.')
+        request = self.context.get('request')
+        if not request or not can_write_enterprise_project(request.user, project):
+            raise PermissionDenied('You cannot modify milestones for this project.')
+        return project
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -66,6 +88,16 @@ class ProjectSerializer(serializers.ModelSerializer):
     is_overdue = serializers.BooleanField(read_only=True)
     budget_utilization = serializers.FloatField(read_only=True)
     team_size = serializers.IntegerField(read_only=True)
+
+    def validate_scope_type(self, value):
+        if self.instance and value != self.instance.scope_type:
+            from apps.project_control.access import can_write_enterprise_project
+            from apps.project_control.services.epc import require_editable_delivery_scope
+            request = self.context.get('request')
+            if request and not can_write_enterprise_project(request.user, self.instance):
+                raise PermissionDenied('Project write access is required to change delivery scope.')
+            require_editable_delivery_scope(self.instance, value)
+        return value
 
     class Meta:
         model = Project

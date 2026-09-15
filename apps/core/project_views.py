@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Q, Count, Sum
+from django.db import transaction
 from django.utils import timezone
 from django.core.cache import cache
 import asyncio
@@ -90,6 +91,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
             serializer.save(owner=self.request.user)
         else:
             serializer.save()
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        # Serialize scope edits with integrated-baseline capture and acceptance.
+        Project.objects.select_for_update(no_key=True).get(pk=self.get_object().pk)
+        return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     def add_member(self, request, pk=None):
@@ -218,6 +225,30 @@ class ProjectMilestoneViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectMilestoneSerializer
     queryset = ProjectMilestone.objects.filter(is_deleted=False)
 
+    def _check_epc_work(self, milestone):
+        from apps.project_control.execution_models import EPCWorkItem
+        from rest_framework.exceptions import ValidationError
+        if EPCWorkItem.objects.filter(milestone=milestone, is_deleted=False).exists():
+            raise ValidationError('This milestone is controlled by EPC work acceptance. Use its linked work item.')
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        milestone = self.get_object()
+        Project.objects.select_for_update().get(pk=milestone.project_id)
+        self._check_epc_work(milestone)
+        return super().update(request, *args, **kwargs)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        milestone = self.get_object()
+        Project.objects.select_for_update().get(pk=milestone.project_id)
+        self._check_epc_work(milestone)
+        return super().destroy(request, *args, **kwargs)
+
+    def get_permissions(self):
+        from apps.project_control.access import ProjectControlObjectPermission
+        return [IsAuthenticated(), ProjectControlObjectPermission()]
+
     def get_queryset(self):
         """Filter milestones by project"""
         from apps.project_control.access import accessible_enterprise_projects
@@ -230,9 +261,12 @@ class ProjectMilestoneViewSet(viewsets.ModelViewSet):
         return queryset
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def mark_completed(self, request, pk=None):
         """Mark milestone as completed"""
         milestone = self.get_object()
+        Project.objects.select_for_update().get(pk=milestone.project_id)
+        self._check_epc_work(milestone)
         from django.utils import timezone
         milestone.is_completed = True
         milestone.completed_date = timezone.now().date()

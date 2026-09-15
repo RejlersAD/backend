@@ -11,6 +11,7 @@ from typing import Dict
 
 from ..models import Estimate, CostSnapshot, IntegratedReportingSnapshot
 from .cost_ledger import ledger_summary
+from .project_metadata import confirmed_project_metadata
 
 
 def _d(x) -> Decimal:
@@ -56,7 +57,7 @@ def compute_project_kpis(project) -> Dict:
         'ledger_entry_count': ledger['entry_count'],
         'calculation_source': 'immutable_integrated_snapshot' if integrated_snapshot else 'posted_cost_ledger',
         'utilisation_pct': round(utilisation_pct, 2),
-        'progress_pct':    project.progress or 0,
+        **confirmed_project_metadata(project, snapshot=integrated_snapshot),
         'forecast': {
             'eac': str(eac) if eac is not None else None,
             'cpi': cpi,

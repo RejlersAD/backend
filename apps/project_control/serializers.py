@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from django.db.models import Sum
+from django.urls import reverse
 from rest_framework import serializers
 from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -22,9 +25,31 @@ from .models import (
     WBSNode,
 )
 from .services.cost_ledger import allocation_totals, source_record, source_value
+from .services.financial_scope import require_owned_financial_wbs
+from .access import accessible_enterprise_projects, can_write_enterprise_project
 
 
 class EstimateLineItemSerializer(serializers.ModelSerializer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request:
+            self.fields['estimate'].queryset = Estimate.objects.filter(is_deleted=False, project__in=accessible_enterprise_projects(request.user))
+
+    def validate(self, attrs):
+        if self.instance and 'estimate' in attrs and attrs['estimate'].pk != self.instance.estimate_id:
+            raise serializers.ValidationError({'estimate': 'An estimate line cannot be moved to another estimate.'})
+        # Imported explicit amounts remain unchanged on descriptive edits.
+        # Entering quantity/rate without an explicit amount recalculates the line.
+        if 'line_total' not in attrs and (not self.instance or 'quantity' in attrs or 'unit_rate' in attrs):
+            quantity = attrs.get('quantity', getattr(self.instance, 'quantity', Decimal('0')))
+            rate = attrs.get('unit_rate', getattr(self.instance, 'unit_rate', Decimal('0')))
+            amount = (quantity * rate).quantize(Decimal('0.01'))
+            if abs(amount) >= Decimal('1000000000000'):
+                raise serializers.ValidationError({'line_total': 'The calculated line total exceeds the supported amount.'})
+            attrs['line_total'] = amount
+        return attrs
+
     class Meta:
         model = EstimateLineItem
         fields = [
@@ -32,15 +57,69 @@ class EstimateLineItemSerializer(serializers.ModelSerializer):
             'unit', 'quantity', 'unit_rate', 'line_total', 'sort_order', 'source_row',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ('created_at', 'updated_at')
+        read_only_fields = ('created_at', 'updated_at', 'source_row')
 
 
-class EstimateSerializer(serializers.ModelSerializer):
-    line_items = EstimateLineItemSerializer(many=True, read_only=True)
+class EstimateCapabilityMixin:
+    def _can_write(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return False
+        permissions = self.context.setdefault('_estimate_permissions', {})
+        if obj.project_id not in permissions:
+            permissions[obj.project_id] = can_write_enterprise_project(request.user, obj.project)
+        return permissions[obj.project_id]
+
+    def get_can_edit(self, obj):
+        return obj.status == 'draft' and self._can_write(obj)
+
+    def get_can_approve(self, obj):
+        return obj.status == 'draft' and self._can_write(obj)
+
+    def get_can_copy(self, obj):
+        return self._can_write(obj)
+
+
+class EstimateSerializer(EstimateCapabilityMixin, serializers.ModelSerializer):
+    line_items = serializers.SerializerMethodField()
     line_item_count = serializers.SerializerMethodField()
     kind_display = serializers.CharField(source='get_kind_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     source_display = serializers.CharField(source='get_source_display', read_only=True)
+    can_edit = serializers.SerializerMethodField()
+    can_approve = serializers.SerializerMethodField()
+    can_copy = serializers.SerializerMethodField()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request:
+            projects = accessible_enterprise_projects(request.user)
+            self.fields['project'].queryset = projects
+            self.fields['source_document'].queryset = ProjectDocument.objects.filter(project__in=projects, is_deleted=False)
+
+    def validate_currency(self, value):
+        value = value.strip().upper()
+        if len(value) != 3 or not value.isascii() or not value.isalpha():
+            raise serializers.ValidationError('Use a three-letter currency code.')
+        return value
+
+    def validate(self, attrs):
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        if self.instance:
+            for field in ('project', 'kind'):
+                supplied = attrs.get(field)
+                previous = getattr(self.instance, field)
+                if field in attrs and supplied != previous:
+                    raise serializers.ValidationError({field: 'This estimate association cannot be changed. Create a new estimate instead.'})
+        document = attrs.get('source_document', getattr(self.instance, 'source_document', None))
+        if document and project and document.project_id != project.pk:
+            raise serializers.ValidationError({'source_document': 'The source document must belong to this project.'})
+        return attrs
+
+    def get_line_items(self, obj):
+        rows = obj.active_lines if hasattr(obj, 'active_lines') else obj.line_items.filter(is_deleted=False)
+        return EstimateLineItemSerializer(rows, many=True, context=self.context).data
 
     class Meta:
         model = Estimate
@@ -50,18 +129,23 @@ class EstimateSerializer(serializers.ModelSerializer):
             'title', 'currency', 'total_amount', 'snapshot_date', 'notes',
             'source_document', 'created_by',
             'line_items', 'line_item_count',
+            'can_edit', 'can_approve', 'can_copy',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ('created_at', 'updated_at', 'created_by', 'line_items', 'line_item_count')
+        read_only_fields = ('created_at', 'updated_at', 'created_by', 'line_items', 'line_item_count', 'version', 'status', 'source', 'total_amount')
+        validators = []  # Version is allocated under the project row lock.
 
     def get_line_item_count(self, obj):
-        return obj.line_items.filter(is_deleted=False).count()
+        return obj.active_line_count if hasattr(obj, 'active_line_count') else obj.line_items.filter(is_deleted=False).count()
 
 
-class EstimateListSerializer(serializers.ModelSerializer):
+class EstimateListSerializer(EstimateCapabilityMixin, serializers.ModelSerializer):
     kind_display = serializers.CharField(source='get_kind_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     line_item_count = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    can_approve = serializers.SerializerMethodField()
+    can_copy = serializers.SerializerMethodField()
 
     class Meta:
         model = Estimate
@@ -70,10 +154,29 @@ class EstimateListSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'source',
             'title', 'currency', 'total_amount', 'snapshot_date',
             'line_item_count', 'created_at', 'updated_at',
+            'can_edit', 'can_approve', 'can_copy',
         ]
 
     def get_line_item_count(self, obj):
-        return obj.line_items.filter(is_deleted=False).count()
+        return obj.active_line_count if hasattr(obj, 'active_line_count') else obj.line_items.filter(is_deleted=False).count()
+
+
+def wbs_has_approved_scope(node):
+    """Whether an existing WBS identity is part of approved control evidence."""
+    from .epc_models import IntegratedBaseline
+
+    if ControlAccount.objects.filter(
+        wbs_node=node, is_deleted=False, status__in=['active', 'closed'],
+        approved_by__isnull=False, approved_at__isnull=False,
+    ).exists():
+        return True
+    for manifest in IntegratedBaseline.objects.filter(project_id=node.project_id).values_list('manifest', flat=True):
+        if isinstance(manifest, dict) and any(
+            isinstance(row, dict) and str(row.get('id')) == str(node.pk)
+            for row in manifest.get('wbs', [])
+        ):
+            return True
+    return False
 
 
 class WBSNodeSerializer(serializers.ModelSerializer):
@@ -83,6 +186,32 @@ class WBSNodeSerializer(serializers.ModelSerializer):
                   'created_at', 'updated_at']
         read_only_fields = ('created_at', 'updated_at')
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        parent = attrs.get('parent', getattr(self.instance, 'parent', None))
+        if self.instance and project.pk != self.instance.project_id:
+            raise serializers.ValidationError({'project': 'An existing WBS node cannot be moved to another project.'})
+        if project and project.is_deleted:
+            raise serializers.ValidationError({'project': 'Select an active project.'})
+
+        seen = {self.instance.pk} if self.instance else set()
+        ancestor = parent
+        while ancestor is not None:
+            if ancestor.pk in seen:
+                raise serializers.ValidationError({'parent': 'A WBS parent cannot be the node itself or create a hierarchy cycle.'})
+            if ancestor.is_deleted or ancestor.project_id != project.pk:
+                raise serializers.ValidationError({'parent': 'Select an active parent hierarchy from the same project.'})
+            seen.add(ancestor.pk)
+            ancestor = ancestor.parent
+
+        if self.instance:
+            changed = any(field in attrs and attrs[field] != getattr(self.instance, field)
+                          for field in ['code', 'name', 'parent'])
+            if changed and wbs_has_approved_scope(self.instance):
+                raise serializers.ValidationError('Approved WBS scope is immutable. Create a new WBS node for revised scope.')
+        return attrs
+
 
 def _user_name(user):
     if not user:
@@ -90,7 +219,24 @@ def _user_name(user):
     return user.get_full_name() or user.email or user.username
 
 
-class ControlAccountSerializer(serializers.ModelSerializer):
+class FinancialScopeSerializerMixin:
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        if self.instance and project.pk != self.instance.project_id:
+            raise serializers.ValidationError({'project': 'An existing financial record cannot move to another project.'})
+        if 'control_account' in self.fields:
+            account = attrs.get('control_account', getattr(self.instance, 'control_account', None))
+            if account:
+                if account.is_deleted or account.project_id != project.pk:
+                    raise serializers.ValidationError({'control_account': 'Select an active Control Account from this project.'})
+                require_owned_financial_wbs(project, account.wbs_node, field='control_account')
+        else:
+            require_owned_financial_wbs(project, attrs.get('wbs_node', getattr(self.instance, 'wbs_node', None)))
+        return attrs
+
+
+class ControlAccountSerializer(FinancialScopeSerializerMixin, serializers.ModelSerializer):
     wbs_code = serializers.CharField(source='wbs_node.code', read_only=True)
     wbs_name = serializers.CharField(source='wbs_node.name', read_only=True)
     manager_name = serializers.SerializerMethodField()
@@ -230,7 +376,7 @@ class ReportingPeriodAuditSerializer(serializers.ModelSerializer):
         return _user_name(obj.actor)
 
 
-class ApprovedHourEntrySerializer(serializers.ModelSerializer):
+class ApprovedHourEntrySerializer(FinancialScopeSerializerMixin, serializers.ModelSerializer):
     control_account_code = serializers.CharField(source='control_account.code', read_only=True)
     reporting_period_name = serializers.CharField(source='reporting_period.name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -286,6 +432,24 @@ class ReconciliationRunSerializer(serializers.ModelSerializer):
 
 
 class IntegratedReportingSnapshotSerializer(serializers.ModelSerializer):
+    actual_cost_basis = serializers.SerializerMethodField()
+    period_totals = serializers.SerializerMethodField()
+    cumulative_totals = serializers.SerializerMethodField()
+
+    def get_actual_cost_basis(self, obj):
+        return obj.calculation_payload.get('actual_cost_basis', 'legacy_period')
+
+    def get_period_totals(self, obj):
+        return obj.calculation_payload.get('period_totals') or {
+            'ledger_actual_cost': str(obj.actual_cost), 'approved_hours': str(obj.approved_hours),
+            'labor_actual_cost': str(obj.labor_actual_cost), 'finance_actual_cost': str(obj.finance_actual_cost),
+        }
+
+    def get_cumulative_totals(self, obj):
+        # Earlier immutable snapshots used period AC. Do not label or rewrite
+        # those values as cumulative history when returning the new API fields.
+        return obj.calculation_payload.get('cumulative_totals')
+
     class Meta:
         model = IntegratedReportingSnapshot
         fields = [
@@ -296,11 +460,12 @@ class IntegratedReportingSnapshotSerializer(serializers.ModelSerializer):
             'cpi', 'spi', 'estimate_at_completion', 'estimate_to_complete',
             'variance_at_completion', 'source_manifest', 'calculation_payload', 'checksum',
             'sealed_by', 'sealed_at',
+            'actual_cost_basis', 'period_totals', 'cumulative_totals',
         ]
         read_only_fields = fields
 
 
-class BudgetAllocationSerializer(serializers.ModelSerializer):
+class BudgetAllocationSerializer(FinancialScopeSerializerMixin, serializers.ModelSerializer):
     wbs_code = serializers.CharField(source='wbs_node.code', read_only=True)
     wbs_name = serializers.CharField(source='wbs_node.name', read_only=True)
     approved_by_name = serializers.SerializerMethodField()
@@ -333,7 +498,7 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class CostAllocationSerializer(serializers.ModelSerializer):
+class CostAllocationSerializer(FinancialScopeSerializerMixin, serializers.ModelSerializer):
     project_code = serializers.CharField(source='project.code', read_only=True)
     wbs_code = serializers.CharField(source='wbs_node.code', read_only=True)
     wbs_name = serializers.CharField(source='wbs_node.name', read_only=True)
@@ -415,6 +580,17 @@ class ProjectDocumentSerializer(serializers.ModelSerializer):
     kind_display = serializers.CharField(source='get_kind_display', read_only=True)
     parse_status_display = serializers.CharField(source='get_parse_status_display', read_only=True)
     uploaded_by_name = serializers.SerializerMethodField()
+    has_file = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+    can_download = serializers.SerializerMethodField()
+    can_upload = serializers.SerializerMethodField()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request:
+            self.fields['project'].queryset = accessible_enterprise_projects(request.user)
 
     class Meta:
         model = ProjectDocument
@@ -425,6 +601,7 @@ class ProjectDocumentSerializer(serializers.ModelSerializer):
             'parse_status', 'parse_status_display', 'parsed_data', 'parse_error',
             'uploaded_by', 'uploaded_by_name',
             'created_at', 'updated_at',
+            'has_file', 'can_edit', 'can_delete', 'can_download', 'can_upload',
         ]
         read_only_fields = (
             'created_at', 'updated_at', 'uploaded_by', 'uploaded_by_name',
@@ -434,15 +611,51 @@ class ProjectDocumentSerializer(serializers.ModelSerializer):
         )
 
     def get_file_url(self, obj):
-        try:
-            return obj.file.url if obj.file else None
-        except Exception:
+        if not obj.file or obj.is_deleted:
             return None
+        return reverse('project-control-document-download', kwargs={'pk': obj.pk})
 
     def get_download_url(self, obj):
-        # Direct presigned URL goes via the dedicated `presign-download` action.
-        # This field surfaces the storage URL (already presigned for S3 backends).
+        # Clients fetch this protected endpoint with their API authentication.
         return self.get_file_url(obj)
+
+    def get_has_file(self, obj):
+        return bool(obj.file)
+
+    def _can_write(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated or obj.is_deleted:
+            return False
+        cache = self.context.setdefault('_document_write_access', {})
+        if obj.project_id not in cache:
+            cache[obj.project_id] = can_write_enterprise_project(request.user, obj.project)
+        return cache[obj.project_id]
+
+    def get_can_edit(self, obj):
+        return self._can_write(obj)
+
+    def get_can_delete(self, obj):
+        return self._can_write(obj)
+
+    def get_can_upload(self, obj):
+        return self._can_write(obj)
+
+    def get_can_download(self, obj):
+        request = self.context.get('request')
+        if not request or obj.is_deleted or not obj.file:
+            return False
+        cache = self.context.setdefault('_document_read_access', {})
+        if obj.project_id not in cache:
+            cache[obj.project_id] = accessible_enterprise_projects(request.user).filter(pk=obj.project_id).exists()
+        return cache[obj.project_id]
+
+    def validate(self, attrs):
+        if self.instance:
+            if 'project' in attrs and attrs['project'].pk != self.instance.project_id:
+                raise serializers.ValidationError({'project': 'A document cannot be moved to another project.'})
+            if 'file' in attrs:
+                raise serializers.ValidationError({'file': 'The stored file cannot be replaced. Upload a separate document to preserve its source references.'})
+        return attrs
 
     def get_uploaded_by_name(self, obj):
         if not obj.uploaded_by_id:

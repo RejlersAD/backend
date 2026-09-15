@@ -84,6 +84,7 @@ google-auth-oauthlib>=1.1.0
 # 8. DATA PROCESSING (Lightweight - Required)
 # ==========================================
 numpy>=1.24.0
+scipy>=1.10.0  # Table-rule detection for local procurement PDF OCR
 pandas>=2.1.0
 networkx==3.2.1
 psutil>=5.9.0  # Real-time CPU/memory/disk metrics for the admin dashboard

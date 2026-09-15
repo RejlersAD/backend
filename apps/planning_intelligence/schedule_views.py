@@ -48,6 +48,19 @@ from .services.operational_jobs import (
     assurance_state_fingerprint, dispatch_job, get_or_create_job, schedule_state_fingerprint,
 )
 from .services.trustworthy_scheduling import approve_schedule_assurance, current_assurance
+from .services.schedule_approval import (
+    ScheduleApprovalError, approve_schedule_version, decide_schedule_review, lock_schedule_version,
+)
+
+
+def _governance_audit_state(item):
+    return {
+        'title': item.title, 'description': item.description, 'status': item.status,
+        'priority': item.priority, 'owner_id': item.owner_id, 'activity_id': item.activity_id,
+        'due_date': item.due_date.isoformat() if item.due_date else None,
+        'resolution': item.resolution, 'schedule_impact_days': str(item.schedule_impact_days),
+        'cost_impact': str(item.cost_impact), 'metadata': item.metadata,
+    }
 
 
 def _build_deliverable_summaries(activities):
@@ -605,34 +618,10 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         version = self.get_object()
-        if not can_final_approve_defaults(request.user, version.schedule.project):
-            return Response({'error': 'Only a project authority can approve a schedule version.'}, status=status.HTTP_403_FORBIDDEN)
-        if version.status != 'calculated':
-            return Response({'error': 'Only a calculated version can be approved.'}, status=status.HTTP_409_CONFLICT)
-        assurance = current_assurance(version)
-        if not assurance or assurance.status != 'approved':
-            return Response({
-                'error': 'Run and approve Phase 3 schedule assurance before schedule approval.',
-                'code': 'schedule_assurance_required',
-            }, status=status.HTTP_409_CONFLICT)
-        generation = version.source_generation
-        critical_findings = [
-            item for item in (generation.validation or []) if item.get('severity') == 'critical'
-        ] if generation else []
-        unconfirmed_gates = [
-            item for item in (generation.logic_matrix or [])
-            if item.get('source') == 'dependency_template' and item.get('requires_confirmation')
-        ] if generation else []
-        if critical_findings or unconfirmed_gates:
-            return Response({
-                'error': 'Resolve critical generation findings and confirm engineering release gates before approval.',
-                'code': 'schedule_assurance_blocked',
-                'critical_finding_count': len(critical_findings),
-                'unconfirmed_gate_count': len(unconfirmed_gates),
-            }, status=status.HTTP_409_CONFLICT)
-        version.status = 'approved'
-        version.save(update_fields=['status', 'updated_at'])
-        record_event(project=version.schedule.project, actor=request.user, action='schedule.approved', entity=version)
+        try:
+            version = approve_schedule_version(version, request.user)
+        except ScheduleApprovalError as exc:
+            return Response(exc.payload, status=exc.status_code)
         return Response(self.get_serializer(version).data)
 
     @action(detail=True, methods=['get'], url_path='controls')
@@ -647,6 +636,10 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         dashboard['snapshots'] = ScheduleControlSnapshotSerializer(
             version.control_snapshots.filter(is_deleted=False)[:12], many=True,
         ).data
+        latest_snapshot = version.control_snapshots.filter(
+            is_deleted=False, data_date__lte=dashboard['data_date'],
+        ).first()
+        dashboard['latest_snapshot'] = ScheduleControlSnapshotSerializer(latest_snapshot).data if latest_snapshot else None
         return Response(dashboard)
 
     @action(detail=True, methods=['post'], url_path='progress')
@@ -673,6 +666,12 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             if row.get('actual_finish') and row['actual_finish'] > data_date:
                 return Response({'error': 'Actual finish cannot be after the data date.'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            version = lock_schedule_version(version)
+            if version.status == 'superseded':
+                return Response({'error': 'Progress cannot be updated for a superseded version.'}, status=status.HTTP_409_CONFLICT)
+            from apps.project_control.execution_models import EPCWorkItem
+            if EPCWorkItem.objects.filter(activity_id__in=activity_map, is_deleted=False).exists():
+                raise ValidationError('These activities use EPC evidence acceptance. Record progress through the linked EPC work item.')
             saved = []
             for row in rows:
                 values = dict(row)
@@ -748,6 +747,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
     @action(detail=True, methods=['post'], url_path='governance-items', permission_classes=[IsAuthenticated])
+    @transaction.atomic
     def governance_items(self, request, pk=None):
         version = self.get_object()
         _require_governance_access(request.user, version)
@@ -773,11 +773,12 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         record_event(
             project=project, actor=request.user, action='governance.item_created', entity=item,
-            after={'title': item.title, 'type': item.item_type, 'version_id': version.id},
+            after={**_governance_audit_state(item), 'type': item.item_type, 'version_id': version.id},
         )
         return Response(GovernanceItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['patch'], url_path='governance-item', permission_classes=[IsAuthenticated])
+    @transaction.atomic
     def governance_item(self, request, pk=None):
         version = self.get_object()
         _require_governance_access(request.user, version)
@@ -787,10 +788,10 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         item = version.governance_items.filter(pk=request.data.get('item_id'), is_deleted=False).first()
         if not item:
             return Response({'error': 'Governance item not found.'}, status=status.HTTP_404_NOT_FOUND)
-        serializer = GovernanceItemUpdateSerializer(data=request.data, partial=True)
+        serializer = GovernanceItemUpdateSerializer(data=request.data, partial=True, context={'metadata': item.metadata})
         serializer.is_valid(raise_exception=True)
         values = dict(serializer.validated_data)
-        before = {'status': item.status, 'owner_id': item.owner_id, 'due_date': item.due_date}
+        before = _governance_audit_state(item)
         owner_was_provided = 'owner' in values
         owner_id = values.pop('owner', None)
         if owner_was_provided:
@@ -798,6 +799,14 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             if owner_id and owner_id not in member_ids:
                 return Response({'error': 'The owner must be an active project member.'}, status=status.HTTP_400_BAD_REQUEST)
             item.owner_id = owner_id
+        if 'activity' in values:
+            activity_id = values.pop('activity')
+            activity = version.activities.filter(pk=activity_id, is_deleted=False).first() if activity_id else None
+            if activity_id and not activity:
+                return Response({'error': 'The activity does not belong to this version.'}, status=status.HTTP_400_BAD_REQUEST)
+            item.activity = activity
+        if 'metadata' in values:
+            values['metadata'] = {**(item.metadata if isinstance(item.metadata, dict) else {}), **values['metadata']}
         for field, value in values.items():
             setattr(item, field, value)
         if item.status in {'closed', 'implemented', 'rejected'}:
@@ -807,7 +816,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         item.save()
         record_event(
             project=project, actor=request.user, action='governance.item_updated', entity=item,
-            before=before, after={'status': item.status, 'owner_id': item.owner_id, 'version_id': version.id},
+            before=before, after={**_governance_audit_state(item), 'version_id': version.id},
         )
         return Response(GovernanceItemSerializer(item).data)
 
@@ -882,7 +891,17 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         reviewer_ids = set(values['reviewer_ids'])
         if reviewer_ids - member_ids:
             return Response({'error': 'All reviewers must be active project members.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not any(can_final_approve_defaults(user, project) for user in User.objects.filter(id__in=reviewer_ids)):
+            return Response({
+                'error': 'Include a project authority among the reviewers to give final schedule approval.',
+                'code': 'schedule_review_authority_required',
+            }, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            version = lock_schedule_version(version)
+            if version.status != 'calculated':
+                return Response({'error': 'Calculate the schedule before requesting approval.'}, status=status.HTTP_409_CONFLICT)
+            if version.governance_reviews.filter(status='pending', is_deleted=False).exists():
+                return Response({'error': 'This version already has a pending review.'}, status=status.HTTP_409_CONFLICT)
             review = ScheduleReview.objects.create(
                 version=version, title=values['title'], description=values['description'],
                 due_date=values.get('due_date'), requested_by=request.user, requested_at=timezone.now(),
@@ -890,49 +909,25 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             ScheduleReviewDecision.objects.bulk_create([
                 ScheduleReviewDecision(review=review, reviewer_id=user_id) for user_id in reviewer_ids
             ])
-        record_event(
-            project=project, actor=request.user, action='governance.review_requested', entity=review,
-            after={'version_id': version.id, 'reviewer_ids': sorted(reviewer_ids)},
-        )
+            record_event(
+                project=project, actor=request.user, action='governance.review_requested', entity=review,
+                after={'version_id': version.id, 'reviewer_ids': sorted(reviewer_ids)},
+            )
         return Response(ScheduleReviewSerializer(review).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='review-decision', permission_classes=[IsAuthenticated])
     def review_decision(self, request, pk=None):
         version = self.get_object()
         _require_governance_access(request.user, version)
-        review = version.governance_reviews.filter(pk=request.data.get('review_id'), is_deleted=False).first()
-        if not review:
-            return Response({'error': 'Review not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if review.status != 'pending':
-            return Response({'error': 'This review is already complete.'}, status=status.HTTP_409_CONFLICT)
-        decision = review.decisions.filter(reviewer=request.user, is_deleted=False).first()
-        if not decision and not (request.user.is_staff or request.user.is_superuser):
-            return Response({'error': 'You are not assigned to this review.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = ReviewDecisionInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        if not decision:
-            decision = review.decisions.filter(is_deleted=False, status='pending').first()
-        decision.status = serializer.validated_data['decision']
-        decision.comment = serializer.validated_data['comment']
-        decision.decided_at = timezone.now()
-        decision.save(update_fields=['status', 'comment', 'decided_at', 'updated_at'])
-        statuses = list(review.decisions.filter(is_deleted=False).values_list('status', flat=True))
-        if 'rejected' in statuses:
-            review.status = 'rejected'
-        elif 'changes_requested' in statuses:
-            review.status = 'changes_requested'
-        elif statuses and all(value == 'approved' for value in statuses):
-            review.status = 'approved'
-            if version.status == 'calculated':
-                version.status = 'approved'
-                version.save(update_fields=['status', 'updated_at'])
-        if review.status != 'pending':
-            review.completed_at = timezone.now()
-        review.save(update_fields=['status', 'completed_at', 'updated_at'])
-        record_event(
-            project=version.schedule.project, actor=request.user, action='governance.review_decided', entity=review,
-            after={'version_id': version.id, 'decision': decision.status, 'review_status': review.status},
-        )
+        try:
+            review = decide_schedule_review(
+                version, serializer.validated_data['review_id'], request.user,
+                decision=serializer.validated_data['decision'], comment=serializer.validated_data['comment'],
+            )
+        except ScheduleApprovalError as exc:
+            return Response(exc.payload, status=exc.status_code)
         return Response(ScheduleReviewSerializer(review).data)
 
     @action(detail=True, methods=['post'])
@@ -943,7 +938,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         if version.status != 'approved':
             return Response({'error': 'Approve the assured schedule version before creating a baseline.'}, status=status.HTTP_409_CONFLICT)
         assurance = current_assurance(version)
-        if not assurance or assurance.status != 'approved':
+        if not assurance or assurance.is_deleted or assurance.status != 'approved' or assurance.blockers:
             return Response({'error': 'An approved Phase 3 assurance review is required for this exact calculated state.'}, status=status.HTTP_409_CONFLICT)
         if version.governance_items.filter(priority='critical', is_deleted=False).exclude(status__in=['closed', 'implemented', 'rejected']).exists():
             return Response({'error': 'Resolve open critical governance items before baselining.'}, status=status.HTTP_409_CONFLICT)
@@ -954,6 +949,11 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
             if version.status != 'approved':
                 return Response({'error': 'The version is no longer available for baselining.'}, status=status.HTTP_409_CONFLICT)
+            assurance = current_assurance(version)
+            if not assurance or assurance.is_deleted or assurance.status != 'approved' or assurance.blockers:
+                return Response({'error': 'An approved Phase 3 assurance review is required for this exact calculated state.'}, status=status.HTTP_409_CONFLICT)
+            if version.governance_items.filter(priority='critical', is_deleted=False).exclude(status__in=['closed', 'implemented', 'rejected']).exists():
+                return Response({'error': 'Resolve open critical governance items before baselining.'}, status=status.HTTP_409_CONFLICT)
             snapshot = {
                 'version': ScheduleVersionSerializer(version).data,
                 'wbs': ScheduleWBSNodeSerializer(version.wbs_nodes.filter(is_deleted=False), many=True).data,
@@ -968,7 +968,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             )
             version.status = 'baselined'
             version.save(update_fields=['status', 'updated_at'])
-        record_event(project=version.schedule.project, actor=request.user, action='schedule.baselined', entity=baseline, after={'version': version.version})
+            record_event(project=version.schedule.project, actor=request.user, action='schedule.baselined', entity=baseline, after={'version': version.version})
         return Response(ScheduleBaselineSerializer(baseline).data, status=status.HTTP_201_CREATED)
 
 
@@ -1142,6 +1142,14 @@ class DailyFieldUpdateViewSet(SoftDeleteViewSet):
             f'Approved field update #{update.id}',
         ) if part]
         with transaction.atomic():
+            version = lock_schedule_version(update.version)
+            update = DailyFieldUpdate.objects.select_for_update().get(pk=update.pk)
+            from apps.project_control.execution_models import EPCWorkItem
+            if EPCWorkItem.objects.filter(activity_id=update.activity_id, is_deleted=False).exists():
+                raise ValidationError('This activity uses EPC evidence acceptance. Record progress through the linked EPC work item.')
+            if update.status != 'submitted':
+                return Response({'error': 'Only submitted field updates can be approved.'}, status=status.HTTP_409_CONFLICT)
+            update.version = version
             progress, _ = ActivityProgressUpdate.objects.update_or_create(
                 activity=update.activity, data_date=update.report_date,
                 defaults={

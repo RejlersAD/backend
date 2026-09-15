@@ -211,6 +211,7 @@ INSTALLED_APPS = [
     'apps.marketing_analytics',  # Marketing Analytics — Google Analytics (GA4) real-time dashboard widget
     'apps.timesheet',            # Time Sheet Analytics — SQL Server attendance integration
     'apps.project_control',      # Project Management — phased cost dashboards, estimates, documents, AI take-off (stubbed)
+    'apps.file_replica',         # Office file server catalogue, private replicas, and reviewed extraction
     'apps.invoice_tracker',      # Invoice Tracker — Accounts Receivable register (external + internal) + Excel import + S3 attachments
     'apps.payroll',              # Payroll Intelligence Platform — validation, audit alerts, project costing, AI insights, chatbot
     'apps.payroll_engine',       # Payroll Engine — fresh monthly payroll automation (Draft → HR → Finance → Released)
@@ -683,6 +684,10 @@ SALES_EMAIL_INTAKE_WEBHOOK_KEY = config(
 MICROSOFT_GRAPH_TIMEOUT = config('MICROSOFT_GRAPH_TIMEOUT', default=30, cast=int)
 HR_ASSISTANT_MODEL = config('HR_ASSISTANT_MODEL', default='gpt-4o-mini')
 HR_ASSISTANT_LLM_ENABLED = config('HR_ASSISTANT_LLM_ENABLED', default=False, cast=bool)
+
+# Temporarily disabled; both inventory and destructive maintenance endpoints
+# require an explicit opt-in before database cleaning can be enabled again.
+DATABASE_MAINTENANCE_ENABLED = config('DATABASE_MAINTENANCE_ENABLED', default=False, cast=bool)
 
 # ==============================================================================
 # RAILWAY PRODUCTION SAFETY CHECK

@@ -504,6 +504,12 @@ def import_pr_workbook(file_obj, *, user, dry_run: bool = True) -> dict[str, Any
                     requested_by=user,
                     **values,
                 )
+                from .pr_document_reconciliation import reconcile_pr_po_link
+                po_link = reconcile_pr_po_link(instance)
+                link_metadata = dict(instance.price_remarks_data or {})
+                link_metadata["po_link"] = po_link
+                instance.price_remarks_data = link_metadata
+                instance.save(update_fields=["price_remarks_data", "updated_at"])
         except IntegrityError:
             skipped += 1
             duplicate_race = PurchaseRequisition.objects.filter(pr_number=row.pr_number).exists()
@@ -519,7 +525,8 @@ def import_pr_workbook(file_obj, *, user, dry_run: bool = True) -> dict[str, Any
                 "error_code": "duplicate_race" if duplicate_race else "database_constraint",
             })
             continue
-        created.append({"id": str(instance.id), "pr_number": instance.pr_number})
+        preview["po_link"] = po_link
+        created.append({"id": str(instance.id), "pr_number": instance.pr_number, "po_link": po_link})
         existing.add(row.pr_number)
 
     return {
@@ -537,5 +544,9 @@ def import_pr_workbook(file_obj, *, user, dry_run: bool = True) -> dict[str, Any
         },
         "rows": previews,
         "created": created,
+        "linking_notices": [
+            {"requisition_id": item["id"], "pr_number": item["pr_number"], **item["po_link"]}
+            for item in created if item["po_link"].get("manual_link_required")
+        ],
         "errors": errors,
     }

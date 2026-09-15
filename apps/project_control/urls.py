@@ -1,6 +1,8 @@
 """URL routes for Project Management — mounted at /api/v1/project-control/."""
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+from .epc_views import EpcProjectViewSet
+from .execution_views import EPCWorkItemViewSet
 
 from .views import (
     ApprovedHourEntryViewSet,
@@ -22,6 +24,8 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.register(r'epc-projects', EpcProjectViewSet, basename='project-control-epc-project')
+router.register(r'epc-work-items', EPCWorkItemViewSet, basename='project-control-epc-work-item')
 router.register(r'estimates', EstimateViewSet, basename='project-control-estimate')
 router.register(r'estimate-line-items', EstimateLineItemViewSet, basename='project-control-line-item')
 router.register(r'wbs-nodes', WBSNodeViewSet, basename='project-control-wbs')

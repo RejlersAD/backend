@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 from django.db import transaction
 from django.utils import timezone
+from apps.core.project_models import Project
 
 from ..config import BOQ_HEADER_SCAN_ROWS, BOQ_HEADER_SYNONYMS
 from ..models import Estimate, EstimateLineItem, ProjectDocument
@@ -98,6 +99,7 @@ def import_boq_excel(
     kind: str = 'estimate',
     title: str = '',
     notes: str = '',
+    currency: Optional[str] = None,
     user=None,
     source_document: Optional[ProjectDocument] = None,
 ) -> Dict:
@@ -115,9 +117,10 @@ def import_boq_excel(
 
     data_rows = rows[header_row + 1:]
 
+    Project.objects.select_for_update().get(pk=project.pk)
     next_version = (
         Estimate.objects
-        .filter(project=project, kind=kind, is_deleted=False)
+        .filter(project=project, kind=kind)
         .order_by('-version').values_list('version', flat=True).first()
     ) or 0
     next_version += 1
@@ -130,6 +133,7 @@ def import_boq_excel(
         status='draft',
         title=title or f'BOQ v{next_version} ({timezone.now():%Y-%m-%d})',
         notes=notes,
+        currency=currency or project.currency or 'AED',
         source_document=source_document,
         created_by=user if (user and getattr(user, 'is_authenticated', False)) else None,
     )
@@ -157,7 +161,8 @@ def import_boq_excel(
 
         qty = _to_decimal(cell('quantity'))
         rate = _to_decimal(cell('unit_rate'))
-        line_total = _to_decimal(cell('line_total')) or (qty * rate).quantize(Decimal('0.01'))
+        source_total = cell('line_total')
+        line_total = _to_decimal(source_total) if source_total is not None and str(source_total).strip() else (qty * rate).quantize(Decimal('0.01'))
 
         items.append(EstimateLineItem(
             estimate=estimate,

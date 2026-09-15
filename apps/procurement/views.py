@@ -85,6 +85,7 @@ from .serializers import (
     ReceiptSerializer,
     ProcurementCategorySerializer,
     PODocumentSerializer,
+    PODocumentReviewSerializer,
     # Master database serializers
     ProjectListSerializer,
     ProjectDetailSerializer,
@@ -291,7 +292,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
         # Conversion creates a Purchase Order and therefore requires order
         # module access in addition to authentication.
-        if getattr(self, 'action', None) == 'convert_to_po':
+        if getattr(self, 'action', None) in {'convert_to_po', 'link_purchase_order'}:
             self.module_required = 'procurement_orders'
         return super().get_permissions()
 
@@ -438,7 +439,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         parser_classes=[MultiPartParser, FormParser],
     )
     def import_signed_pdf(self, request):
-        """Capture a signed PR PDF into an existing RADAI requisition."""
+        """Review a signed PR PDF, then update or explicitly create its record."""
         pdf_file = request.FILES.get('file')
         if not pdf_file:
             return Response(
@@ -483,6 +484,13 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise SignedPRImportError('Manual signature verification must be a valid JSON object.') from exc
 
+            create_value = str(request.data.get('create_new', 'false')).strip().lower()
+            if create_value not in {'true', 'false', '1', '0'}:
+                raise SignedPRImportError('Create recommendation must be true or false.')
+            attach_value = str(request.data.get('attach_only', 'true' if expected_pr_number and create_value in {'false', '0'} else 'false')).strip().lower()
+            if attach_value not in {'true', 'false', '1', '0'}:
+                raise SignedPRImportError('Attach signed document must be true or false.')
+
             result = import_signed_pr_pdf(
                 pdf_bytes,
                 filename=pdf_file.name,
@@ -493,10 +501,12 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 expected_pr_number=expected_pr_number,
                 manual_overrides=manual_overrides,
                 manual_signature_overrides=manual_signature_overrides,
+                create_new=create_value in {'true', '1'},
+                attach_only=attach_value in {'true', '1'},
             )
         except SignedPRImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(result, status=status.HTTP_200_OK)
+        return Response(result, status=status.HTTP_201_CREATED if result.get('created') else status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'])
     def check_pr_number(self, request):
@@ -1313,6 +1323,26 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'requisition': self._build_requisition_response(pr),
             'purchase_order': PurchaseOrderSerializer(po, context=self.get_serializer_context()).data,
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='link-purchase-order')
+    def link_purchase_order(self, request, pk=None):
+        """Link an existing PO after an explicit procurement user selection."""
+        from uuid import UUID
+        from .services.pr_document_reconciliation import link_selected_purchase_order
+
+        raw_id = request.data.get('purchase_order_id')
+        try:
+            purchase_order_id = UUID(str(raw_id))
+        except (ValueError, TypeError, AttributeError):
+            return Response({'error': 'Select a valid purchase order.'}, status=status.HTTP_400_BAD_REQUEST)
+        pr = self.get_object()
+        po_link = link_selected_purchase_order(pr, purchase_order_id, actor=request.user)
+        response_status = status.HTTP_200_OK
+        payload = {'requisition_id': str(pr.pk), 'po_link': po_link}
+        if po_link['manual_link_required']:
+            payload['error'] = po_link['message']
+            response_status = status.HTTP_404_NOT_FOUND if po_link['status'] == 'not_found' else status.HTTP_409_CONFLICT
+        return Response(payload, status=response_status)
     
     @action(detail=True, methods=['post'])
     def upload_attachment(self, request, pk=None):
@@ -2463,10 +2493,100 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PODocumentSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
-        return super().get_queryset().filter(uploaded_by=self.request.user)
+        queryset = super().get_queryset().filter(uploaded_by=self.request.user)
+        if str(self.request.query_params.get('pending_reconciliation', '')).lower() == 'true':
+            queryset = queryset.filter(
+                confirmed_po__isnull=True, document_type='purchase_order',
+                extracted_data__reconciliation_required=True,
+            )
+        return queryset
+
+    def partial_update(self, request, pk=None):
+        """Review a retained upload without manufacturing approval or a PO."""
+        from copy import deepcopy
+        from django.db import transaction
+        from .services.po_excel_import import canonical_po_number
+        from .services.signed_po_pdf_import import _serializable_fields
+
+        document = self.get_object()
+        review = PODocumentReviewSerializer(data=request.data, partial=True)
+        review.is_valid(raise_exception=True)
+        with transaction.atomic():
+            document = self.get_queryset().select_for_update().get(pk=document.pk)
+            if document.confirmed_po_id or document.document_type != 'purchase_order':
+                return Response({'error': 'Edit the linked purchase order instead.'}, status=status.HTTP_409_CONFLICT)
+            fields = deepcopy(document.extracted_data or {})
+            fields.setdefault('source_extracted_data', deepcopy(fields))
+            values = dict(review.validated_data)
+            if 'pr_id' in values:
+                pr = values.pop('pr_id')
+                fields['pr_id'] = str(pr.pk) if pr else None
+                fields['pr_number'] = pr.pr_number if pr else ''
+            if 'po_number' in values:
+                supplied = values.pop('po_number')
+                canonical = canonical_po_number(supplied)
+                if PurchaseOrder.objects.filter(po_number=canonical).exists():
+                    raise ValidationError({'po_number': ['This number belongs to an existing purchase order.']})
+                fields.update(po_number=canonical, source_po_number=supplied)
+            if 'vendor_name' in values and values['vendor_name'] != fields.get('vendor_name'):
+                fields['vendor_id'] = None
+                fields['vendor_name_source'] = 'manual'
+            fields.update(_serializable_fields(values))
+            fields['reconciliation_required'] = True
+            fields['reconciliation_issues'] = [
+                *([] if fields.get('pr_id') else ['Link the matching purchase recommendation.']),
+                'Supplier and order details await reconciliation.',
+            ]
+            fields['reviewed_by'] = str(request.user.pk)
+            fields['reviewed_at'] = timezone.now().isoformat()
+            fields['manually_reviewed_fields'] = sorted(set(fields.get('manually_reviewed_fields', [])) | set(request.data))
+            document.extracted_data = fields
+            document.save(update_fields=['extracted_data', 'updated_at'])
+        return Response(self.get_serializer(document).data)
+
+    def destroy(self, request, pk=None):
+        """Remove a pending upload; linked orders use the purchase order endpoint."""
+        from django.db import transaction
+        from django.core.files.storage import default_storage
+        import logging
+
+        document = self.get_object()
+        with transaction.atomic():
+            document = self.get_queryset().select_for_update().get(pk=document.pk)
+            if document.confirmed_po_id or document.document_type != 'purchase_order':
+                return Response({'error': 'Delete the linked purchase order instead.'}, status=status.HTTP_409_CONFLICT)
+            key = document.s3_key
+            document.delete()
+            def remove_unreferenced_source():
+                if key and not PODocument.objects.filter(s3_key=key).exists():
+                    try:
+                        default_storage.delete(key)
+                    except Exception:
+                        logging.getLogger(__name__).exception('Pending PO source cleanup failed')
+            transaction.on_commit(remove_unreferenced_source)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get'], url_path='content')
+    def content(self, request, pk=None):
+        """Read an authorized stored source PDF for preview or download."""
+        from django.core.files.storage import default_storage
+        from django.http import FileResponse
+        document = self.get_object()
+        if not document.s3_key:
+            return Response({'error': 'The source PDF is unavailable.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            source = default_storage.open(document.s3_key, 'rb')
+        except FileNotFoundError:
+            return Response({'error': 'The source PDF is unavailable.'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception:
+            return Response({'error': 'The saved PDF could not be loaded. Please retry.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        response = FileResponse(source, content_type='application/pdf', as_attachment=False, filename=document.original_filename)
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @action(detail=False, methods=['post'], url_path='extract_from_pdf',
             parser_classes=[MultiPartParser, FormParser])

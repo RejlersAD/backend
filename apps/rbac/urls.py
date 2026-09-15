@@ -21,6 +21,7 @@ from .dashboard_views import (
 from .ai_champion_views import AIChampionViewSet
 from apps.users.views_password import change_password
 from .views_admin import provision_all_profiles, check_profile_status, check_admin_status
+from .database_maintenance_views import database_tables, database_table_action
 
 router = DefaultRouter()
 # RBAC Core
@@ -63,6 +64,8 @@ urlpatterns = [
     # Password management
     path('users/change-password/', change_password, name='rbac-change-password'),
     # Admin endpoints for system maintenance
+    path('admin/database/tables/', database_tables, name='admin-database-tables'),
+    path('admin/database/tables/action/', database_table_action, name='admin-database-table-action'),
     path('admin/check-status/', check_admin_status, name='admin-check-status'),
     path('admin/provision-profiles/', provision_all_profiles, name='admin-provision-profiles'),
     path('admin/profile-status/', check_profile_status, name='admin-profile-status'),
