@@ -6,6 +6,31 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def ensure_execution_reference_keys(apps, schema_editor):
+    """Repair existing targets before execution's deferred foreign keys run.
+
+    A procurement-only preflight still fails on restored milestone, planning,
+    or project-control tables. Use historical models and cover every existing
+    target of this migration, including the documents through table's target.
+    Keep requisitions for installations that applied 0007 before its preflight.
+    """
+    import_module('apps.project_control.migrations.0007_epc_foundation').ensure_reference_keys(
+        apps, schema_editor, (
+            ('procurement', 'PurchaseRequisition'),
+            ('procurement', 'PurchaseOrder'),
+            tuple(settings.AUTH_USER_MODEL.split('.')),
+            ('core', 'Project'),
+            ('core', 'ProjectMilestone'),
+            ('planning_intelligence', 'ScheduleActivity'),
+            ('planning_intelligence', 'ScheduleControlSnapshot'),
+            ('planning_intelligence', 'ActivityProgressUpdate'),
+            ('project_control', 'IntegratedBaseline'),
+            ('project_control', 'ProjectDocument'),
+            ('project_control', 'WBSNode'),
+        ),
+    )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -17,9 +42,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Also cover installations that applied 0007 before its key preflight.
         migrations.RunPython(
-            import_module('apps.project_control.migrations.0007_epc_foundation').ensure_procurement_reference_keys,
+            ensure_execution_reference_keys,
             migrations.RunPython.noop,
         ),
         migrations.CreateModel(

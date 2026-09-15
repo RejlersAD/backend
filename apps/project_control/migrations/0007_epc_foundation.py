@@ -6,10 +6,17 @@ from django.db import migrations, models
 
 
 def ensure_procurement_reference_keys(apps, schema_editor):
+    ensure_reference_keys(apps, schema_editor, (
+        ('procurement', 'PurchaseRequisition'),
+        ('procurement', 'PurchaseOrder'),
+    ))
+
+
+def ensure_reference_keys(apps, schema_editor, model_labels):
     """Restore PostgreSQL FK target keys without changing business identities.
 
-    Restored databases can record procurement migrations as applied while their
-    ID indexes are absent. Repair before this migration's deferred foreign keys;
+    Restored databases can record migrations as applied while their ID indexes
+    are absent. Repair before the calling migration's deferred foreign keys;
     adding a new predecessor would invalidate already-applied EPC histories.
     """
     connection = schema_editor.connection
@@ -17,8 +24,8 @@ def ensure_procurement_reference_keys(apps, schema_editor):
         return
     quote = schema_editor.quote_name
     with connection.cursor() as cursor:
-        for name in ('PurchaseRequisition', 'PurchaseOrder'):
-            model = apps.get_model('procurement', name)
+        for app_label, name in model_labels:
+            model = apps.get_model(app_label, name)
             table, column = model._meta.db_table, model._meta.pk.column
             # Retain this lock until the atomic migration finishes, so writes
             # cannot invalidate validation before the new key/FKs are created.
@@ -41,7 +48,7 @@ def ensure_procurement_reference_keys(apps, schema_editor):
                 raise RuntimeError(
                     f'Cannot repair {table}.{column}: null IDs exist. '
                     'Reconcile the source identities before retrying migrations; '
-                    'no procurement rows or IDs were changed.'
+                    'no source rows or IDs were changed.'
                 )
             cursor.execute(f'''SELECT EXISTS (
                 SELECT 1 FROM {quote(table)} GROUP BY {quote(column)} HAVING COUNT(*) > 1
@@ -50,7 +57,7 @@ def ensure_procurement_reference_keys(apps, schema_editor):
                 raise RuntimeError(
                     f'Cannot repair {table}.{column}: duplicate IDs exist. '
                     'Reconcile the source identities before retrying migrations; '
-                    'no procurement rows or IDs were changed.'
+                    'no source rows or IDs were changed.'
                 )
             cursor.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(%s) AND contype = 'p')",
