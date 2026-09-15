@@ -221,13 +221,89 @@ class PurchaseOrderExportTests(TestCase):
         order.confirmation_date = '2026-09-13'
         return order
 
-    def test_long_addresses_and_contacts_flow_before_following_fields_and_footer(self):
+    def _realistic_long_contact_order(self):
+        # Match the reported cover's density: two buyers, three invoice email
+        # addresses and the same long supplier contact in both cover columns.
+        order = self._order()
+        order.vendor.name = 'SYNTHETIC SURVEYS WORK MEASUREMENT & SPACE L.L.C.'
+        order.title = 'Provision of Piping Design engineer for 2 Months'
+        order.seller_address = 'Al Example Tower, Office M04, Abu Dhabi, United Arab Emirates'
+        order.seller_reference = (
+            'Mr. Synthetic Contact\ninfo@syntheticsurveys.com\n'
+            'supplier@syntheticsurveys.com'
+        )
+        order.quote_ref = 'CESPR092026016 R0 & Email Dated 14.09.2026'
+        order.seller_license_no = 'CN-4349991'
+        order.invoicing_attn = 'Attn. Mr. Synthetic Accounts Contact'
+        order.invoicing_emails = [
+            'accounts.payable.contact@example.ae',
+            'cc. uae.finance@example.ae',
+            'uae.procurement@example.ae',
+        ]
+        order.company_fax = 'INVOICEFAX9988'
+        order.contact_persons = {'buyer_references': [
+            {'name': 'Synthetic Primary Buyer', 'designation': 'Procurement Manager',
+             'email': 'primarybuyer.thomas@example.ae'},
+            {'name': 'Synthetic Second Buyer', 'designation': 'Procurement Engineer',
+             'email': 'secondarybuyer.ravichandran@example.ae'},
+        ]}
+        order.payment_terms = '45 days net for agreed payment milestones'
+        order.delivery_terms = 'Services completed and accepted'
+        order.marking = 'RAD-PRJ-PUR-0126_SEP2026'
+        return order
+
+    def test_realistic_cover_keeps_every_field_legible_on_first_page(self):
+        order = self._realistic_long_contact_order()
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertEqual(len(pdf), 3)
+            self._assert_body_clear_of_footer(pdf)
+            page = pdf[0]
+            text = ''.join(page.get_text().split())
+            for label in (
+                'Seller:', 'Seller Address:', 'Invoicing Address:', 'Seller Reference:',
+                'Buyer Reference:', 'Payment Terms:', 'Payment Mode:', 'Project:',
+                'Delivery terms:', 'Delivery date:', 'Marking:', 'Purchase Summary:',
+                'Total Purchase Price:', 'Total Sum:', 'Approved by:', 'Order Confirmation:',
+                'Seller Signature:', 'Seller Name:', 'Seller Ref. no:', 'Contact Person:',
+                'Phone Number:', 'Fax:', 'Email:',
+            ):
+                self.assertIn(''.join(label.split()), text)
+            for value in (
+                order.vendor.name, order.seller_address, order.seller_reference,
+                order.quote_ref, order.seller_license_no, order.invoicing_attn,
+                *order.invoicing_emails, order.payment_terms, order.delivery_terms,
+                order.marking, order.title, order.seller_phone, order.seller_fax,
+                order.seller_email,
+            ):
+                self.assertIn(''.join(value.split()), text)
+            for reference in order.contact_persons['buyer_references']:
+                for value in reference.values():
+                    self.assertIn(''.join(value.split()), text)
+            self.assertLess(
+                page.search_for('INVOICEFAX9988')[0].y1,
+                min(rect.y0 for rect in page.search_for('Payment Terms:')),
+            )
+            # Evaluate the actual exported glyph sizes after any fit scaling.
+            for block in page.get_text('dict')['blocks']:
+                for line in block.get('lines', []):
+                    for span in line['spans']:
+                        if (span['bbox'][1] >= 34 * mm
+                                and span['bbox'][3] <= page.rect.height - 40 * mm):
+                            self.assertGreaterEqual(span['size'], 8,
+                                f'Cover text became too small: {span["text"]}')
+            self.assertIn('PO DESCRIPTION & SCOPE', pdf[1].get_text())
+            self.assertNotIn('Order Confirmation:', pdf[1].get_text())
+            self.assertIn('SUMMARY OF PRICES', pdf[2].get_text())
+
+    def test_long_addresses_and_contacts_fit_on_first_page_without_footer_overlap(self):
         order = self._long_order()
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
         with fitz.open(stream=content, filetype='pdf') as pdf:
             self._assert_body_clear_of_footer(pdf)
-            text = ''.join(page.get_text() for page in pdf)
+            text = pdf[0].get_text()
             compact_text = ''.join(text.split())
             for value in [
                 order.vendor.name, order.seller_address, *order.invoicing_emails,
@@ -243,9 +319,13 @@ class PurchaseOrderExportTests(TestCase):
             self.assertEqual(len(fax), 1)
             self.assertEqual(len({page_number for page_number, _ in payment}), 1)
             self.assertLess(fax[0], min(payment))
-            self.assertGreater(len(pdf), 3)
+            self.assertEqual(fax[0][0], 0)
+            self.assertEqual(min(payment)[0], 0)
+            self.assertIn('Approved by:', text)
+            self.assertIn('Order Confirmation:', text)
+            self.assertEqual(len(pdf), 3)
 
-    def test_single_address_taller_than_page_preserves_every_line(self):
+    def test_single_address_taller_than_page_preserves_every_line_on_first_page(self):
         order = self._order()
         address_lines = [f'ADDRESSLINE{index:03d} Synthetic site location' for index in range(125)]
         order.seller_address = '\n'.join(address_lines)
@@ -253,16 +333,19 @@ class PurchaseOrderExportTests(TestCase):
         self.assertEqual(warnings, [])
         with fitz.open(stream=content, filetype='pdf') as pdf:
             self._assert_body_clear_of_footer(pdf)
-            text = '\n'.join(page.get_text() for page in pdf)
+            text = pdf[0].get_text()
             for index in range(125):
                 self.assertEqual(text.count(f'ADDRESSLINE{index:03d}'), 1)
-            for label in ('Payment Terms:', 'Order Confirmation:', 'Phone Number:', 'SUMMARY OF PRICES'):
+            for label in ('Payment Terms:', 'Order Confirmation:', 'Phone Number:'):
                 self.assertIn(''.join(label.split()), ''.join(text.split()))
-            self.assertIn('USD 105.00', text)
-            self.assertGreater(len(pdf), 4)
+            self.assertIn('105.00USD', ''.join(text.split()))
+            self.assertEqual(len(pdf), 3)
+            self.assertIn('PO DESCRIPTION & SCOPE', pdf[1].get_text())
+            self.assertIn('SUMMARY OF PRICES', pdf[2].get_text())
 
-    def test_signature_approver_and_confirmation_stay_together_after_long_details(self):
-        order = self._long_order()
+    def test_signature_approver_and_confirmation_stay_together_on_first_page(self):
+        order = self._realistic_long_contact_order()
+        order.approved_by_name = 'Synthetic Authorised Approver'
         signature = BytesIO()
         PILImage.new('RGB', (180, 50), 'navy').save(signature, format='PNG')
         order.approval_signature = 'data:image/png;base64,' + base64.b64encode(signature.getvalue()).decode()
@@ -273,6 +356,8 @@ class PurchaseOrderExportTests(TestCase):
             approval_pages = [page for page in pdf if page.search_for('Approved by:')]
             self.assertEqual(len(approval_pages), 1)
             page = approval_pages[0]
+            self.assertEqual(page.number, 0)
+            self.assertEqual(len(pdf), 3)
             heading = page.search_for('Approved by:')[0]
             approver = page.search_for(order.approved_by_name)[0]
             self.assertTrue(page.search_for('Order Confirmation:'))
