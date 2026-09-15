@@ -2338,39 +2338,39 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             )
 
 
+class ReceiptPagination(PageNumberPagination):
+    # Keep the existing default for older consumers; new clients can request small pages.
+    page_size = 500
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+
 class ReceiptViewSet(viewsets.ModelViewSet):
     """Goods Receipt management secured by procurement receipt access."""
 
     queryset = Receipt.objects.all().select_related(
-        'purchase_order', 'received_by'
+        'purchase_order', 'received_by', 'purchase_order__vendor',
+        'purchase_order__project', 'purchase_order__enterprise_project',
     ).order_by('-created_at')
     serializer_class = ReceiptSerializer
+    pagination_class = ReceiptPagination
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     
     def get_queryset(self):
-        queryset = super().get_queryset()
-        
-        status_filter = self.request.query_params.get('status', None)
-        if status_filter:
-            queryset = queryset.filter(status=status_filter)
-        
-        quality_filter = self.request.query_params.get('quality_check', None)
-        if quality_filter == 'passed':
-            queryset = queryset.filter(quality_check_passed=True)
-        elif quality_filter == 'failed':
-            queryset = queryset.filter(quality_check_passed=False)
-        
-        search = self.request.query_params.get('search', None)
-        if search:
-            queryset = queryset.filter(
-                Q(receipt_number__icontains=search) |
-                Q(purchase_order__po_number__icontains=search) |
-                Q(delivery_note_number__icontains=search)
-            )
-        
-        return queryset
+        from .services.receipt_inspection import apply_queue, filter_receipts, order_receipts, selected_queue
+        queryset = filter_receipts(super().get_queryset(), self.request.query_params)
+        if self.action != 'inspection_summary':
+            queryset = apply_queue(queryset, selected_queue(self.request.query_params))
+        return order_receipts(queryset, self.request.query_params)
+
+    @action(detail=False, methods=['get'], url_path='inspection-summary')
+    def inspection_summary(self, request):
+        from .services.receipt_inspection import inspection_summary
+        response = Response(inspection_summary(self.get_queryset(), request))
+        response['Cache-Control'] = 'private, no-store'
+        return response
     
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):

@@ -18,6 +18,7 @@ import os
 import tempfile
 
 from django.db.models import Count, Sum, Q
+from django.utils import timezone
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -41,19 +42,28 @@ class CustomerInvoicePagination(PageNumberPagination):
     max_page_size = 200
 
 
+class StableInvoiceOrderingFilter(filters.OrderingFilter):
+    def get_ordering(self, request, queryset, view):
+        ordering = super().get_ordering(request, queryset, view)
+        if ordering and not any(field.lstrip('-') == 'id' for field in ordering):
+            return [*ordering, '-id']
+        return ordering
+
+
 class CustomerInvoiceViewSet(viewsets.ModelViewSet):
     queryset = CustomerInvoice.objects.all().prefetch_related('attachments')
     serializer_class = CustomerInvoiceSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [filters.SearchFilter, StableInvoiceOrderingFilter]
     search_fields = [
         'invoice_number', 'account', 'company', 'rad_project_no',
         'project_name', 'project_id', 'customer_inv_reference',
         'bank_reference_code', 'pm', 'finance_pm_email',
     ]
     ordering_fields = ['invoice_date', 'due_date', 'grand_total',
-                       'invoice_amount', 'payment_status', 'created_at']
+                       'invoice_amount', 'payment_status', 'created_at',
+                       'invoice_number', 'balance_to_be_received', 'id']
     ordering = ['-invoice_date', '-id']
     pagination_class = CustomerInvoicePagination
 
@@ -82,18 +92,31 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
                 Q(project_id__icontains=project)
             )
 
-        currency = params.get('currency')
-        if currency:
-            qs = qs.filter(currency=currency)
+        from .services.collections import filter_collection_queryset
+        return filter_collection_queryset(
+            qs, params, as_of=timezone.localdate(),
+            include_queue=self.action != 'collections_summary',
+        )
 
-        date_from = params.get('date_from')
-        if date_from:
-            qs = qs.filter(invoice_date__gte=date_from)
-        date_to = params.get('date_to')
-        if date_to:
-            qs = qs.filter(invoice_date__lte=date_to)
-
-        return qs
+    @action(detail=False, methods=['get'], url_path='collections-summary')
+    def collections_summary(self, request):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.collections import build_collections_summary
+        source = self.filter_queryset(self.get_queryset())
+        data = build_collections_summary(
+            source, full_source=super().get_queryset(),
+            queue=request.query_params.get('queue') or 'all',
+        )
+        can_create = request_action_allowed(request, 'finance_outgoing', 'create')
+        data['capabilities'] = {
+            'create': can_create,
+            # import_excel is governed by CREATE_OPERATIONS in action_policy.
+            'import': can_create,
+            'export': request_action_allowed(request, 'finance_outgoing', 'export'),
+        }
+        response = Response(data)
+        response['Cache-Control'] = 'private, no-store'
+        return response
 
     def perform_create(self, serializer):
         instance = serializer.save(created_by=self.request.user)
