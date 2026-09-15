@@ -81,6 +81,9 @@ def _validate_sheet(workbook: str, sheet: dict[str, Any], issues: list[dict[str,
     col_size_to = _first_column(headers, "SizeTo", "Size To")
 
     for row in rows:
+        source = row.get("source") or {}
+        if not (source.get("class_id") or source.get("component_id")):
+            continue
         checked += 1
         cells = row.get("cells") or {}
         row_key = str(row.get("row_key") or "")

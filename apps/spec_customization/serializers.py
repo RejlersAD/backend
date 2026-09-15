@@ -76,7 +76,7 @@ class PipingClassSerializer(serializers.ModelSerializer):
 
 class PipingClassListSerializer(serializers.ModelSerializer):
     """Lightweight list serializer (no nested components)."""
-    components_count = serializers.IntegerField(read_only=True)
+    components_count = serializers.SerializerMethodField()
 
     class Meta:
         model = PipingClass
@@ -86,6 +86,9 @@ class PipingClassListSerializer(serializers.ModelSerializer):
             'service_list', 'source_pages', 'confidence_score',
             'extraction_engine', 'components_count', 'created_at',
         ]
+
+    def get_components_count(self, obj):
+        return len(obj.components.all())
 
 
 

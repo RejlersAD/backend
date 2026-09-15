@@ -252,6 +252,12 @@ def batch_save_cells(job: PaperSpecExtractionJob, cells: list[dict], user=None) 
             defaults={
                 'value': cell.get('value', ''),
                 'edited_by': user,
+                'source_class_id': cell.get('source_class_id'),
+                'source_component_id': cell.get('source_component_id'),
+                'edit_origin': cell.get('edit_origin', WorkbookCellOverride.EDIT_ORIGIN_MANUAL),
+                'evidence_pages': cell.get('evidence_pages', []),
+                'auto_value_used': bool(cell.get('auto_value_used', False)),
+                'approved_at': cell.get('approved_at'),
             }
         )
         

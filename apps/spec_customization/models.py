@@ -528,6 +528,13 @@ class WorkbookCellOverride(models.Model):
 
     ]
 
+    EDIT_ORIGIN_MANUAL = 'manual'
+    EDIT_ORIGIN_CHATBOT = 'chatbot'
+    EDIT_ORIGIN_CHOICES = [
+        (EDIT_ORIGIN_MANUAL, 'Manual'),
+        (EDIT_ORIGIN_CHATBOT, 'Workbook chatbot'),
+    ]
+
 
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -551,6 +558,29 @@ class WorkbookCellOverride(models.Model):
     column_name = models.CharField(max_length=128)
 
     value       = models.TextField(blank=True, default='')
+
+    source_class = models.ForeignKey(
+        PipingClass,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        db_constraint=False,
+        related_name='workbook_overrides',
+    )
+    source_component = models.ForeignKey(
+        PipingClassComponent,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        db_constraint=False,
+        related_name='workbook_overrides',
+    )
+    edit_origin = models.CharField(
+        max_length=16,
+        choices=EDIT_ORIGIN_CHOICES,
+        default=EDIT_ORIGIN_MANUAL,
+    )
+    evidence_pages = models.JSONField(default=list, blank=True)
+    auto_value_used = models.BooleanField(default=False)
+    approved_at = models.DateTimeField(null=True, blank=True)
 
 
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.core.cache import cache
+from django.utils import timezone
 
 from .exporters.workbook_preview import WORKBOOK_CAT, WORKBOOK_SPEC, build_preview
 from ..workbook_storage_service import batch_save_cells, get_workbook_revision
@@ -128,8 +129,13 @@ def _uploaded_document_context(job) -> dict[str, Any]:
     if not doc:
         return {
             "available": False,
+            "document_id": "",
             "source": "unknown",
             "filename": "",
+            "file_url": "",
+            "project_id": "",
+            "title": "",
+            "document_number": "",
             "s3_key": "",
             "size_bytes": 0,
             "page_count": 0,
@@ -142,11 +148,20 @@ def _uploaded_document_context(job) -> dict[str, Any]:
     if file_obj is not None:
         file_name = str(getattr(file_obj, "name", "") or "")
         source = "s3" if file_name.startswith("spec_customization/") else "storage"
+    try:
+        file_url = str(getattr(file_obj, "url", "") or "") if file_obj else ""
+    except Exception:
+        file_url = ""
 
     return {
         "available": True,
+        "document_id": str(getattr(doc, "id", "") or ""),
         "source": source,
         "filename": str(getattr(doc, "original_filename", "") or ""),
+        "file_url": file_url,
+        "project_id": str(getattr(doc, "project_id", "") or ""),
+        "title": str(getattr(doc, "title", "") or ""),
+        "document_number": str(getattr(doc, "document_number", "") or ""),
         "s3_key": file_name,
         "size_bytes": int(getattr(doc, "file_size_bytes", 0) or 0),
         "page_count": int(getattr(doc, "total_pages", 0) or 0),
@@ -566,6 +581,136 @@ def _parse_instruction(instruction: str) -> ParsedInstruction | None:
     return None
 
 
+def _is_repair_instruction(instruction: str) -> bool:
+    """Recognize broad requests that ask the assistant to clean existing data."""
+    text = _norm(instruction)
+    repair_terms = {"align", "clean", "correct", "fix", "normalize", "rectify", "standardize"}
+    data_terms = {"data", "issue", "issues", "record", "records", "row", "rows", "workbook"}
+    return bool(_tokens(text).intersection(repair_terms) and _tokens(text).intersection(data_terms))
+
+
+def _canonical_pressure(value: Any) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    match = re.fullmatch(r"(?:CLASS|CL|#)?\s*(\d{2,4})\s*#?", text)
+    return f"CLASS {match.group(1)}" if match else None
+
+
+def _canonical_facing(value: Any) -> str | None:
+    text = _norm(value)
+    if text in {"rf", "raised face", "raised-face"}:
+        return "RF"
+    if text in {"ff", "flat face", "flat-face"}:
+        return "FF"
+    if text in {"rtj", "ring type joint", "ring-type joint"}:
+        return "RTJ"
+    return None
+
+
+def _canonical_end_connection(value: Any) -> str | None:
+    text = _norm(value)
+    aliases = {
+        "butt weld": "BW", "buttweld": "BW", "bw": "BW",
+        "socket weld": "SW", "socketweld": "SW", "sw": "SW",
+        "threaded": "THR", "thread": "THR", "thr": "THR",
+        "npt": "NPT", "rf": "RF", "ff": "FF", "rtj": "RTJ",
+    }
+    return aliases.get(text)
+
+
+def _numeric_size(value: Any) -> float | None:
+    match = re.search(r"\d+(?:\.\d+)?", str(value or ""))
+    try:
+        return float(match.group(0)) if match else None
+    except ValueError:
+        return None
+
+
+def _plan_safe_repairs_for_workbook(job, workbook: str) -> dict[str, Any]:
+    """Plan only corrections whose intended value is unambiguous."""
+    preview = build_preview(job, workbook)
+    updates: list[dict[str, Any]] = []
+    unresolved_count = 0
+    source_rows = 0
+
+    for sheet in preview.get("sheets") or []:
+        headers = [str(header) for header in (sheet.get("headers") or [])]
+        pressure_column = _resolve_name("PressureRating", headers)
+        facing_column = _resolve_name("FlangeFacing", headers)
+        end_column = _resolve_name("EndConnection", headers)
+        size_from_column = _resolve_name("SizeFrom", headers)
+        size_to_column = _resolve_name("SizeTo", headers)
+
+        for row in sheet.get("rows") or []:
+            cells = row.get("cells") or {}
+            source = row.get("source") or {}
+            if not (source.get("class_id") or source.get("component_id")):
+                continue
+            source_rows += 1
+
+            def add_update(column_name: str, value: Any) -> None:
+                previous_value = cells.get(column_name)
+                if str(previous_value or "").strip() == str(value or "").strip():
+                    return
+                updates.append({
+                    "workbook": workbook,
+                    "sheet_name": sheet.get("name") or "",
+                    "row_key": row.get("row_key") or "",
+                    "column_name": column_name,
+                    "value": value,
+                    "previous_value": previous_value,
+                    "source": {
+                        "class_id": source.get("class_id"),
+                        "class_code": source.get("class_code"),
+                        "component_id": source.get("component_id"),
+                    },
+                })
+
+            if pressure_column and str(cells.get(pressure_column) or "").strip():
+                canonical = _canonical_pressure(cells.get(pressure_column))
+                if canonical:
+                    add_update(pressure_column, canonical)
+                else:
+                    unresolved_count += 1
+
+            if facing_column and str(cells.get(facing_column) or "").strip():
+                canonical = _canonical_facing(cells.get(facing_column))
+                if canonical:
+                    add_update(facing_column, canonical)
+                else:
+                    unresolved_count += 1
+
+            if end_column and str(cells.get(end_column) or "").strip():
+                canonical = _canonical_end_connection(cells.get(end_column))
+                if canonical:
+                    add_update(end_column, canonical)
+                else:
+                    unresolved_count += 1
+
+            if size_from_column and size_to_column:
+                size_from = _numeric_size(cells.get(size_from_column))
+                size_to = _numeric_size(cells.get(size_to_column))
+                if size_from is not None and size_to is not None and size_from > size_to:
+                    add_update(size_from_column, cells.get(size_to_column))
+                    add_update(size_to_column, cells.get(size_from_column))
+
+            if len(updates) >= WORKBOOK_CHATBOT_CONFIG["safety"]["max_cell_updates"]:
+                break
+
+    return {
+        "ok": True,
+        "workbook": workbook,
+        "operation": "repair",
+        "planned_updates": updates,
+        "planned_count": len(updates),
+        "source_rows": source_rows,
+        "retrieved_rows": int(preview.get("total_rows") or sum(
+            len(sheet.get("rows") or []) for sheet in preview.get("sheets") or []
+        )),
+        "unresolved_count": unresolved_count,
+        "retrieval_cache_hit": False,
+    }
+
+
 def _score_item(tokens: set[str], text_blob: str) -> int:
     if not tokens:
         return 0
@@ -721,6 +866,8 @@ def _plan_updates_for_workbook(job, workbook: str, instruction: str, *, resolved
         for row in rows:
             if not _match_row(parsed, row, where_column_real):
                 continue
+            cells = row.get("cells") or {}
+            source = row.get("source") or {}
             row_key = row["row_key"]
             sheet_name = row["sheet_name"]
             dedupe = f"{sheet_name}::{row_key}::{target_column_real}"
@@ -734,6 +881,11 @@ def _plan_updates_for_workbook(job, workbook: str, instruction: str, *, resolved
                 "column_name": target_column_real,
                 "value": resolved_target_value if resolved_target_value is not None else parsed.target_value,
                 "previous_value": cells.get(target_column_real),
+                "source": {
+                    "class_id": source.get("class_id"),
+                    "class_code": source.get("class_code"),
+                    "component_id": source.get("component_id"),
+                },
             })
             if len(planned) + len(updates) >= WORKBOOK_CHATBOT_CONFIG["safety"]["max_cell_updates"]:
                 break
@@ -789,6 +941,7 @@ def apply_workbook_chat_instruction(
 
     workbooks = _workbook_for_instruction(instruction, workbook_scope, active_workbook)
     parsed = _parse_instruction(instruction)
+    repair_requested = parsed is None and _is_repair_instruction(instruction)
 
     if (
         parsed
@@ -881,7 +1034,11 @@ def apply_workbook_chat_instruction(
     all_updates = []
     index_cache_hits = 0
     for wb in workbooks:
-        res = _plan_updates_for_workbook(job, wb, instruction, resolved_target_value=resolved_target_value)
+        res = (
+            _plan_safe_repairs_for_workbook(job, wb)
+            if repair_requested
+            else _plan_updates_for_workbook(job, wb, instruction, resolved_target_value=resolved_target_value)
+        )
         workbook_results.append(res)
         if res.get("retrieval_cache_hit"):
             index_cache_hits += 1
@@ -901,16 +1058,38 @@ def apply_workbook_chat_instruction(
             evidence_count=len(document_evidence),
             auto_value_used=auto_value_used,
         )
+        if repair_requested:
+            unresolved_count = sum(int(result.get("unresolved_count") or 0) for result in workbook_results)
+            source_rows = sum(int(result.get("source_rows") or 0) for result in workbook_results)
+            if source_rows == 0:
+                warning = (
+                    "This job has no extracted class or component records to repair. "
+                    "The visible rows are workbook template reference rows and are intentionally not auto-modified."
+                )
+                tip = "Re-run extraction on the source document, then ask me to rectify and align the extracted records."
+            else:
+                warning = (
+                    "No safe automatic corrections were found. "
+                    "Missing or ambiguous values need an explicit value or document reference before they can be changed."
+                )
+                tip = "Try: set <column> to <value> where <column> contains <text>, or include a source page."
+        else:
+            unresolved_count = 0
+            warning = "No matching rows found for this instruction."
+            tip = "Use a sheet name present in workbook and ensure where-conditions match existing rows."
         return {
             "ok": True,
             "preview_only": True,
             "instruction": instruction,
+            "operation": "repair" if repair_requested else "edit",
             "workbooks": workbooks,
             "workbook_revisions": workbook_revisions,
             "applied_count": 0,
             "planned_count": 0,
-            "warning": "No matching rows found for this instruction.",
-            "error": "No matching rows found for this instruction.",
+            "warning": warning,
+            "error": warning,
+            "unresolved_count": unresolved_count,
+            "source_rows": source_rows if repair_requested else 0,
             "workbook_results": workbook_results,
             "runtime": runtime,
             "document_context": _uploaded_document_context(job),
@@ -922,7 +1101,7 @@ def apply_workbook_chat_instruction(
             },
             "suggestions": {
                 "try_workbook_scope": "both",
-                "tip": "Use a sheet name present in workbook and ensure where-conditions match existing rows.",
+                "tip": tip,
             },
         }
 
@@ -960,6 +1139,7 @@ def apply_workbook_chat_instruction(
             "ok": True,
             "preview_only": True,
             "instruction": instruction,
+            "operation": "repair" if repair_requested else "edit",
             "workbooks": workbooks,
             "workbook_revisions": workbook_revisions,
             "applied_count": 0,
@@ -978,12 +1158,32 @@ def apply_workbook_chat_instruction(
         _cache_set(result_key, response)
         return response
 
-    save_result = batch_save_cells(job=job, cells=all_updates, user=user)
+    evidence_pages = sorted({
+        int(item["page"])
+        for item in document_evidence
+        if item.get("page") is not None
+    })
+    approved_at = timezone.now()
+    cells_with_provenance = []
+    for update in all_updates:
+        source = update.get("source") or {}
+        cells_with_provenance.append({
+            **update,
+            "source_class_id": source.get("class_id"),
+            "source_component_id": source.get("component_id"),
+            "edit_origin": "chatbot",
+            "evidence_pages": evidence_pages,
+            "auto_value_used": auto_value_used,
+            "approved_at": approved_at,
+        })
+
+    save_result = batch_save_cells(job=job, cells=cells_with_provenance, user=user)
 
     response = {
         "ok": True,
         "preview_only": False,
         "instruction": instruction,
+        "operation": "repair" if repair_requested else "edit",
         "workbooks": workbooks,
         "workbook_revisions": workbook_revisions,
         "applied_count": len(all_updates),

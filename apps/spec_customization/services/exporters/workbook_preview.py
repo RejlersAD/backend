@@ -263,7 +263,7 @@ def _enumerate_spec_rows(job):
                     row_key = f'cls:{cls.id}:b{b_idx}:{seq}'
                     source = {
                         'class_id':     str(cls.id),
-                        'class_code':   cls.class_code,
+                        'class_code':   _clean_workbook_text(cls.class_code),
                         'component_id': None,
                     }
                     yield sheet_name, row_key, source, dict(row)
@@ -354,7 +354,7 @@ def _enumerate_cat_rows(job, unrouted_out: list[dict] | None = None):
                 row_key = f'comp:{comp.id}:{sheet_name}:{seq}'
                 source = {
                     'class_id':     str(cls.id),
-                    'class_code':   cls.class_code,
+                    'class_code':   _clean_workbook_text(cls.class_code),
                     'component_id': str(comp.id),
                 }
                 yield sheet_name, row_key, source, dict(row)

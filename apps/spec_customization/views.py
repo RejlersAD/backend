@@ -617,7 +617,7 @@ def cancel_job(request, job_id):
 def job_classes(request, job_id):
     job = _get_accessible_job(request, job_id)
     qs = (job.piping_classes
-              .annotate(components_count=Count('components'))
+              .prefetch_related('components')
               .order_by('class_code'))
     return Response(PipingClassListSerializer(qs, many=True).data)
 
