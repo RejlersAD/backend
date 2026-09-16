@@ -24,6 +24,13 @@ __all__ = [
 
 User = get_user_model()
 
+VAT_BASIS_CHOICES = [
+    ('unconfirmed', 'VAT treatment not confirmed'),
+    ('exclusive', 'Add 5% VAT to entered prices'),
+    ('inclusive', 'Entered prices include 5% VAT'),
+    ('none', 'No VAT applies'),
+]
+
 
 # Soft-coded configuration for procurement categories - Oil & Gas Industry
 PROCUREMENT_CATEGORIES = {
@@ -267,6 +274,7 @@ class PurchaseRequisition(TimeStampedModel):
     currency = models.CharField(max_length=3, default='USD', help_text='Currency code (USD, AED, EUR, etc.)')
     price_remarks = models.TextField(blank=True, help_text='Negotiation remarks: outcome, savings, commercial clarifications, or final terms (Feedback: Renamed from Discount %)')
     net_total_excl_vat = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text='Net Total, excluding VAT')
+    vat_basis = models.CharField(max_length=16, choices=VAT_BASIS_CHOICES, default='unconfirmed')
     
     # === ADVANCED PRICE REMARKS DATA (Dynamic) ===
     price_remarks_data = models.JSONField(
@@ -487,6 +495,9 @@ class PurchaseOrder(TimeStampedModel):
     form_note = models.CharField(max_length=200, default='(PO no. to be used in all documents)', help_text='Form usage note')
     
     # Financial (soft-coded for AI extraction)
+    net_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True,
+                                    help_text='Net after discounts, recorded when the user confirms VAT treatment.')
+    vat_basis = models.CharField(max_length=16, choices=VAT_BASIS_CHOICES, default='unconfirmed')
     total_amount = models.DecimalField(max_digits=15, decimal_places=2)
     currency = models.CharField(max_length=10, default='USD')
     tax_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
@@ -653,7 +664,7 @@ class PurchaseOrder(TimeStampedModel):
     
     def __str__(self):
         return f"{self.po_number}: {self.title}"
-    
+
     # ═══ BUSINESS LOGIC METHODS (Soft-Coded) ═══
     
     def update_invoice_status(self):

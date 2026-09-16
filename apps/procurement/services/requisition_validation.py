@@ -87,7 +87,9 @@ def normalize_line_items(value):
             maximum=Decimal('9999999999999.99'),
             decimal_places=2,
         )
-        calculated_total = (quantity * unit_price).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+        discount = _decimal(raw_item.get('discount', raw_item.get('line_discount', raw_item.get('discount_amount', 0))) or 0,
+                            f'Line item {index} discount', minimum=Decimal('0'), decimal_places=2)
+        calculated_total = max(Decimal('0'), quantity * unit_price - discount).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
         if calculated_total > Decimal('9999999999999.99'):
             raise ValidationError(f'Line item {index} total exceeds the supported monetary range.')
 
@@ -115,6 +117,8 @@ def normalize_line_items(value):
             'unit_price': format(unit_price, '.2f'),
             'total': format(calculated_total, '.2f'),
         }
+        if discount or any(key in raw_item for key in ('discount', 'line_discount', 'discount_amount')):
+            normalized_item['discount'] = format(discount, '.2f')
         code = str(raw_item.get('code') or raw_item.get('sku') or '').strip()
         if code:
             if len(code) > 100:

@@ -390,6 +390,10 @@ class RequisitionWorkflowService:
         normalized_items = normalize_line_items(pr.items)
         if normalized_items:
             calculated_total = Decimal(str(line_items_total(normalized_items) or 0)).quantize(Decimal('0.01'))
+            from .procurement_vat import CONFIRMED_BASES, confirmed_totals
+            if getattr(pr, 'vat_basis', 'unconfirmed') in CONFIRMED_BASES:
+                calculated_total = confirmed_totals(calculated_total, pr.vat_basis,
+                    (pr.price_remarks_data or {}).get('discount_amount', 0))['total_amount']
             pr_total = Decimal(str(pr.total_price or 0)).quantize(Decimal('0.01'))
             
             if pr_total != calculated_total:

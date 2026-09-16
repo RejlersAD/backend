@@ -135,7 +135,17 @@ CURRENCY_SYMBOLS = {
 # OCR TEXT EXTRACTION
 # ==============================================================================
 
-def extract_text_from_pdf_tesseract(pdf_bytes: bytes) -> str:
+class PDFTextUnreadableError(ValueError):
+    """The source document is invalid, locked, blank, or has no readable text."""
+
+
+def _check_bounded_pdf_text(text: str, max_pages: int | None) -> str:
+    if max_pages is not None and not re.sub(r'--- Page \d+ ---', '', text).strip():
+        raise PDFTextUnreadableError('No readable text was found in the PDF cover pages.')
+    return text
+
+
+def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None = None) -> str:
     """
     Extract text from PDF using pdf2image + Tesseract OCR.
     
@@ -146,6 +156,7 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes) -> str:
     
     Args:
         pdf_bytes: Raw PDF file bytes
+        max_pages: Optional cover-page limit, applied to every extraction method.
         
     Returns:
         Extracted text string
@@ -153,44 +164,82 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes) -> str:
     Raises:
         Exception: If all extraction methods fail
     """
+    if max_pages is not None and (not isinstance(max_pages, int) or max_pages < 1):
+        raise ValueError('max_pages must be a positive integer.')
+    ocr_failure = None
+    unreadable_document = False
+
     # Method 1: pdf2image + Tesseract OCR (best for scanned PDFs)
     try:
         import pdf2image
         import pytesseract
         
         logger.info('[Tesseract] Converting PDF to images...')
-        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=300, fmt='png')
-        
-        logger.info(f'[Tesseract] Running OCR on {len(images)} page(s)...')
+        if max_pages is None:
+            image_batches = [(1, pdf2image.convert_from_bytes(pdf_bytes, dpi=300, fmt='png'))]
+        else:
+            page_count = min(max_pages, pdf2image.pdfinfo_from_bytes(pdf_bytes, timeout=15)['Pages'])
+            # Render one page at a time without PNG compression. Signed POs can
+            # include dozens of scanned contract attachments that need neither
+            # rasterizing nor OCR; raw PPM avoids an expensive encode/decode pass.
+            # 200 DPI retains the detail of typical source scans without the
+            # 2.25x pixel expansion at 300 DPI, which can exhaust the OCR timeout.
+            image_batches = (
+                (page_number, pdf2image.convert_from_bytes(
+                    pdf_bytes, dpi=200, fmt='ppm', first_page=page_number,
+                    last_page=page_number, timeout=20,
+                ))
+                for page_number in range(1, page_count + 1)
+            )
+
         full_text = ''
-        for i, img in enumerate(images, 1):
-            page_text = pytesseract.image_to_string(img, lang=OCR_LANG)
-            full_text += f'\n--- Page {i} ---\n{page_text}\n'
-            logger.debug(f'[Tesseract] Page {i}: extracted {len(page_text)} chars')
+        for first_page, images in image_batches:
+            try:
+                for i, img in enumerate(images, first_page):
+                    options = {'timeout': 15} if max_pages is not None else {}
+                    page_text = pytesseract.image_to_string(img, lang=OCR_LANG, **options)
+                    full_text += f'\n--- Page {i} ---\n{page_text}\n'
+                    logger.debug(f'[Tesseract] Page {i}: extracted {len(page_text)} chars')
+            finally:
+                for img in images:
+                    img.close()
         
         logger.info(f'[Tesseract] ✅ Extracted {len(full_text)} total characters')
-        return full_text
+        return _check_bounded_pdf_text(full_text, max_pages)
     except ImportError as e:
+        ocr_failure = e
         logger.warning(f'[Tesseract] pdf2image or pytesseract not installed: {e}')
     except Exception as e:
+        ocr_failure = e
         logger.warning(f'[Tesseract] OCR method failed: {e}')
     
     # Method 2: PyMuPDF text extraction (faster but worse for scanned PDFs)
+    native_file_errors = ()
     try:
         import fitz  # PyMuPDF
+        native_file_errors = (fitz.FileDataError,)
         logger.info('[PyMuPDF] Attempting text extraction...')
-        doc = fitz.open(stream=io.BytesIO(pdf_bytes), filetype='pdf')
         full_text = ''
-        for page_num in range(doc.page_count):
-            page = doc[page_num]
-            page_text = page.get_text()
-            full_text += f'\n--- Page {page_num + 1} ---\n{page_text}\n'
-        doc.close()
+        with fitz.open(stream=io.BytesIO(pdf_bytes), filetype='pdf') as doc:
+            if max_pages is not None and doc.needs_pass:
+                unreadable_document = True
+                raise PDFTextUnreadableError('The PDF is password protected.')
+            page_count = min(doc.page_count, max_pages) if max_pages is not None else doc.page_count
+            blank_pages = True
+            for page_num in range(page_count):
+                page = doc[page_num]
+                page_text = page.get_text()
+                if max_pages is not None and (page_text.strip() or page.get_images() or page.get_drawings()):
+                    blank_pages = False
+                full_text += f'\n--- Page {page_num + 1} ---\n{page_text}\n'
+            unreadable_document = max_pages is not None and blank_pages
         logger.info(f'[PyMuPDF] ✅ Extracted {len(full_text)} characters')
-        return full_text
+        return _check_bounded_pdf_text(full_text, max_pages)
     except ImportError:
         logger.warning('[PyMuPDF] PyMuPDF not installed')
     except Exception as e:
+        if max_pages is not None and isinstance(e, native_file_errors):
+            unreadable_document = True
         logger.warning(f'[PyMuPDF] Extraction failed: {e}')
     
     # Method 3: PyPDF2 (last resort)
@@ -199,18 +248,21 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes) -> str:
         logger.info('[PyPDF2] Attempting text extraction (last resort)...')
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         full_text = ''
-        for page_num in range(len(pdf_reader.pages)):
+        page_count = min(len(pdf_reader.pages), max_pages) if max_pages is not None else len(pdf_reader.pages)
+        for page_num in range(page_count):
             page = pdf_reader.pages[page_num]
             page_text = page.extract_text() or ''
             full_text += f'\n--- Page {page_num + 1} ---\n{page_text}\n'
         logger.info(f'[PyPDF2] ✅ Extracted {len(full_text)} characters')
-        return full_text
+        return _check_bounded_pdf_text(full_text, max_pages)
     except ImportError:
         logger.warning('[PyPDF2] PyPDF2 not installed')
     except Exception as e:
         logger.warning(f'[PyPDF2] Extraction failed: {e}')
     
-    raise Exception('All PDF extraction methods failed. Install pdf2image, pytesseract, PyMuPDF, or PyPDF2.')
+    if max_pages is not None and (unreadable_document or isinstance(ocr_failure, PDFTextUnreadableError)):
+        raise PDFTextUnreadableError('The PDF is invalid, locked, blank, or has no readable text.') from ocr_failure
+    raise RuntimeError('All PDF extraction methods failed. Install pdf2image, pytesseract, PyMuPDF, or PyPDF2.') from ocr_failure
 
 
 # ==============================================================================

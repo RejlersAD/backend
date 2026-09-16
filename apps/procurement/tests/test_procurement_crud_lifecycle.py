@@ -186,15 +186,19 @@ class ProcurementCRUDLifecycleTests(TestCase):
             self.pr.purchase_recommendation = 'Before'
             self.pr.price_remarks_data = source
             self.pr.save()
+            # Clearing a price is a financial edit and now needs a VAT decision.
+            blocked = self.client.patch(f'{BASE}requisitions/{self.pr.pk}/', {
+                'total_price': '' if encoding == 'multipart' else None,
+            }, format=encoding)
+            self.assertEqual(blocked.status_code, 400, blocked.data)
             response = self.client.patch(f'{BASE}requisitions/{self.pr.pk}/', {
                 'vendor': '' if encoding == 'multipart' else None,
                 'supplier_name': '', 'purchase_recommendation': '',
-                'total_price': '' if encoding == 'multipart' else None,
             }, format=encoding)
             self.assertEqual(response.status_code, 200, response.data)
             self.pr.refresh_from_db()
             self.assertIsNone(self.pr.vendor_id)
-            self.assertIsNone(self.pr.total_price)
+            self.assertEqual(self.pr.total_price, Decimal('100.00'))
             self.assertEqual(self.pr.supplier_name, '')
             self.assertEqual(self.pr.purchase_recommendation, '')
             self.assertEqual(self.pr.price_remarks_data, source)

@@ -375,7 +375,7 @@ def _main_pdf(order):
     )
     currency = order.currency or 'AED'
     items = _items(order)
-    subtotal = sum(item['total'] for item in items)
+    subtotal = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in items)
     tax = float(order.tax_amount or 0)
     total = float(order.total_amount or subtotal + tax)
     vendor = getattr(order, 'vendor', None)
@@ -931,7 +931,7 @@ def build_purchase_order_docx(order):
     summary = document.add_table(rows=1, cols=2)
     summary.style = 'Table Grid'
     _docx_set_cell_text(summary.cell(0, 0), f'Purchase Summary:\n{_value(getattr(order, "summary", None) or order.title)}', size=7, bold=True)
-    subtotal_for_summary = sum(item['total'] for item in _items(order))
+    subtotal_for_summary = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in _items(order))
     _docx_set_cell_text(
         summary.cell(0, 1),
         f'Total Purchase Price: {subtotal_for_summary:,.2f} {order.currency or "AED"}\n'
@@ -987,7 +987,7 @@ def build_purchase_order_docx(order):
         )
         for cell, value in zip(cells, values):
             cell.text = str(value)
-    subtotal = sum(item['total'] for item in items)
+    subtotal = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in items)
     tax = float(order.tax_amount or 0)
     total = float(order.total_amount or subtotal + tax)
     totals = document.add_paragraph()

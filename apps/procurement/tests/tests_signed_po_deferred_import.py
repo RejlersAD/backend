@@ -91,6 +91,77 @@ class SignedPODeferredImportTests(TestCase):
         self.assertEqual(self.storage.save.call_count, 1)
         self.assertFalse(PurchaseOrder.objects.exists())
 
+    def test_long_pdf_preserves_matched_links_for_review_without_creating_an_order(self):
+        pr = self.create_pr(self.fields['source_po_number'])
+        self.fields.update(source_page_count=27, extracted_page_count=4, extraction_truncated=True)
+        result = self.upload()
+        self.assertEqual(result['operation'], 'uploaded')
+        self.assertEqual(result['vendor_id'], str(self.vendor.pk))
+        self.assertEqual(result['pr_id'], str(pr.pk))
+        self.assertTrue(any('complete saved PDF' in issue for issue in result['reconciliation_issues']))
+        self.assertFalse(PurchaseOrder.objects.exists())
+        pr.refresh_from_db()
+        self.assertEqual(pr.status, 'approved')
+        document = PODocument.objects.get(pk=result['document_id'])
+        self.assertTrue(document.extracted_data['extraction_truncated'])
+        self.assertEqual(document.extracted_data['total_amount'], '225608.00')
+        self.assertEqual(document.extracted_data['vendor_id'], str(self.vendor.pk))
+        self.assertIsNone(document.confirmed_po_id)
+
+    def test_unread_purchase_amount_requires_review_instead_of_creating_zero_value_order(self):
+        self.fields['total_amount'] = Decimal('0.00')
+        self.fields['gross_amount'] = Decimal('0.00')
+        result = self.upload()
+        self.assertEqual(result['operation'], 'uploaded')
+        self.assertEqual(result['vendor_id'], str(self.vendor.pk))
+        self.assertTrue(any('purchase amount' in issue for issue in result['reconciliation_issues']))
+        self.assertFalse(PurchaseOrder.objects.exists())
+        self.assertEqual(PODocument.objects.get().extracted_data['total_amount'], '0.00')
+
+    def test_unknown_page_count_requires_review(self):
+        self.fields.update(source_page_count=None, extracted_page_count=None, extraction_truncated=False)
+        result = self.upload()
+        self.assertEqual(result['operation'], 'uploaded')
+        self.assertTrue(any('complete saved PDF' in issue for issue in result['reconciliation_issues']))
+        self.assertFalse(PurchaseOrder.objects.exists())
+
+    def test_existing_order_with_unknown_page_count_stages_one_original_without_attaching(self):
+        pr = self.create_pr()
+        po = PurchaseOrder.objects.create(
+            po_number=self.fields['po_number'], pr_reference=pr, vendor=self.vendor,
+            title='Existing order', total_amount=self.fields['total_amount'], created_by=self.user,
+        )
+        self.fields.update(source_page_count=None, extracted_page_count=None, extraction_truncated=False)
+        result = self.upload()
+        self.assertEqual(result['operation'], 'uploaded')
+        self.assertIsNone(result['purchase_order_id'])
+        self.assertEqual(result['pr_id'], str(pr.pk))
+        self.assertEqual(result['vendor_id'], str(self.vendor.pk))
+        self.assertEqual(PODocument.objects.count(), 1)
+        self.assertIsNone(PODocument.objects.get().confirmed_po_id)
+        self.assertEqual(self.storage.save.call_count, 1)
+        po.refresh_from_db()
+        self.assertEqual(po.attachments, [])
+
+    def test_reupload_of_reviewed_identical_long_source_keeps_review_confirmation(self):
+        pr = self.create_pr(self.fields['source_po_number'])
+        self.fields.update(source_page_count=27, extracted_page_count=4, extraction_truncated=True)
+        first = self.upload()
+        po = PurchaseOrder.objects.create(
+            po_number=self.fields['po_number'], pr_reference=pr, vendor=self.vendor,
+            title='Reviewed long document', total_amount=self.fields['total_amount'], created_by=self.user,
+        )
+        document = PODocument.objects.get(pk=first['document_id'])
+        document.confirmed_po = po
+        document.extracted_data['extraction_reviewed'] = True
+        document.save()
+        second = self.upload()
+        self.assertEqual(second['operation'], 'attached')
+        self.assertFalse(second['reconciliation_required'])
+        document.refresh_from_db()
+        self.assertTrue(document.extracted_data['extraction_reviewed'])
+        self.assertEqual(self.storage.save.call_count, 1)
+
     def test_existing_po_keeps_its_link_when_pr_has_no_text_po_reference(self):
         pr = self.create_pr()
         po = PurchaseOrder.objects.create(
