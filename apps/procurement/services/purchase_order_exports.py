@@ -36,6 +36,8 @@ from reportlab.platypus import (
 )
 from reportlab.lib.utils import ImageReader
 
+from .approval_integrity import purchase_order_signature_issue
+
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
 JARMO_COMPANY = 'Rejlers International Engineering Solutions AB'
@@ -469,9 +471,10 @@ def _main_pdf(order):
         ('TOPPADDING', (0, 0), (-1, -1), 1.5 * mm), ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5 * mm),
     ]))
     approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
-    approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE)
+    approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE if approval_name == JARMO_NAME else '')
     approved = [Paragraph('<b>Approved by:</b>', preview)]
-    signature_stream = _signature_stream(getattr(order, 'approval_signature', ''))
+    signature_issue = purchase_order_signature_issue(order)
+    signature_stream = _signature_stream('' if signature_issue else getattr(order, 'approval_signature', ''))
     if signature_stream:
         signature_image = Image(signature_stream)
         signature_image._restrictSize(52 * mm, 20 * mm)
@@ -479,6 +482,8 @@ def _main_pdf(order):
         approved.extend([Spacer(1, 2 * mm), signature_image, Spacer(1, 2 * mm)])
     else:
         approved.append(Spacer(1, 16 * mm))
+    if signature_issue:
+        approved.append(Paragraph(escape(signature_issue), preview))
     approval_identity = Paragraph(
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
         f'{JARMO_COMPANY}<br/><b>Date:</b> '
@@ -945,15 +950,20 @@ def build_purchase_order_docx(order):
     _docx_no_borders(approval)
     approval_cell = approval.cell(0, 0)
     _docx_set_cell_text(approval_cell, 'Approved by:', size=7, bold=True)
-    signature_stream = _signature_stream(getattr(order, 'approval_signature', ''))
+    signature_issue = purchase_order_signature_issue(order)
+    signature_stream = _signature_stream('' if signature_issue else getattr(order, 'approval_signature', ''))
     if signature_stream:
         signature_run = approval_cell.add_paragraph().add_run()
         signature_run.add_picture(signature_stream, width=Mm(50))
     else:
         approval_cell.add_paragraph('\n\n\n')
+    if signature_issue:
+        approval_cell.add_paragraph(signature_issue)
+    approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
+    approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE if approval_name == JARMO_NAME else '')
     approval_cell.add_paragraph(
-        f'{_value(getattr(order, "approved_by_name", None), JARMO_NAME)}\n'
-        f'{_value(getattr(order, "approved_by_title", None), JARMO_TITLE)}\n{JARMO_COMPANY}\n'
+        f'{approval_name}\n'
+        f'{approval_title}\n{JARMO_COMPANY}\n'
         f'Date: {_value(getattr(order, "approved_date", None), "")}'
     )
     _docx_set_cell_text(

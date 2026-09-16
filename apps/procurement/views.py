@@ -622,34 +622,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset().filter(
             Q(status__in=active_statuses) | Q(status__in=converted_statuses)
         )
-        is_super_admin = RequisitionWorkflowService._is_super_admin(request.user)
         assigned = []
 
         for pr in queryset:
-            workflow = normalize_ceo_workflow(
-                pr.approval_workflow_config,
-                pr.po_number_reference,
-                getattr(pr, 'po_applicable', None),
-            )
-            if not isinstance(workflow, list):
-                continue
-            pending = [
-                (index, stage) for index, stage in enumerate(workflow)
-                if isinstance(stage, dict)
-                and str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
-                and (
-                    canonicalize_pr_status(pr.status) != 'converted'
-                    or bool(stage.get('evidence_requested_at'))
-                )
-            ]
-            if not pending:
-                continue
-            active_level = min(RequisitionWorkflowService._stage_level(stage, index) for index, stage in pending)
-            active_stages = [stage for index, stage in pending if RequisitionWorkflowService._stage_level(stage, index) == active_level]
-            if is_super_admin or any(
-                RequisitionWorkflowService._stage_matches_user(stage, request.user)
-                for stage in active_stages
-            ):
+            if RequisitionWorkflowService.can_approve(pr, request.user):
                 assigned.append(pr)
 
         count = len(assigned)

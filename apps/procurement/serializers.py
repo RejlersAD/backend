@@ -4,6 +4,7 @@ API data serialization for procurement workflows
 """
 
 import copy
+from uuid import uuid4
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -15,9 +16,9 @@ from django.urls import reverse
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import (
+    can_approve as can_approve_purchase_order,
     _active_entries,
     _entry_level,
-    _entry_matches_user,
     normalize_assignments,
     notify_assigned_approvers,
     notify_purchase_order_created,
@@ -43,7 +44,8 @@ from .services.requisition_validation import (
     normalize_line_items,
     validate_attachments,
 )
-from .services.requisition_workflow import notify_requisition_approver_changes
+from .services.requisition_workflow import RequisitionWorkflowService, notify_requisition_approver_changes
+from .services.approval_integrity import stage_signature_issue, purchase_order_signature_issue, protect_approval_route
 from .services.procurement_vat import apply_confirmed_input, CONFIRMED_BASES
 
 
@@ -215,6 +217,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
     # API alias for frontend compatibility
     approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
+    can_approve = serializers.SerializerMethodField()
+    current_approval = serializers.SerializerMethodField()
     linked_po_id = serializers.SerializerMethodField()
     linked_po_number = serializers.SerializerMethodField()
 
@@ -273,6 +277,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Dynamic Approval Workflow
             'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
+            'can_approve', 'current_approval',
             
             # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
@@ -419,6 +424,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'user_email': approver.email,
                 'status': 'pending',
                 'approved_at': None,
+                'assignment_id': str(uuid4()),
             }
 
             if self.instance:
@@ -427,14 +433,24 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                         getattr(self.instance, 'approval_workflow_config', None) or []
                     )
                     if isinstance(existing, dict)
-                    and str(existing.get('user_id') or existing.get('approver_id') or '') == approver_id
+                    and (
+                        RequisitionWorkflowService._stage_email(existing) == str(approver.email or '').strip().lower()
+                        if RequisitionWorkflowService._stage_email(existing)
+                        else str(existing.get('user_id') or existing.get('approver_id') or '') == approver_id
+                    )
                     and str(existing.get('level', '')) == str(level)
+                    and str(existing.get('role') or '').strip().lower() == role.lower()
                 ), None)
                 if previous_stage:
+                    normalized_stage['assignment_id'] = previous_stage.get('assignment_id', '')
                     for state_field in (
-                        'status', 'approved_at', 'approved_by_id', 'approved_by_name',
+                        'status', 'approved_at', 'approved_by_id', 'approved_by_name', 'approved_by_email',
                         'rejected_at', 'rejected_by_id', 'rejected_by_name',
-                        'rejection_reason', 'signature',
+                        'rejected_by_email', 'rejection_reason', 'signature',
+                        'signature_user_id', 'signature_user_email',
+                        'evidence_requested_at', 'evidence_requested_by',
+                        'evidence_requested_by_id',
+                        'evidence_requested_by_name',
                     ):
                         if state_field in previous_stage:
                             normalized_stage[state_field] = previous_stage[state_field]
@@ -536,6 +552,22 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 po_applicable,
             )
 
+        if self.instance and not self._preserve_source_workflow(self.instance):
+            old_workflow = normalize_ceo_workflow(
+                getattr(self.instance, 'approval_workflow_config', None) or [],
+                getattr(self.instance, 'po_number_reference', ''), getattr(self.instance, 'po_applicable', False),
+            )
+            new_workflow = normalize_ceo_workflow(
+                attrs.get('approval_workflow_config', old_workflow),
+                attrs.get('po_number_reference', getattr(self.instance, 'po_number_reference', '')),
+                attrs.get('po_applicable', getattr(self.instance, 'po_applicable', False)),
+            )
+            protect_approval_route(
+                old_workflow or [], new_workflow or [],
+                level=RequisitionWorkflowService._stage_level, label='role',
+                freeze_route=bool(old_workflow) and canonicalize_pr_status(self.instance.status) != 'draft',
+            )
+
         try:
             attrs = apply_confirmed_input(attrs, self.instance, 'pr')
         except ValueError as error:
@@ -602,6 +634,33 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def get_status_display(self, obj):
         return canonicalize_pr_status(obj.status).replace('_', ' ').title()
 
+    def get_can_approve(self, obj):
+        request = self.context.get('request')
+        actor = getattr(request, 'user', None)
+        return bool(actor and RequisitionWorkflowService.can_approve(obj, actor))
+
+    def get_current_approval(self, obj):
+        status = canonicalize_pr_status(obj.status)
+        if status not in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES | {'converted'}:
+            return None
+        try:
+            workflow = RequisitionWorkflowService._workflow(obj)
+            level, stages = RequisitionWorkflowService._active_level_stages(obj, workflow)
+        except serializers.ValidationError:
+            return None
+        if status == 'converted' and not all(stage.get('evidence_requested_at') for _, stage in stages):
+            return None
+        return {
+            'level': level,
+            'stages': [{
+                'index': index,
+                'role': stage.get('role'),
+                'user_id': stage.get('user_id') or stage.get('approver_id'),
+                'user_email': RequisitionWorkflowService._stage_email(stage),
+                'user_name': stage.get('user_name') or stage.get('approver'),
+            } for index, stage in stages],
+        }
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data['status'] = canonicalize_pr_status(instance.status)
@@ -634,14 +693,21 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 user_email = str(
                     stage.get('user_email') or stage.get('approver_email') or ''
                 ).strip().lower()
-                resolved_user = users_by_id.get(user_id) or users_by_email.get(user_email)
-                if resolved_user:
+                # Routing uses email as the stable identity across migrations;
+                # showing a stale numeric ID's name can misattribute a signature.
+                resolved_user = users_by_email.get(user_email) if user_email else users_by_id.get(user_id)
+                if resolved_user and str(stage.get('status', '')).lower() != 'approved':
                     stage['user_id'] = str(resolved_user.pk)
                 stage['user_name'] = (
                     names.get(str(resolved_user.pk)) if resolved_user else None
                 ) or name_only(
                     stage.get('user_name') or stage.get('approver')
                 ) or 'Assigned Employee'
+                signature_issue = stage_signature_issue(raw_stage)
+                if signature_issue:
+                    stage['signature'] = ''
+                    stage['signature_review_required'] = True
+                    stage['signature_review_reason'] = signature_issue
                 if (
                     canonicalize_pr_status(instance.status) == 'converted'
                     and str(stage.get('status', 'pending')).strip().lower() in {'pending', 'in_review'}
@@ -702,6 +768,19 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # finished. Save against the locked current record so its status,
         # source decisions and audit cannot be replaced by that stale copy.
         instance = PurchaseRequisition.objects.select_for_update().get(pk=instance.pk)
+        # Recheck route changes against decisions committed during validation.
+        self.instance = instance
+        if not self._preserve_source_workflow(instance):
+            old_workflow = normalize_ceo_workflow(instance.approval_workflow_config, instance.po_number_reference, instance.po_applicable)
+            new_workflow = normalize_ceo_workflow(
+                validated_data.get('approval_workflow_config', old_workflow),
+                validated_data.get('po_number_reference', instance.po_number_reference),
+                validated_data.get('po_applicable', instance.po_applicable),
+            )
+            protect_approval_route(
+                old_workflow or [], new_workflow or [], level=RequisitionWorkflowService._stage_level, label='role',
+                freeze_route=bool(old_workflow) and canonicalize_pr_status(instance.status) != 'draft',
+            )
         source_metadata = instance.price_remarks_data or {}
         if 'price_remarks_data' in validated_data:
             metadata = dict(validated_data['price_remarks_data'] or {})
@@ -717,6 +796,13 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             validated_data['price_remarks_data'] = metadata
         if self._preserve_source_workflow(instance) and 'approval_workflow_config' in validated_data:
             validated_data['approval_workflow_config'] = instance.approval_workflow_config
+        elif 'approval_workflow_config' in validated_data:
+            # A decision may have committed after validation. Re-read its
+            # signature and actor evidence under the same lock as the edit.
+            self.instance = instance
+            validated_data['approval_workflow_config'] = self.validate_approval_workflow_config(
+                validated_data['approval_workflow_config'],
+            )
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
         management_evidence = validated_data.pop('management_approval_evidence_file', None)
@@ -910,7 +996,30 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'po_date', 'approved_at', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'po_date', 'created_at', 'updated_at',
+            'approved_by', 'approved_by_name', 'approved_by_title', 'approved_at',
+            'approval_signature', 'approval_stamp',
+        ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        rows = []
+        for original in data.get('approval_log') or []:
+            row = dict(original)
+            issue = stage_signature_issue(row)
+            if issue:
+                row['signature'] = ''
+                row['signature_review_required'] = True
+                row['signature_review_reason'] = issue
+            rows.append(row)
+        data['approval_log'] = rows
+        issue = purchase_order_signature_issue(instance)
+        if issue:
+            data['approval_signature'] = ''
+            data['signature_review_required'] = True
+            data['signature_review_reason'] = issue
+        return data
 
     def to_internal_value(self, data):
         """Accept project identities returned by the unified project picker.
@@ -1009,10 +1118,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request or not getattr(request, 'user', None):
             return False
-        return any(
-            _entry_matches_user(entry, request.user)
-            for _, entry in _active_entries(list(obj.approval_log or []))
-        )
+        return can_approve_purchase_order(obj, request.user)
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
@@ -1029,6 +1135,9 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        # Result fields are written only by the decision or reviewed-source
+        # services. Older forms may still echo this optional date on save.
+        attrs.pop('approved_date', None)
         try:
             attrs = apply_confirmed_input(attrs, self.instance, 'po')
         except ValueError as error:
@@ -1037,6 +1146,13 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 'Completed purchase orders are read-only and cannot be edited.'
             )
+        if (
+            self.instance is not None and self.instance.status != 'draft'
+            and attrs.get('status') == 'draft'
+            and any(row.get('user_id') or row.get('approver_email')
+                    for row in (self.instance.approval_log or []) if isinstance(row, dict))
+        ):
+            raise serializers.ValidationError({'status': 'A submitted approval workflow cannot be reset through an ordinary edit.'})
         pr = attrs.get('pr_reference')
 
         # Existing legacy POs may not have a PR. Do not prevent unrelated edits
@@ -1081,6 +1197,13 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                     if entry.get('stage') != 'Final Management Sign-off'
                 ]
             attrs['approval_log'].extend(source_history)
+            protect_approval_route(
+                existing_log or [], attrs['approval_log'], level=_entry_level, label='stage',
+                freeze_route=bool(existing_log) and (
+                    getattr(self.instance, 'status', 'draft') != 'draft'
+                    or any(str(row.get('status') or 'pending').lower() != 'pending' for row in existing_log)
+                ),
+            )
             by_stage = {entry['stage']: entry for entry in attrs['approval_log']}
             attrs['technical_approver'] = ''
             attrs['financial_approver'] = ''
@@ -1138,13 +1261,29 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('The linked recommendation changed. Refresh this order before saving.')
         if instance.status == 'completed':
             raise serializers.ValidationError('Completed purchase orders are read-only and cannot be edited.')
+        if (
+            instance.status != 'draft' and validated_data.get('status') == 'draft'
+            and any(row.get('user_id') or row.get('approver_email')
+                    for row in (instance.approval_log or []) if isinstance(row, dict))
+        ):
+            raise serializers.ValidationError({'status': 'A submitted approval workflow cannot be reset through an ordinary edit.'})
         # A stale edit must not erase original-document evidence recorded after
         # its serializer was validated, or turn that history into assignments.
         source_history = [dict(entry) for entry in (instance.approval_log or [])
                           if isinstance(entry, dict) and not entry.get('user_id')]
         if 'approval_log' in validated_data:
-            validated_data['approval_log'] = [entry for entry in validated_data['approval_log']
-                                               if entry.get('user_id')] + source_history
+            protect_approval_route(
+                instance.approval_log or [], validated_data['approval_log'], level=_entry_level, label='stage',
+                freeze_route=bool(instance.approval_log) and (
+                    instance.status != 'draft'
+                    or any(str(row.get('status') or 'pending').lower() != 'pending' for row in instance.approval_log)
+                ),
+            )
+            validated_data['approval_log'] = normalize_assignments(
+                [entry for entry in validated_data['approval_log'] if entry.get('user_id')],
+                existing_log=instance.approval_log,
+                require_core=False,
+            ) + source_history
         if any(entry.get('evidence_document_id') and entry.get('signature_verified') for entry in source_history):
             for field in ('approved_by', 'approved_by_name', 'approved_by_title', 'approved_date',
                           'approval_signature', 'approval_stamp'):

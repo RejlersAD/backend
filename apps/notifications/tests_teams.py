@@ -1,4 +1,5 @@
 from datetime import date
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,17 +38,38 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
             'description': 'Engineering software renewal',
             'project_name': 'Onboarding Enhancement phase 2',
             'project_id': 'RAD-PRJ-2026-0042',
+            'po_number': 'PO-2026-0042',
+            'service': 'Engineering software renewal',
+            'vendor': 'Engineering Supplier',
+            'value': 'AED 12,500.00',
+            'currency': 'AED',
+            'approval_level': 0,
             'due_date': date(2026, 9, 5),
         })
 
         self.assertEqual(payload['recipient_email'], 'approver@rejlers.ae')
         self.assertEqual(payload['submitted_by'], 'Requester Name')
-        self.assertEqual(payload['due_date'], '05-Sep-2026')
+        self.assertNotIn('due_date', payload)
+        self.assertNotIn('Due Date', json.dumps(payload))
         self.assertEqual(payload['action_url'], 'https://radai.ae/approvals?tab=procurement')
         self.assertIn('New approval request assigned', payload['message'])
+        self.assertIn('Service: Engineering software renewal', payload['message'])
         self.assertIn('Description: Engineering software renewal', payload['message'])
         self.assertIn('Project Name: Onboarding Enhancement phase 2', payload['message'])
         self.assertIn('Project ID: RAD-PRJ-2026-0042', payload['message'])
+        for key, value in {
+            'PO Number': 'PO-2026-0042',
+            'Vendor': 'Engineering Supplier',
+            'Value': 'AED 12,500.00',
+            'Approval Level': 'Level 0',
+        }.items():
+            self.assertIn(f'{key}: {value}', payload['message'])
+        facts = {fact['title']: fact['value'] for fact in payload['attachments'][0]['content']['body'][1]['facts']}
+        self.assertEqual(facts['PO Number'], payload['po_number'])
+        self.assertEqual(facts['Service'], payload['service'])
+        self.assertEqual(facts['Vendor'], payload['vendor'])
+        self.assertEqual(facts['Value'], payload['value'])
+        self.assertEqual(facts['Approval Level'], 'Level 0')
         self.assertEqual(payload['type'], 'message')
         self.assertEqual(
             payload['attachments'][0]['contentType'],
@@ -73,6 +95,15 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
             payload['attachments'][0]['content']['body'][0]['text'],
             'New purchase order created',
         )
+        facts = payload['attachments'][0]['content']['body'][1]['facts']
+        self.assertNotIn('Approval Level', [fact['title'] for fact in facts])
+
+    def test_missing_po_and_optional_details_have_explicit_fallbacks(self):
+        payload = build_approval_assignment_payload(self._notification())
+        self.assertEqual(payload['po_number'], 'Not issued')
+        self.assertEqual(payload['vendor'], 'Not specified')
+        self.assertEqual(payload['value'], 'Not specified')
+        self.assertIsNone(payload['approval_level'])
 
     @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='https://flow.example.test/trigger')
     @patch('apps.notifications.teams.send_teams_approval_assignment.delay')
@@ -82,8 +113,15 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
         self.assertTrue(queue_approval_assignment(notification, {'request_name': 'Request'}))
         delay.assert_called_once_with(notification.pk, {
             'request_name': 'Request',
-            'due_date': 'Not specified',
         })
+
+    @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='https://flow.example.test/trigger')
+    @patch('apps.notifications.teams.send_teams_approval_assignment.delay')
+    def test_legacy_due_date_is_removed_before_queue_serialization(self, delay):
+        context = {'request_name': 'Request', 'due_date': date(2026, 9, 5)}
+        self.assertTrue(queue_approval_assignment(self._notification(), context))
+        self.assertEqual(delay.call_args.args[1], {'request_name': 'Request'})
+        self.assertIn('due_date', context)
 
     @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='')
     @patch('apps.notifications.teams.send_teams_approval_assignment.delay')

@@ -16,6 +16,9 @@ class FakeRequisition(SimpleNamespace):
     def save(self, *args, **kwargs):
         self.save_count = getattr(self, 'save_count', 0) + 1
 
+    def refresh_from_db(self, *args, **kwargs):
+        pass
+
 
 class RequisitionWorkflowServiceTests(SimpleTestCase):
     def setUp(self):
@@ -32,6 +35,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             full_name='Project Manager',
             username='pm',
             email='pm@example.com',
+            rbac_profile=SimpleNamespace(signature_image='pm-signature'),
         )
         self.engineering_manager = FakeUser(
             id='eng-user',
@@ -39,6 +43,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             full_name='Engineering Manager',
             username='eng',
             email='eng@example.com',
+            rbac_profile=SimpleNamespace(signature_image='eng-signature'),
         )
         self.second_level_one = FakeUser(
             id='level-one-2',
@@ -46,6 +51,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             full_name='Second Level One Approver',
             username='levelone2',
             email='levelone2@example.com',
+            rbac_profile=SimpleNamespace(signature_image='second-signature'),
         )
 
     def _workflow(self):
@@ -161,7 +167,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
     ):
         first = FakeUser(pk='level-one-a', id='level-one-a')
         second = FakeUser(pk='level-one-b', id='level-one-b')
-        resolve_stage_user.side_effect = [first, second]
+        resolve_stage_user.side_effect = lambda stage: {first.id: first, second.id: second}.get(stage.get('user_id'))
         notification_filter.return_value.values_list.return_value = []
         pr = self._pr(status='submitted')
         pr.pk = 'pr-id'
@@ -171,6 +177,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             {'level': 1, 'user_id': second.id, 'status': 'pending'},
             {'level': 2, 'user_id': 'later-user', 'status': 'pending'},
         ]
+        pr.approval_workflow_config = workflow
 
         RequisitionWorkflowService._notify_level(pr, workflow, 1)
 

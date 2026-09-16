@@ -20,6 +20,29 @@ from apps.procurement.services.purchase_order_exports import (
 
 
 class PurchaseOrderExportTests(TestCase):
+    def test_pdf_and_docx_flag_mismatched_approval_instead_of_printing_signature(self):
+        order = self._order()
+        order.approved_by_name = 'Assigned Approver'
+        order.approved_by_id = 'assigned'
+        signature = BytesIO()
+        PILImage.new('RGB', (181, 51), 'navy').save(signature, format='PNG')
+        order.approval_signature = 'data:image/png;base64,' + base64.b64encode(signature.getvalue()).decode()
+        order.approval_log = [{
+            'user_id': 'assigned', 'approved_by_id': 'different-person',
+            'status': 'Approved', 'signature': order.approval_signature,
+        }]
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertIn('Approval review is required', ' '.join(page.get_text() for page in pdf))
+            self.assertFalse(any(image[2:4] == (181, 51) for page in pdf for image in page.get_images()))
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        self.assertIn('Approval review is required', ' '.join(
+            paragraph.text for table in document.tables for row in table.rows
+            for cell in row.cells for paragraph in cell.paragraphs
+        ))
+        self.assertNotIn(signature.getvalue(), [part.blob for part in document.part.package.parts])
+
     def _order(self, attachments=None):
         return SimpleNamespace(
             vendor=SimpleNamespace(name='Test Vendor'),

@@ -83,8 +83,9 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         self.assertTrue(_entry_matches_user(entry, actor))
 
     def test_only_first_pending_level_is_visible_to_approvers(self):
-        level_zero = SimpleNamespace(id='level-zero', email='l0@example.com')
-        level_one = SimpleNamespace(id='level-one', email='l1@example.com')
+        profile = SimpleNamespace(status='active', is_deleted=False)
+        level_zero = SimpleNamespace(id='level-zero', email='l0@example.com', is_active=True, rbac_profile=profile)
+        level_one = SimpleNamespace(id='level-one', email='l1@example.com', is_active=True, rbac_profile=profile)
         order = SimpleNamespace(approval_log=[
             {'level': 0, 'user_id': 'level-zero', 'status': 'Pending'},
             {'level': 1, 'user_id': 'level-one', 'status': 'Pending'},
@@ -148,7 +149,7 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
     @patch('apps.procurement.services.purchase_order_approvals._jarmo_user')
     @patch('apps.procurement.services.purchase_order_approvals._resolve_entry_user')
     @patch('apps.procurement.services.purchase_order_approvals.employee_display_name')
-    def test_po_created_notifies_buyer_references_and_ceo_once(
+    def test_po_created_notifies_buyer_references_once_without_automatic_ceo_fyi(
         self,
         display_name,
         resolve_entry_user,
@@ -158,7 +159,9 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
     ):
         buyer = SimpleNamespace(pk='buyer-id', email='buyer@rejlers.ae')
         jarmo = SimpleNamespace(pk='ceo-id', email='jarmo@rejlers.ae')
-        creator = SimpleNamespace(pk='creator-id', email='creator@rejlers.ae')
+        creator = SimpleNamespace(
+            pk='creator-id', email='creator@rejlers.ae', get_full_name=lambda: 'PO Creator',
+        )
         resolve_entry_user.return_value = buyer
         jarmo_user.return_value = jarmo
         notification_filter.return_value.exists.return_value = False
@@ -180,12 +183,13 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
 
         notify_purchase_order_created(order)
 
-        self.assertEqual(create_notification.call_count, 2)
+        self.assertEqual(create_notification.call_count, 1)
         recipients = {
             call.kwargs['recipient'].email: call.kwargs
             for call in create_notification.call_args_list
         }
-        self.assertSetEqual(set(recipients), {'buyer@rejlers.ae', 'jarmo@rejlers.ae'})
+        self.assertSetEqual(set(recipients), {'buyer@rejlers.ae'})
+        jarmo_user.assert_not_called()
         for kwargs in recipients.values():
             self.assertTrue(kwargs['send_teams'])
             self.assertEqual(kwargs['teams_context']['event_type'], 'purchase_order_created')
@@ -202,9 +206,13 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         self.assertFalse(invalid.is_valid())
         self.assertIn('icv_percentage', invalid.errors)
 
+    @patch('apps.procurement.services.purchase_order_approvals.UserProfile.objects.select_related')
     @patch('apps.procurement.models.PurchaseOrder.objects.select_for_update')
-    def test_approval_records_full_timestamp(self, select_for_update):
-        actor = SimpleNamespace(id='jarmo-id', email='jarmo@example.com', get_full_name=lambda: 'Jarmo Suominen')
+    def test_approval_records_full_timestamp(self, select_for_update, select_profile):
+        actor = SimpleNamespace(pk='jarmo-id', id='jarmo-id', email='jarmo@example.com', is_active=True, get_full_name=lambda: 'Jarmo Suominen')
+        select_profile.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            user=actor, signature_image='',
+        )
         locked = SimpleNamespace(
             id='po-id',
             approval_log=[{

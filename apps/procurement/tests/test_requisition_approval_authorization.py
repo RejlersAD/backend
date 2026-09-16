@@ -33,8 +33,24 @@ class PurchaseRequisitionApprovalAuthorizationTests(SimpleTestCase):
         with self.assertRaisesMessage(PermissionDenied, 'No approver is assigned'):
             RequisitionWorkflowService._enforce_assigned_approver(stage, self.other_user)
 
-    def test_superuser_can_override_selected_approver(self):
+    def test_superuser_cannot_override_selected_approver(self):
         superuser = SimpleNamespace(id='admin-user', is_superuser=True)
         stage = {'role': 'Project Manager', 'user_id': self.assigned_user.id}
 
+        with self.assertRaises(PermissionDenied):
+            RequisitionWorkflowService._enforce_assigned_approver(stage, superuser)
+
+    def test_superuser_can_act_only_when_assigned(self):
+        superuser = SimpleNamespace(id='admin-user', is_superuser=True)
+        stage = {'role': 'Project Manager', 'user_id': superuser.id}
+
         RequisitionWorkflowService._enforce_assigned_approver(stage, superuser)
+
+    def test_assignment_email_is_authoritative_even_when_actor_email_is_blank(self):
+        stage = {
+            'role': 'Procurement Manager', 'user_id': self.assigned_user.id,
+            'user_email': 'richa@example.com',
+        }
+
+        with self.assertRaises(PermissionDenied):
+            RequisitionWorkflowService._enforce_assigned_approver(stage, self.assigned_user)
