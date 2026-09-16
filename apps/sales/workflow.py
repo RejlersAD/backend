@@ -21,6 +21,15 @@ HANDOVER_REQUIRED_ITEMS = (
 )
 
 
+def require_project_manager(manager):
+    from apps.rbac.approval_eligibility import approval_access, has_business_position
+    if not manager or not has_business_position(manager, ('project_manager',)):
+        raise ValidationError({'nominated_project_manager': 'Nominate an active employee holding the Project Manager business position before handover.'})
+    if not approval_access(manager, 'sales_handovers'):
+        raise ValidationError({'nominated_project_manager': 'The nominated Project Manager needs current handover approval access.'})
+    return manager
+
+
 def _audit(opportunity, actor, event_type, *, from_stage='', to_stage='', reason='', data=None):
     return OpportunityAuditEvent.objects.create(
         opportunity=opportunity,
@@ -67,7 +76,11 @@ def submit_qualification(opportunity, actor):
     return opportunity
 
 
+@transaction.atomic
 def record_bid_decision(opportunity, actor, decision, reason=''):
+    opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
+    from apps.rbac.approval_eligibility import require_configured_approval
+    require_configured_approval(actor, 'sales_opportunities', opportunity, 'bid_decision')
     if opportunity.stage != 'qualified':
         raise ValidationError({'stage': 'Bid decision is available only for a qualified opportunity.'})
     if decision not in {'bid', 'conditional_bid', 'no_bid'}:
@@ -159,6 +172,10 @@ def submit_award(opportunity, actor, *, reference, award_date, award_value, hand
 
 @transaction.atomic
 def decide_award(opportunity, actor, *, approved, reason=''):
+    opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
+    from apps.rbac.approval_eligibility import require_configured_approval
+    require_configured_approval(actor, 'sales_opportunities', opportunity,
+                                'approve_award' if approved else 'reject_award')
     if opportunity.stage != 'award_pending' or opportunity.award_status != 'pending':
         raise ValidationError({'stage': 'This opportunity is not awaiting award approval.'})
     if opportunity.award_submitted_by_id == actor.id:
@@ -188,7 +205,7 @@ def decide_award(opportunity, actor, *, approved, reason=''):
         ).order_by('-version', '-created_at').first()
         if not proposal:
             raise ValidationError({'proposal': 'An approved submitted proposal is required to initiate handover.'})
-        manager = opportunity.nominated_project_manager or opportunity.owner
+        manager = require_project_manager(opportunity.nominated_project_manager)
         ProjectHandover.objects.get_or_create(
             opportunity=opportunity,
             defaults={
@@ -208,6 +225,7 @@ def decide_award(opportunity, actor, *, approved, reason=''):
 
 
 def submit_handover_for_acceptance(handover, actor):
+    require_project_manager(handover.project_manager)
     if actor.id != handover.owner_id:
         raise ValidationError({'owner': 'Only the handover owner can submit it for acceptance.'})
     if handover.status not in {
@@ -225,7 +243,13 @@ def submit_handover_for_acceptance(handover, actor):
     return handover
 
 
+@transaction.atomic
 def decide_handover(handover, actor, *, accepted, comment=''):
+    handover = ProjectHandover.objects.select_for_update().get(pk=handover.pk)
+    require_project_manager(handover.project_manager)
+    from apps.rbac.approval_eligibility import require_approval
+    require_approval(actor, 'sales_handovers', assigned=actor.pk == handover.project_manager_id,
+                     current=handover.status == 'acceptance_pending')
     if handover.status != 'acceptance_pending':
         raise ValidationError({'status': 'The handover is not awaiting delivery acceptance.'})
     if actor.id != handover.project_manager_id:
@@ -269,7 +293,7 @@ def convert_to_project(opportunity_id, actor, *, project_code, project_name=None
 
     start = opportunity.expected_start_date or opportunity.award_date
     end = start + timedelta(days=30 * opportunity.project_duration_months) if start and opportunity.project_duration_months else None
-    owner = opportunity.nominated_project_manager or opportunity.owner or actor
+    owner = require_project_manager(handover.project_manager)
     project = Project.objects.create(
         code=project_code,
         name=project_name or opportunity.deal_name,

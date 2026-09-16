@@ -126,6 +126,13 @@ class BulkBasisDeliverableReviewSerializer(serializers.Serializer):
 
 
 class ScheduleBasisSerializer(serializers.ModelSerializer):
+    can_approve = serializers.SerializerMethodField()
+
+    def get_can_approve(self, obj):
+        from .access import can_final_approve_defaults, current_basis
+        request = self.context.get('request')
+        return bool(request and can_final_approve_defaults(request.user, obj.project)
+                    and current_basis(obj) and (obj.readiness or {}).get('ready'))
     deliverables = BasisDeliverableSerializer(many=True, read_only=True)
     source_run_id = serializers.IntegerField(source='source_run.id', read_only=True)
     approved_by_name = serializers.SerializerMethodField()
@@ -136,7 +143,7 @@ class ScheduleBasisSerializer(serializers.ModelSerializer):
             'id', 'project', 'source_run', 'source_run_id', 'version', 'status',
             'project_name', 'client', 'location', 'effective_date', 'contractual_finish',
             'duration_months', 'calendar', 'authority_snapshot', 'readiness', 'deliverables',
-            'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at',
+            'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at', 'can_approve',
         ]
         read_only_fields = [
             'project', 'source_run', 'version', 'status', 'authority_snapshot', 'readiness',
@@ -193,6 +200,13 @@ class GenerationDecisionGateSerializer(serializers.ModelSerializer):
 
 
 class GenerationPlanSerializer(serializers.ModelSerializer):
+    can_approve = serializers.SerializerMethodField()
+
+    def get_can_approve(self, obj):
+        from .access import can_final_approve_defaults, current_generation_plan
+        request = self.context.get('request')
+        return bool(request and can_final_approve_defaults(request.user, obj.project)
+                    and current_generation_plan(obj) and (obj.readiness or {}).get('ready'))
     deliverables = PlanDeliverableSerializer(many=True, read_only=True)
     dependencies = GenerationDependencySerializer(many=True, read_only=True)
     phases = GenerationPhaseSerializer(many=True, read_only=True)
@@ -202,7 +216,7 @@ class GenerationPlanSerializer(serializers.ModelSerializer):
         model = GenerationPlan
         fields = [
             'id', 'project', 'basis', 'version', 'status', 'readiness', 'selected_scenario',
-            'deliverables', 'dependencies', 'phases', 'decision_gates',
+            'deliverables', 'dependencies', 'phases', 'decision_gates', 'can_approve',
             'approved_by', 'approved_at', 'created_at', 'updated_at',
         ]
         read_only_fields = [

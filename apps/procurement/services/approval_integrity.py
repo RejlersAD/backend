@@ -11,7 +11,8 @@ def protect_approval_route(existing, incoming, *, level, label, freeze_route=Fal
     proposed = [row for row in incoming if isinstance(row, dict) and not row.get('external') and not row.get('evidence_document_id')]
 
     def position(row, index):
-        return level(row, index), str(row.get(label) or '').strip().lower()
+        return (level(row, index), str(row.get(label) or '').strip().lower(),
+                str(row.get('business_position') or '').strip().lower())
 
     if freeze_route and Counter(position(row, index) for index, row in enumerate(previous)) != Counter(
         position(row, index) for index, row in enumerate(proposed)

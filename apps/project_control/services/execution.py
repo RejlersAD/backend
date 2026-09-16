@@ -15,9 +15,8 @@ from ..epc_models import WBSActivityLink, control_scope
 
 
 def can_accept_work(user, project):
-    return bool(user and user.is_authenticated and user.is_active and (
-        user.is_staff or user.is_superuser or project.owner_id == user.pk or
-        project.memberships.filter(user=user, is_active=True, role='project_manager').exists()))
+    from apps.rbac.approval_eligibility import approval_access, project_approval_assignment
+    return bool(approval_access(user, 'project_control') and project_approval_assignment(user, project))
 
 
 def document_manifest(item):
@@ -249,6 +248,9 @@ def submit_work(item, *, user):
 @transaction.atomic
 def review_work(item, *, user, decision, note, criteria_confirmed=False):
     item = _locked(item)
+    from apps.rbac.approval_eligibility import require_approval
+    require_approval(user, 'project_control', assigned=user.pk == item.reviewer_id,
+                     current=item.status in ('submitted', 'reviewed'))
     if not user.is_active or user.pk != item.reviewer_id:
         raise PermissionDenied('Only the assigned reviewer can record this review.')
     if not note.strip():
@@ -282,7 +284,7 @@ def review_work(item, *, user, decision, note, criteria_confirmed=False):
 def accept_work(item, *, user, note):
     item = _locked(item)
     if not can_accept_work(user, item.project):
-        raise PermissionDenied('Only the project owner, project manager or administrator can accept work.')
+        raise PermissionDenied('Only the assigned project owner or project manager with approval access can accept work.')
     if item.status == 'accepted':
         return item  # A retried acceptance must not double-post progress or history.
     if not note.strip():

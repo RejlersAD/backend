@@ -13,6 +13,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.approval_eligibility import guarded_business_approval
 from django.db.models import Q, Count, Sum, Avg
 from django.utils import timezone
 from datetime import timedelta
@@ -241,6 +242,11 @@ class VendorViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {
+        'approve', 'reject', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
+        'eng_manager_approve', 'eng_manager_reject', 'manager_projects_approve',
+        'manager_projects_reject', 'process_dynamic_approval', 'process_dynamic_rejection',
+    }
     """
     ViewSet for Purchase Requisition management
     
@@ -1905,6 +1911,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     queryset = PurchaseOrder.objects.all().select_related(
         'vendor', 'pr_reference', 'project', 'enterprise_project'
     ).prefetch_related('receipts').order_by('-created_at', '-id')
@@ -2467,6 +2474,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     pagination_class = ReceiptPagination
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
+    business_approval_actions = {'accept', 'reject_delivery'}
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     
     def get_queryset(self):
@@ -2497,6 +2505,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return Response(response_data)
 
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('procurement_receipts')
     def accept(self, request, pk=None):
         receipt = self.get_object()
         if receipt.status != 'pending':
@@ -2511,6 +2520,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(receipt).data)
     
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('procurement_receipts')
     def reject_delivery(self, request, pk=None):
         receipt = self.get_object()
         if receipt.status != 'pending':
@@ -2908,6 +2918,7 @@ class BudgetViewSet(viewsets.ModelViewSet):
     serializer_class = BudgetSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement'
+    business_approval_actions = {'approve'}
     filterset_fields = ['project', 'category', 'fiscal_year', 'is_approved']
     search_fields = ['project__project_number', 'project__project_name', 'description']
     ordering_fields = ['category', 'allocated_amount', 'fiscal_year', 'created_at']
@@ -2927,6 +2938,7 @@ class BudgetViewSet(viewsets.ModelViewSet):
         return queryset.select_related('project', 'cost_center', 'approved_by')
     
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('procurement')
     def approve(self, request, pk=None):
         budget = self.get_object()
         budget.is_approved = True

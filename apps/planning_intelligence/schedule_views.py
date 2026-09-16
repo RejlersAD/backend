@@ -50,6 +50,7 @@ from .services.operational_jobs import (
 from .services.trustworthy_scheduling import approve_schedule_assurance, current_assurance
 from .services.schedule_approval import (
     ScheduleApprovalError, approve_schedule_version, decide_schedule_review, lock_schedule_version,
+    current_schedule_version,
 )
 
 
@@ -264,6 +265,7 @@ class ScheduleViewSet(SoftDeleteViewSet):
 
 
 class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
+    business_approval_actions = {'approve', 'approve_assurance', 'review_decision', 'baseline'}
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
     serializer_class = ScheduleVersionSerializer
     queryset = ScheduleVersion.objects.filter(is_deleted=False).select_related('schedule__project', 'source_generation')
@@ -372,7 +374,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 'date_authority': (configuration.settings or {}).get('date_authority', 'relational_cpm'),
             } if configuration else None,
             'generation_validation': source_generation.validation if source_generation else [],
-            'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance).data if assurance else None,
+            'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance, context={'request': request}).data if assurance else None,
             'dependency_assumptions': dependency_assumptions,
             'can_edit': can_write_project(request.user, project)
             and version.status not in {'approved', 'baselined', 'superseded'},
@@ -478,7 +480,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             after={'job_id': job.id, 'async': True},
         )
         job.refresh_from_db()
-        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+        return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['post'], url_path='run-assurance')
     def run_assurance(self, request, pk=None):
@@ -509,7 +511,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             after={'version_id': version.id, 'job_id': job.id},
         )
         job.refresh_from_db()
-        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+        return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['post'], url_path='approve-assurance')
     def approve_assurance(self, request, pk=None):
@@ -521,7 +523,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
         record_event(project=version.schedule.project, actor=request.user, action='schedule.assurance_approved', entity=review, after={'version_id': version.id})
-        return Response(ScheduleAssuranceReviewSerializer(review).data)
+        return Response(ScheduleAssuranceReviewSerializer(review, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='rebuild-generated-logic')
     def rebuild_generated_logic(self, request, pk=None):
@@ -733,7 +735,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'can_manage': can_write_project(request.user, project),
             'members': members,
             'items': GovernanceItemSerializer(items, many=True).data,
-            'reviews': ScheduleReviewSerializer(reviews, many=True).data,
+            'reviews': ScheduleReviewSerializer(reviews, many=True, context={'request': request}).data,
             'audit_events': PlanningAuditEventSerializer(audit, many=True).data,
             'summary': {
                 'open_items': items.exclude(status__in=['closed', 'implemented', 'rejected']).count(),
@@ -913,7 +915,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 project=project, actor=request.user, action='governance.review_requested', entity=review,
                 after={'version_id': version.id, 'reviewer_ids': sorted(reviewer_ids)},
             )
-        return Response(ScheduleReviewSerializer(review).data, status=status.HTTP_201_CREATED)
+        return Response(ScheduleReviewSerializer(review, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='review-decision', permission_classes=[IsAuthenticated])
     def review_decision(self, request, pk=None):
@@ -928,14 +930,14 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except ScheduleApprovalError as exc:
             return Response(exc.payload, status=exc.status_code)
-        return Response(ScheduleReviewSerializer(review).data)
+        return Response(ScheduleReviewSerializer(review, context={'request': request}).data)
 
     @action(detail=True, methods=['post'])
     def baseline(self, request, pk=None):
         version = self.get_object()
         if not can_final_approve_defaults(request.user, version.schedule.project):
             return Response({'error': 'Only a project authority can create a baseline.'}, status=status.HTTP_403_FORBIDDEN)
-        if version.status != 'approved':
+        if version.status != 'approved' or not current_schedule_version(version) or version.governance_reviews.filter(is_deleted=False, status='pending').exists():
             return Response({'error': 'Approve the assured schedule version before creating a baseline.'}, status=status.HTTP_409_CONFLICT)
         assurance = current_assurance(version)
         if not assurance or assurance.is_deleted or assurance.status != 'approved' or assurance.blockers:
@@ -947,7 +949,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'A baseline with this name already exists.'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
-            if version.status != 'approved':
+            if version.status != 'approved' or not current_schedule_version(version):
                 return Response({'error': 'The version is no longer available for baselining.'}, status=status.HTTP_409_CONFLICT)
             assurance = current_assurance(version)
             if not assurance or assurance.is_deleted or assurance.status != 'approved' or assurance.blockers:
@@ -1060,6 +1062,7 @@ class ActivityAssignmentViewSet(SoftDeleteViewSet):
 
 
 class DailyFieldUpdateViewSet(SoftDeleteViewSet):
+    business_approval_actions = {'approve', 'reject'}
     serializer_class = DailyFieldUpdateSerializer
     queryset = DailyFieldUpdate.objects.filter(is_deleted=False).select_related(
         'version__schedule__project', 'activity', 'reported_by', 'reviewed_by',
@@ -1144,6 +1147,8 @@ class DailyFieldUpdateViewSet(SoftDeleteViewSet):
         with transaction.atomic():
             version = lock_schedule_version(update.version)
             update = DailyFieldUpdate.objects.select_for_update().get(pk=update.pk)
+            if not current_schedule_version(version):
+                raise ValidationError('This field update no longer belongs to the current schedule.')
             from apps.project_control.execution_models import EPCWorkItem
             if EPCWorkItem.objects.filter(activity_id=update.activity_id, is_deleted=False).exists():
                 raise ValidationError('This activity uses EPC evidence acceptance. Record progress through the linked EPC work item.')
@@ -1201,6 +1206,8 @@ class DailyFieldUpdateViewSet(SoftDeleteViewSet):
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         update = self.get_object()
+        if not current_schedule_version(update.version):
+            raise ValidationError('This field update no longer belongs to the current schedule.')
         project = update.version.schedule.project
         if not can_final_approve_defaults(request.user, project):
             return Response({'error': 'Only the project manager can reject field progress.'}, status=status.HTTP_403_FORBIDDEN)

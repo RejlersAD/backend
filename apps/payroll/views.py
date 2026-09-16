@@ -546,6 +546,7 @@ class LeaveTypeViewSet(viewsets.ReadOnlyModelViewSet):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LeaveRequestViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject', 'rm_approve', 'rm_reject'}
     """
     Full CRUD for leave requests.
     POST to create (any auth user / HR on behalf of employee).
@@ -618,6 +619,10 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             # Direct reports are only relevant for the Reporting-Manager queue
             # view — never included for an explicit "mine only" request.
             if not mine_only:
+                from .services.leave_approval import can_review
+                actionable_ids = [item.pk for item in qs.filter(status__in=['PENDING', 'RM_APPROVED'])
+                                  if can_review(item, user)]
+                own_q |= Q(pk__in=actionable_ids)
                 try:
                     from apps.hr_core.models import EmployeeMaster
                     subordinates = EmployeeMaster.objects.filter(manager__user=user).exclude(user__rbac_profile__manager__isnull=False)
@@ -732,8 +737,6 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req = self.get_object()
         from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
 
-        if not self._is_hr_or_admin(request.user):
-            raise PermissionDenied('Only HR can give final leave approval.')
         if req.status not in self.FINAL_APPROVABLE_STATUSES and not (req.status == 'PENDING' and manager_for_request(req) is None):
             return Response(
                 {'error': f'Cannot approve a {req.status} request'},
@@ -769,8 +772,6 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req = self.get_object()
         from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
 
-        if not self._is_hr_or_admin(request.user):
-            raise PermissionDenied('Only HR can give final leave rejection.')
         if req.status not in self.FINAL_APPROVABLE_STATUSES and not (req.status == 'PENDING' and manager_for_request(req) is None):
             return Response(
                 {'error': f'Cannot reject a {req.status} request'},
@@ -1204,6 +1205,7 @@ class SalaryComponentViewSet(viewsets.ModelViewSet):
 # =============================================================================
 
 class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     """
     Workflow: DRAFT -> PENDING_APPROVAL -> APPROVED | REJECTED
 
@@ -1238,9 +1240,15 @@ class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('HR Manager role required.')
 
     def _require_senior_hr(self):
-        if not _is_senior_hr(self.request.user):
-            from rest_framework.exceptions import PermissionDenied, ValidationError
-            raise PermissionDenied('Senior HR role required.')
+        from apps.rbac.approval_eligibility import require_approval
+        require_approval(self.request.user, 'payroll', assigned=True, current=True,
+                         positions=('hr_manager', 'hr_admin'))
+
+    def get_object(self):
+        instance = super().get_object()
+        if self.request.method == 'POST' and self.action in self.business_approval_actions:
+            return EmployeeSalaryStructure.objects.select_for_update().get(pk=instance.pk)
+        return instance
 
     def perform_create(self, serializer):
         self._require_hr()
@@ -1285,6 +1293,7 @@ class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
         return Response(EmployeeSalaryStructureSerializer(obj).data)
 
     @action(detail=True, methods=['post'], url_path='approve')
+    @transaction.atomic
     def approve(self, request, pk=None):
         """Senior HR approves a pending structure and writes SalaryHistory."""
         self._require_senior_hr()
@@ -1345,6 +1354,7 @@ class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
         return Response(EmployeeSalaryStructureSerializer(obj).data)
 
     @action(detail=True, methods=['post'], url_path='reject')
+    @transaction.atomic
     def reject(self, request, pk=None):
         """Senior HR rejects a pending structure."""
         self._require_senior_hr()
@@ -1772,6 +1782,7 @@ from .serializers import DailyWorkLogSerializer  # noqa: E402
 
 
 class DailyWorkLogViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     """
     CRUD for personal daily work logs.
 
@@ -1798,6 +1809,9 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
         user   = self.request.user
         params = self.request.query_params
         qs     = DailyWorkLog.objects.select_related('user')
+
+        if self.action in self.business_approval_actions:
+            return qs.filter(pk__in=[log.pk for log in qs if self._can_approve(user, log)])
 
         # Scope
         if user.is_staff and params.get('all') == 'true':
@@ -1832,7 +1846,17 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
         return qs.order_by('-log_date', '-created_at')
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        from apps.hr_core.models import EmployeeMaster
+        from .services.leave_approval import manager_for_employee
+        from apps.rbac.approval_eligibility import approval_access
+        role = serializer.validated_data.get('submitted_to_role') or 'reporting_manager'
+        employee = EmployeeMaster.objects.filter(user=self.request.user).first()
+        manager = manager_for_employee(employee, self.request.user.pk)
+        if role != 'reporting_manager' or not manager or not manager.user_id or manager.user_id == self.request.user.pk:
+            raise ValidationError({'submitted_to_role': 'Configure a designated reporting manager before submitting work approval.'})
+        if not approval_access(manager.user, 'payroll'):
+            raise ValidationError({'submitted_to_role': 'The assigned manager requires active payroll approval access.'})
+        serializer.save(user=self.request.user, submitted_to_role=role)
 
     # ── Permission helper ──────────────────────────────────────────────────
     @staticmethod
@@ -1845,17 +1869,21 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
              (UserProfile.manager FK points to a UserProfile; check if that
               UserProfile.user == request_user)
         """
-        if request_user.is_staff or request_user.is_superuser:
-            return True
-        try:
-            from apps.rbac.models import UserProfile  # noqa: F811
-            return UserProfile.objects.filter(
-                user=log_obj.user,
-                manager__user=request_user,
-                is_deleted=False,
-            ).exists()
-        except Exception:
+        from apps.hr_core.models import EmployeeMaster
+        from .services.leave_approval import manager_for_employee
+        from apps.rbac.approval_eligibility import approval_access
+        if log_obj.approval_status != 'pending' or not approval_access(request_user, 'payroll'):
             return False
+        if log_obj.submitted_to_role not in ('', 'reporting_manager') or log_obj.user_id == request_user.pk:
+            return False
+        manager = manager_for_employee(EmployeeMaster.objects.filter(user_id=log_obj.user_id).first(), log_obj.user_id)
+        return bool(manager and manager.user_id == request_user.pk)
+
+    def get_object(self):
+        instance = super().get_object()
+        if self.request.method == 'POST' and self.action in self.business_approval_actions:
+            return DailyWorkLog.objects.select_for_update().get(pk=instance.pk)
+        return instance
 
     @action(detail=False, methods=['get'], url_path='summary')
     def summary(self, request):
@@ -1909,6 +1937,7 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
             logger.exception('Daily work log review notification failed for log %s', log.pk)
 
     @action(detail=True, methods=['post'], url_path='approve')
+    @transaction.atomic
     def approve(self, request, pk=None):
         log = self.get_object()
         if not self._can_approve(request.user, log):
@@ -1955,6 +1984,7 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
         return Response(DailyWorkLogSerializer(log).data)
 
     @action(detail=True, methods=['post'], url_path='reject')
+    @transaction.atomic
     def reject(self, request, pk=None):
         log = self.get_object()
         if not self._can_approve(request.user, log):

@@ -6,6 +6,7 @@ from django.core.mail import send_mail, EmailMultiAlternatives, EmailMessage
 from django.core.files.storage import default_storage
 from django.template.loader import render_to_string
 from django.conf import settings
+from django.db import transaction
 from django.urls import reverse
 import logging
 import os
@@ -21,10 +22,20 @@ class EmailService:
     
     def send_approval_request(self, approval, invoice):
         """Send approval request email with approve/reject buttons and PDF attachment"""
+        from django.db import transaction
+        if transaction.get_connection().in_atomic_block:
+            transaction.on_commit(lambda: self.send_approval_request(approval, invoice), robust=True)
+            return True
+        from ..models import Approval
+        from ..approval_eligibility import invoice_approver, can_approve_invoice
+        approval = Approval.objects.select_related('invoice').filter(pk=approval.pk).first()
+        if approval is None or not can_approve_invoice(approval, invoice_approver(approval)):
+            return False
+        invoice = approval.invoice
         try:
             # Parse approval metadata for CC and title
             metadata = approval.approval_metadata or {}
-            cc_emails = metadata.get('cc', [])
+            cc_emails = []
             title = metadata.get('title', '')
             mandatory = metadata.get('mandatory', False)
             
@@ -274,6 +285,15 @@ This is an automated notification from RAD AI Finance System.
         Notifies procurement (Richa) and finance team
         Now includes approval button if recipient is the first approver
         """
+        if transaction.get_connection().in_atomic_block:
+            transaction.on_commit(lambda: self.send_invoice_upload_notification(invoice, uploaded_by, first_approval), robust=True)
+            return True
+        if first_approval:
+            from apps.finance.models import Approval
+            from apps.finance.approval_eligibility import invoice_approver, can_approve_invoice
+            first_approval = Approval.objects.select_related('invoice').filter(pk=first_approval.pk).first()
+            if first_approval and not can_approve_invoice(first_approval, invoice_approver(first_approval)):
+                first_approval = None
         try:
             # Get Richa's email from settings
             richa_email = getattr(settings, 'FINANCE_RICHA_EMAIL', None)

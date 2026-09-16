@@ -228,7 +228,8 @@ def approve_workable_baseline(project, user, version_id, name, progress):
         raise ValueError('Resolve open critical governance items before baselining.')
     progress(25, 'Approving final schedule assurance', 'assurance_approval')
     with transaction.atomic():
-        assurance = approve_schedule_assurance(version, user)
+        if assurance.status != 'approved':
+            assurance = approve_schedule_assurance(version, user)
         record_event(
             project=project, actor=user, action='schedule.assurance_approved', entity=assurance,
             after={'version_id': version.pk},

@@ -78,6 +78,7 @@ from .serializers import (
     MicrosoftGraphUserLinkSerializer,
 )
 from .workflows import HRWorkflowService
+from apps.rbac.approval_eligibility import require_approval, has_business_position
 from .assistant import accessible_policies, answer_question
 from .governance import audit, employee_for_user, is_manager
 from .microsoft_graph import GraphConfigurationError, MicrosoftGraphService
@@ -132,6 +133,12 @@ class EmployeeMasterViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         employee = self.get_object()
+        protected = {'designation', 'job_title_uae', 'job_title_finland', 'department', 'manager', 'user'}
+        if employee.user_id == self.request.user.pk and any(
+            name in serializer.validated_data and serializer.validated_data[name] != getattr(employee, name)
+            for name in protected
+        ):
+            raise PermissionDenied('Another authorized HR administrator must maintain your business position and reporting assignment.')
         if not _is_hr(self.request.user) and employee.user_id != self.request.user.id:
             raise PermissionDenied('Only HR can update another employee record.')
         if not _is_hr(self.request.user):
@@ -249,8 +256,16 @@ class HRWorkflowDefinitionViewSet(viewsets.ModelViewSet):
         self._require_hr()
         serializer.save(created_by=self.request.user)
 
+    @transaction.atomic
     def perform_update(self, serializer):
         self._require_hr()
+        instance = HRWorkflowDefinition.objects.select_for_update().get(pk=serializer.instance.pk)
+        if instance.instances.exists() and any(
+            field in serializer.validated_data and serializer.validated_data[field] != getattr(instance, field)
+            for field in ('code', 'version', 'subject_type')
+        ):
+            raise ValidationError('Create a new workflow version; a used definition cannot change its approval identity.')
+        serializer.instance = instance
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -273,22 +288,35 @@ class HRWorkflowStageViewSet(viewsets.ModelViewSet):
         if not _is_hr(self.request.user):
             raise PermissionDenied('Only HR can configure workflow stages.')
 
+    @transaction.atomic
     def perform_create(self, serializer):
         self._require_hr()
+        definition = HRWorkflowDefinition.objects.select_for_update().get(pk=serializer.validated_data['definition'].pk)
+        if definition.instances.exists():
+            raise ValidationError('Create a new workflow version before changing stages already used by a request.')
         serializer.save()
 
+    @transaction.atomic
     def perform_update(self, serializer):
         self._require_hr()
+        target = serializer.validated_data.get('definition', serializer.instance.definition)
+        definitions = HRWorkflowDefinition.objects.select_for_update().filter(
+            pk__in={serializer.instance.definition_id, target.pk}).order_by('pk')
+        if any(definition.instances.exists() for definition in definitions):
+            raise ValidationError('Create a new workflow version before changing stages already used by a request.')
         serializer.save()
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         self._require_hr()
-        if instance.tasks.exists():
+        definition = HRWorkflowDefinition.objects.select_for_update().get(pk=instance.definition_id)
+        if definition.instances.exists():
             raise ValidationError({'detail': 'A stage used by workflow history cannot be deleted.'})
         instance.delete()
 
 
 class HRWorkflowInstanceViewSet(viewsets.ReadOnlyModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     permission_classes = [IsAuthenticated]
     serializer_class = HRWorkflowInstanceSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -308,6 +336,7 @@ class HRWorkflowInstanceViewSet(viewsets.ReadOnlyModelViewSet):
             | Q(employee__manager__user=self.request.user)
             | Q(tasks__assigned_to=self.request.user)
             | Q(tasks__assigned_role_code__in=roles)
+            | Q(pk__in=HRWorkflowService.actionable_instance_ids(self.request.user))
         ).distinct()
 
     def create(self, request, *args, **kwargs):
@@ -382,6 +411,7 @@ class PerformanceCycleViewSet(viewsets.ModelViewSet):
 
 
 class PerformanceGoalViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     serializer_class = PerformanceGoalSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -424,10 +454,13 @@ class PerformanceGoalViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(goal).data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        goal = self.get_object()
-        if not (_is_hr(request.user) or (goal.employee.manager_id and goal.employee.manager.user_id == request.user.id)):
-            raise PermissionDenied('Only the employee manager or HR can approve goals.')
+        goal = PerformanceGoal.objects.select_for_update().get(pk=self.get_object().pk)
+        require_approval(request.user, 'hr_management',
+            assigned=bool(goal.employee.manager_id and goal.employee.manager.user_id == request.user.id)
+                     or has_business_position(request.user, ('hr_manager', 'hr_admin')),
+            current=goal.status == 'pending')
         total_weight = PerformanceGoal.objects.filter(
             employee=goal.employee, cycle=goal.cycle, status__in=['active', 'completed']
         ).exclude(pk=goal.pk).aggregate(total=models.Sum('weight'))['total'] or 0
@@ -661,6 +694,7 @@ class SuccessionCandidateViewSet(HRRestrictedViewSet):
 
 
 class PromotionCaseViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     permission_classes = [IsAuthenticated]
     serializer_class = PromotionCaseSerializer
     filterset_fields = ['employee', 'status']
@@ -669,8 +703,10 @@ class PromotionCaseViewSet(viewsets.ModelViewSet):
         queryset = PromotionCase.objects.select_related('employee', 'workflow_instance__current_stage')
         if _is_hr(self.request.user):
             return queryset
-        return queryset.filter(Q(employee__user=self.request.user) | Q(employee__manager__user=self.request.user))
+        return queryset.filter(Q(employee__user=self.request.user) | Q(employee__manager__user=self.request.user)
+                               | Q(workflow_instance_id__in=HRWorkflowService.actionable_instance_ids(self.request.user)))
 
+    @transaction.atomic
     def perform_create(self, serializer):
         if not _is_hr(self.request.user):
             raise PermissionDenied('Only HR can open promotion cases.')
@@ -697,8 +733,11 @@ class PromotionCaseViewSet(viewsets.ModelViewSet):
             raise ValidationError({'status': 'A submitted promotion case cannot be deleted.'})
         instance.delete()
 
+    @transaction.atomic
     def _decide(self, request, decision):
-        case = self.get_object()
+        case = PromotionCase.objects.select_for_update().get(pk=self.get_object().pk)
+        if case.status != 'pending':
+            raise ValidationError('This promotion is no longer pending.')
         workflow = HRWorkflowService.decide(case.workflow_instance, request.user, decision, request.data.get('note', ''))
         case.status = workflow.status if workflow.status != 'pending' else 'pending'
         case.save(update_fields=['status', 'updated_at'])
@@ -802,6 +841,7 @@ class OvertimePagination(PageNumberPagination):
 
 
 class OvertimeRequestViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     pagination_class = OvertimePagination
     serializer_class = OvertimeRequestSerializer
     permission_classes = [IsAuthenticated]
@@ -970,6 +1010,7 @@ class OvertimeRequestViewSet(viewsets.ModelViewSet):
 
 
 class EmployeeServiceRequestViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     serializer_class = EmployeeServiceRequestSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -991,9 +1032,11 @@ class EmployeeServiceRequestViewSet(viewsets.ModelViewSet):
             Q(employee__manager__user=user) |
             Q(assigned_to=user) |
             Q(workflow_instance__tasks__status='pending', workflow_instance__tasks__assigned_to=user) |
-            Q(workflow_instance__tasks__status='pending', workflow_instance__tasks__assigned_role_code__in=role_codes)
+            Q(workflow_instance__tasks__status='pending', workflow_instance__tasks__assigned_role_code__in=role_codes) |
+            Q(workflow_instance_id__in=HRWorkflowService.actionable_instance_ids(user))
         ).distinct()
 
+    @transaction.atomic
     def perform_create(self, serializer):
         employee = serializer.validated_data['employee']
         if not _is_hr(self.request.user) and employee.user_id != self.request.user.id:
@@ -1027,8 +1070,11 @@ class EmployeeServiceRequestViewSet(viewsets.ModelViewSet):
             raise ValidationError({'status': 'Only drafts can be deleted.'})
         instance.delete()
 
+    @transaction.atomic
     def _decide(self, request, decision):
-        service_request = self.get_object()
+        service_request = EmployeeServiceRequest.objects.select_for_update().get(pk=self.get_object().pk)
+        if service_request.status != 'pending':
+            raise ValidationError('This service request is no longer pending.')
         workflow = HRWorkflowService.decide(
             service_request.workflow_instance, request.user, decision, request.data.get('note', '')
         )

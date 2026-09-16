@@ -19,7 +19,8 @@ from apps.planning_intelligence.services.schedule_approval import approve_schedu
 from apps.planning_intelligence.services.trustworthy_scheduling import approve_schedule_assurance, run_schedule_assurance
 from apps.procurement.models import PurchaseOrder, Receipt, Vendor
 from apps.procurement.services.purchase_order_approvals import FINANCIAL_STAGE, TECHNICAL_STAGE, record_decision
-from apps.rbac.models import Organization, UserProfile
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
+from apps.rbac.models import Organization, UserProfile, UserRole
 from apps.users.models import User
 from ..epc_models import IntegratedBaseline
 from ..execution_models import EPCWorkEvent, EPCWorkItem
@@ -40,6 +41,10 @@ class EpcExecutionTests(TestCase):
         self.reviewer = User.objects.create_user(username='pilot-reviewer', email='pilot-reviewer@example.test')
         self.outsider = User.objects.create_user(username='pilot-outsider', email='pilot-outsider@example.test')
         self.project = Project.objects.create(code='EPC-PILOT', name='Full EPC pilot', owner=self.owner)
+        ProjectMember.objects.create(project=self.project, user=self.authority, role='project_manager')
+        for user in (self.owner, self.reviewer, self.authority):
+            grant_approval(user, 'project_control', 'planning_package', 'procurement_orders')
+            set_position(user, 'Finance Manager' if user == self.authority else 'Engineer')
         self.other = Project.objects.create(code='OTHER-PILOT', name='Other project', owner=self.outsider)
         ProjectMember.objects.create(project=self.project, user=self.reviewer, role='reviewer')
         self.client = APIClient()
@@ -146,6 +151,27 @@ class EpcExecutionTests(TestCase):
 
     def complete(self, item):
         return accept_work(self.review(item), user=self.authority, note='Accepted against approved baseline and reviewed evidence.')
+
+    def test_exact_reviewer_needs_effective_approval_permission_and_current_submission(self):
+        item = self.items[0]
+        with self.assertRaises(ValidationError):
+            review_work(item, user=self.reviewer, decision='approve', note='Too early', criteria_confirmed=True)
+        item = submit_work(item, user=self.owner)
+        UserRole.objects.filter(user_profile=self.reviewer.rbac_profile).delete()
+        with self.assertRaises(PermissionDenied):
+            review_work(item, user=self.reviewer, decision='approve', note='No approval grant', criteria_confirmed=True)
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'submitted')
+        self.assertIsNone(item.reviewed_at)
+
+    def test_superuser_cannot_accept_after_project_assignment_removed(self):
+        item = self.review(self.items[0])
+        ProjectMember.objects.filter(project=self.project, user=self.authority).delete()
+        with self.assertRaises(PermissionDenied):
+            accept_work(item, user=self.authority, note='No designated project responsibility')
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'reviewed')
+        self.assertFalse(ActivityProgressUpdate.objects.filter(activity=item.activity).exists())
 
     def test_full_pilot_approved_sources_to_four_acceptances_and_reporting_seal(self):
         snapshots = []

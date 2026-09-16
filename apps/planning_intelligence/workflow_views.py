@@ -238,6 +238,7 @@ class ProjectScheduleConfigurationViewSet(viewsets.ModelViewSet):
 
 
 class ScheduleDefaultProposalViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'decision'}
     permission_classes = [IsAuthenticated]
     http_method_names = ['get', 'post', 'head', 'options']
     serializer_class = ScheduleDefaultProposalSerializer
@@ -309,7 +310,7 @@ class ScheduleDefaultProposalViewSet(viewsets.ModelViewSet):
         if decision not in {'approved', 'rejected'}:
             raise ValidationError({'decision': 'Decision must be approved or rejected.'})
         if not can_final_approve_defaults(request.user, proposal.project):
-            raise PermissionDenied('Only a project manager, project owner, or administrator can make the final decision.')
+            raise PermissionDenied('Only an assigned project manager or project owner with approval access can make the final decision.')
         if decision == 'rejected' and not comment:
             raise ValidationError({'comment': 'A rejection reason is required.'})
         with transaction.atomic():
@@ -317,6 +318,8 @@ class ScheduleDefaultProposalViewSet(viewsets.ModelViewSet):
             configuration = ProjectScheduleConfiguration.objects.select_for_update().get(pk=proposal.configuration_id)
             if proposal.status != 'proposed':
                 raise ValidationError({'detail': 'This proposal already has a final decision.'})
+            if configuration.configuration_version != proposal.base_configuration_version:
+                raise ValidationError({'detail': 'This proposal no longer matches the effective configuration.'})
             if decision == 'approved':
                 if configuration.configuration_version != proposal.base_configuration_version:
                     raise ValidationError({'detail': 'The effective configuration changed after this proposal was created. Submit a new proposal.'})

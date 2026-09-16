@@ -16,6 +16,7 @@ from apps.planning_intelligence.models import (
     ScheduleBaseline, ScheduleControlSnapshot, ScheduleVersion,
 )
 from apps.users.models import User
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
 from ..epc_models import IntegratedBaseline
 from ..execution_models import EPCWorkEvent, EPCWorkItem
 from ..models import (
@@ -45,6 +46,10 @@ class EngineeringBoundaryAdversarialTests(TestCase):
             owner=self.owner, scope_type='detailed_engineering', client_name='Test client', currency='AED',
             start_date=date(2026, 1, 1), end_date=date(2026, 12, 31))
         ProjectMember.objects.create(project=self.project, user=self.reviewer, role='reviewer')
+        ProjectMember.objects.create(project=self.project, user=self.authority, role='project_manager')
+        for user in (self.authority, self.reviewer):
+            grant_approval(user, 'project_control', 'planning_package')
+            set_position(user)
         ProjectMember.objects.create(project=self.project, user=self.viewer, role='viewer')
         self.nodes = [WBSNode.objects.create(project=self.project, code=code, name=name, sort_order=index)
                       for index, (code, name) in enumerate(EPC_PHASES)]

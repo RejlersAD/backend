@@ -887,6 +887,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     @transaction.atomic
     def perform_update(self, serializer):
+        from .approval_eligibility import self_organization_changes
+        if serializer.instance.user_id == self.request.user.pk:
+            forbidden = self_organization_changes(serializer.instance, self.request.data)
+            if forbidden:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('Your department, position and manager must be maintained by another authorized administrator.')
         profile = serializer.save()
         from apps.hr_core.services import EmployeeService
         EmployeeService.sync_from_rbac_profile(profile, self.request.data.keys())
@@ -2376,6 +2382,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     {'error': 'Profile not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
+
+            from .approval_eligibility import self_organization_changes
+            forbidden = self_organization_changes(profile, request.data)
+            if forbidden:
+                return Response({key: 'This organizational assignment must be maintained by HR or an authorized administrator.'
+                                 for key in forbidden}, status=status.HTTP_403_FORBIDDEN)
             
             # Validate the selected manager before changing any profile fields.
             selected_manager = None
@@ -2413,23 +2425,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             if 'location' in request.data:
                 changes['location'] = request.data['location']
                 profile.location = request.data['location']
-            if 'department' in request.data:
-                changes['department'] = request.data['department']
-                profile.department = request.data['department']
-            if 'job_title' in request.data:
-                changes['job_title'] = request.data['job_title']
-                profile.job_title = request.data['job_title']
-            
-            # Handle reporting manager assignment
-            if 'manager_id' in request.data:
-                manager_id = request.data['manager_id']
-                if manager_id:
-                    profile.manager = selected_manager
-                    changes['manager'] = f"{selected_manager.user.get_full_name() or selected_manager.user.username} ({manager_id})"
-                else:
-                    # Empty string or null = clear the manager
-                    profile.manager = None
-                    changes['manager'] = 'cleared'
+            # Organizational facts are maintained in the controlled employee
+            # editor. Even unchanged self-service fields must not overwrite a
+            # newer canonical designation through the profile sync.
             
             # Handle profile photo upload
             if 'profile_photo' in request.FILES:
@@ -3937,11 +3935,12 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
     Module access requests submitted by regular users.
 
     - Regular users: create and view their own requests.
-    - Admins / Super Admins: view all requests; approve or deny via custom actions.
+    - Administrators retain visibility; designated ICT approvers decide requests.
     """
 
     serializer_class   = AccessRequestSerializer
     permission_classes = [IsAuthenticated]
+    business_approval_actions = {'approve', 'deny'}
     filter_backends    = [filters.OrderingFilter, DjangoFilterBackend]
     filterset_fields   = ['status', 'module']
     ordering_fields    = ['created_at']
@@ -3951,7 +3950,10 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
     MANAGER_ROLE_CODES = ['super_admin', 'admin']
 
     def _is_manager(self, user):
-        """Return True if user is superuser or holds a manager-level role."""
+        """Visibility includes administrators and eligible ICT reviewers."""
+        from .approval_eligibility import approval_access, has_business_position
+        if has_business_position(user, ('ict_admin',)) and approval_access(user, 'role_access_mgmt'):
+            return True
         if user.is_superuser:
             return True
         try:
@@ -4005,6 +4007,11 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         req = self.get_object()
+        from .approval_eligibility import require_approval, has_business_position
+        require_approval(request.user, 'role_access_mgmt',
+                         assigned=has_business_position(request.user, ('ict_admin',)),
+                         current=req.status == AccessRequest.STATUS_PENDING
+                         and req.user_profile.user_id != request.user.pk)
         if req.status != AccessRequest.STATUS_PENDING:
             return Response(
                 {'detail': f'Request is already {req.status}.'},
@@ -4051,6 +4058,11 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         req = self.get_object()
+        from .approval_eligibility import require_approval, has_business_position
+        require_approval(request.user, 'role_access_mgmt',
+                         assigned=has_business_position(request.user, ('ict_admin',)),
+                         current=req.status == AccessRequest.STATUS_PENDING
+                         and req.user_profile.user_id != request.user.pk)
         if req.status != AccessRequest.STATUS_PENDING:
             return Response(
                 {'detail': f'Request is already {req.status}.'},
@@ -4328,24 +4340,21 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     Files stored in AWS S3 bucket.
     """
     permission_classes = [IsAuthenticated]
+    business_approval_actions = {'verify', 'reject'}
     filter_backends = [filters.OrderingFilter, DjangoFilterBackend]
     filterset_fields = ['document_type', 'verification_status', 'is_active']
     ordering_fields = ['document_type', 'created_at', 'expiry_date']
     ordering = ['-created_at']
 
     def _can_review_documents(self, request):
-        """Use the same authorization boundary as Employee Management."""
-        return bool(
-            request.user.is_superuser
-            or request.user.is_staff
-            or CanManageUsers().has_permission(request, self)
-        )
+        from .approval_eligibility import can_review_profile_document
+        return can_review_profile_document(request.user)
 
     def _require_document_reviewer(self, request):
         """Enforce RBAC ownership of organization-wide document review."""
         if not self._can_review_documents(request):
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Only authorized RBAC administrators can review profile documents.')
+            raise PermissionDenied('Only the designated HR or Administration positions with approval access can review profile documents.')
 
     @action(detail=False, methods=['get'], url_path='pending-verification')
     def pending_verification(self, request):
@@ -4487,7 +4496,8 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         # Admins can see all documents
-        if self._can_review_documents(self.request):
+        if (self._can_review_documents(self.request) or self.request.user.is_superuser
+                or self.request.user.is_staff or CanManageUsers().has_permission(self.request, self)):
             queryset = ProfileDocument.objects.select_related(
                 'user_profile__user', 'verified_by'
             ).all()
@@ -4630,6 +4640,9 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
         """Admin-only: Verify a document."""
         self._require_document_reviewer(request)
         document = self.get_object()
+        from .approval_eligibility import can_review_profile_document
+        if not can_review_profile_document(request.user, document):
+            return Response({'detail': 'You are not eligible to review this pending document.'}, status=403)
         if document.verification_status != 'pending':
             return Response(
                 {'detail': f'Document is already {document.verification_status}.'},
@@ -4665,6 +4678,9 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
         """Admin-only: Reject a document."""
         self._require_document_reviewer(request)
         document = self.get_object()
+        from .approval_eligibility import can_review_profile_document
+        if not can_review_profile_document(request.user, document):
+            return Response({'detail': 'You are not eligible to review this pending document.'}, status=403)
         if document.verification_status != 'pending':
             return Response(
                 {'detail': f'Document is already {document.verification_status}.'},

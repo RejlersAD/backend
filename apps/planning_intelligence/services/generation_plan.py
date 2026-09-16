@@ -238,6 +238,8 @@ def build_generation_plan(basis):
 @transaction.atomic
 def approve_generation_plan(plan, user):
     plan = GenerationPlan.objects.select_for_update().get(pk=plan.pk)
+    from ..access import require_planning_approval, current_generation_plan
+    require_planning_approval(user, plan.project, current=current_generation_plan(plan))
     readiness = refresh_generation_plan_readiness(plan)
     if not readiness['ready']:
         raise ValueError('Generation Plan is not ready: ' + ' '.join(readiness['blockers']))

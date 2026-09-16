@@ -31,6 +31,7 @@ from .services.proposal_workflow import (
 
 
 class TechnicalProposalViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'review_decision', 'approval_decision', 'issue', 'transition'}
     permission_classes = [IsAuthenticated]
     serializer_class = TechnicalProposalSerializer
     throttle_classes = [ScopedRateThrottle]

@@ -395,6 +395,7 @@ class ContactViewSet(viewsets.ModelViewSet):
 
 
 class FrameworkAgreementViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'activate'}
     """Client framework terms, eligibility, rate versions, and value control."""
 
     visibility_module_code = 'sales'
@@ -414,6 +415,8 @@ class FrameworkAgreementViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
         framework = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'sales_frameworks', framework, 'activate')
         if framework.owner_id == request.user.id:
             from rest_framework.exceptions import ValidationError
             raise ValidationError({'approver': 'The framework owner cannot approve their own agreement.'})
@@ -435,6 +438,7 @@ class FrameworkAgreementViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 # ==============================================================================
 
 class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'bid_decision', 'approve_award', 'reject_award'}
     """
     ViewSet for Deal/Opportunity Management
     
@@ -713,6 +717,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
 
 class QuoteViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     """
     ViewSet for Quote/Proposal Management
     
@@ -763,6 +768,8 @@ class QuoteViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         from rest_framework.exceptions import ValidationError
         quote = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'sales_proposals', quote, 'approve')
         missing = [name for name, value in [
             ('scope', quote.scope), ('deliverables', quote.deliverables),
             ('estimated_hours', quote.estimated_hours), ('valid_until', quote.valid_until),
@@ -870,6 +877,7 @@ class QuoteViewSet(viewsets.ModelViewSet):
 
 
 class ProjectHandoverViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'accept', 'return_for_correction'}
     """Formal delivery acceptance queue; records are initiated by approved awards."""
 
     queryset = ProjectHandover.objects.select_related(
@@ -994,6 +1002,7 @@ class SalesActivityViewSet(viewsets.ModelViewSet):
 # ==============================================================================
 
 class SalesForecastViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     """
     ViewSet for Sales Forecasting
     AI-powered revenue predictions
@@ -1018,6 +1027,8 @@ class SalesForecastViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         forecast = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'sales_forecasts', forecast, 'approve')
         if forecast.generated_by_id == request.user.id:
             from rest_framework.exceptions import ValidationError
             raise ValidationError({'approver': 'The forecast preparer cannot approve their own snapshot.'})

@@ -115,6 +115,7 @@ def _enterprise_contract_state(project):
     }
 
 class PlanningProjectViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve_workable_baseline'}
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
     serializer_class = PlanningProjectSerializer
     queryset = PlanningProject.objects.all().filter(is_deleted=False)
@@ -242,7 +243,7 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             except RuntimeError:
                 pass
         job.refresh_from_db()
-        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+        return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['get'], url_path='workable-plan-status')
     def workable_plan_status(self, request, pk=None):
@@ -258,7 +259,7 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             if not target_version_id or not baseline or baseline.source_version_id != target_version_id:
                 baseline = None
         return Response({
-            'job': PlanningJobSerializer(job).data if job else None,
+            'job': PlanningJobSerializer(job, context={'request': self.request}).data if job else None,
             'baseline': ScheduleBaselineSerializer(baseline).data if baseline else None,
         })
 
@@ -281,7 +282,7 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             except RuntimeError:
                 pass
         job.refresh_from_db()
-        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+        return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
     def perform_destroy(self, instance):
         """Soft-delete only — never hard-delete a project (RADAI global rule:
@@ -420,7 +421,7 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             except RuntimeError:
                 logger.exception('Celery dispatch failed for planning job %s', job.id)
         job.refresh_from_db()
-        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+        return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='ai-settings')
     def ai_settings(self, request, pk=None):

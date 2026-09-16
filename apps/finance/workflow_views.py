@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class PayrollWorkflowViewSet(viewsets.ReadOnlyModelViewSet):
+    business_approval_actions = {'approve_hr', 'approve_accounting', 'approve_finance', 'reject'}
     """
     Payroll Workflow API
     

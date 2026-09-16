@@ -92,7 +92,14 @@ class ActionEnforcementTests(TestCase):
         self.assertFalse(PFDQProject.objects.filter(pk=created.data['id']).exists())
         self.assertTrue(PFDQProject.objects.filter(pk=other.data['id']).exists())
 
+    @override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={
+        'pid_analysis.PIDIssue.approve': {'positions': ['engineering_manager'], 'pending_states': ['pending']},
+    })
     def test_pid_approve_denial_prevents_side_effect_and_inheritance_restores(self):
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.create_employee(user=self.users[0], employee_number='PID-APPROVER',
+            employee_code='PID-APPROVER', first_name='PID', last_name='Approver',
+            department='Engineering', designation='Engineering Manager')
         from apps.pid_analysis.models import PIDDrawing, PIDAnalysisReport, PIDIssue
         module = self.module('pid_analysis', ['read', 'approve'])
         drawing = PIDDrawing.objects.create(uploaded_by=self.users[0], file='test.pdf', original_filename='test.pdf', file_size=1)
@@ -187,7 +194,9 @@ class ActionEnforcementTests(TestCase):
         issue.refresh_from_db()
         self.assertEqual(issue.status, 'pending')
         self.override(module, 'approve', True)
-        self.assertEqual(self.client.patch(f'/api/v1/pid/issues/{issue.pk}/', {'status': 'approved'}, format='json').status_code, 200)
+        self.assertEqual(self.client.patch(f'/api/v1/pid/issues/{issue.pk}/', {'status': 'approved'}, format='json').status_code, 403)
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, 'pending')
 
     def test_legacy_iframe_token_still_requires_effective_view_grant(self):
         module = self.module('finance_incoming', ['read'])
@@ -198,7 +207,7 @@ class ActionEnforcementTests(TestCase):
         self.assertEqual(self.client.get(url, {'token': token}).status_code, 404)
         self.override(module, 'read')
         self.assertEqual(self.client.get(url, {'token': token}).status_code, 403)
-        self.assertEqual(self.client.get('/api/v1/finance/approval/00000000-0000-0000-0000-000000000001/details/').status_code, 404)
+        self.assertEqual(self.client.get('/api/v1/finance/approval/00000000-0000-0000-0000-000000000001/details/').status_code, 401)
 
     def test_shared_lists_and_critical_feature_cannot_use_sibling_grants(self):
         self.module('pid_line_list', ['read'])

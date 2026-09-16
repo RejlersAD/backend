@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 
 from apps.core.project_models import Project, ProjectMember
 from apps.users.models import User
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
 from ..models import Estimate, EstimateLineItem, ProjectDocument
 from ..views import EstimateViewSet
 
@@ -18,6 +19,8 @@ from ..views import EstimateViewSet
 class EstimateControlAPITests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='estimate-owner', email='estimate-owner@example.test')
+        grant_approval(self.owner, 'project_control')
+        set_position(self.owner)
         self.viewer = User.objects.create_user(username='estimate-viewer', email='estimate-viewer@example.test')
         self.outsider = User.objects.create_user(username='estimate-outsider', email='estimate-outsider@example.test')
         self.project = Project.objects.create(code='EST-CONTROL', name='Estimate project', owner=self.owner, currency='USD')

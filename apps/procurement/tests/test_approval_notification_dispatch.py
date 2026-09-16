@@ -13,6 +13,7 @@ from apps.procurement.services.purchase_order_approvals import (
 )
 from apps.procurement.services.requisition_workflow import RequisitionWorkflowService
 from apps.rbac.models import Organization, UserProfile
+from .approval_fixtures import grant_approval, set_position
 
 
 @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='', WEB_PUSH_VAPID_PRIVATE_KEY='')
@@ -29,6 +30,8 @@ class ApprovalNotificationDispatchTests(TestCase):
             profile.status = 'active'
             profile.is_deleted = False
             profile.save(update_fields=['status', 'is_deleted'])
+            grant_approval(user)
+            set_position(user, 'Procurement Manager')
             self.people.append(user)
             self.profiles.append(profile)
         self.pr = PurchaseRequisition.objects.create(

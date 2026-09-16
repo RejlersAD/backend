@@ -3,17 +3,16 @@ from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.workflows import HRWorkflowService
+from apps.rbac.approval_eligibility import approval_access, has_business_position, position_users
 
 HR_ROLES = ('hr_manager', 'hr_admin', 'super_admin', 'superadmin', 'admin')
+HR_APPROVAL_POSITIONS = ('hr_manager', 'hr_admin', 'head_hr_administration')
 
 def is_hr(user):
     return bool(user.is_active and (user.is_superuser or set(HR_ROLES) & HRWorkflowService._role_codes(user)))
 
 def active_hr_approvers(employee_user_id=None):
-    from django.contrib.auth import get_user_model
-    return get_user_model().objects.filter(is_active=True).filter(
-        Q(is_superuser=True) | Q(rbac_profile__roles__code__in=HR_ROLES, rbac_profile__roles__is_active=True)
-    ).exclude(pk=employee_user_id).distinct()
+    return position_users(HR_APPROVAL_POSITIONS, 'payroll').exclude(pk=employee_user_id)
 
 
 def employee_for_request(request):
@@ -47,24 +46,31 @@ def manager_for_request(request):
 
 
 def can_review(request, user):
+    if not approval_access(user, 'payroll'):
+        return False
     employee = employee_for_request(request)
     if request.employee_id == user.pk or (employee and employee.user_id == user.pk):
         return False
     if request.status not in ('PENDING', 'RM_APPROVED'):
         return False
-    if request.workflow_instance_id and request.workflow_instance.status != 'pending':
-        return False
+    if request.workflow_instance_id:
+        task = request.workflow_instance.tasks.filter(
+            stage_id=request.workflow_instance.current_stage_id, status='pending',
+        ).select_related('stage', 'instance').first()
+        if not task or not HRWorkflowService.task_is_current(task):
+            return False
     manager = manager_for_request(request)
     if request.status == 'PENDING' and manager:
+        if request.workflow_instance_id and request.workflow_instance.current_stage.code != 'manager_review':
+            return False
         return bool(manager.user_id == user.pk and user.is_active)
-    if not is_hr(user):
+    if request.status == 'PENDING' or not has_business_position(user, HR_APPROVAL_POSITIONS):
         return False
     if request.workflow_instance_id:
         instance = request.workflow_instance
         if instance.status != 'pending':
             return False
-        stage = instance.definition.stages.filter(code='hr_review').first()
-        return bool(stage and is_hr(user))
+        return bool(instance.current_stage_id and instance.current_stage.code == 'hr_review')
     return True
 
 
@@ -72,19 +78,14 @@ def prepare_review_workflow(request):
     """Reconcile stale tasks on a permitted decision; caller holds the request lock."""
     if not request.workflow_instance_id:
         return
-    from apps.hr_core.models import HRWorkflowInstance, HRWorkflowEvent
+    from apps.hr_core.models import HRWorkflowInstance
     instance = HRWorkflowInstance.objects.select_for_update().get(pk=request.workflow_instance_id)
     if instance.status != 'pending':
         raise ValidationError({'workflow': 'This workflow is no longer pending.'})
     manager = manager_for_request(request)
-    target = 'manager_review' if request.status == 'PENDING' and manager else 'hr_review'
-    if target == 'hr_review' and instance.current_stage.code == 'manager_review':
-        instance.tasks.filter(status='pending').update(status='cancelled', decision_note='No manager assigned; routed directly to HR.')
-        instance.current_stage = instance.definition.stages.get(code='hr_review')
-        instance.save(update_fields=['current_stage', 'updated_at'])
-        HRWorkflowEvent.objects.create(instance=instance, event_type='manager_skipped', stage_code='manager_review', metadata={'reason': 'No assigned manager'})
-        HRWorkflowService._create_task(instance, instance.current_stage)
-    elif target == 'manager_review':
+    if request.status == 'PENDING' and not manager:
+        raise ValidationError({'manager': 'Configure the reporting manager before review.'})
+    if request.status == 'PENDING' and instance.current_stage.code == 'manager_review':
         instance.tasks.filter(status='pending', stage__code='manager_review').update(assigned_to_id=manager.user_id, assigned_role_code='')
     request.workflow_instance = instance
 
@@ -94,7 +95,7 @@ def require_manager(employee):
         raise ValidationError({'employee': 'An employee master record is required. Ask HR to complete your employee profile.'})
     manager = manager_for_employee(employee)
     if manager is None:
-        return None
+        raise ValidationError({'manager': 'Assign an active reporting manager before submitting leave.'})
     if not manager.user_id or not manager.user.is_active or manager.user_id == employee.user_id:
         raise ValidationError({'manager': 'An active line manager must be assigned before leave can be submitted. Contact HR.'})
     return manager
@@ -108,19 +109,29 @@ def notify_employee(request):
         title='Leave request updated',
         message=f'{request.days_requested} days requested: {request.get_status_display()}.',
         category='APPROVAL', action_url=f'/approvals?leave={request.pk}',
-        action_label='View leave request', metadata={'leave_request_id': str(request.pk)},
+        action_label='View leave request', metadata={'leave_request_id': str(request.pk), 'requires_action': False},
     )
 
 
 def notify_legacy_hr(request):
-    from django.contrib.auth import get_user_model
+    from django.db import transaction
+    transaction.on_commit(lambda: _deliver_legacy_hr(request.pk), robust=True)
+
+
+def _deliver_legacy_hr(request_id):
+    from apps.payroll.models import LeaveRequest
     from apps.notifications.services import NotificationService
+    request = LeaveRequest.objects.filter(pk=request_id).first()
+    if not request:
+        return
     for user in active_hr_approvers(request.employee_id):
+        if not can_review(request, user):
+            continue
         NotificationService.create_notification(
             recipient=user, title='HR leave approval required', category='APPROVAL',
             message=f'Please approve the leave request of {request.employee_name} ? {request.days_requested} days requested.',
             action_url=f'/approvals?leave={request.pk}', action_label='Review leave',
-            metadata={'leave_request_id': str(request.pk)},
+            metadata={'leave_request_id': str(request.pk), 'requires_action': True},
         )
 
 

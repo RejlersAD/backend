@@ -19,6 +19,7 @@ from .services.execution import _event, accept_work, review_work, submit_work
 
 class EPCWorkItemViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
                          mixins.UpdateModelMixin, viewsets.GenericViewSet):
+    business_approval_actions = {'review', 'accept'}
     permission_classes = [IsAuthenticated]
     serializer_class = EPCWorkItemSerializer
     http_method_names = ['get', 'post', 'patch', 'head', 'options']

@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Q
+from django.db import transaction
 from datetime import timedelta
 
 from .models import ClientSite, SiteVisitRequest, SiteVisitCheckIn
@@ -20,6 +21,7 @@ from .serializers import (
     SiteVisitCheckInCreateSerializer, SiteVisitCheckOutSerializer
 )
 from . import config as site_config
+from apps.rbac.approval_eligibility import guarded_business_approval
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +92,23 @@ class SiteVisitRequestViewSet(viewsets.ModelViewSet):
     Employees submit requests, managers approve/reject.
     """
     permission_classes = [IsAuthenticated]
+    business_approval_actions = {'approve', 'reject'}
     queryset = SiteVisitRequest.objects.all()
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from apps.hr_core.models import EmployeeMaster
+        from apps.payroll.services.leave_approval import manager_for_employee
+
+        instance = SiteVisitRequest.objects.select_for_update().get(pk=self.get_object().pk)
+        if instance.status != 'PENDING':
+            raise ValidationError('Only a pending site visit request can be edited.')
+        employee = EmployeeMaster.objects.filter(user_id=instance.employee_id).first() if instance.employee_id else None
+        manager = manager_for_employee(employee, instance.employee_id) if instance.employee_id else None
+        if request.user.pk != instance.employee_id and not (manager and manager.user_id == request.user.pk):
+            raise PermissionDenied('Only the requesting employee or current reporting manager may edit this request.')
+        return super().update(request, *args, **kwargs)
     
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -149,6 +167,7 @@ class SiteVisitRequestViewSet(viewsets.ModelViewSet):
         serializer.save(**data)
     
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('timesheet', reporting_manager=True)
     def approve(self, request, pk=None):
         """Manager approves site visit request."""
         obj = self.get_object()
@@ -171,6 +190,7 @@ class SiteVisitRequestViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('timesheet', reporting_manager=True)
     def reject(self, request, pk=None):
         """Manager rejects site visit request."""
         obj = self.get_object()

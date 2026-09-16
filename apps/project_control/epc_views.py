@@ -15,6 +15,7 @@ from .services.epc import (
 class EpcProjectViewSet(viewsets.GenericViewSet):
     """Existing project identities; setup never creates a second project."""
     permission_classes = [IsAuthenticated]
+    business_approval_actions = {'baseline'}
 
     def get_queryset(self):
         return accessible_enterprise_projects(self.request.user).select_related('owner')

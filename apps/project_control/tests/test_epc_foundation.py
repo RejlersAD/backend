@@ -15,6 +15,8 @@ from apps.core.project_models import Project, ProjectMember
 from apps.planning_intelligence.models import PlanningProject, Schedule, ScheduleActivity, ScheduleBaseline, ScheduleVersion
 from apps.procurement.models import ProjectRelationshipResolution, PurchaseRequisition
 from apps.users.models import User
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
+from apps.rbac.models import UserProfile
 from ..epc_models import IntegratedBaseline, RequisitionWBSLink, WBSActivityLink
 from ..epc_views import EpcProjectViewSet
 from ..models import BudgetAllocation, ControlAccount, WBSNode
@@ -32,6 +34,11 @@ class EpcFoundationTests(TestCase):
         self.outsider = User.objects.create_user(username='epc-outsider', email='epc-outsider@example.test')
         self.project = Project.objects.create(code='EPC-001', name='Existing project', owner=self.owner)
         self.other = Project.objects.create(code='OTHER-001', name='Other project', owner=self.outsider)
+        grant_approval(self.authority, 'project_control', 'planning_package')
+        set_position(self.authority)
+        ProjectMember.objects.create(project=self.project, user=self.authority, role='project_manager')
+        for user in (self.owner, self.viewer, self.outsider):
+            UserProfile.objects.get_or_create(user=user, defaults={'organization': self.authority.rbac_profile.organization})
         ProjectMember.objects.create(project=self.project, user=self.viewer, role='viewer')
         self.values = {'code': 'EPC-001', 'name': 'Full EPC pilot', 'client_name': 'Pilot client',
                        'owner': self.owner.pk, 'start_date': '2026-01-01', 'end_date': '2026-12-31',
@@ -88,7 +95,7 @@ class EpcFoundationTests(TestCase):
                  {'code': self.other.code}, {'owner': self.owner.pk}, {'client_name': ''}]
         for override in cases:
             with self.subTest(override=override):
-                payload = {**self.values, 'owner': self.authority.pk, **override}
+                payload = {**self.values, 'owner': self.viewer.pk, **override}
                 self.assertEqual(self.api('setup', 'post', payload).status_code, 400)
         self.project.refresh_from_db()
         self.assertEqual(self.project.name, 'Existing project')

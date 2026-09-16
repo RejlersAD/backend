@@ -803,12 +803,18 @@ def enquiry_stats(request):
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated, CanManageEnquiries])
+@transaction.atomic
 def enquiry_detail(request, pk: int):
     """Retrieve, update (status / admin_notes), or delete a single enquiry."""
     enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
+    if request.method != 'GET':
+        enquiry = Enquiry.objects.select_for_update().get(pk=enquiry.pk)
 
     if request.method == 'GET':
-        return Response({'success': True, 'enquiry': _serialize_enquiry(enquiry, detail=True, include_internal=True)})
+        from apps.core.enquiry_workflow import can_approve_enquiry
+        data = _serialize_enquiry(enquiry, detail=True, include_internal=True)
+        data['can_approve'] = can_approve_enquiry(request.user, enquiry)
+        return Response({'success': True, 'enquiry': data})
 
     if request.method == 'DELETE':
         if not _can_manage_enquiries(request.user):
@@ -830,10 +836,16 @@ def enquiry_detail(request, pk: int):
             status=status.HTTP_400_BAD_REQUEST,
         )
     if 'approval_status' in payload:
-        if not _can_manage_enquiries(request.user):
-            return Response({'detail': 'Manager approval access is required.'}, status=status.HTTP_403_FORBIDDEN)
-        if payload['approval_status'] not in ('pending', 'approved', 'rejected', 'not_required'):
+        from apps.core.enquiry_workflow import can_approve_enquiry
+        if not can_approve_enquiry(request.user, enquiry):
+            return Response({'detail': 'Only the assigned department head with approval access may decide this pending request.'}, status=403)
+        if payload['approval_status'] not in ('approved', 'rejected'):
             return Response({'detail': 'Invalid approval status.'}, status=status.HTTP_400_BAD_REQUEST)
+        if set(payload) - {'approval_status', 'admin_notes'}:
+            return Response({'detail': 'Approval cannot also change the request assignment or stage.'}, status=400)
+    if (payload.get('status') in ('resolved', 'closed', 'pending_confirmation')
+            and enquiry.approval_required and enquiry.approval_status != 'approved'):
+        return Response({'detail': 'Complete the assigned approval before resolving this request.'}, status=400)
 
     previous = {key: getattr(enquiry, f'{key}_id' if key == 'assigned_to' else key) for key in payload}
     if 'assigned_to' in payload:
@@ -868,15 +880,8 @@ def enquiry_detail(request, pk: int):
         details={'before': previous, 'after': {key: request.data.get(key) for key in previous}},
     )
     if 'assigned_to' in previous and enquiry.assigned_to:
-        from apps.notifications.services import NotificationService
-        NotificationService.create_notification(
-            enquiry.assigned_to,
-            title=f'Request assigned: {enquiry.reference}',
-            message=f'{enquiry.get_inquiry_type_display()} assigned to you: {enquiry.subject}',
-            category='INFO', priority='HIGH' if enquiry.urgency in ('high', 'urgent') else 'NORMAL',
-            action_url=f'/admin/enquiries/{enquiry.pk}', action_label='Open Request',
-            metadata={'enquiry_id': enquiry.pk}, sender=request.user,
-        )
+        from apps.core.enquiry_workflow import notify_enquiry_assignment
+        notify_enquiry_assignment(enquiry, sender=request.user)
     if 'approval_status' in previous and enquiry.assigned_to:
         from apps.notifications.services import NotificationService
         NotificationService.create_notification(
@@ -884,7 +889,7 @@ def enquiry_detail(request, pk: int):
             title=f'Approval {enquiry.approval_status}: {enquiry.reference}',
             message=f'Handling approval for "{enquiry.subject}" is {enquiry.approval_status}.',
             category='INFO', priority='HIGH', action_url=f'/admin/enquiries/{enquiry.pk}',
-            action_label='Open Request', metadata={'enquiry_id': enquiry.pk},
+            action_label='Open Request', metadata={'enquiry_id': enquiry.pk, 'requires_action': False},
         )
     if 'status' in previous and previous['status'] != enquiry.status and enquiry.requester:
         from apps.notifications.services import NotificationService
@@ -893,7 +898,7 @@ def enquiry_detail(request, pk: int):
             title=f'Request updated: {enquiry.reference}',
             message=f'Your request status changed to {enquiry.get_status_display()}.',
             category='INFO', priority='NORMAL', action_url=f'/my-enquiries/{enquiry.pk}',
-            action_label='View Request', metadata={'enquiry_id': enquiry.pk},
+            action_label='View Request', metadata={'enquiry_id': enquiry.pk, 'requires_action': False},
         )
     if payload.get('status') in ('resolved', 'closed') and enquiry.requester:
         from apps.notifications.services import NotificationService
@@ -902,7 +907,7 @@ def enquiry_detail(request, pk: int):
             title=f'Request {payload["status"]}: {enquiry.reference}',
             message=f'Your request "{enquiry.subject}" was marked {payload["status"]}.',
             category='INFO', priority='NORMAL', action_url=f'/my-enquiries/{enquiry.pk}',
-            action_label='View Request', metadata={'enquiry_id': enquiry.pk},
+            action_label='View Request', metadata={'enquiry_id': enquiry.pk, 'requires_action': False},
         )
 
     return Response({'success': True, 'enquiry': _serialize_enquiry(enquiry, detail=True, include_internal=True)})
@@ -1087,3 +1092,5 @@ def enquiry_representatives(request):
         for user in users
     ]})
 
+
+enquiry_detail.cls.business_approval_fields = {'approval_status'}

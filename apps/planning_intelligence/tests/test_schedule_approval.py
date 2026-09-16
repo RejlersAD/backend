@@ -20,6 +20,7 @@ from ..services.schedule_approval import (
 from ..services.trustworthy_scheduling import approve_schedule_assurance, run_schedule_assurance
 from ..services.workable_plan import approve_workable_baseline
 from .test_scheduling_engine import ScheduleFixture
+from .test_business_approval_gates import grant_test_approval
 
 
 class ScheduleApprovalTests(ScheduleFixture):
@@ -30,6 +31,7 @@ class ScheduleApprovalTests(ScheduleFixture):
         self.project.save(update_fields=['enterprise_project', 'updated_at'])
         self.reviewer = User.objects.create_user(username='approval-reviewer', email='approval-reviewer@example.com')
         ProjectMember.objects.create(project=self.enterprise, user=self.reviewer, role='reviewer')
+        grant_test_approval((self.owner, self.reviewer))
         self.activity('APPROVAL-A', 2)
         calculate_schedule_version(self.version)
         self.client = APIClient()
