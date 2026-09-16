@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from .models import PlanningProject
+from apps.rbac.approval_eligibility import active_approval_user, approval_access, project_approval_assignment, require_approval
 
 
 WRITE_ROLES = {'project_manager', 'lead_engineer', 'engineer', 'designer'}
@@ -43,16 +44,28 @@ def can_write_project(user, project):
 
 def can_final_approve_defaults(user, project):
     """Limit effective default changes to accountable project authorities."""
-    if user.is_staff or user.is_superuser:
-        return True
-    if project.enterprise_project_id:
-        enterprise_project = project.enterprise_project
-        if enterprise_project.owner_id == user.id:
-            return True
-        return enterprise_project.memberships.filter(
-            user=user, is_active=True, role='project_manager',
-        ).exists()
-    return project.created_by_id == user.id
+    return bool(project and not project.is_deleted and project.enterprise_project_id
+                and project_approval_assignment(user, project.enterprise_project)
+                and approval_access(user, 'planning_package'))
+
+
+def require_planning_approval(user, project, *, current):
+    require_approval(user, 'planning_package',
+                     assigned=bool(project and not project.is_deleted and project.enterprise_project_id
+                                   and project_approval_assignment(user, project.enterprise_project)),
+                     current=current)
+
+
+def current_basis(basis):
+    return bool(not basis.is_deleted and basis.status in {'draft', 'ready'}
+                and not basis.project.schedule_bases.filter(is_deleted=False, version__gt=basis.version).exists())
+
+
+def current_generation_plan(plan):
+    return bool(not plan.is_deleted and plan.status in {'draft', 'ready'}
+                and not plan.basis.is_deleted and plan.basis.status == 'approved'
+                and not plan.project.schedule_bases.filter(is_deleted=False, version__gt=plan.basis.version).exists()
+                and not plan.project.generation_plans.filter(is_deleted=False, version__gt=plan.version).exists())
 
 
 def proposal_reviewer_users(project):
@@ -63,13 +76,15 @@ def proposal_reviewer_users(project):
     approval remains restricted to accountable project authorities.
     """
     User = get_user_model()
-    return User.objects.filter(is_active=True).order_by('first_name', 'last_name', 'email')
+    ids = [user.pk for user in User.objects.filter(is_active=True)
+           if active_approval_user(user) and approval_access(user, 'planning_package')]
+    return User.objects.filter(pk__in=ids).order_by('first_name', 'last_name', 'email')
 
 
 def proposal_approver_users(project):
     """Accountable authorities permitted to approve a technical proposal."""
     User = get_user_model()
-    ids = set(User.objects.filter(Q(is_staff=True) | Q(is_superuser=True), is_active=True).values_list('id', flat=True))
+    ids = set()
     if project.enterprise_project_id:
         enterprise_project = project.enterprise_project
         if enterprise_project.owner_id:
@@ -77,11 +92,42 @@ def proposal_approver_users(project):
         ids.update(enterprise_project.memberships.filter(
             is_active=True, role__in=APPROVAL_ROLES,
         ).values_list('user_id', flat=True))
-    return User.objects.filter(id__in=ids, is_active=True).order_by('first_name', 'last_name', 'email')
+    ids = [user.pk for user in User.objects.filter(pk__in=ids, is_active=True)
+           if can_final_approve_defaults(user, project)]
+    return User.objects.filter(id__in=ids).order_by('first_name', 'last_name', 'email')
 
 
 def can_approve_proposal(user, project):
-    return bool(user and user.is_authenticated and proposal_approver_users(project).filter(pk=user.pk).exists())
+    return can_final_approve_defaults(user, project)
+
+
+def can_decide_proposal_task(proposal, user, task=None):
+    """Shared current task capability for decisions, UI and message delivery."""
+    if not active_approval_user(user) or not approval_access(user, 'planning_package'):
+        return False
+    if proposal.is_deleted or proposal.project.is_deleted:
+        return False
+    version = proposal.schedule_version
+    if (version is None or version.is_deleted or version.status == 'superseded' or version.schedule.is_deleted
+            or version.schedule.versions.filter(is_deleted=False, version__gt=version.version).exists()):
+        return False
+    task_type = {'internal_review': 'review', 'approval_review': 'approval'}.get(proposal.status)
+    if not task_type:
+        return False
+    current = proposal.workflow_tasks.filter(
+        is_deleted=False, status='pending', task_type=task_type,
+    ).order_by('-created_at', '-pk').first()
+    if current is None or current.assigned_to_id != user.pk or (task and task.pk != current.pk):
+        return False
+    if task_type == 'review':
+        return proposal.reviewer_id == user.pk and proposal.created_by_id != user.pk
+    reviewed = proposal.workflow_tasks.filter(
+        is_deleted=False, task_type='review', status='completed', assigned_to_id=proposal.checked_by_id,
+    ).exists()
+    return bool(proposal.approver_id == user.pk and can_approve_proposal(user, proposal.project)
+                and user.pk not in (proposal.created_by_id, proposal.checked_by_id)
+                and reviewed and proposal.review_completed_at
+                and not proposal.workflow_tasks.filter(is_deleted=False, task_type='review', status='pending').exists())
 
 
 def planning_project_for_object(obj):

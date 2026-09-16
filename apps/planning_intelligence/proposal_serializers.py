@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .access import can_approve_proposal, can_write_project
+from .access import can_approve_proposal, can_write_project, can_decide_proposal_task
 from .models import ProposalExportRecord, ProposalWorkflowTask, TechnicalProposal
 
 
@@ -108,14 +108,13 @@ class TechnicalProposalSerializer(serializers.ModelSerializer):
         return {
             'can_edit': obj.status == 'draft' and write_access,
             'can_submit_review': obj.status == 'draft' and write_access,
-            'can_review': obj.status == 'internal_review' and obj.reviewer_id == user_id,
+            'can_review': obj.status == 'internal_review' and can_decide_proposal_task(obj, user),
             'can_reassign_reviewer': obj.status == 'internal_review' and write_access,
             'can_reassign_approver': obj.status == 'approval_review' and (
                 write_access or obj.checked_by_id == user_id
             ),
             'can_approve': (
-                obj.status == 'approval_review' and obj.approver_id == user_id
-                and approval_authority and obj.created_by_id != user_id and obj.checked_by_id != user_id
+                obj.status == 'approval_review' and can_decide_proposal_task(obj, user)
             ),
             'can_issue': obj.status == 'approved' and approval_authority,
             'can_reopen': obj.status == 'rejected' and write_access,

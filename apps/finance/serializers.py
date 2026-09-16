@@ -154,7 +154,9 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'extracted_text', 'classification_confidence',
-            'classification_reasoning', 'structured_line_items', 'po_allocations'
+            'classification_reasoning', 'structured_line_items', 'po_allocations',
+            'status', 'procurement_reviewed_by', 'procurement_reviewed_at',
+            'finance_reviewed_by', 'finance_reviewed_at'
         ]
 
 
@@ -177,6 +179,16 @@ class InvoiceUploadSerializer(serializers.ModelSerializer):
 
 class ApprovalRouteSerializer(serializers.ModelSerializer):
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
+
+    def validate(self, attrs):
+        from apps.rbac.approval_eligibility import has_business_position
+        from .approval_eligibility import validated_invoice_route
+        actor = getattr(self.context.get('request'), 'user', None)
+        if not has_business_position(actor, ('finance_manager', 'finance_admin', 'accounting_manager')):
+            raise serializers.ValidationError('Only the designated Finance administrator may configure invoice approval routes.')
+        chain = attrs.get('approval_chain', getattr(self.instance, 'approval_chain', None))
+        attrs['approval_chain'] = validated_invoice_route(chain, actor=actor)
+        return attrs
     
     class Meta:
         model = ApprovalRoute

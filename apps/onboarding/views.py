@@ -21,7 +21,7 @@ import re
 
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment, ProbationPerformanceReport,
-    Document, AccessProvisioning, Checklist,
+    Document, AccessProvisioning, Checklist, ExitApproval,
     ONBOARDING_ACTIVE_STATUSES, OFFBOARDING_ACTIVE_STATUSES,
     CHECKLIST_STAGE_PRE_HIRE, CHECKLIST_STAGE_IT_PROVISIONING,
     CHECKLIST_STAGE_FIRST_DAY, CHECKLIST_STAGE_FINAL_VALIDATION,
@@ -44,10 +44,11 @@ from apps.notifications.models import Notification
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.services import EmployeeService
 from apps.rbac.models import UserProfile as RBACUserProfile, Organization
+from apps.rbac.approval_eligibility import approval_access, require_approval
 from .rbac import (
     can_manage_offboarding, can_manage_onboarding_stage,
     can_start_onboarding_stage, can_manage_offboarding_stage,
-    can_start_offboarding_stage, can_manage_probation_report,
+    can_start_offboarding_stage, can_manage_probation_report, can_decide_exit_project,
 )
 from .project_assignments import get_active_project_assignments, get_profile_project_manager
 from .performance_insights import build_probation_report_insights
@@ -146,54 +147,48 @@ def _resolve_exit_reporting_manager(user, employee=None):
     return employee.manager.get_full_name() if employee and employee.manager else ''
 
 
+def _exit_project_managers(record):
+    projects = [p for p in get_active_project_assignments(record.user) if p['source'] == 'core_project']
+    recipients = {manager.pk: manager for project in projects for manager in project['managers']
+                  if manager and manager.pk != record.user_id}
+    if projects and (not recipients or any(not approval_access(user, 'hr_onboarding') for user in recipients.values())):
+        raise ValidationError({'detail': 'Configure an active project manager with onboarding approval access before submitting this exit.'})
+    return projects, recipients
+
+
 def _notify_project_managers_of_exit(record):
-    """Notify each PoM responsible for an active project assigned to the employee."""
-    projects = get_active_project_assignments(record.user)
-    recipients = {}
-    recipient_projects = {}
-    for project in projects:
-        for manager in project['managers']:
-            if not manager or manager.id == record.user_id:
-                continue
-            recipients[manager.id] = manager
-            recipient_projects.setdefault(manager.id, []).append(project)
-
-    if recipients and record.project_manager_approval_status != 'pending':
+    """Create the current project assignments; deliver only after commit."""
+    projects, recipients = _exit_project_managers(record)
+    for recipient in recipients.values():
+        ExitApproval.objects.get_or_create(offboarding_record=record, approver=recipient,
+                                           approval_step='project_manager')
+    if recipients:
         record.project_manager_approval_status = 'pending'
-        record.save(update_fields=['project_manager_approval_status', 'updated_at'])
+        record.approval_workflow_status = 'project_managers_pending'
+        record.save(update_fields=['project_manager_approval_status', 'approval_workflow_status', 'updated_at'])
+    transaction.on_commit(lambda: _deliver_exit_requests(record.pk), robust=True)
+    return projects
 
-    for user_id, recipient in recipients.items():
-        assigned_projects = recipient_projects[user_id]
-        project_labels = ', '.join(
-            f"{project['code']} - {project['name']}" for project in assigned_projects
-        )
-        notification = NotificationService.create_notification(
-            recipient=recipient,
-            sender=record.created_by,
+
+def _deliver_exit_requests(record_id):
+    record = OffboardingRecord.objects.select_related('user', 'created_by').filter(pk=record_id).first()
+    if not record:
+        return
+    projects, recipients = _exit_project_managers(record)
+    for recipient in recipients.values():
+        if not can_decide_exit_project(record, recipient):
+            continue
+        NotificationService.create_notification(
+            recipient=recipient, sender=record.created_by,
             title='Employee initiated an exit process',
-            message=(
-                f'{record.employee_name} ({record.employee_id or record.employee_email}) '
-                f'has initiated an exit process and is assigned to your active '
-                f'project(s): {project_labels}. Last working day: {record.last_working_day}.'
-            ),
-            category='APPROVAL',
-            priority='HIGH',
+            message=f'{record.employee_name} has requested an exit. Review your active project assignment.',
+            category='APPROVAL', priority='HIGH',
             action_url=f'/hr/onboarding?tab=offboarding&record_id={record.id}',
             action_label='Review Offboarding',
-            metadata={
-                'offboarding_id': record.id,
-                'employee_id': record.employee_id,
-                'project_ids': [project['id'] for project in assigned_projects],
-                'event': 'employee_exit_initiated',
-                'action_type': 'offboarding_project_manager_decision',
-                'decision_status': 'pending',
-            },
+            metadata={'offboarding_id': record.id, 'event': 'employee_exit_initiated',
+                      'action_type': 'offboarding_project_manager_decision',
+                      'decision_status': 'pending', 'requires_action': True},
         )
-        if notification and notification.send_in_app and notification.status == 'PENDING':
-            notification.status = 'SENT'
-            notification.save(update_fields=['status', 'updated_at'])
-
-    return projects
 
 ONBOARDING_CHECKLIST_TEMPLATES = {
     CHECKLIST_STAGE_PRE_HIRE: (
@@ -309,6 +304,10 @@ def complete_offboarding_if_ready(record):
     """Close an offboarding workflow when every required stage is complete."""
     if not record or record.status in {'completed', 'cancelled', 'rejected'}:
         return False
+    if record.project_manager_approval_status not in {'approved', 'not_required'}:
+        return False
+    if record.exit_approvals.exclude(status='approved').exists():
+        return False
 
     required_stages = set(OFFBOARDING_CHECKLIST_TEMPLATES)
     stage_rows = record.checklist_items.filter(stage__in=required_stages)
@@ -371,6 +370,7 @@ def ensure_onboarding_record(employee, created_by=None):
 
 
 class OnboardingRecordViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'mark_completed'}
     """
     API endpoint for onboarding records
     Supports CRUD + custom actions: statistics, mark_completed
@@ -598,9 +598,10 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def mark_completed(self, request, pk=None):
         """Mark onboarding as completed"""
-        record = self.get_object()
+        record = OnboardingRecord.objects.select_for_update().get(pk=self.get_object().pk)
         if not can_manage_onboarding_stage(request.user, CHECKLIST_STAGE_FINAL_VALIDATION, record):
             raise PermissionDenied('Only HR may complete final onboarding validation.')
 
@@ -977,6 +978,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
 
 
 class OffboardingRecordViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'project_manager_decision', 'reject', 'mark_completed'}
     """
     API endpoint for offboarding records
     Supports CRUD + custom actions: statistics, mark_completed
@@ -1043,6 +1045,7 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         
         return queryset.select_related('created_by', 'assigned_to', 'rejected_by', 'user')
     
+    @transaction.atomic
     def perform_create(self, serializer):
         """
         Allow HR to initiate any exit while employees may initiate only their own.
@@ -1087,28 +1090,6 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
             from django.contrib.auth import get_user_model
             User = get_user_model()
             
-            # Process each project assignment
-            for project_assignment in project_assignments:
-                project_number = project_assignment.get('project_number', '')
-                project_name = project_assignment.get('project_name', '')
-                project_manager_ids = project_assignment.get('project_manager_ids', [])
-                
-                # Create ExitApproval for each project manager in this project
-                for pm_id in project_manager_ids:
-                    try:
-                        pm_user = User.objects.get(id=pm_id)
-                        ExitApproval.objects.create(
-                            offboarding_record=record,
-                            approver=pm_user,
-                            approval_step='project_manager',
-                            status='pending',
-                            project_number=project_number,
-                            project_name=project_name
-                        )
-                    except User.DoesNotExist:
-                        pass
-            
-            # ✨ Create ExitApproval for HR Coordinator
             if hr_coordinator_id:
                 try:
                     hr_coord_user = User.objects.get(id=hr_coordinator_id)
@@ -1178,11 +1159,13 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def reject(self, request, pk=None):
         """Reject an active offboarding when the employee remains on an active project."""
-        if not can_manage_offboarding(request.user):
-            raise PermissionDenied('Only HR or an administrator may reject an offboarding process.')
-        record = self.get_object()
+        record = OffboardingRecord.objects.select_for_update().get(pk=self.get_object().pk)
+        require_approval(request.user, 'hr_onboarding', assigned=True,
+                         current=record.status in OFFBOARDING_ACTIVE_STATUSES and record.project_manager_approval_status in {'approved', 'not_required'},
+                         positions={'hr_manager', 'hr_admin', 'human_resource'})
         if record.status not in OFFBOARDING_ACTIVE_STATUSES:
             raise ValidationError({'detail': 'Only an active offboarding process can be rejected.'})
 
@@ -1216,7 +1199,7 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
                 priority='HIGH',
                 action_url=f'/hr/onboarding?tab=offboarding&record_id={record.id}',
                 action_label='View Request',
-                metadata={'offboarding_id': record.id, 'event': 'offboarding_rejected'},
+                metadata={'offboarding_id': record.id, 'event': 'offboarding_rejected', 'requires_action': False},
             )
             if notification and notification.send_in_app and notification.status == 'PENDING':
                 notification.status = 'SENT'
@@ -1233,37 +1216,22 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             record = OffboardingRecord.objects.select_for_update().get(pk=pk)
-            active_projects = get_active_project_assignments(record.user)
-            manager_ids = {
-                manager.id
-                for project in active_projects
-                for manager in project['managers']
-                if manager
-            }
-            notified_as_project_manager = any(
-                str(notification.metadata.get('offboarding_id')) == str(record.id)
-                for notification in Notification.objects.filter(
-                    recipient=request.user,
-                    metadata__event='employee_exit_initiated',
-                )
-            )
-            if request.user.id not in manager_ids and not notified_as_project_manager:
-                raise PermissionDenied(
-                    'Only a Project Manager assigned to this employee may decide the exit process.'
-                )
-            if record.project_manager_approval_status != 'pending':
-                raise ValidationError({
-                    'detail': (
-                        'This exit process has already been decided by a Project Manager '
-                        f'({record.project_manager_approval_status}).'
-                    )
-                })
-            if record.status not in OFFBOARDING_ACTIVE_STATUSES:
-                raise ValidationError({'detail': 'This offboarding process is no longer active.'})
-
+            if not can_decide_exit_project(record, request.user):
+                raise PermissionDenied('Only the current assigned project manager with approval access may decide this pending exit.')
+            _projects, managers = _exit_project_managers(record)
+            for manager in managers.values():
+                ExitApproval.objects.get_or_create(offboarding_record=record, approver=manager,
+                                                   approval_step='project_manager')
+            approval = record.exit_approvals.select_for_update().get(
+                approver=request.user, approval_step='project_manager')
             note = (request.data.get('note') or '').strip()
             now = timezone.now()
-            record.project_manager_approval_status = decision
+            approval.status = decision
+            approval.decision_note = note
+            approval.decided_at = now
+            approval.save(update_fields=['status', 'decision_note', 'decided_at', 'updated_at'])
+            peers_pending = record.exit_approvals.filter(approval_step='project_manager').exclude(status='approved').exists()
+            record.project_manager_approval_status = 'pending' if decision == 'approved' and peers_pending else decision
             record.project_manager_decided_by = request.user
             record.project_manager_decided_at = now
             record.project_manager_decision_note = note
@@ -1280,7 +1248,7 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
             record.save(update_fields=update_fields)
 
             related_notifications = Notification.objects.filter(
-                metadata__event='employee_exit_initiated'
+                recipient=request.user, metadata__event='employee_exit_initiated'
             )
             for notification in related_notifications:
                 if str(notification.metadata.get('offboarding_id')) != str(record.id):
@@ -1311,7 +1279,7 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
                     action_label='View Exit Process',
                     metadata={
                         'offboarding_id': record.id,
-                        'event': f'offboarding_project_manager_{decision}',
+                        'event': f'offboarding_project_manager_{decision}', 'requires_action': False,
                     },
                 )
                 if notification and notification.send_in_app and notification.status == 'PENDING':
@@ -1396,9 +1364,10 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def mark_completed(self, request, pk=None):
         """Mark offboarding as completed"""
-        record = self.get_object()
+        record = OffboardingRecord.objects.select_for_update().get(pk=self.get_object().pk)
         if not can_manage_offboarding_stage(request.user, CHECKLIST_STAGE_FINAL_SETTLEMENT, record):
             raise PermissionDenied('Only HR or Finance may complete final offboarding settlement.')
         stage_rows = record.checklist_items.filter(stage__in=OFFBOARDING_CHECKLIST_TEMPLATES)
@@ -1715,6 +1684,7 @@ class ChecklistViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     queryset = Checklist.objects.all()
     serializer_class = ChecklistSerializer
+    business_approval_actions = {'update', 'partial_update'}
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1747,6 +1717,8 @@ class ChecklistViewSet(viewsets.ModelViewSet):
                 self.request.user, stage or item.stage, item.offboarding_record
             ):
                 raise PermissionDenied('Your RBAC role cannot update this offboarding checklist stage.')
+        else:
+            raise PermissionDenied('A checklist must belong to an active lifecycle workflow.')
 
     def perform_create(self, serializer):
         onboarding_record = serializer.validated_data.get('onboarding_record')
@@ -1762,7 +1734,21 @@ class ChecklistViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Your RBAC role cannot create this offboarding checklist item.')
         serializer.save()
 
+    @transaction.atomic
     def perform_update(self, serializer):
+        item = Checklist.objects.select_for_update().get(pk=serializer.instance.pk)
+        parent = item.onboarding_record or item.offboarding_record
+        if parent is None:
+            raise PermissionDenied('A checklist must belong to an active lifecycle workflow.')
+        locked_parent = type(parent).objects.select_for_update().get(pk=parent.pk)
+        if item.onboarding_record_id:
+            item.onboarding_record = locked_parent
+        else:
+            item.offboarding_record = locked_parent
+        serializer.instance = item
+        for field in ('stage', 'onboarding_record', 'offboarding_record'):
+            if field in serializer.validated_data and serializer.validated_data[field] != getattr(item, field):
+                raise ValidationError({field: 'An existing workflow checklist cannot be moved to another stage or record.'})
         self._assert_manage_permission(
             serializer.instance,
             serializer.validated_data.get('stage', serializer.instance.stage),

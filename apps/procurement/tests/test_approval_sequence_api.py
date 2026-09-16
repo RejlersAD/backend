@@ -15,6 +15,7 @@ from apps.procurement.serializers import PurchaseOrderSerializer, PurchaseRequis
 from apps.procurement.services.requisition_workflow import RequisitionWorkflowService
 from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, UserPermissionOverride, UserProfile, UserRole
 from apps.rbac.module_actions import ensure_module_actions
+from .approval_fixtures import grant_approval, set_position
 
 
 urlpatterns = [path('api/v1/procurement/', include('apps.procurement.urls'))]
@@ -42,6 +43,8 @@ class ApprovalSequenceAPITests(TestCase):
             profile.is_deleted = False
             profile.save()
             UserRole.objects.create(user_profile=profile, role=role)
+            grant_approval(user)
+            set_position(user, 'CEO' if user == self.ceo else 'Procurement Manager')
             for permission in module.permissions.filter(action__in=['read', 'update', 'approve', 'reject'], is_active=True):
                 UserPermissionOverride.objects.create(user_profile=profile, permission=permission, allowed=True)
         self.workflow = [
@@ -184,6 +187,8 @@ class ApprovalSequenceAPITests(TestCase):
 
     def test_stale_reassignment_cannot_remove_approval_recorded_during_edit(self):
         substitute = get_user_model().objects.create_user('substitute', email='substitute@example.test')
+        grant_approval(substitute)
+        set_position(substitute, 'Procurement Manager')
         changed = deepcopy(self.workflow)
         changed[0]['user_id'] = str(substitute.pk)
         serializer = PurchaseRequisitionSerializer(
@@ -226,6 +231,8 @@ class ApprovalSequenceAPITests(TestCase):
 
     def test_returning_assignee_gets_new_notification_identity(self):
         substitute = get_user_model().objects.create_user('push-substitute', email='push-substitute@example.test')
+        grant_approval(substitute)
+        set_position(substitute, 'Procurement Manager')
         self.pr.approval_workflow_config[0]['assignment_id'] = 'original-assignment'
         self.pr.save(update_fields=['approval_workflow_config'])
 

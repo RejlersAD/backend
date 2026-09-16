@@ -225,7 +225,7 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
             'photo', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename',
             'engineer_profile', 'checklist_stage_permissions'
         ]
-        read_only_fields = ['canonical_employee', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename']
+        read_only_fields = ['status', 'progress_percentage', 'actual_completion_date', 'canonical_employee', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename']
     
     def get_days_until_joining(self, obj):
         """Calculate days until joining date"""
@@ -315,6 +315,7 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
     ongoing_projects = serializers.SerializerMethodField(read_only=True)
     has_ongoing_projects = serializers.SerializerMethodField(read_only=True)
     can_manage_actions = serializers.SerializerMethodField(read_only=True)
+    can_project_manager_decide = serializers.SerializerMethodField(read_only=True)
     rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
     project_manager_decided_by_name = serializers.CharField(
         source='project_manager_decided_by.get_full_name', read_only=True
@@ -347,10 +348,10 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
             # Nested data
             'equipment', 'documents', 'access_records', 'checklist_items',
             'days_until_exit', 'days_since_initiated', 'checklist_stage_permissions',
-            'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions'
+            'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions', 'can_project_manager_decide'
         ]
         read_only_fields = [
-            'canonical_employee',
+            'canonical_employee', 'status', 'progress_percentage', 'actual_completion_date',
             'rejection_reason', 'rejected_by', 'rejected_at',
             'project_manager_approval_status', 'project_manager_decided_by',
             'project_manager_decided_at', 'project_manager_decision_note',
@@ -367,6 +368,10 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
 
     def get_can_manage_actions(self, obj):
         return _can_manage_offboarding_actions(self)
+
+    def get_can_project_manager_decide(self, obj):
+        from .rbac import can_decide_exit_project
+        return can_decide_exit_project(obj, getattr(self.context.get('request'), 'user', None))
 
     def get_checklist_stage_permissions(self, obj):
         from .rbac import offboarding_stage_permissions

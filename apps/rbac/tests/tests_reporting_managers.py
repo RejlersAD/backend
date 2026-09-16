@@ -47,8 +47,19 @@ class ReportingManagerProfileTests(TestCase):
         self.client.force_authenticate(user=None)
         self.assertIn(self.client.get('/api/v1/rbac/users/reporting-managers/').status_code, (401, 403))
 
-    def test_sales_and_reporting_manager_save_and_reload(self):
+    def test_organizational_changes_require_another_authorized_editor(self):
         response = self.client.patch('/api/v1/rbac/users/me/?view=profile', {
+            'department': 'sales', 'manager_id': str(self.manager.pk),
+        }, format='json')
+        self.assertEqual(response.status_code, 403, response.data)
+        from apps.rbac.models import Module, Permission
+        from apps.rbac.module_actions import ensure_module_actions
+        module, _ = Module.objects.get_or_create(code='user_mgmt', defaults={'name': 'Users'})
+        ensure_module_actions(Module, Permission, module_ids=[module.pk])
+        self.manager.user.is_superuser = True
+        self.manager.user.save(update_fields=['is_superuser'])
+        self.client.force_authenticate(self.manager.user)
+        response = self.client.patch(f'/api/v1/rbac/users/{self.profile.pk}/', {
             'department': 'sales', 'manager_id': str(self.manager.pk),
         }, format='json')
         self.assertEqual(response.status_code, 200, response.data)
@@ -58,14 +69,15 @@ class ReportingManagerProfileTests(TestCase):
         employee = EmployeeMaster.objects.get(user=self.profile.user)
         self.assertEqual(employee.department, 'sales')
         self.assertEqual(employee.manager.user_id, self.manager.user_id)
+        self.client.force_authenticate(self.profile.user)
         response = self.client.get('/api/v1/rbac/users/me/?view=profile')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['department'], 'sales')
         self.assertEqual(response.data['manager_detail']['id'], str(self.manager.pk))
         response = self.client.patch('/api/v1/rbac/users/me/', {'manager_id': ''}, format='multipart')
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 403, response.data)
         self.profile.refresh_from_db()
-        self.assertIsNone(self.profile.manager_id)
+        self.assertEqual(self.profile.manager_id, self.manager.pk)
 
     def test_invalid_manager_does_not_partially_save_profile(self):
         for manager_id in ('not-a-uuid', str(self.profile.pk)):
@@ -73,7 +85,7 @@ class ReportingManagerProfileTests(TestCase):
                 response = self.client.patch('/api/v1/rbac/users/me/', {
                     'first_name': 'Do not save', 'department': 'sales', 'manager_id': manager_id,
                 }, format='json')
-                self.assertEqual(response.status_code, 400, response.data)
+                self.assertEqual(response.status_code, 403, response.data)
                 self.profile.refresh_from_db()
                 self.profile.user.refresh_from_db()
                 self.assertEqual(self.profile.department, 'Engineering')

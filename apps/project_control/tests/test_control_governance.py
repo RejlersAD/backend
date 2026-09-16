@@ -6,9 +6,11 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.project_models import Project, ProjectMember
 from apps.users.models import User
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
+from apps.rbac.models import UserRole
 
 from ..models import BudgetAllocation, ControlAccount, ReportingPeriod, ReportingPeriodAudit, WBSNode
-from ..views import ControlAccountViewSet, ReportingPeriodViewSet
+from ..views import BudgetAllocationViewSet, ControlAccountViewSet, ReportingPeriodViewSet
 
 
 class ControlGovernanceApiTests(TestCase):
@@ -23,6 +25,10 @@ class ControlGovernanceApiTests(TestCase):
             start_date=date(2026, 1, 1), end_date=date(2026, 12, 31),
         )
         ProjectMember.objects.create(project=self.project, user=self.manager, role='engineer')
+        ProjectMember.objects.create(project=self.project, user=self.controller, role='project_manager')
+        for user in (self.owner, self.controller):
+            grant_approval(user, 'project_control')
+            set_position(user)
         self.wbs = WBSNode.objects.create(project=self.project, code='1.1', name='Engineering')
         BudgetAllocation.objects.create(
             project=self.project, wbs_node=self.wbs, code='BUD-ENG', name='Engineering budget',
@@ -37,6 +43,42 @@ class ControlGovernanceApiTests(TestCase):
         response = viewset.as_view({method: action})(request, **({'pk': pk} if pk else {}))
         response.render()
         return response
+
+    def test_superuser_without_business_assignment_cannot_approve_budget(self):
+        allocation = BudgetAllocation.objects.create(project=self.project, wbs_node=self.wbs, code='THREE-GATES',
+                                                     name='Pending budget', amount=100, currency='AED')
+        ProjectMember.objects.filter(project=self.project, user=self.controller).delete()
+        response = self.call(BudgetAllocationViewSet, 'post', 'approve', self.controller, pk=allocation.pk)
+        self.assertEqual(response.status_code, 403, response.data)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.status, 'draft')
+
+    def test_business_assignment_without_permission_cannot_approve_budget(self):
+        allocation = BudgetAllocation.objects.create(project=self.project, wbs_node=self.wbs, code='NO-GRANT',
+                                                     name='Pending budget', amount=100, currency='AED')
+        UserRole.objects.filter(user_profile=self.owner.rbac_profile).delete()
+        response = self.call(BudgetAllocationViewSet, 'post', 'approve', self.owner, pk=allocation.pk)
+        self.assertEqual(response.status_code, 403, response.data)
+        allocation.refresh_from_db()
+        self.assertIsNone(allocation.approved_by_id)
+
+    def test_approved_budget_cannot_receive_another_approval(self):
+        allocation = BudgetAllocation.objects.get(project=self.project)
+        response = self.call(BudgetAllocationViewSet, 'post', 'approve', self.controller, pk=allocation.pk)
+        self.assertEqual(response.status_code, 400, response.data)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.approved_by_id, self.controller.pk)
+
+    def test_ordinary_finance_position_with_grant_can_approve_commercial_budget(self):
+        finance = User.objects.create_user(username='finance-position', email='finance-position@example.test')
+        grant_approval(finance, 'project_control')
+        set_position(finance, 'Finance Manager')
+        allocation = BudgetAllocation.objects.create(project=self.project, wbs_node=self.wbs, code='FINANCE-POSITION',
+                                                     name='Pending budget', amount=100, currency='AED')
+        response = self.call(BudgetAllocationViewSet, 'post', 'approve', finance, pk=allocation.pk)
+        self.assertEqual(response.status_code, 200, response.data)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.approved_by_id, finance.pk)
 
     def test_control_account_requires_submission_and_independent_approval(self):
         created = self.call(ControlAccountViewSet, 'post', 'create', self.owner, {

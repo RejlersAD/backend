@@ -81,13 +81,22 @@ class ProjectMilestoneSerializer(serializers.ModelSerializer):
 class ProjectSerializer(serializers.ModelSerializer):
     """Project serializer"""
     owner = UserSimpleSerializer(read_only=True)
-    owner_id = serializers.IntegerField(write_only=True, required=False)
+    owner_id = serializers.PrimaryKeyRelatedField(
+        source='owner', queryset=User.objects.filter(is_active=True), write_only=True, required=False,
+    )
     team_members_data = ProjectMemberSerializer(source='memberships', many=True, read_only=True)
     tasks_summary = serializers.SerializerMethodField()
     milestones_summary = serializers.SerializerMethodField()
     is_overdue = serializers.BooleanField(read_only=True)
     budget_utilization = serializers.FloatField(read_only=True)
     team_size = serializers.IntegerField(read_only=True)
+
+    def validate_owner_id(self, owner):
+        if self.instance is not None:
+            from .project_assignment_policy import require_owner_change
+            request = self.context.get('request')
+            require_owner_change(getattr(request, 'user', None), self.instance, owner)
+        return owner
 
     def validate_scope_type(self, value):
         if self.instance and value != self.instance.scope_type:

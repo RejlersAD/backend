@@ -148,6 +148,8 @@ class ScheduleReviewDecisionSerializer(serializers.ModelSerializer):
 
 
 class ScheduleReviewSerializer(serializers.ModelSerializer):
+    can_decide = serializers.SerializerMethodField()
+    can_reject = serializers.SerializerMethodField()
     requested_by = GovernanceUserSerializer(read_only=True)
     decisions = ScheduleReviewDecisionSerializer(many=True, read_only=True)
     comments = GovernanceCommentSerializer(many=True, read_only=True)
@@ -157,9 +159,19 @@ class ScheduleReviewSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'version', 'title', 'description', 'status', 'due_date',
             'requested_by', 'requested_at', 'completed_at', 'decisions', 'comments',
-            'created_at', 'updated_at',
+            'created_at', 'updated_at', 'can_decide', 'can_reject',
         ]
         read_only_fields = fields
+
+    def get_can_decide(self, obj):
+        from .services.schedule_approval import can_decide_schedule_review
+        request = self.context.get('request')
+        return bool(request and can_decide_schedule_review(obj, request.user))
+
+    def get_can_reject(self, obj):
+        from .services.schedule_approval import can_decide_schedule_review
+        request = self.context.get('request')
+        return bool(request and can_decide_schedule_review(obj, request.user, decision='rejected'))
 
 
 class ScheduleReviewInputSerializer(serializers.Serializer):

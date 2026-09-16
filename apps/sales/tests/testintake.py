@@ -1,4 +1,5 @@
 from .access_fixtures import grant_sales_actions
+from apps.procurement.tests.approval_fixtures import set_position
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -259,6 +260,10 @@ class SalesEmailIntakeReviewTests(TestCase):
         )
 
 
+@override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={
+    'sales_proposals.Quote.approve': {
+        'positions': ['Business Development Manager'], 'pending_states': ['draft']},
+})
 class ProposalApprovalTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
@@ -267,6 +272,7 @@ class ProposalApprovalTests(TestCase):
             password='test-password',
         )
         grant_sales_actions(self.user, 'sales_proposals')
+        set_position(self.user, 'Business Development Manager')
         self.client_record = Client.objects.create(
             client_code='CLIENT-PROPOSAL-001',
             company_name='Proposal Client',

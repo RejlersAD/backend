@@ -12,7 +12,7 @@ from apps.notifications.services import NotificationService
 
 from ..access import (
     can_approve_proposal, can_write_project, proposal_approver_users,
-    proposal_reviewer_users,
+    proposal_reviewer_users, can_decide_proposal_task,
 )
 from ..models import ProposalExportRecord, ProposalWorkflowTask, TechnicalProposal
 from .audit import record_event
@@ -22,6 +22,15 @@ from .proposal_exports import generate_proposal_export
 def _notify(recipient, *, sender, title, message, proposal, priority='HIGH'):
     if not recipient:
         return
+    actionable = title in {
+        'Technical proposal review required', 'Technical proposal approval required',
+        'Technical proposal returned by approver',
+    }
+    task = proposal.workflow_tasks.filter(
+        is_deleted=False, status='pending', assigned_to=recipient,
+    ).order_by('-created_at', '-pk').first() if actionable else None
+    if actionable and (task is None or not can_decide_proposal_task(proposal, recipient, task)):
+        return
     NotificationService.create_notification(
         recipient=recipient, sender=sender, title=title, message=message,
         category='APPROVAL', priority=priority, send_email=False,
@@ -30,6 +39,9 @@ def _notify(recipient, *, sender, title, message, proposal, priority='HIGH'):
         metadata={
             'proposal_id': proposal.id, 'project_id': proposal.project_id,
             'proposal_number': proposal.proposal_number, 'revision': proposal.revision,
+            'event_type': 'proposal_approval_assignment' if actionable else 'proposal_workflow_result',
+            'requires_action': actionable,
+            **({'proposal_task_id': task.pk, 'task_type': task.task_type} if task else {}),
         },
     )
 
@@ -179,6 +191,8 @@ def reviewer_decision(proposal_id, actor, *, decision, comments='', approver_id=
     task = proposal.workflow_tasks.filter(task_type='review', status='pending', assigned_to=actor).first()
     if not task:
         raise ValidationError('The active review task was not found.')
+    if not can_decide_proposal_task(proposal, actor, task):
+        raise PermissionDenied('Your current assignment and access do not permit this review decision.')
     if decision not in ('return', 'complete'):
         raise ValidationError({'decision': 'Use return or complete.'})
     if not comments.strip() and decision == 'return':
@@ -255,6 +269,8 @@ def approver_decision(proposal_id, actor, *, decision, comments=''):
     task = proposal.workflow_tasks.filter(task_type='approval', status='pending', assigned_to=actor).first()
     if not task:
         raise ValidationError('The active approval task was not found.')
+    if not can_decide_proposal_task(proposal, actor, task):
+        raise PermissionDenied('Your current assignment and access do not permit this approval decision.')
     now = timezone.now()
     task.status = {'approve': 'completed', 'return': 'returned', 'reject': 'rejected'}[decision]
     task.comments = comments

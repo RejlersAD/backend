@@ -267,14 +267,16 @@ def approve_schedule_assurance(version, user):
     # Callers may still hold the object from before CPM recalculated it.
     # Serialize approval against schedule edits and check the persisted state.
     version = type(version).objects.select_for_update().get(pk=version.pk, is_deleted=False)
-    from .schedule_approval import require_schedule_authority
+    from .schedule_approval import require_schedule_authority, current_schedule_version
     require_schedule_authority(version, user)
+    if not current_schedule_version(version) or version.status != 'calculated':
+        raise ValueError('Only the current calculated schedule can be assured.')
     review = current_assurance(version)
     if not review:
         raise ValueError('Run Phase 3 assurance for the latest CPM calculation first.')
     if review.blockers:
         raise ValueError('Resolve all critical Phase 3 assurance blockers before approval.')
-    if review.status not in {'ready', 'approved'}:
+    if review.status != 'ready':
         raise ValueError('The Phase 3 assurance review is not ready for approval.')
     review.status = 'approved'
     review.approved_by = user

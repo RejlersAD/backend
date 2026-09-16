@@ -15,6 +15,9 @@ SERVICE_PATH = 'apps.procurement.services.requisition_workflow'
 
 class RequisitionSignerIntegrityTests(SimpleTestCase):
     def setUp(self):
+        eligibility = patch(f'{SERVICE_PATH}.eligible_stage_assignee', return_value=True)
+        eligibility.start()
+        self.addCleanup(eligibility.stop)
         self.approvers = [
             self.user('richa', 'Richa Thomas'),
             self.user('pm', 'Project Manager'),

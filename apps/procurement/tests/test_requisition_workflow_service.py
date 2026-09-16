@@ -22,6 +22,11 @@ class FakeRequisition(SimpleNamespace):
 
 class RequisitionWorkflowServiceTests(SimpleTestCase):
     def setUp(self):
+        # This unit suite isolates state-machine behavior; database-backed
+        # three-gate authorization is exercised in test_approval_three_gates.
+        authorization = patch('apps.procurement.services.requisition_workflow.eligible_stage_assignee', return_value=True)
+        authorization.start()
+        self.addCleanup(authorization.stop)
         self.issuer = FakeUser(
             id='issuer',
             is_superuser=False,

@@ -18,6 +18,7 @@ from apps.notifications.services import NotificationService, send_notification_e
 from apps.notifications.teams import send_teams_approval_assignment
 from apps.procurement.models import PurchaseOrder, PurchaseRequisition, Vendor
 from apps.rbac.models import Organization, UserProfile
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
 
 
 urlpatterns = [path('notifications/', include('apps.notifications.urls'))]
@@ -42,11 +43,13 @@ class NotificationPushDeliveryTests(TestCase):
                 username=f'push-audit-{index}', email=f'push-audit-{index}@example.test',
             )
             UserProfile.objects.get_or_create(user=user, defaults={'organization': org})
+            grant_approval(user)
+            set_position(user)
             self.users.append(user)
         self.recipient, self.other, self.ceo = self.users
         self.ceo.is_superuser = True
         self.ceo.save(update_fields=['is_superuser'])
-        self.category = NotificationCategory.objects.get_or_create(name='APPROVAL')[0]
+        self.category = NotificationCategory.objects.get_or_create(name='INFO')[0]
         self.vendor = Vendor.objects.create(vendor_code='PUSH-AUDIT', name='Push audit vendor')
         self.order = PurchaseOrder.objects.create(
             po_number='PO-PUSH-AUDIT', vendor=self.vendor, title='Push approval',
@@ -67,6 +70,7 @@ class NotificationPushDeliveryTests(TestCase):
         return {
             'stage': f'Level {level}', 'level': level, 'user_id': str(user.pk),
             'approver_email': user.email, 'status': 'Pending', 'assignment_id': f'po-{level}-initial',
+            'business_position': 'engineer',
             **kwargs,
         }
 
@@ -95,9 +99,11 @@ class NotificationPushDeliveryTests(TestCase):
             pr_number='PR-PUSH-AUDIT', issued_by=self.other, status='submitted', po_applicable=False,
             approval_workflow_config=[
                 {'stage': 'Level 0', 'level': 0, 'user_id': str(self.recipient.pk),
-                 'user_email': self.recipient.email, 'status': 'pending', 'assignment_id': 'pr-0-initial'},
+                 'user_email': self.recipient.email, 'status': 'pending', 'assignment_id': 'pr-0-initial',
+                 'business_position': 'engineer'},
                 {'stage': 'Level 1', 'level': 1, 'user_id': str(self.other.pk),
-                 'user_email': self.other.email, 'status': 'pending', 'assignment_id': 'pr-1-initial'},
+                 'user_email': self.other.email, 'status': 'pending', 'assignment_id': 'pr-1-initial',
+                 'business_position': 'engineer'},
             ], **kwargs,
         )
 

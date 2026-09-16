@@ -172,6 +172,7 @@ class EmployeeSalaryComponentViewSet(viewsets.ModelViewSet):
 # ===========================
 
 class PayrollRunViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'bulk_approve'}
     """
     API endpoint for payroll run management
     Create and manage monthly payroll cycles
@@ -281,6 +282,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=['post'], url_path='bulk-approve')
+    @transaction.atomic
     def bulk_approve(self, request, pk=None):
         """Approve all pending-approval slips in this payroll run in a single DB update."""
         run = self.get_object()
@@ -288,12 +290,11 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             payroll_run=run,
             status=SalaryStatus.PENDING_APPROVAL,
         )
-        count = pending_qs.count()
-        pending_qs.update(
-            status=SalaryStatus.APPROVED,
-            approved_by=request.user,
-            approved_at=timezone.now(),
-        )
+        from .salary_approval_service import decide_salary_slip
+        count = 0
+        for slip in pending_qs.order_by('pk'):
+            decide_salary_slip(slip.pk, request.user, 'approve', module='payroll')
+            count += 1
         return Response({'approved': count, 'run_code': run.run_code})
 
     @action(detail=True, methods=['post'], url_path='bulk-send-approved')
@@ -329,6 +330,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
 # ===========================
 
 class SalarySlipViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     """
     API endpoint for salary slip management
     Core functionality for salary slip CRUD and workflows
@@ -522,57 +524,29 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        """Submit a draft/generated salary slip to its configured named approvers."""
+        from .salary_approval_service import submit_salary_slip
+        slip = submit_salary_slip(self.get_object().pk, request.user)
+        return Response(self.get_serializer(slip).data)
+
+    @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve a salary slip"""
         salary_slip = self.get_object()
-        
-        if salary_slip.status != SalaryStatus.PENDING_APPROVAL:
-            return Response(
-                {'error': 'Only pending slips can be approved'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        salary_slip.status = SalaryStatus.APPROVED
-        salary_slip.approved_by = request.user
-        salary_slip.approved_at = timezone.now()
-        salary_slip.save()
-        
-        # Log action
-        SalarySlipAuditLog.objects.create(
-            salary_slip=salary_slip,
-            action='approved',
-            performed_by=request.user,
-            description='Salary slip approved'
-        )
-        
-        return Response({'message': 'Salary slip approved successfully'})
-    
+        from .salary_approval_service import decide_salary_slip
+        decide_salary_slip(salary_slip.pk, request.user, 'approve', module='finance_salary')
+        return Response({'message': 'Assigned salary approval recorded.'})
+
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """Reject a salary slip"""
         salary_slip = self.get_object()
         reason = request.data.get('reason', '')
-        
-        if salary_slip.status != SalaryStatus.PENDING_APPROVAL:
-            return Response(
-                {'error': 'Only pending slips can be rejected'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        salary_slip.status = SalaryStatus.REJECTED
-        salary_slip.rejection_reason = reason
-        salary_slip.save()
-        
-        # Log action
-        SalarySlipAuditLog.objects.create(
-            salary_slip=salary_slip,
-            action='rejected',
-            performed_by=request.user,
-            description=f'Salary slip rejected: {reason}'
-        )
-        
-        return Response({'message': 'Salary slip rejected'})
-    
+        from .salary_approval_service import decide_salary_slip
+        decide_salary_slip(salary_slip.pk, request.user, 'reject', comment=reason, module='finance_salary')
+        return Response({'message': 'Assigned salary rejection recorded.'})
+
     @action(detail=True, methods=['post'], url_path='apply-deduction')
     @transaction.atomic
     def apply_deduction(self, request, pk=None):
@@ -893,6 +867,7 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
 # ===========================
 
 class SalarySlipApprovalViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'decide'}
     """
     API endpoint for salary slip approval workflow
     """
@@ -901,6 +876,37 @@ class SalarySlipApprovalViewSet(viewsets.ModelViewSet):
     ).all()
     serializer_class = SalarySlipApprovalSerializer
     permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        slip = SalarySlip.objects.select_for_update().get(pk=serializer.validated_data['salary_slip'].pk)
+        serializer.validate({**serializer.validated_data, 'salary_slip': slip})
+        serializer.save(salary_slip=slip)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        # Submission and decisions serialize on the parent slip; revalidate
+        # after acquiring it so stale serializer validation grants no authority.
+        slip = SalarySlip.objects.select_for_update().get(pk=serializer.instance.salary_slip_id)
+        serializer.instance.refresh_from_db()
+        serializer.instance.salary_slip = slip
+        supplied_slip = serializer.validated_data.get('salary_slip', slip)
+        if supplied_slip.pk != slip.pk:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('An approval assignment cannot be moved to another salary slip.')
+        serializer.validate({**serializer.validated_data, 'salary_slip': slip})
+        serializer.save(salary_slip=slip)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        from apps.rbac.approval_eligibility import has_business_position
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        slip = SalarySlip.objects.select_for_update().get(pk=instance.salary_slip_id)
+        if not has_business_position(self.request.user, ('hr_manager', 'hr_admin', 'payroll_admin')):
+            raise PermissionDenied('Only the designated HR or payroll position may configure approval routes.')
+        if slip.status not in (SalaryStatus.DRAFT, SalaryStatus.GENERATED):
+            raise ValidationError('Submitted approval assignments cannot be removed.')
+        instance.delete()
     
     @action(detail=True, methods=['post'])
     def decide(self, request, pk=None):
@@ -911,18 +917,10 @@ class SalarySlipApprovalViewSet(viewsets.ModelViewSet):
         
         decision = serializer.validated_data['decision']
         comments = serializer.validated_data.get('comments', '')
-        
-        if decision == 'approve':
-            approval.status = ApprovalStatus.APPROVED
-        else:
-            approval.status = ApprovalStatus.REJECTED
-        
-        approval.decision_date = timezone.now()
-        approval.comments = comments
-        approval.save()
-        
-        return Response({'message': f'Approval {decision}d successfully'})
-
+        from .salary_approval_service import decide_salary_slip
+        decide_salary_slip(approval.salary_slip_id, request.user, decision,
+                           approval_id=approval.pk, comment=comments)
+        return Response({'message': f'Approval {decision} recorded'})
 
 # ===========================
 # EMAIL TRACKING VIEWSET

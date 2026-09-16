@@ -71,6 +71,7 @@ ROUTE_MODULES = {
     'timesheet/my-attendance/': 'hr_self_service', 'timesheet/': 'timesheet',
     'enquiry/': 'enquiry_management', 'enquiries/': 'enquiry_management',
     'rbac/users/': 'user_mgmt', 'user-management/': 'user_mgmt', 'users/employees/': 'hr_management',
+    'rbac/profile-documents/': 'user_mgmt',
     'rbac/roles/': 'role_access_mgmt', 'rbac/modules/': 'role_access_mgmt',
     'rbac/permissions/': 'role_access_mgmt', 'rbac/access-requests/': 'role_access_mgmt',
     'rbac/organizations/': 'org_settings', 'rbac/audit-logs/': 'audit_logs',
@@ -85,7 +86,6 @@ ROUTE_MODULES = {
 INDEPENDENT_WORKFLOWS = {
     ('apps.instrument_tools.views', 'MetaView'),
     ('apps.finance.views', 'get_approval_details'),
-    ('apps.finance.views', 'submit_approval_decision'),
     ('apps.finance.views', 'approval_action'),
     ('apps.timesheet.mirror_views', 'ingest_events'),
     ('apps.timesheet.mirror_views', 'heartbeat'),
@@ -99,6 +99,11 @@ INDEPENDENT_WORKFLOWS = {
 
 # Account bootstrap and owner-scoped profile operations do not require module grants.
 SELF_SERVICE_ACTIONS = {
+    'ProfileDocumentViewSet': {
+        'list', 'retrieve', 'create', 'update', 'partial_update', 'destroy',
+        'document_types', 'document_types_profile', 'document_types_onboarding',
+        'document_types_by_category', 'expiring_soon',
+    },
     'EmployeeProfileViewSet': {'my_employee_profile', 'upload_my_profile_photo', 'my_signature'},
     'UserProfileViewSet': {
         'me', 'my_profile', 'my_permissions', 'my_modules', 'change_password',
@@ -194,6 +199,15 @@ def operation_action(request, view):
     explicit = getattr(view, 'permission_action', None)
     if explicit:
         return explicit
+    operation = getattr(view, 'action', '') or view.__class__.__name__
+    if (view.__class__.__module__ == 'apps.sales.intake_views'
+            and view.__class__.__name__ == 'SalesEmailIntakeViewSet' and operation == 'reject'):
+        # Inbox triage records why an email will not become a Sales request.
+        return 'update'
+    if method not in {'GET', 'HEAD', 'OPTIONS'} and set(getattr(view, 'business_approval_fields', ())) & set(getattr(request, 'data', {})):
+        return 'approve'
+    if operation in getattr(view, 'business_approval_actions', ()) and method not in {'GET', 'HEAD', 'OPTIONS'}:
+        return 'approve'
     if (
         view.__class__.__module__ == 'apps.procurement.views'
         and view.__class__.__name__ == 'PODocumentViewSet'

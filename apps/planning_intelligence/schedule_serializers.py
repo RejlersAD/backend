@@ -88,6 +88,18 @@ class ScheduleSerializer(serializers.ModelSerializer):
 
 
 class ScheduleVersionSerializer(serializers.ModelSerializer):
+    can_approve = serializers.SerializerMethodField()
+    can_baseline = serializers.SerializerMethodField()
+
+    def get_can_baseline(self, obj):
+        from .services.schedule_approval import can_baseline_schedule
+        request = self.context.get('request')
+        return bool(request and can_baseline_schedule(obj, request.user))
+
+    def get_can_approve(self, obj):
+        from .services.schedule_approval import can_approve_schedule
+        request = self.context.get('request')
+        return bool(request and can_approve_schedule(obj, request.user))
     activity_count = serializers.IntegerField(read_only=True)
     relationship_count = serializers.IntegerField(read_only=True)
 
@@ -96,7 +108,7 @@ class ScheduleVersionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'schedule', 'version', 'status', 'parent_version', 'source_generation',
             'change_summary', 'calculated_at', 'calculated_finish', 'created_by',
-            'activity_count', 'relationship_count', 'created_at', 'updated_at',
+            'activity_count', 'relationship_count', 'created_at', 'updated_at', 'can_approve', 'can_baseline',
         ]
         read_only_fields = fields
 
@@ -230,6 +242,19 @@ class ScheduleCalculationRunSerializer(serializers.ModelSerializer):
 
 
 class ScheduleAssuranceReviewSerializer(serializers.ModelSerializer):
+    can_approve = serializers.SerializerMethodField()
+
+    def get_can_approve(self, obj):
+        from .access import can_final_approve_defaults
+        from .services.schedule_approval import current_schedule_version
+        from .services.trustworthy_scheduling import current_assurance
+        request = self.context.get('request')
+        if not (request and can_final_approve_defaults(request.user, obj.version.schedule.project)
+                and current_schedule_version(obj.version) and obj.version.status == 'calculated'
+                and obj.status == 'ready' and not obj.blockers):
+            return False
+        current = current_assurance(obj.version)
+        return bool(current and current.pk == obj.pk)
     approved_by_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -238,7 +263,7 @@ class ScheduleAssuranceReviewSerializer(serializers.ModelSerializer):
             'id', 'version', 'calculation_run', 'status', 'network_validation',
             'contract_scenarios', 'resource_validation', 'change_comparison',
             'blockers', 'warnings', 'calculated_state_at', 'input_fingerprint', 'approved_by',
-            'approved_by_name', 'approved_at', 'created_at', 'updated_at',
+            'approved_by_name', 'approved_at', 'created_at', 'updated_at', 'can_approve',
         ]
         read_only_fields = fields
 
@@ -288,6 +313,14 @@ class ActivityProgressUpdateSerializer(serializers.ModelSerializer):
 
 
 class DailyFieldUpdateSerializer(serializers.ModelSerializer):
+    can_approve = serializers.SerializerMethodField()
+
+    def get_can_approve(self, obj):
+        from .access import can_final_approve_defaults
+        from .services.schedule_approval import current_schedule_version
+        request = self.context.get('request')
+        return bool(request and can_final_approve_defaults(request.user, obj.version.schedule.project)
+                    and obj.status == 'submitted' and current_schedule_version(obj.version))
     external_id = serializers.CharField(source='activity.external_id', read_only=True)
     activity_name = serializers.CharField(source='activity.name', read_only=True)
     discipline = serializers.CharField(source='activity.discipline', read_only=True)
@@ -305,7 +338,7 @@ class DailyFieldUpdateSerializer(serializers.ModelSerializer):
             'actual_hours', 'actual_cost', 'work_location', 'constraints', 'notes',
             'evidence', 'evidence_name', 'reported_by', 'reporter_name', 'submitted_at',
             'reviewed_by', 'reviewer_name', 'reviewed_at', 'review_comment',
-            'applied_progress_update', 'created_at', 'updated_at',
+            'applied_progress_update', 'created_at', 'updated_at', 'can_approve',
         ]
         read_only_fields = [
             'id', 'version', 'status', 'reported_by', 'submitted_at', 'reviewed_by',

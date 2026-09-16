@@ -8,18 +8,21 @@ from apps.rbac.views import ProfileDocumentViewSet
 
 
 class ProfileDocumentEmployeeScopeTests(SimpleTestCase):
+    @patch('apps.rbac.approval_eligibility.can_review_profile_document', return_value=False)
     @patch('apps.rbac.views.CanManageUsers.has_permission', return_value=True)
-    def test_rbac_user_manager_can_review_employee_documents(self, can_manage):
+    def test_rbac_user_manager_alone_cannot_review_employee_documents(self, can_manage, eligibility):
         view = ProfileDocumentViewSet()
         request = SimpleNamespace(
             user=SimpleNamespace(is_superuser=False, is_staff=False),
         )
 
-        self.assertTrue(view._can_review_documents(request))
-        can_manage.assert_called_once_with(request, view)
+        self.assertFalse(view._can_review_documents(request))
+        eligibility.assert_called_once_with(request.user)
+        can_manage.assert_not_called()
 
+    @patch('apps.rbac.approval_eligibility.can_review_profile_document', return_value=False)
     @patch('apps.rbac.models.ProfileDocument.objects')
-    def test_staff_list_is_scoped_to_selected_employee(self, documents):
+    def test_staff_list_is_scoped_to_selected_employee(self, documents, eligibility):
         queryset = MagicMock()
         filtered_queryset = MagicMock()
         documents.select_related.return_value = queryset

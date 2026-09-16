@@ -2,6 +2,7 @@
 
 from apps.hr_core.models import EmployeeMaster
 from apps.rbac.models import UserRole
+from apps.rbac.approval_eligibility import approval_access, has_business_position
 
 from .models import (
     CHECKLIST_STAGE_FINAL_VALIDATION,
@@ -95,67 +96,47 @@ def can_manage_probation_report(user, employee_user=None):
     ).exists()
 
 
-def can_manage_onboarding_stage(user, stage, record=None):
-    policy = ONBOARDING_STAGE_RBAC.get(stage)
-    if not policy or not user or not getattr(user, 'is_authenticated', False):
+def _stage_ready(record, stage, policies):
+    if record is None or record.status in {'completed', 'cancelled', 'rejected'}:
         return False
-    if getattr(user, 'is_superuser', False):
-        return True
+    stages = list(policies)
+    if stage not in stages:
+        return False
+    for prior in stages[:stages.index(stage)]:
+        items = record.checklist_items.filter(stage=prior)
+        if not items.exists() or items.filter(completed=False).exists():
+            return False
+    if policies is OFFBOARDING_STAGE_RBAC and stage != CHECKLIST_STAGE_EXIT_INITIATION:
+        if record.project_manager_approval_status not in {'approved', 'not_required'}:
+            return False
+        if record.exit_approvals.exclude(status='approved').exists():
+            return False
+    return True
 
-    role_codes = get_active_role_codes(user)
-    if role_codes.intersection(policy['roles']):
+
+def _stage_eligible(user, stage, record, policies):
+    if not approval_access(user, 'hr_onboarding') or not _stage_ready(record, stage, policies):
+        return False
+    positions = policies[stage]['roles'] - LIFECYCLE_ADMIN_ROLES - LIFECYCLE_MANAGER_ROLES
+    if has_business_position(user, positions):
         return True
-    if record and record.assigned_to_id == user.id:
-        return True
-    if stage == CHECKLIST_STAGE_FIRST_DAY and record and record.user_id:
-        return EmployeeMaster.objects.filter(
-            user_id=record.user_id,
-            manager__user_id=user.id,
-        ).exists()
-    return False
+    return bool(policies is ONBOARDING_STAGE_RBAC and stage == CHECKLIST_STAGE_FIRST_DAY
+                and record.user_id and EmployeeMaster.objects.filter(user_id=record.user_id, manager__user=user).exists())
+
+
+def can_manage_onboarding_stage(user, stage, record=None):
+    return _stage_eligible(user, stage, record, ONBOARDING_STAGE_RBAC)
 
 
 def can_start_onboarding_stage(user, stage, record=None):
-    policy = ONBOARDING_STAGE_RBAC.get(stage)
-    if not policy or not user or not getattr(user, 'is_authenticated', False):
-        return False
-    if getattr(user, 'is_superuser', False):
-        return True
-    if get_active_role_codes(user).intersection(policy.get('start_roles', policy['roles'])):
-        return True
-    return bool(record and record.assigned_to_id == user.id)
+    return _stage_eligible(user, stage, record, ONBOARDING_STAGE_RBAC)
 
 
 def onboarding_stage_permissions(user, record=None):
-    authenticated = bool(user and getattr(user, 'is_authenticated', False))
-    is_superuser = authenticated and getattr(user, 'is_superuser', False)
-    role_codes = get_active_role_codes(user) if authenticated and not is_superuser else set()
-    is_assignee = bool(record and authenticated and record.assigned_to_id == user.id)
-    is_reporting_manager = bool(
-        record and authenticated and record.user_id
-        and EmployeeMaster.objects.filter(
-            user_id=record.user_id,
-            manager__user_id=user.id,
-        ).exists()
-    )
-    return {
-        stage: {
-            'can_manage': bool(
-                is_superuser
-                or role_codes.intersection(policy['roles'])
-                or is_assignee
-                or (stage == CHECKLIST_STAGE_FIRST_DAY and is_reporting_manager)
-            ),
-            'can_start': bool(
-                is_superuser
-                or role_codes.intersection(policy.get('start_roles', policy['roles']))
-                or is_assignee
-            ),
-            'owner_label': policy['owner_label'],
-            'label': policy['label'],
-        }
-        for stage, policy in ONBOARDING_STAGE_RBAC.items()
-    }
+    return {stage: {'can_manage': can_manage_onboarding_stage(user, stage, record),
+                   'can_start': can_start_onboarding_stage(user, stage, record),
+                   'owner_label': policy['owner_label'], 'label': policy['label']}
+            for stage, policy in ONBOARDING_STAGE_RBAC.items()}
 
 
 def can_manage_offboarding(user):
@@ -169,25 +150,25 @@ def can_manage_offboarding(user):
 
 
 def can_manage_offboarding_stage(user, stage, record=None):
-    policy = OFFBOARDING_STAGE_RBAC.get(stage)
-    if not policy or not user or not getattr(user, 'is_authenticated', False):
-        return False
-    if getattr(user, 'is_superuser', False):
-        return True
-    if get_active_role_codes(user).intersection(policy['roles']):
-        return True
-    return bool(record and record.assigned_to_id == user.id)
+    return _stage_eligible(user, stage, record, OFFBOARDING_STAGE_RBAC)
 
 
 def can_start_offboarding_stage(user, stage, record=None):
-    policy = OFFBOARDING_STAGE_RBAC.get(stage)
-    if not policy or not user or not getattr(user, 'is_authenticated', False):
+    return _stage_eligible(user, stage, record, OFFBOARDING_STAGE_RBAC)
+
+
+def can_decide_exit_project(record, user):
+    if not approval_access(user, 'hr_onboarding') or record.status in {'completed', 'cancelled', 'rejected'}:
         return False
-    if getattr(user, 'is_superuser', False):
-        return True
-    if get_active_role_codes(user).intersection(policy.get('start_roles', policy['roles'])):
-        return True
-    return bool(record and record.assigned_to_id == user.id)
+    if record.project_manager_approval_status != 'pending' or record.user_id == user.pk:
+        return False
+    from .project_assignments import get_active_project_assignments
+    managers = {manager.pk for project in get_active_project_assignments(record.user)
+                if project['source'] == 'core_project' for manager in project['managers']}
+    if user.pk not in managers:
+        return False
+    previous = record.exit_approvals.filter(approval_step='project_manager', approver=user).first()
+    return previous is None or previous.status == 'pending'
 
 
 def offboarding_stage_permissions(user, record=None):

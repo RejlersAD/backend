@@ -29,6 +29,7 @@ from .salary_models import PayrollRun, SalarySlip, SalarySlipApproval, SalarySli
 # Import RADAI notification service for smart notifications
 from apps.notifications.models import Notification, NotificationCategory
 from apps.notifications.services import NotificationService
+from apps.rbac.approval_eligibility import require_approval, approval_access
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -351,6 +352,27 @@ class WorkflowNotificationLog(models.Model):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PayrollWorkflowService:
+    @staticmethod
+    def can_review(workflow, user):
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        try:
+            PayrollWorkflowService._require_reviewer(workflow, user, workflow.current_stage)
+            return True
+        except (PermissionDenied, ValidationError):
+            return False
+
+    @staticmethod
+    def _require_reviewer(workflow, reviewer, stage):
+        keys = {WorkflowStage.HR_REVIEW: 'hr_manager', WorkflowStage.ACCOUNTING_REVIEW: 'accounting',
+                WorkflowStage.FINANCE_REVIEW: 'finance'}
+        email = WORKFLOW_STAKEHOLDERS.get(keys.get(stage), {}).get('email', '').strip().lower()
+        candidates = list(User.objects.filter(email__iexact=email, is_active=True)[:2]) if email else []
+        prior_complete = (stage == WorkflowStage.HR_REVIEW or bool(workflow.hr_reviewed_at and workflow.hr_reviewer_id))
+        if stage == WorkflowStage.FINANCE_REVIEW:
+            prior_complete = prior_complete and bool(workflow.accounting_reviewed_at and workflow.accounting_reviewer_id)
+        require_approval(reviewer, 'payroll', assigned=bool(len(candidates) == 1 and candidates[0].pk == getattr(reviewer, 'pk', None)),
+                         current=workflow.current_stage == stage and stage in keys and prior_complete)
+
     """
     Service layer for payroll workflow operations.
     Handles stage transitions, notifications, and audit logging.
@@ -411,7 +433,8 @@ class PayrollWorkflowService:
         """
         HR Manager approves payroll, forwards to Accounting.
         """
-        workflow = PayrollWorkflow.objects.get(payroll_run=payroll_run)
+        workflow = PayrollWorkflow.objects.select_for_update().get(payroll_run=payroll_run)
+        PayrollWorkflowService._require_reviewer(workflow, reviewer, WorkflowStage.HR_REVIEW)
         
         if workflow.current_stage != WorkflowStage.HR_REVIEW:
             raise ValueError(f"Cannot approve: workflow is in {workflow.current_stage} stage")
@@ -440,7 +463,8 @@ class PayrollWorkflowService:
         """
         Accounting approves payroll, forwards to Finance.
         """
-        workflow = PayrollWorkflow.objects.get(payroll_run=payroll_run)
+        workflow = PayrollWorkflow.objects.select_for_update().get(payroll_run=payroll_run)
+        PayrollWorkflowService._require_reviewer(workflow, reviewer, WorkflowStage.ACCOUNTING_REVIEW)
         
         if workflow.current_stage != WorkflowStage.ACCOUNTING_REVIEW:
             raise ValueError(f"Cannot approve: workflow is in {workflow.current_stage} stage")
@@ -469,7 +493,8 @@ class PayrollWorkflowService:
         """
         Finance gives final approval, releases payroll to employees.
         """
-        workflow = PayrollWorkflow.objects.get(payroll_run=payroll_run)
+        workflow = PayrollWorkflow.objects.select_for_update().get(payroll_run=payroll_run)
+        PayrollWorkflowService._require_reviewer(workflow, reviewer, WorkflowStage.FINANCE_REVIEW)
         
         if workflow.current_stage != WorkflowStage.FINANCE_REVIEW:
             raise ValueError(f"Cannot approve: workflow is in {workflow.current_stage} stage")
@@ -501,7 +526,8 @@ class PayrollWorkflowService:
         """
         Reject payroll at any stage, returns to draft.
         """
-        workflow = PayrollWorkflow.objects.get(payroll_run=payroll_run)
+        workflow = PayrollWorkflow.objects.select_for_update().get(payroll_run=payroll_run)
+        PayrollWorkflowService._require_reviewer(workflow, reviewer, workflow.current_stage)
         
         # Track rejection
         workflow.rejected_by = reviewer
@@ -529,6 +555,17 @@ class PayrollWorkflowService:
         Send notification using RADAI's smart notification system.
         Creates both in-app notification and email.
         """
+        if transaction.get_connection().in_atomic_block:
+            transaction.on_commit(lambda: PayrollWorkflowService._send_notification(
+                workflow, notification_type, recipient_config, triggered_by, custom_message), robust=True)
+            return True
+        workflow.refresh_from_db()
+        actionable_stages = {'hr_review': WorkflowStage.HR_REVIEW, 'accounting_review': WorkflowStage.ACCOUNTING_REVIEW,
+                             'finance_review': WorkflowStage.FINANCE_REVIEW}
+        if notification_type in actionable_stages:
+            matches = list(User.objects.filter(email__iexact=recipient_config['email'], is_active=True)[:2])
+            if len(matches) != 1 or not PayrollWorkflowService.can_review(workflow, matches[0]) or workflow.current_stage != actionable_stages[notification_type]:
+                return False
         try:
             template = NOTIFICATION_TEMPLATES.get(notification_type, {})
             payroll_run = workflow.payroll_run
@@ -605,11 +642,14 @@ class PayrollWorkflowService:
                 sender=triggered_by,
                 category=approval_category,
                 priority=priority,
+                status='SENT',
                 send_in_app=True,
                 send_email=True,
                 action_url=context['review_url'],
                 action_label='Review Payroll',
                 metadata={
+                    'finance_payroll_workflow_id': str(workflow.id),
+                    'requires_action': notification_type in actionable_stages,
                     'workflow_id': str(workflow.id),
                     'payroll_run_id': str(payroll_run.id),
                     'run_code': payroll_run.run_code,
@@ -620,6 +660,9 @@ class PayrollWorkflowService:
             
             # Send email using Django mail
             try:
+                workflow.refresh_from_db()
+                if notification_type in actionable_stages and not PayrollWorkflowService.can_review(workflow, recipient_user):
+                    return False
                 send_mail(
                     subject=subject,
                     message=message,

@@ -127,6 +127,7 @@ def _recalculate_estimate(estimate):
 
 
 class EstimateViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     queryset = Estimate.objects.all().select_related('project')
 
@@ -191,6 +192,8 @@ class EstimateViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def approve(self, request, pk=None):
         est = _locked_estimate(self.get_object().pk)
+        if not can_approve_commercial(request.user, est.project):
+            raise PermissionDenied('Only the designated project or commercial approver may approve this estimate.')
         if est.status == 'approved':
             return Response(self.get_serializer(est).data)
         est = _locked_draft_estimate(est.pk)
@@ -318,6 +321,7 @@ class _FinancialScopeMixin:
 
 
 class ControlAccountViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'close'}
     """Governed WBS responsibility with submit/approve/close transitions."""
 
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
@@ -357,13 +361,13 @@ class ControlAccountViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewset
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Project Control or Finance approval access is required.')
         with transaction.atomic():
             account = self._locked_financial_object()
             if account.status != 'submitted':
                 raise ValidationError('Only a submitted Control Account can be approved.')
-            if account.submitted_by_id == request.user.id and not request.user.is_superuser:
+            if account.submitted_by_id == request.user.id:
                 raise PermissionDenied('The submitter cannot approve their own Control Account.')
             approved_budget = BudgetAllocation.objects.filter(
                 project=account.project, wbs_node=account.wbs_node,
@@ -381,7 +385,7 @@ class ControlAccountViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewset
 
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Project Control or Finance approval access is required.')
         with transaction.atomic():
             account = ControlAccount.objects.select_for_update().get(pk=self.get_object().pk)
@@ -395,6 +399,7 @@ class ControlAccountViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewset
 
 
 class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'lock', 'reopen'}
     """Controlled project reporting calendar and immutable transition history."""
 
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
@@ -482,11 +487,11 @@ class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def lock(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Project Control or Finance approval access is required to lock a period.')
         with transaction.atomic():
             period = ReportingPeriod.objects.select_for_update().get(pk=self.get_object().pk)
-            if period.submitted_by_id == request.user.id and not request.user.is_superuser:
+            if period.submitted_by_id == request.user.id:
                 raise PermissionDenied('The submitter cannot lock their own reporting period.')
             try:
                 snapshot = create_integrated_snapshot(period, user=request.user)
@@ -515,7 +520,7 @@ class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def reopen(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Project Control or Finance approval access is required to reopen a period.')
         reason = str(request.data.get('reason') or '').strip()
         if len(reason) < 10:
@@ -541,6 +546,7 @@ class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
 
 
 class ApprovedHourEntryViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reverse'}
     """Two-person approval workflow for project-attributed labour actuals."""
 
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
@@ -580,13 +586,13 @@ class ApprovedHourEntryViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, view
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Project Control or Finance approval access is required.')
         with transaction.atomic():
             entry = self._locked_financial_object()
             if entry.status != 'submitted':
                 raise ValidationError('Only a submitted hour entry can be approved.')
-            if entry.submitted_by_id == request.user.id and not request.user.is_superuser:
+            if entry.submitted_by_id == request.user.id:
                 raise PermissionDenied('The submitter cannot approve their own hour entry.')
             if not entry.reporting_period.is_entry_allowed:
                 raise ValidationError('The reporting period is no longer open for approval.')
@@ -601,7 +607,7 @@ class ApprovedHourEntryViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, view
 
     @action(detail=True, methods=['post'])
     def reverse(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Project Control or Finance approval access is required.')
         reason = str(request.data.get('reason') or '').strip()
         if len(reason) < 10:
@@ -624,6 +630,7 @@ class ApprovedHourEntryViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, view
 
 
 class BudgetAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = BudgetAllocationSerializer
@@ -639,9 +646,11 @@ class BudgetAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, views
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def approve(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Finance or Project Control approval access is required.')
         allocation = self._locked_financial_object()
+        if allocation.status != 'draft':
+            raise ValidationError('This allocation has already left its approval stage.')
         allocation.status = 'approved'
         allocation.approved_by = request.user
         allocation.approved_at = timezone.now()
@@ -651,6 +660,7 @@ class BudgetAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, views
 
 
 class CostAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = CostAllocationSerializer
@@ -698,10 +708,12 @@ class CostAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewset
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def approve(self, request, pk=None):
-        if not can_approve_commercial(request.user):
+        if not can_approve_commercial(request.user, self.get_object().project):
             raise PermissionDenied('Finance or Project Control approval access is required.')
         allocation = self._locked_financial_object()
-        if allocation.allocated_by_id == request.user.id and not request.user.is_superuser:
+        if allocation.status != 'draft':
+            raise ValidationError('This allocation has already left its approval stage.')
+        if allocation.allocated_by_id == request.user.id:
             raise PermissionDenied('The allocator cannot approve their own cost allocation.')
         allocation.status = 'approved'
         allocation.approved_by = request.user
@@ -711,8 +723,15 @@ class CostAllocationViewSet(_FinancialScopeMixin, _ProjectFilteredMixin, viewset
         return Response(self.get_serializer(allocation).data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def reject(self, request, pk=None):
-        allocation = self.get_object()
+        allocation = self._locked_financial_object()
+        if not can_approve_commercial(request.user, allocation.project):
+            raise PermissionDenied('Only the designated commercial approver may reject this allocation.')
+        if allocation.status != 'draft':
+            raise ValidationError('This allocation has already left its approval stage.')
+        if allocation.allocated_by_id == request.user.id:
+            raise PermissionDenied('The allocator cannot decide their own cost allocation.')
         allocation.status = 'rejected'
         allocation.approved_by = request.user
         allocation.approved_at = timezone.now()

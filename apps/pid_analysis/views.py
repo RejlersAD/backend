@@ -847,6 +847,7 @@ class PIDAnalysisReportViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class PIDIssueViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'ignore'}
     """ViewSet for P&ID issues"""
     
     permission_classes = [permissions.IsAuthenticated]
@@ -897,6 +898,8 @@ class PIDIssueViewSet(viewsets.ModelViewSet):
         POST /api/v1/pid/issues/{id}/approve/
         """
         issue = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'pid_analysis', issue, 'approve')
         issue.status = 'approved'
         issue.approval = 'Approved'
         if 'remark' in request.data:
@@ -919,6 +922,8 @@ class PIDIssueViewSet(viewsets.ModelViewSet):
         POST /api/v1/pid/issues/{id}/ignore/
         """
         issue = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'pid_analysis', issue, 'ignore')
         issue.status = 'ignored'
         issue.approval = 'Ignored'
         if 'remark' in request.data:

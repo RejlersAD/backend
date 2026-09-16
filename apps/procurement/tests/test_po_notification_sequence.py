@@ -10,6 +10,7 @@ from rest_framework.exceptions import PermissionDenied
 from apps.notifications.models import Notification
 from apps.procurement.models import PurchaseOrder, Vendor
 from apps.rbac.models import Organization, UserProfile
+from .approval_fixtures import grant_approval, set_position
 from apps.procurement.services.purchase_order_approvals import (
     normalize_assignments,
     notify_assigned_approvers,
@@ -32,6 +33,8 @@ class PurchaseOrderNotificationSequenceTests(TestCase):
         }
         for user in self.users.values():
             UserProfile.objects.get_or_create(user=user, defaults={'organization': organization})
+            grant_approval(user)
+            set_position(user, 'CEO' if user == self.users['ceo'] else 'Engineer')
         vendor = Vendor.objects.create(vendor_code='PO-SEQUENCE-VENDOR', name='Sequence supplier')
         self.order = PurchaseOrder.objects.create(
             po_number='PO-SEQUENCE', vendor=vendor, title='Engineering services',
@@ -55,6 +58,7 @@ class PurchaseOrderNotificationSequenceTests(TestCase):
             'user_id': str(user.pk), 'approver_email': user.email,
             'stage': stage or f'Level {level} - {key}', 'level': level,
             'status': 'Pending',
+            'business_position': 'ceo' if key == 'ceo' else 'engineer',
         }
 
     def capture_notification(self, **kwargs):

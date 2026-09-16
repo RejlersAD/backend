@@ -96,17 +96,27 @@ def capabilities(request):
 
 
 def enrich_receipt(data, receipt, request):
+    from apps.rbac.approval_eligibility import require_configured_approval
+    from rest_framework.exceptions import PermissionDenied
+
     po = receipt.purchase_order
     grants = capabilities(request)
-    can_decide = receipt.status == 'pending' and grants['approve']
+    def can_decide(operation):
+        if receipt.status != 'pending' or not grants['approve']:
+            return False
+        try:
+            require_configured_approval(request.user, 'procurement_receipts', receipt, operation)
+        except (PermissionDenied, ValidationError):
+            return False
+        return True
     data.update({
         'vendor_id': str(po.vendor_id), 'vendor_name': po.vendor.name,
         **project_metadata(po), 'po_category': po.category,
         'required_certifications': po.required_certifications,
         'heat_numbers_required': po.heat_numbers_required, 'ndt_requirements': po.ndt_requirements,
         'evidence': receipt_evidence(receipt),
-        'capabilities': {'update': grants['update'], 'accept': can_decide,
-                         'reject': can_decide, 'export': grants['export']},
+        'capabilities': {'update': grants['update'], 'accept': can_decide('accept'),
+                         'reject': can_decide('reject_delivery'), 'export': grants['export']},
     })
     return data
 

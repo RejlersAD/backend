@@ -64,17 +64,25 @@ def _profile_matches_department(profile, department):
     return bool(target & searchable)
 
 
-def _manager_candidates(department):
-    from apps.rbac.models import UserProfile
+def _department_head_positions(department):
+    from apps.rbac.organization_catalog import DEPARTMENTS, resolve_department_code
+    code = resolve_department_code(department)
+    return [row['head_role_code'] for row in DEPARTMENTS
+            if row['code'] == code and row['head_role_code']]
 
-    profiles = list(UserProfile.objects.select_related('user').filter(
-        is_deleted=False, status='active', user__is_active=True,
-    ))
-    eligible = [
-        profile for profile in profiles
-        if _is_department_head(profile) and _profile_matches_department(profile, department)
-    ]
-    users = [profile.user for profile in eligible]
+
+def _manager_candidates(department, *, approval_required=False):
+    from apps.rbac.models import UserProfile
+    if approval_required:
+        from apps.rbac.approval_eligibility import position_users
+        positions = _department_head_positions(department)
+        users = list(position_users(positions, 'enquiry_management')) if positions else []
+    else:
+        profiles = list(UserProfile.objects.select_related('user').filter(
+            is_deleted=False, status='active', user__is_active=True,
+        ))
+        users = [profile.user for profile in profiles
+                 if _is_department_head(profile) and _profile_matches_department(profile, department)]
     workload = dict(
         Enquiry.objects.filter(assigned_to_id__in=[user.pk for user in users]).exclude(
             status__in=['resolved', 'closed', 'spam'],
@@ -99,13 +107,49 @@ def _email_external_response(enquiry, body):
         return
 
 
+def can_approve_enquiry(user, enquiry):
+    from apps.rbac.approval_eligibility import eligible_approver, has_business_position
+    positions = _department_head_positions(enquiry.department)
+    return eligible_approver(
+        user, 'enquiry_management',
+        assigned=bool(user and enquiry.assigned_to_id == user.pk
+                      and positions and has_business_position(user, positions)),
+        current=bool(enquiry.approval_required and enquiry.approval_status == 'pending'
+                     and enquiry.status not in ('resolved', 'closed', 'spam')),
+    )
+
+
 def _notify(user, *, title, message, action_url, priority='NORMAL', metadata=None, sender=None):
     if not user:
         return
     from apps.notifications.services import NotificationService
+    metadata = {'requires_action': False, **(metadata or {})}
+    actionable = metadata.get('requires_action') is True
     NotificationService.create_notification(
-        user, title=title, message=message, category='INFO', priority=priority,
-        action_url=action_url, action_label='Open Request', metadata=metadata or {}, sender=sender,
+        user, title=title, message=message, category='APPROVAL' if actionable else 'INFO', priority=priority,
+        action_url=action_url, action_label='Review Request' if actionable else 'Open Request', metadata=metadata, sender=sender,
+    )
+
+
+def notify_enquiry_assignment(enquiry, *, sender=None, title=None):
+    recipient = enquiry.assigned_to
+    if not recipient:
+        return
+    actionable = bool(enquiry.approval_required)
+    if actionable and (not enquiry.assigned_at or not can_approve_enquiry(recipient, enquiry)):
+        return
+    _notify(
+        recipient, sender=sender,
+        title=title or f'{"Approval required" if actionable else "Request assigned"}: {enquiry.reference}',
+        message=f'{enquiry.get_inquiry_type_display()} assigned to you: {enquiry.subject}',
+        action_url=f'/admin/enquiries/{enquiry.pk}',
+        priority='HIGH' if actionable or enquiry.urgency in ('high', 'urgent') else 'NORMAL',
+        metadata={
+            'enquiry_id': enquiry.pk, 'department': enquiry.department,
+            'requires_action': actionable,
+            'event_type': 'enquiry_approval_assignment' if actionable else 'enquiry_assignment',
+            'assigned_at': enquiry.assigned_at.isoformat() if enquiry.assigned_at else None,
+        },
     )
 
 
@@ -115,15 +159,17 @@ def route_enquiry(enquiry, *, actor=None):
         inquiry_type=enquiry.inquiry_type, is_active=True,
     ).first()
     department, sla_hours = DEFAULT_ROUTING.get(enquiry.inquiry_type, DEFAULT_ROUTING['other'])
+    approval_required = enquiry.urgency in ('high', 'urgent')
     representative = None
     if rule:
         department, sla_hours = rule.department, rule.sla_hours
         if rule.representative and rule.representative.is_active:
             profile = getattr(rule.representative, 'rbac_profile', None)
-            if profile and _is_department_head(profile) and _profile_matches_department(profile, department):
+            if (approval_required and any(user.pk == rule.representative_id for user in _manager_candidates(department, approval_required=True))
+                    or not approval_required and profile and _is_department_head(profile) and _profile_matches_department(profile, department)):
                 representative = rule.representative
     if representative is None:
-        candidates = _manager_candidates(department)
+        candidates = _manager_candidates(department, approval_required=approval_required)
         representative = candidates[0] if candidates else None
 
     enquiry.department = department
@@ -132,7 +178,7 @@ def route_enquiry(enquiry, *, actor=None):
     enquiry.assigned_by = actor if getattr(actor, 'is_authenticated', False) else None
     enquiry.assigned_at = timezone.now() if representative else None
     enquiry.status = 'assigned' if representative else 'new'
-    enquiry.approval_required = enquiry.urgency in ('high', 'urgent')
+    enquiry.approval_required = approval_required
     enquiry.approval_status = 'pending' if enquiry.approval_required else 'not_required'
     enquiry.save(update_fields=[
         'department', 'due_at', 'assigned_to', 'assigned_by', 'assigned_at', 'status',
@@ -144,14 +190,7 @@ def route_enquiry(enquiry, *, actor=None):
                  'sla_hours': sla_hours,
                  'assignment_strategy': 'department_head' if representative else 'unassigned_no_department_head'},
     )
-    if representative:
-        _notify(
-            representative, title=f'New request ENQ-{enquiry.pk:06d}',
-            message=f'{enquiry.get_inquiry_type_display()} assigned to you: {enquiry.subject}',
-            action_url=f'/admin/enquiries/{enquiry.pk}',
-            priority='HIGH' if enquiry.urgency in ('high', 'urgent') else 'NORMAL',
-            metadata={'enquiry_id': enquiry.pk, 'department': department},
-        )
+    notify_enquiry_assignment(enquiry, sender=actor)
     return enquiry
 
 
@@ -218,15 +257,19 @@ def escalate_enquiry(enquiry, *, actor=None, reason='SLA deadline exceeded'):
         enquiry=enquiry, actor=actor, action='enquiry_escalated',
         details={'level': enquiry.escalation_level, 'reason': enquiry.escalation_reason},
     )
-    recipients = {user.pk: user for user in _manager_candidates(enquiry.department)}
+    recipients = {user.pk: user for user in _manager_candidates(enquiry.department, approval_required=True)}
     if enquiry.assigned_to:
         recipients[enquiry.assigned_to.pk] = enquiry.assigned_to
     for recipient in recipients.values():
+        if enquiry.assigned_to_id == recipient.pk and can_approve_enquiry(recipient, enquiry):
+            notify_enquiry_assignment(enquiry, sender=actor, title=f'Escalated approval request: {enquiry.reference}')
+            continue
         _notify(
             recipient, sender=actor, title=f'Escalated request: {enquiry.reference}',
             message=f'Level {enquiry.escalation_level}: {enquiry.escalation_reason}',
             action_url=f'/admin/enquiries/{enquiry.pk}', priority='HIGH',
-            metadata={'enquiry_id': enquiry.pk, 'escalation_level': enquiry.escalation_level},
+            metadata={'enquiry_id': enquiry.pk, 'escalation_level': enquiry.escalation_level,
+                      'event_type': 'enquiry_escalation_information', 'requires_action': False},
         )
     return enquiry
 

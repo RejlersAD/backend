@@ -208,7 +208,7 @@ class SalarySlipSerializer(serializers.ModelSerializer):
             'remarks', 'internal_notes', 'created_at', 'updated_at',
             'generated_by', 'generated_by_name'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'slip_number']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'slip_number', 'status', 'approved_by', 'approved_at', 'rejection_reason']
     
     def get_employee_name(self, obj):
         return obj.employee_salary_info.user.get_full_name() or obj.employee_salary_info.user.email
@@ -263,6 +263,11 @@ class SalarySlipCreateSerializer(serializers.Serializer):
         default=False,
         help_text="Automatically approve slips without requiring workflow."
     )
+
+    def validate_auto_approve(self, value):
+        if value:
+            raise serializers.ValidationError('Salary approval requires the assigned sequential review workflow.')
+        return value
 
 
 class SalarySlipDetailSerializer(serializers.ModelSerializer):
@@ -327,6 +332,7 @@ class SalarySlipUpdateSerializer(serializers.ModelSerializer):
             'remarks',
             'internal_notes'
         ]
+        read_only_fields = ['status']
     
     def validate_basic_salary(self, value):
         """Validate basic salary is within acceptable range"""
@@ -445,7 +451,25 @@ class SalarySlipApprovalSerializer(serializers.ModelSerializer):
             'approval_role', 'approver', 'approver_name', 'status',
             'decision_date', 'comments', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'status', 'decision_date', 'comments']
+
+    def validate(self, attrs):
+        from .salary_models import SalaryStatus
+        from apps.rbac.approval_eligibility import has_business_position
+        request = self.context.get('request')
+        slip = attrs.get('salary_slip') or getattr(self.instance, 'salary_slip', None)
+        if self.instance and slip and self.instance.salary_slip_id != slip.pk:
+            raise serializers.ValidationError('An approval assignment cannot be moved to another salary slip.')
+        if not request or not has_business_position(request.user, ('hr_manager', 'hr_admin', 'payroll_admin')):
+            raise serializers.ValidationError('Only the designated HR or payroll position may configure this approval route.')
+        if not slip or slip.status not in (SalaryStatus.DRAFT, SalaryStatus.GENERATED):
+            raise serializers.ValidationError('Approval assignments can only be configured before submission.')
+        approver = attrs.get('approver', getattr(self.instance, 'approver', None))
+        if not approver:
+            raise serializers.ValidationError('A named employee approver is required.')
+        if approver.pk == request.user.pk:
+            raise serializers.ValidationError('Another authorized HR administrator must configure your own salary approval assignment.')
+        return attrs
     
     def get_approver_name(self, obj):
         return obj.approver.get_full_name() if obj.approver else None

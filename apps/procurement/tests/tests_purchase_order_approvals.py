@@ -34,6 +34,13 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         return SimpleNamespace(user_id=user_id, user=user, department=department, roles=EmptyRelations())
 
     def setUp(self):
+        # Account/position storage is covered by the database integration suite.
+        authorization = patch(
+            'apps.procurement.services.purchase_order_approvals.eligible_stage_assignee',
+            side_effect=lambda user, entry, module: entry.get('stage') != FINANCIAL_STAGE or user.id == 'finance-id',
+        )
+        authorization.start()
+        self.addCleanup(authorization.stop)
         self.technical = self._profile('technical-id', 'Technical Approver', 'technical@example.com', 'Engineering')
         self.finance = self._profile('finance-id', 'Finance Approver', 'finance@example.com', 'Finance')
         self.non_finance = self._profile('other-id', 'Other Approver', 'other@example.com', 'Engineering')
@@ -59,7 +66,7 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
             'technical-id': self.technical,
             'other-id': self.non_finance,
         }
-        with self.assertRaisesMessage(ValidationError, 'active Finance employee'):
+        with self.assertRaisesMessage(ValidationError, 'configured business position'):
             normalize_assignments([
                 {'stage': TECHNICAL_STAGE, 'user_id': 'technical-id'},
                 {'stage': FINANCIAL_STAGE, 'user_id': 'other-id'},

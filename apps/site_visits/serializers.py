@@ -122,12 +122,18 @@ class SiteVisitRequestCreateSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         """Validate date range and approval requirements."""
-        if data['start_date'] > data['end_date']:
+        if self.instance:
+            for field in ('employee', 'employee_code', 'employee_name', 'department'):
+                if field in data and data[field] != getattr(self.instance, field):
+                    raise serializers.ValidationError({field: 'The requesting employee identity cannot be changed.'})
+        start_date = data.get('start_date', getattr(self.instance, 'start_date', None))
+        end_date = data.get('end_date', getattr(self.instance, 'end_date', None))
+        if start_date and end_date and start_date > end_date:
             raise serializers.ValidationError("start_date must be before end_date")
         
         # Check if approval is required for this site
         site = data.get('site')
-        if site and site.require_approval:
+        if self.instance is None and site and site.require_approval:
             from . import config as site_config
             if not site_config.REQUIRE_APPROVAL:
                 # Auto-approve if globally disabled

@@ -397,6 +397,12 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f'Approval stage {index + 1} must reference an active user.'
                 )
+            from .services.approval_eligibility import MODULE_PR, eligible_stage_assignee
+            if not eligible_stage_assignee(approver, stage, MODULE_PR):
+                raise serializers.ValidationError(
+                    f'Approval stage {index + 1} requires the configured business position '
+                    'and Purchase Requisition approval permission.'
+                )
 
             try:
                 level = max(0, int(stage.get('level', index + 1)))
@@ -414,6 +420,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'step': index + 1,
                 'level': level,
                 'role': role,
+                **({'business_position': stage['business_position']} if stage.get('business_position') else {}),
                 'user_id': str(approver.pk),
                 'user_name': employee_display_name(approver),
                 'username': (
@@ -1344,16 +1351,14 @@ class ReceiptSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'receipt_number', 'receipt_date', 'received_by', 'created_at', 'updated_at']
 
     def validate(self, attrs):
-        from apps.rbac.action_policy import request_action_allowed
         from rest_framework.exceptions import PermissionDenied
 
         if self.instance is None:
             changes_disposition = attrs.get('status', 'pending') != 'pending'
         else:
             changes_disposition = 'status' in attrs and attrs['status'] != self.instance.status
-        request = self.context.get('request')
-        if changes_disposition and not (request and request_action_allowed(request, 'procurement_receipts', 'approve')):
-            raise PermissionDenied('Receipt approval access is required to set or change its inspection disposition.')
+        if changes_disposition:
+            raise PermissionDenied('Use the assigned receipt acceptance or rejection action to change its disposition.')
         return super().validate(attrs)
 
     def to_representation(self, instance):
@@ -1511,7 +1516,7 @@ class BudgetSerializer(serializers.ModelSerializer):
             'spent_amount', 'remaining_amount', 'utilization_percentage', 'is_over_budget',
             'notes', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_approved', 'approved_by', 'approved_at']
     
     def get_spent_amount(self, obj):
         return float(obj.get_spent_amount())

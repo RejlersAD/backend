@@ -9,7 +9,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
-from .delivery import absolute_action_url, delivery_issue, notification_action_url
+from .delivery import absolute_action_url, approval_assignment_issue, delivery_issue, notification_action_url
 from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog, WebPushSubscription
 from celery import shared_task
 import logging
@@ -182,7 +182,7 @@ class NotificationService:
                 send_email = send_email or prefs.enable_email
             
             # Create notification
-            notification = Notification.objects.create(
+            notification = Notification(
                 recipient=recipient,
                 sender=notification_data.get('sender'),
                 title=notification_data.get('title', 'Notification'),
@@ -200,6 +200,11 @@ class NotificationService:
                 # row exists. Leaving it PENDING hides it from unread_count.
                 status='SENT' if prefs.enable_in_app else 'PENDING',
             )
+            reason = approval_assignment_issue(notification)
+            if reason:
+                logger.info('Approval notification omitted for recipient %s: %s', recipient.pk, reason)
+                return None
+            notification.save()
 
             cache.delete(f'notification_unread_count_{recipient.id}')
             
