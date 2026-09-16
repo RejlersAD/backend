@@ -63,7 +63,6 @@ DEFAULT_INVOICE_ADDRESS = (
     'Tel: +971 2 639 7449\n'
     'Fax: +971 2 639 7448'
 )
-USD_TO_AED_RATE = 3.6725
 
 
 class _FlowTable(Table):
@@ -480,10 +479,11 @@ def _main_pdf(order):
         approved.extend([Spacer(1, 2 * mm), signature_image, Spacer(1, 2 * mm)])
     else:
         approved.append(Spacer(1, 16 * mm))
-    approved.append(Paragraph(
+    approval_identity = Paragraph(
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
-        f'{JARMO_COMPANY}<br/><b>Date:</b> {escape(_value(getattr(order, "approved_date", None), ""))}', preview,
-    ))
+        f'{JARMO_COMPANY}<br/><b>Date:</b> '
+        f'{escape(_value(getattr(order, "approved_date", None), "__________________________"))}', preview,
+    )
     raw_seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
     raw_contact_person = str(getattr(order, 'seller_contact_person', '') or '').strip()
     confirmation_contact = raw_contact_person or raw_seller_reference
@@ -524,18 +524,44 @@ def _main_pdf(order):
             ]),
         ),
     ]
-    # Keep measured row heights: fixed heights allow wrapped fields to overlap.
-    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], splitInRow=1, style=TableStyle([
+    approval_style = TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LINEBEFORE', (2, 0), (2, 0), 0.5, colors.HexColor('#64748b')),
         ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
         ('LEFTPADDING', (2, 0), (2, 0), 3 * mm), ('RIGHTPADDING', (2, 0), (2, 0), 0),
-    ]))
+        ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+    ])
     cover = [
         Spacer(1, 1 * mm), details, Spacer(1, 1 * mm), commercial, Spacer(1, 2 * mm),
         summary_table, Spacer(1, 2 * mm),
-        approval_table,
     ]
+    # Fill the remaining cover height, leaving "Approved by" at the top and
+    # placing the approver identity/date at the bottom-left above the footer.
+    # Measure all text first; the panel must never be shorter than its content.
+    cover_width = 176 * mm
+    frame_width, frame_height = document.width - 12, document.height - 12
+    width_scale = max(1, cover_width / frame_width)
+    preceding_height = sum(item.wrap(cover_width, 1e6)[1] for item in cover)
+    approval_table = Table(
+        [[[*approved, approval_identity], '', confirmation]],
+        colWidths=[86 * mm, 5 * mm, 85 * mm], style=approval_style,
+    )
+    natural_height = approval_table.wrap(cover_width, 1e6)[1]
+    panel_height = max(natural_height, frame_height * width_scale - preceding_height)
+    identity_height = approval_identity.wrap(79 * mm, 1e6)[1]
+    approved_column = Table(
+        [[approved], [approval_identity]], colWidths=[79 * mm],
+        rowHeights=[panel_height - 6 - identity_height, identity_height],
+        style=TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ]),
+    )
+    cover.append(Table(
+        [[approved_column, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm],
+        rowHeights=[panel_height], style=approval_style,
+    ))
     # Measure the complete cover and proportionally fit unusually long values
     # inside the first-page frame. Never clip text or move approval/confirmation
     # to a continuation page. The frame reserves the branded header and footer;
@@ -592,7 +618,6 @@ def _main_pdf(order):
             ['Total Price:', _money(subtotal, currency)],
             [f'VAT ({float(order.vat_percentage or 0):g}%):', _money(tax, currency)],
             ['Total Sum:', _money(total, currency)],
-            *([['Grand Total USD in AED:', _money(total * USD_TO_AED_RATE, 'AED')]] if str(currency).upper() == 'USD' else []),
         ], colWidths=[55 * mm, 42 * mm], hAlign='RIGHT', style=TableStyle([
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#475569')),
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
@@ -972,8 +997,6 @@ def build_purchase_order_docx(order):
         f'VAT ({float(order.vat_percentage or 0):g}%): {_money(tax, currency)}\n'
         f'Total Sum: {_money(total, currency)}'
     )
-    if str(currency).upper() == 'USD':
-        totals_text += f'\nGrand Total USD in AED: {_money(total * USD_TO_AED_RATE, "AED")}'
     totals.add_run(totals_text).bold = True
     normal_style = document.styles['Normal']
     normal_style.font.name = 'Arial'
