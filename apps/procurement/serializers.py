@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import Q
+from django.urls import reverse
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
@@ -29,6 +30,9 @@ from .services.employee_display import (
 )
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_status import canonicalize_pr_status
+from .services.requisition_source_documents import (
+    SIGNED_PR_TYPE, refreshed_requisition_attachments, requisition_original_source,
+)
 from .services.project_relationships import (
     resolve_enterprise_project_by_code,
     resolve_order_enterprise_project,
@@ -196,6 +200,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         source='enterprise_project.name', read_only=True, allow_null=True,
     )
     
+    # Original PR links are temporary storage URLs, refreshed only on reads.
+    attachments = serializers.SerializerMethodField()
+
     # File upload fields
     attachments_files = serializers.ListField(
         child=serializers.FileField(),
@@ -210,6 +217,12 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     linked_po_number = serializers.SerializerMethodField()
 
     SERVER_CONTROLLED_FIELDS = PR_SERVER_CONTROLLED_FIELDS
+    SOURCE_METADATA_FIELDS = (
+        'signed_document_verification', 'signed_approval_evidence',
+        'signed_pdf_attached', 'source_approval_reviews', 'po_link',
+        'po_link_previous_status',
+        '_retained_attachment_sources',
+    )
     
     class Meta:
         model = PurchaseRequisition
@@ -288,6 +301,19 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             *PR_SERVER_CONTROLLED_FIELDS,
         ]
 
+    def get_attachments(self, obj):
+        attachments = refreshed_requisition_attachments(obj)
+        for index, attachment in enumerate(attachments if isinstance(attachments, list) else []):
+            if not isinstance(attachment, dict) or SIGNED_PR_TYPE not in (
+                attachment.get('type'), attachment.get('document_type'),
+            ):
+                continue
+            attachment['content_url'] = reverse(
+                'requisition-uploaded-document-content',
+                kwargs={'pk': obj.pk, 'document_id': index},
+            ) if requisition_original_source(obj, index) else ''
+        return attachments
+
     @staticmethod
     def _linked_purchase_order(obj):
         # Consume the view's prefetched relation so register rows add no queries.
@@ -317,11 +343,20 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         except (AttributeError, ObjectDoesNotExist):
             return False
 
+    @staticmethod
+    def _preserve_source_workflow(instance):
+        verification = (getattr(instance, 'price_remarks_data', None) or {}).get('signed_document_verification') or {}
+        workflow = getattr(instance, 'approval_workflow_config', None) or []
+        return bool(verification.get('signed_off') or (
+            verification.get('source_approval_rows') and workflow
+            and all(isinstance(stage, dict) and stage.get('external') is True
+                    and stage.get('source') == SIGNED_PR_TYPE for stage in workflow)
+        ))
+
     def validate_approval_workflow_config(self, value):
         """Validate approver assignments and discard client-supplied approval state."""
-        verification = (getattr(self.instance, 'price_remarks_data', None) or {}).get('signed_document_verification') or {}
-        if verification.get('signed_off'):
-            # Editing commercial fields must not replace completed PDF decisions
+        if self._preserve_source_workflow(self.instance):
+            # Editing commercial fields must not replace recorded PDF decisions
             # with the new-form approval route submitted by an older client.
             return self.instance.approval_workflow_config
         if not isinstance(value, list):
@@ -431,7 +466,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         existing = getattr(self.instance, 'price_remarks_data', None) or {}
         # Source-document decisions and comparison evidence are written only by
         # the import/link services, never by ordinary form JSON.
-        for key in ('signed_document_verification', 'signed_approval_evidence', 'signed_pdf_attached', 'po_link'):
+        for key in self.SOURCE_METADATA_FIELDS:
             data.pop(key, None)
             if key in existing:
                 data[key] = existing[key]
@@ -652,6 +687,25 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     
     @transaction.atomic
     def update(self, instance, validated_data):
+        # A form may have been validated before an inline source review
+        # finished. Save against the locked current record so its status,
+        # source decisions and audit cannot be replaced by that stale copy.
+        instance = PurchaseRequisition.objects.select_for_update().get(pk=instance.pk)
+        source_metadata = instance.price_remarks_data or {}
+        if 'price_remarks_data' in validated_data:
+            metadata = dict(validated_data['price_remarks_data'] or {})
+            for key in self.SOURCE_METADATA_FIELDS:
+                metadata.pop(key, None)
+                if key in source_metadata:
+                    metadata[key] = source_metadata[key]
+            validated_data['price_remarks_data'] = metadata
+        if 'pr_number' in validated_data and validated_data['pr_number'] != instance.pr_number:
+            from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, attachment_cleanup_keys
+            metadata = dict(validated_data.get('price_remarks_data', source_metadata) or {})
+            metadata[RETAINED_ATTACHMENTS] = sorted(attachment_cleanup_keys(instance))
+            validated_data['price_remarks_data'] = metadata
+        if self._preserve_source_workflow(instance) and 'approval_workflow_config' in validated_data:
+            validated_data['approval_workflow_config'] = instance.approval_workflow_config
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
         management_evidence = validated_data.pop('management_approval_evidence_file', None)
@@ -676,21 +730,20 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             instance.save(update_fields=['management_approval_evidence'])
         if workflow_changed:
             transaction.on_commit(
-                lambda: notify_requisition_approver_changes(instance, previous_workflow)
+                lambda: notify_requisition_approver_changes(instance, previous_workflow),
+                robust=True,
             )
         
         return instance
     
     def _upload_attachments(self, instance, files):
-        """Upload files to S3 and update attachments field"""
-        from apps.core.s3_utils import S3Client
+        """Upload files through the configured storage backend."""
+        from django.core.files.storage import default_storage
         from django.utils import timezone
         import logging
         import uuid
         
         logger = logging.getLogger(__name__)
-        s3_client = S3Client()
-        
         attachments = list(instance.attachments or [])
         validated_files = validate_attachments(files, attachments)
         uploaded = []
@@ -701,21 +754,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 object_id = uuid.uuid4().hex
                 s3_key = f"procurement/requisitions/{instance.pr_number}/{object_id}_{safe_name}"
                 
-                # Upload to S3
-                success = s3_client.upload_file(
-                    file_obj=file,
-                    s3_key=s3_key,
-                    content_type=file.verified_content_type,
-                    metadata={
-                        'pr_number': instance.pr_number,
-                        'uploaded_by': self.context['request'].user.email,
-                        'original_filename': safe_name,
-                    }
-                )
-                
-                if success:
-                    # Get S3 URL
-                    s3_url = f"https://{s3_client.bucket_name}.s3.{s3_client.s3_client.meta.region_name}.amazonaws.com/{s3_key}"
+                file.seek(0)
+                s3_key = default_storage.save(s3_key, file)
+                if s3_key:
+                    s3_url = default_storage.url(s3_key)
                     
                     # Add to attachments
                     attachments.append({
@@ -882,6 +924,19 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         existing = self.instance.attachments if self.instance else []
         return validate_attachments(value, existing)
 
+    def validate_contact_persons(self, value):
+        from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, RETAINED_SOURCES
+
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Contact details must be an object.')
+        value = dict(value)
+        existing = getattr(self.instance, 'contact_persons', None) or {}
+        for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES):
+            value.pop(key, None)
+            if key in existing:
+                value[key] = existing[key]
+        return value
+
     def _upload_attachments(self, instance, files):
         """Store PO attachments using the active local/S3 storage backend."""
         from django.core.files.storage import default_storage
@@ -988,6 +1043,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
         if 'approval_log' in attrs:
             existing_log = self.instance.approval_log if self.instance is not None else []
+            source_history = [dict(entry) for entry in (existing_log or [])
+                              if isinstance(entry, dict) and not entry.get('user_id')]
             requisition = pr or (self.instance.pr_reference if self.instance is not None else None)
             has_po_reference = requisition is not None
             attrs['approval_log'] = normalize_assignments(
@@ -997,6 +1054,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 require_management=(
                     attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft'
                     and not has_po_reference
+                    and not source_history
                 ),
             )
             if has_po_reference:
@@ -1004,6 +1062,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                     entry for entry in attrs['approval_log']
                     if entry.get('stage') != 'Final Management Sign-off'
                 ]
+            attrs['approval_log'].extend(source_history)
             by_stage = {entry['stage']: entry for entry in attrs['approval_log']}
             attrs['technical_approver'] = ''
             attrs['financial_approver'] = ''
@@ -1038,9 +1097,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if files:
             self._upload_attachments(order, files)
 
-        locked_pr.status = 'converted'
-        locked_pr.po_number_reference = order.po_number
-        locked_pr.save(update_fields=['status', 'po_number_reference', 'updated_at'])
+        from .services.procurement_lifecycle import mark_requisition_converted
+        mark_requisition_converted(locked_pr, order.po_number)
         # Notification delivery is a side effect and must never turn a
         # successfully committed PO into an HTTP 500 response.
         transaction.on_commit(lambda: notify_assigned_approvers(order), robust=True)
@@ -1049,11 +1107,61 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        from .services.procurement_lifecycle import mark_requisition_converted, reconcile_requisition_orders
+
+        old_pr_id = instance.pr_reference_id
+        selected_pr = validated_data.get('pr_reference', instance.pr_reference)
+        pr_ids = {value for value in (old_pr_id, selected_pr.pk if selected_pr else None) if value}
+        locked_prs = {
+            pr.pk: pr for pr in PurchaseRequisition.objects.select_for_update().filter(pk__in=pr_ids).order_by('pk')
+        }
+        instance = PurchaseOrder.objects.select_for_update().get(pk=instance.pk)
+        if instance.pr_reference_id != old_pr_id:
+            raise serializers.ValidationError('The linked recommendation changed. Refresh this order before saving.')
+        if instance.status == 'completed':
+            raise serializers.ValidationError('Completed purchase orders are read-only and cannot be edited.')
+        # A stale edit must not erase original-document evidence recorded after
+        # its serializer was validated, or turn that history into assignments.
+        source_history = [dict(entry) for entry in (instance.approval_log or [])
+                          if isinstance(entry, dict) and not entry.get('user_id')]
+        if 'approval_log' in validated_data:
+            validated_data['approval_log'] = [entry for entry in validated_data['approval_log']
+                                               if entry.get('user_id')] + source_history
+        if any(entry.get('evidence_document_id') and entry.get('signature_verified') for entry in source_history):
+            for field in ('approved_by', 'approved_by_name', 'approved_by_title', 'approved_date',
+                          'approval_signature', 'approval_stamp'):
+                if field in validated_data and getattr(instance, field):
+                    validated_data[field] = getattr(instance, field)
+        if 'attachments' in validated_data:
+            originals = [entry for entry in (instance.attachments or []) if isinstance(entry, dict)
+                         and entry.get('type') == 'signed_purchase_order_pdf']
+            validated_data['attachments'] = [entry for entry in (validated_data['attachments'] or [])
+                                             if not (isinstance(entry, dict) and entry.get('type') == 'signed_purchase_order_pdf')] + originals
+        if 'contact_persons' in validated_data:
+            from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, RETAINED_SOURCES
+            contacts = instance.contact_persons or {}
+            for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES):
+                validated_data['contact_persons'].pop(key, None)
+                if key in contacts:
+                    validated_data['contact_persons'][key] = contacts[key]
+        previous_number = instance.po_number
+        if 'po_number' in validated_data and validated_data['po_number'] != previous_number:
+            from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, attachment_cleanup_keys
+            contacts = dict(validated_data.get('contact_persons', instance.contact_persons) or {})
+            contacts[RETAINED_ATTACHMENTS] = sorted(attachment_cleanup_keys(instance))
+            validated_data['contact_persons'] = contacts
         files = validated_data.pop('attachments_files', [])
         order = super().update(instance, validated_data)
         if files:
             self._upload_attachments(order, files)
-        transaction.on_commit(lambda: notify_assigned_approvers(order))
+        if old_pr_id != order.pr_reference_id:
+            if old_pr_id in locked_prs:
+                reconcile_requisition_orders(locked_prs[old_pr_id], previous_number)
+            if order.pr_reference_id in locked_prs:
+                mark_requisition_converted(locked_prs[order.pr_reference_id], order.po_number)
+        elif order.pr_reference_id and order.po_number != previous_number:
+            mark_requisition_converted(locked_prs[order.pr_reference_id], order.po_number)
+        transaction.on_commit(lambda: notify_assigned_approvers(order), robust=True)
         return order
 
 
@@ -1139,6 +1247,17 @@ class PODocumentReviewSerializer(serializers.Serializer):
         unknown = set(self.initial_data) - set(self.fields)
         if unknown:
             raise serializers.ValidationError({field: 'This field cannot be edited.' for field in unknown})
+        return attrs
+
+
+class PODocumentReconcileSerializer(serializers.Serializer):
+    vendor_id = serializers.PrimaryKeyRelatedField(queryset=Vendor.objects.filter(status='active'))
+    pr_id = serializers.PrimaryKeyRelatedField(queryset=PurchaseRequisition.objects.all(), required=False)
+
+    def validate(self, attrs):
+        unknown = set(self.initial_data) - set(self.fields)
+        if unknown:
+            raise serializers.ValidationError({field: 'Save reviewed business fields before completing reconciliation.' for field in unknown})
         return attrs
 
 

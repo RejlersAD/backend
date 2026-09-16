@@ -227,14 +227,18 @@ def reconcile_pr_po_link(pr, *, extracted_fields=None):
             locked_pr.po_number_reference = po.po_number
             changed.append("po_number_reference")
         if getattr(locked_pr, "status", "") == "approved":
+            locked_pr.price_remarks_data = dict(getattr(locked_pr, 'price_remarks_data', None) or {})
+            locked_pr.price_remarks_data['po_link_previous_status'] = 'approved'
             locked_pr.status = "converted"
-            changed.append("status")
+            changed.extend(['status', 'price_remarks_data'])
         if changed:
             locked_pr.save(update_fields=[*changed, "updated_at"])
         # Keep the caller's instance consistent without touching its other fields.
         pr.po_applicable = locked_pr.po_applicable
         pr.po_number_reference = locked_pr.po_number_reference
         pr.status = locked_pr.status
+        if hasattr(locked_pr, 'price_remarks_data'):
+            pr.price_remarks_data = locked_pr.price_remarks_data
         return _result("already_linked" if already_linked else "linked", f"Linked to purchase order {po.po_number}.", po=po, manual=False)
 
 
@@ -273,6 +277,8 @@ def link_selected_purchase_order(pr, purchase_order_id, *, actor=None):
                 changed.append(field)
         # Association does not approve a draft or a recommendation in review.
         if getattr(locked_pr, "status", "") == "approved":
+            locked_pr.price_remarks_data = dict(getattr(locked_pr, 'price_remarks_data', None) or {})
+            locked_pr.price_remarks_data['po_link_previous_status'] = 'approved'
             locked_pr.status = "converted"
             changed.append("status")
         po_link = _result("already_linked" if already_linked else "linked", f"Linked to purchase order {po.po_number}.", po=po, manual=False)

@@ -100,11 +100,12 @@ class SignedPODeferredImportTests(TestCase):
         )
         result = self.upload()
         po.refresh_from_db()
-        self.assertEqual(result["operation"], "overwritten")
+        self.assertEqual(result["operation"], "attached")
         self.assertEqual(po.pr_reference_id, pr.pk)
         self.assertEqual(result["pr_id"], str(pr.pk))
         self.assertFalse(result["reconciliation_required"])
         self.assertEqual(po.items, [{"description": "Existing item", "quantity": 1}])
+        self.assertEqual(po.title, 'Existing order')
 
     def test_matching_pr_and_supplier_keep_normal_creation_and_conversion(self):
         pr = self.create_pr(self.fields["source_po_number"])
@@ -119,3 +120,51 @@ class SignedPODeferredImportTests(TestCase):
         self.assertFalse(result["reconciliation_required"])
         self.assertEqual(result["reconciliation_issues"], [])
         self.assertEqual(PODocument.objects.get().confirmed_po_id, po.pk)
+
+    def test_zero_tax_source_retains_zero_vat(self):
+        result = self.upload()
+        po = PurchaseOrder.objects.get(pk=result['purchase_order_id'])
+        self.assertEqual(po.vat_percentage, Decimal('0.00'))
+
+    def test_signed_source_attaches_to_completed_order_without_resetting_business_fields(self):
+        po = PurchaseOrder.objects.create(
+            po_number=self.fields['po_number'], vendor=self.vendor, status='completed',
+            title='Completed native order', total_amount=Decimal('98.50'), currency='AED',
+            vat_percentage=Decimal('0.00'), approval_log=[{'stage': 'Native approval', 'status': 'Approved'}],
+        )
+        result = self.upload()
+        po.refresh_from_db()
+        self.assertEqual(result['operation'], 'attached')
+        self.assertTrue(result['reconciliation_required'])
+        self.assertEqual(po.status, 'completed')
+        self.assertEqual(po.title, 'Completed native order')
+        self.assertEqual(po.total_amount, Decimal('98.50'))
+        self.assertEqual(po.currency, 'AED')
+        self.assertEqual(po.vat_percentage, Decimal('0.00'))
+        self.assertEqual(po.approval_log[0], {'stage': 'Native approval', 'status': 'Approved'})
+        self.assertEqual(PODocument.objects.get().confirmed_po_id, po.pk)
+
+    def test_duplicate_unverified_upload_keeps_recorded_signature_and_date(self):
+        first = self.upload()
+        po = PurchaseOrder.objects.get(pk=first['purchase_order_id'])
+        signature = po.approval_signature
+        second = import_signed_po_pdf(b'%PDF-synthetic-deferred-po', filename='signed-po.pdf', user=self.user)
+        po.refresh_from_db()
+        self.assertEqual(second['operation'], 'attached')
+        self.assertEqual(po.approval_signature, signature)
+        self.assertEqual(po.approved_by_name, 'Document Approver')
+        self.assertEqual(po.approved_date, date(2026, 1, 7))
+        self.assertEqual(len(po.approval_log), 1)
+        self.assertEqual(len(po.attachments), 1)
+        self.assertEqual(PODocument.objects.count(), 1)
+        self.assertEqual(self.storage.save.call_count, 1)
+        self.assertTrue(second['signature_verified'])
+
+    def test_pending_duplicate_uploaded_by_another_user_stays_in_each_owners_register(self):
+        self.fields['vendor_name'] = 'Unregistered supplier'
+        first = self.upload()
+        other = get_user_model().objects.create_user('second-po-uploader', email='second-po-uploader@example.test')
+        second = import_signed_po_pdf(b'%PDF-synthetic-deferred-po', filename='signed-po.pdf', user=other)
+        self.assertNotEqual(first['document_id'], second['document_id'])
+        self.assertEqual(PODocument.objects.filter(uploaded_by=self.user).count(), 1)
+        self.assertEqual(PODocument.objects.filter(uploaded_by=other).count(), 1)

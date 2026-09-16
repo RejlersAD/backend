@@ -102,6 +102,10 @@ class SignedPRPdfCreationTests(TestCase):
         pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
         self.assertTrue(result['created'])
         self.assertEqual(pr.pr_number, self.fields['pr_number'])
+        self.assertEqual(pr.attachments[0]['storage_key'], self.storage.save.return_value)
+        self.assertTrue(self.storage.save.call_args.args[0].startswith(
+            f'procurement/signed_requisitions/{pr.pk}/2026/',
+        ))
         self.assertEqual(pr.issued_by, self.issuer)
         self.assertEqual(pr.requested_by, self.issuer)
         self.assertEqual(pr.vendor, self.vendor)
@@ -124,6 +128,12 @@ class SignedPRPdfCreationTests(TestCase):
         self.assertEqual(pr.vp_op_approval_status, 'pending')
         self.assertFalse(result['signature_verified'])
         self.assertTrue(any('fully signed' in issue for issue in result['workflow_issues']))
+        self.assertEqual(pr.approval_workflow_config, [])
+        history = pr.price_remarks_data['signed_document_verification']['source_approval_rows']
+        self.assertEqual([row['role_key'] for row in history], ['pm', 'moe', 'mop', 'vp'])
+        self.assertEqual([row['status'] for row in history], ['approved'] * 3 + ['not_recorded'])
+        self.assertEqual([row['signature_verified'] for row in history], [True] * 3 + [False])
+        self.assertEqual(history[-1]['user_name'], self.approvers['vp'].get_full_name())
 
     def test_reviewed_import_persists_source_rows_remarks_and_evidence(self):
         self.fields['price_lines'] = [
@@ -136,12 +146,60 @@ class SignedPRPdfCreationTests(TestCase):
         self.fields['extraction_pages'] = [{'page': 1, 'method': 'native', 'characters': 500}]
         result = self._import()
         pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
-        self.assertEqual(pr.items, self.fields['price_lines'])
+        self.assertEqual(pr.items, [
+            {**line, 'quantity': '1', 'unit': 'LS', 'unit_price': line['total']}
+            for line in self.fields['price_lines']
+        ])
         self.assertEqual(pr.price_remarks, self.fields['price_remarks'])
         self.assertEqual(pr.total_price, Decimal('1250.50'))
         self.assertEqual(pr.price_remarks_data['ocr_source_price_lines'], self.fields['price_lines'])
         self.assertEqual(pr.price_remarks_data['ocr_text_method'], 'native')
         self.assertEqual(pr.price_remarks_data['ocr_field_provenance']['net_total']['evidence'], 'Net Total AED 1,250.50')
+
+    def test_imported_total_only_item_survives_normal_draft_form_save(self):
+        self.evidence['signatures']['vp'] = False
+        self.fields['price_lines'] = [{
+            'description': 'Recorded lump sum', 'total': '1250.50', 'currency': 'AED',
+        }]
+        result = self._import()
+        pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
+        verification = deepcopy(pr.price_remarks_data['signed_document_verification'])
+        evidence = deepcopy(pr.price_remarks_data['signed_approval_evidence'])
+        source_rows = deepcopy(pr.price_remarks_data['ocr_source_price_lines'])
+        self.assertEqual(pr.items[0]['quantity'], '1')
+        self.assertEqual(pr.items[0]['unit'], 'LS')
+        self.assertEqual(pr.items[0]['unit_price'], '1250.50')
+        self.assertNotIn('quantity', source_rows[0])
+        serializer = PurchaseRequisitionSerializer(pr, data={
+            'description_reason': 'Corrected draft explanation', 'items': pr.items,
+            'price_remarks_data': {'payment_terms': 'Net 30'},
+        }, partial=True, context={'request': SimpleNamespace(user=self.issuer)})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        pr.refresh_from_db()
+        self.assertEqual(pr.status, 'draft')
+        self.assertEqual(pr.total_price, Decimal('1250.50'))
+        self.assertEqual(pr.items[0]['total'], '1250.50')
+        self.assertEqual(pr.price_remarks_data['signed_document_verification'], verification)
+        self.assertEqual(pr.price_remarks_data['signed_approval_evidence'], evidence)
+
+    def test_import_does_not_rewrite_partial_or_conflicting_quantity_rate_evidence(self):
+        for pricing in ({'quantity': '2'}, {'unit_price': '10.00'},
+                        {'qty': '2'}, {'price': '10.00'},
+                        {'quantity': '2', 'unit_price': '10.00'}):
+            with self.subTest(pricing=pricing):
+                self.fields['price_lines'] = [{
+                    'description': 'Incomplete pricing', 'total': '1250.50', 'currency': 'AED', **pricing,
+                }]
+                result = self._import()
+                pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
+                self.assertNotIn('unit', pr.items[0])
+                for key, value in pricing.items():
+                    self.assertEqual(pr.items[0][key], value)
+                serializer = PurchaseRequisitionSerializer(pr, data={'items': pr.items}, partial=True)
+                self.assertFalse(serializer.is_valid())
+                self.assertIn('items', serializer.errors)
+                pr.delete()
 
     def test_signed_creation_without_approval_date_is_approved_with_actionable_date_issue(self):
         self.evidence['approval_date'] = None
@@ -459,6 +517,48 @@ class SignedPRPdfCreationTests(TestCase):
             response = view(request)
             self.assertEqual(response.status_code, expected_status, response.data)
         self.assertEqual(PurchaseRequisition.objects.count(), 1)
+
+    def test_admin_multipart_edit_keeps_approved_and_converted_source_history_exact(self):
+        self._grant_api_access()
+        self.evidence['approver_names']['vp'] = 'External Source Signer'
+        result = self._import()
+        pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
+        history = deepcopy(pr.approval_workflow_config)
+        verification = deepcopy(pr.price_remarks_data['signed_document_verification'])
+        evidence = deepcopy(pr.price_remarks_data['signed_approval_evidence'])
+        attachments = deepcopy(pr.attachments)
+        self.assertIsNone(history[-1]['user_id'])
+        factory = APIRequestFactory()
+        view = PurchaseRequisitionViewSet.as_view({'patch': 'partial_update'})
+        for lifecycle in ('approved', 'converted'):
+            with self.subTest(status=lifecycle):
+                pr.status = lifecycle
+                pr.save(update_fields=['status'])
+                request = factory.patch(f'/api/v1/procurement/requisitions/{pr.pk}/', {
+                    'description_reason': f'Reviewed description ({lifecycle})',
+                    'items': json.dumps(pr.items),
+                    'po_applicable': 'true',
+                    'approval_workflow_config': json.dumps([
+                        {**stage, 'status': 'pending', 'approved_at': None} for stage in history
+                    ]),
+                    'price_remarks_data': json.dumps({
+                        'signed_document_verification': {'signed_off': False},
+                        'signed_approval_evidence': {},
+                        'payment_terms': 'Net 30',
+                    }),
+                }, format='multipart')
+                force_authenticate(request, self.reviewer)
+                response = view(request, pk=pr.pk)
+                self.assertEqual(response.status_code, 200, response.data)
+                pr.refresh_from_db()
+                self.assertEqual(pr.status, lifecycle)
+                self.assertEqual(pr.description_reason, f'Reviewed description ({lifecycle})')
+                self.assertEqual(pr.approval_workflow_config, history)
+                self.assertEqual(pr.price_remarks_data['signed_document_verification'], verification)
+                self.assertEqual(pr.price_remarks_data['signed_approval_evidence'], evidence)
+                self.assertEqual(pr.attachments, attachments)
+                self.assertEqual(response.data['approval_workflow_config'], history)
+                self.assertEqual(response.data['approval_hierarchy'], history)
 
     def _grant_api_access(self):
         organization = Organization.objects.create(name='PDF import tests', code='pdf-import-tests')

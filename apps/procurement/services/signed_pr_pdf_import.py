@@ -20,7 +20,7 @@ from ..models import PurchaseRequisition, Vendor
 from .po_tesseract_extractor import extract_text_from_pdf_tesseract
 from .pr_pdf_text import extract_pr_pdf_text
 from .pr_document_reconciliation import compare_existing_pr, reconcile_pr_po_link
-from .pr_pdf_semantics import apply_pr_layout_semantics
+from .pr_pdf_semantics import apply_pr_layout_semantics, approval_role
 from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 
@@ -541,6 +541,22 @@ def _serialize_extracted_fields(fields: dict) -> dict:
     }
 
 
+def _price_lines_as_items(price_lines: list[dict]) -> list[dict]:
+    """Represent a source amount as one lump sum only when no rate exists."""
+    items = []
+    for source_line in price_lines:
+        line = dict(source_line)
+        if line.get("total") not in (None, "") and all(
+            line.get(field) in (None, "") for field in ("quantity", "qty", "unit_price", "price")
+        ):
+            # Keep the extracted price rows unchanged as source evidence. This
+            # explicit representation lets normal form validation retain their
+            # amount without inventing a quantity/rate for partially read rows.
+            line.update(quantity="1", unit="LS", unit_price=line["total"])
+        items.append(line)
+    return items
+
+
 def _apply_manual_overrides(fields: dict, overrides: dict | None) -> dict:
     """Apply reviewed OCR corrections using a strict, field-level allow-list."""
     if not overrides:
@@ -859,13 +875,44 @@ def import_signed_pr_pdf(
     previous_verification = previous_metadata.get("signed_document_verification") or {}
     same_document = previous_verification.get("document_sha256") == digest
     effective_signature_overrides = manual_signature_overrides
-    if same_document and manual_signature_overrides is None and signatures_verified is not False:
+    if same_document and signatures_verified is not False and (
+        manual_signature_overrides is None
+        or isinstance(manual_signature_overrides, dict) and manual_signature_overrides
+    ):
         recorded_overrides = (previous_metadata.get("signed_approval_evidence") or {}).get("manual_signature_overrides") or {}
-        effective_signature_overrides = {role: True for role, verified in recorded_overrides.items() if verified is True} or None
+        # Reviewing a remaining signature supplements the review of these exact
+        # source bytes. A different PDF must never inherit those confirmations;
+        # an explicit empty object still requests a fresh review.
+        effective_signature_overrides = {
+            **{role: True for role, verified in recorded_overrides.items() if verified is True},
+            **(manual_signature_overrides or {}),
+        } or None
     detected = _apply_manual_signature_overrides(
         detect_approval_evidence(pdf_bytes, _source=source) if source is not None else detect_approval_evidence(pdf_bytes),
         effective_signature_overrides,
     )
+    recorded_names = {
+        approval_role(row.get("role_key") or row.get("role", "")): row.get("user_name", "")
+        for row in (previous_verification.get("source_approval_rows") or [])
+        if same_document and isinstance(row, dict) and row.get("user_name")
+    }
+    approval_names = {**detected["approver_names"], **recorded_names, **(approvals or {})}
+    if not detected.get("approval_rows") and all(
+        detected["manual_signature_overrides"].get(role)
+        and isinstance(approval_names.get(role), str) and approval_names[role].strip()
+        for role in APPROVAL_ROLES
+    ):
+        # A reviewer can explicitly identify and confirm each of the four
+        # source roles even when OCR misses the table. Keep this separate from
+        # automated table/signature detection, and never infer it from a name,
+        # filename, or a global "verified" flag alone.
+        detected["approval_rows"] = [
+            {"role_key": role, "source_role": role.upper(), "name": approval_names[role],
+             "signature_detected": False, "signature_candidate": False,
+             "evidence_source": "manual_review"}
+            for role in APPROVAL_ROLES
+        ]
+        detected["manual_table_reviewed"] = True
     signatures_verified = document_is_signed_off(detected) if signatures_verified is None else (
         signatures_verified and document_is_signed_off(detected)
     )
@@ -943,7 +990,7 @@ def import_signed_pr_pdf(
         pr.preferred_supplier_if_any = fields["preferred_supplier"] or pr.preferred_supplier_if_any
         pr.price_description = pr.product_service
         if fields["price_lines"]:
-            pr.items = fields["price_lines"]
+            pr.items = _price_lines_as_items(fields["price_lines"])
             first_price_remarks = fields.get("price_remarks") or fields["price_lines"][0].get("remarks", "")
             if first_price_remarks:
                 pr.price_remarks = first_price_remarks
@@ -961,6 +1008,13 @@ def import_signed_pr_pdf(
 
     metadata = dict(pr.price_remarks_data or {})
     original_import_source = metadata.get("import_source")
+    source_snapshot = _serialize_extracted_fields(source_fields)
+    approved_snapshot = _serialize_extracted_fields(source_fields if attach_only else fields)
+    if same_document and attach_only:
+        # A signature-only review of the same bytes must retain the original
+        # extraction and the commercial corrections already reviewed for them.
+        source_snapshot = previous_verification.get("source_fields") or source_snapshot
+        approved_snapshot = previous_verification.get("approved_fields") or approved_snapshot
     metadata.update({
         "import_source": "signed_pr_pdf",
         "import_operation": "create" if create_new else "update",
@@ -970,8 +1024,8 @@ def import_signed_pr_pdf(
             "document_sha256": digest,
             "attach_only": attach_only,
             "comparison": comparison,
-            "source_fields": _serialize_extracted_fields(source_fields),
-            "approved_fields": _serialize_extracted_fields(source_fields if attach_only else fields),
+            "source_fields": source_snapshot,
+            "approved_fields": approved_snapshot,
             "reviewed_by_id": str(uploaded_by.pk),
             "reviewed_at": timezone.now().isoformat(),
         },
@@ -1001,6 +1055,14 @@ def import_signed_pr_pdf(
             "automated_signatures": detected.get("automated_signatures", {}),
             "manual_signature_overrides": detected.get("manual_signature_overrides", {}),
             "signature_sources": detected.get("signature_sources", {}),
+            "signature_candidates": detected.get("signature_candidates", {}),
+            "signature_density": detected.get("signature_density", {}),
+            "approval_evidence_issues": detected.get("approval_evidence_issues", []),
+            "manual_table_reviewed": detected.get("manual_table_reviewed", False),
+            "reviewed_approver_names": {
+                role: approval_names[role] for role in APPROVAL_ROLES
+                if (approvals or {}).get(role) or recorded_names.get(role)
+            },
             "approver_names": detected.get("approver_names", {}),
             "date_present": detected.get("date_present", False),
             "date_ocr": detected.get("date_ocr", []),
@@ -1019,12 +1081,15 @@ def import_signed_pr_pdf(
             else:
                 metadata.pop(key, None)
     if manual_overrides or any(detected.get("manual_signature_overrides", {}).values()):
+        corrected_fields = set((manual_overrides or {}).keys())
+        if same_document:
+            corrected_fields.update((previous_metadata.get("manual_ocr_review") or {}).get("corrected_fields") or [])
         metadata["manual_ocr_review"] = {
             "applied": True,
             "reviewed_at": timezone.now().isoformat(),
             "reviewed_by_id": str(uploaded_by.id),
             "reviewed_by_name": uploaded_by.get_full_name() or uploaded_by.email,
-            "corrected_fields": sorted((manual_overrides or {}).keys()),
+            "corrected_fields": sorted(corrected_fields),
             "verified_signatures": [
                 role for role, verified in detected.get("manual_signature_overrides", {}).items() if verified
             ],
@@ -1042,7 +1107,7 @@ def import_signed_pr_pdf(
         effective_date = fields["issued_date"] or timezone.localdate()
         safe_name = build_procurement_pdf_filename(pr.pr_number, "pr", effective_date)
         key = default_storage.save(
-            f"procurement/signed_requisitions/{effective_date.year}/{safe_name}",
+            f"procurement/signed_requisitions/{pr.pk}/{effective_date.year}/{safe_name}",
             ContentFile(pdf_bytes),
         )
         storage_url = default_storage.url(key)
@@ -1050,6 +1115,7 @@ def import_signed_pr_pdf(
             "type": "signed_purchase_requisition_pdf",
             "document_type": "signed_purchase_requisition_pdf",
             "filename": filename,
+            "storage_key": key,
             "url": storage_url,
             "s3_url": storage_url,
             "sha256": digest,
@@ -1057,7 +1123,6 @@ def import_signed_pr_pdf(
         }]
 
     workflow_issues = []
-    approval_names = {**detected["approver_names"], **(approvals or {})}
     previous_date = _date(previous_verification.get("approval_date", "")) if same_document else None
     approved_on = supplied_approval_date or previous_date or detected.get("approval_date")
     approved_at = timezone.make_aware(datetime.combine(approved_on, time(12, 0))) if approved_on else None
@@ -1089,10 +1154,14 @@ def import_signed_pr_pdf(
             last_signer = user
         external_history.append({
             "step": len(external_history) + 1, "role": row.get("source_role") or role.upper(),
+            "role_key": role,
             "user_id": str(user.pk) if user else None,
             "user_name": approval_names.get(role) or row.get("name", ""),
             "status": "approved" if present else "not_recorded",
             "approved_at": approved_at.isoformat() if present and approved_at else None,
+            "signature_verified": present,
+            "signature_source": detected.get("signature_sources", {}).get(role, "missing"),
+            "signature_candidate": bool(row.get("signature_candidate") or detected.get("signature_candidates", {}).get(role)),
             "source": "signed_purchase_requisition_pdf", "external": True,
         })
     if signatures_verified:
@@ -1119,6 +1188,7 @@ def import_signed_pr_pdf(
     pr.price_remarks_data = metadata
     pr.save()
     po_link = reconcile_pr_po_link(pr, extracted_fields=source_fields)
+    metadata = dict(pr.price_remarks_data or {})
     if po_link["status"] in {"linked", "already_linked"} and pr.status in {"approved", "converted"}:
         pr.status = "converted"
     metadata["po_link"] = po_link
