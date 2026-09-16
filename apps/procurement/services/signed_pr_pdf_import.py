@@ -8,6 +8,7 @@ from difflib import SequenceMatcher
 import hashlib
 import re
 
+from botocore.exceptions import BotoCoreError, ClientError
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
@@ -23,9 +24,14 @@ from .pr_document_reconciliation import compare_existing_pr, reconcile_pr_po_lin
 from .pr_pdf_semantics import apply_pr_layout_semantics, approval_role
 from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
+from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
 
 
 class SignedPRImportError(ValueError):
+    pass
+
+
+class SignedPRStorageError(SignedPRImportError):
     pass
 
 
@@ -1099,28 +1105,46 @@ def import_signed_pr_pdf(
     existing_attachment = next((
         item for item in (pr.attachments or [])
         if isinstance(item, dict) and item.get("sha256") == digest
+        and SIGNED_PR_TYPE in (item.get("type"), item.get("document_type"))
     ), None)
-    if existing_attachment:
-        storage_url = existing_attachment.get("url") or existing_attachment.get("s3_url")
-        existing_attachment["signature_verified"] = signatures_verified
-    else:
-        effective_date = fields["issued_date"] or timezone.localdate()
-        safe_name = build_procurement_pdf_filename(pr.pr_number, "pr", effective_date)
-        key = default_storage.save(
-            f"procurement/signed_requisitions/{pr.pk}/{effective_date.year}/{safe_name}",
-            ContentFile(pdf_bytes),
-        )
-        storage_url = default_storage.url(key)
-        pr.attachments = list(pr.attachments or []) + [{
-            "type": "signed_purchase_requisition_pdf",
-            "document_type": "signed_purchase_requisition_pdf",
-            "filename": filename,
-            "storage_key": key,
-            "url": storage_url,
-            "s3_url": storage_url,
-            "sha256": digest,
-            "signature_verified": signatures_verified,
-        }]
+    existing_key = requisition_source_key(pr, existing_attachment)
+    try:
+        if existing_key and default_storage.exists(existing_key):
+            # Reuse a healthy original and its upload timestamp, renewing only
+            # the temporary URL returned to the reviewer.
+            storage_url = default_storage.url(existing_key)
+            existing_attachment["signature_verified"] = signatures_verified
+        else:
+            # Reattaching the same reviewed bytes must repair an unavailable
+            # original, rather than treating a matching hash as a healthy file.
+            # Never inspect, overwrite or delete an unvalidated historical key.
+            effective_date = fields["issued_date"] or timezone.localdate()
+            safe_name = build_procurement_pdf_filename(pr.pr_number, "pr", effective_date)
+            key = default_storage.save(
+                f"procurement/signed_requisitions/{pr.pk}/{effective_date.year}/{safe_name}",
+                ContentFile(pdf_bytes),
+            )
+            storage_url = default_storage.url(key)
+            attachment = {
+                "type": SIGNED_PR_TYPE,
+                "document_type": SIGNED_PR_TYPE,
+                "filename": filename,
+                "storage_key": key,
+                "url": storage_url,
+                "s3_url": storage_url,
+                "sha256": digest,
+                "uploaded_at": timezone.now().isoformat(),
+                "signature_verified": signatures_verified,
+            }
+            if existing_attachment is not None:
+                existing_attachment.update(attachment)
+                existing_attachment.pop("s3_key", None)
+            else:
+                pr.attachments = list(pr.attachments or []) + [attachment]
+    except (OSError, ValueError, NotImplementedError, BotoCoreError, ClientError) as exc:
+        raise SignedPRStorageError(
+            "The signed PR PDF could not be stored or verified. Please retry."
+        ) from exc
 
     workflow_issues = []
     previous_date = _date(previous_verification.get("approval_date", "")) if same_document else None

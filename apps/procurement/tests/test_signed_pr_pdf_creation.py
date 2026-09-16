@@ -68,8 +68,9 @@ class SignedPRPdfCreationTests(TestCase):
         self.extract = self._patch('extract_signed_pr_fields', side_effect=lambda *args, **kwargs: deepcopy(self.fields))
         self.detect = self._patch('detect_approval_evidence', side_effect=lambda *args: deepcopy(self.evidence))
         self.storage = self._patch('default_storage')
-        self.storage.save.return_value = 'test-only/signed.pdf'
-        self.storage.url.return_value = '/test-only/signed.pdf'
+        self.storage.save.side_effect = lambda key, content: key
+        self.storage.url.side_effect = lambda key: '/media/' + key
+        self.storage.exists.return_value = True
 
     def _patch(self, name, **kwargs):
         patcher = patch(f'{SERVICE}.{name}', **kwargs)
@@ -102,7 +103,7 @@ class SignedPRPdfCreationTests(TestCase):
         pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
         self.assertTrue(result['created'])
         self.assertEqual(pr.pr_number, self.fields['pr_number'])
-        self.assertEqual(pr.attachments[0]['storage_key'], self.storage.save.return_value)
+        self.assertEqual(pr.attachments[0]['storage_key'], self.storage.save.call_args.args[0])
         self.assertTrue(self.storage.save.call_args.args[0].startswith(
             f'procurement/signed_requisitions/{pr.pk}/2026/',
         ))
@@ -517,6 +518,30 @@ class SignedPRPdfCreationTests(TestCase):
             response = view(request)
             self.assertEqual(response.status_code, expected_status, response.data)
         self.assertEqual(PurchaseRequisition.objects.count(), 1)
+
+    def test_api_storage_failure_returns_retryable_503_and_keeps_record_unchanged(self):
+        self._grant_api_access()
+        original = self._import()
+        pr = PurchaseRequisition.objects.get(pk=original['pr_id'])
+        attachments = deepcopy(pr.attachments)
+        verification = deepcopy(pr.price_remarks_data)
+        self.storage.exists.side_effect = OSError('private storage details')
+        self.storage.save.reset_mock()
+        request = APIRequestFactory().post('/api/v1/procurement/requisitions/import-signed-pdf/', {
+            'file': SimpleUploadedFile('signed.pdf', b'%PDF-test', content_type='application/pdf'),
+            'expected_pr_number': pr.pr_number, 'attach_only': 'true',
+        }, format='multipart')
+        force_authenticate(request, self.reviewer)
+
+        response = PurchaseRequisitionViewSet.as_view({'post': 'import_signed_pdf'})(request)
+
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertIn('Please retry', response.data['error'])
+        self.assertNotIn('private', response.data['error'])
+        self.storage.save.assert_not_called()
+        pr.refresh_from_db()
+        self.assertEqual(pr.attachments, attachments)
+        self.assertEqual(pr.price_remarks_data, verification)
 
     def test_admin_multipart_edit_keeps_approved_and_converted_source_history_exact(self):
         self._grant_api_access()

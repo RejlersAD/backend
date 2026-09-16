@@ -500,6 +500,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
         from .services.signed_pr_pdf_import import (
             SignedPRImportError,
+            SignedPRStorageError,
             import_signed_pr_pdf,
             preview_signed_pr_pdf,
         )
@@ -553,6 +554,8 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 create_new=create_value in {'true', '1'},
                 attach_only=attach_value in {'true', '1'},
             )
+        except SignedPRStorageError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except SignedPRImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_201_CREATED if result.get('created') else status.HTTP_200_OK)
