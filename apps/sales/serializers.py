@@ -460,6 +460,15 @@ class DealCreateSerializer(serializers.ModelSerializer):
             'converted_at', 'actual_close_date',
         ]
 
+    def validate_nominated_project_manager(self, value):
+        if self.instance and getattr(value, 'pk', None) != self.instance.nominated_project_manager_id:
+            if ProjectHandover.objects.filter(opportunity=self.instance).exists():
+                raise serializers.ValidationError('The award nomination is retained with its handover. Manage a pending handover assignment through the handover workflow.')
+        if value is not None:
+            from .workflow import require_project_manager
+            require_project_manager(value)
+        return value
+
     def validate(self, attrs):
         framework = attrs.get('framework', getattr(self.instance, 'framework', None))
         client = attrs.get('client', getattr(self.instance, 'client', None))
@@ -556,12 +565,16 @@ class ProjectHandoverSerializer(serializers.ModelSerializer):
     project_manager_name = serializers.CharField(source='project_manager.get_full_name', read_only=True)
     accepted_by_name = serializers.CharField(source='accepted_by.get_full_name', read_only=True)
 
+    def validate_project_manager(self, value):
+        from .workflow import require_project_manager
+        return require_project_manager(value)
+
     class Meta:
         model = ProjectHandover
         fields = '__all__'
         read_only_fields = [
             'id', 'opportunity', 'proposal', 'owner', 'contract_value', 'currency',
-            'accepted_by', 'accepted_at', 'project', 'created_at', 'updated_at',
+            'status', 'accepted_by', 'accepted_at', 'project', 'created_at', 'updated_at',
         ]
 
 

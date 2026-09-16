@@ -24,8 +24,13 @@ def has_commercial_module_access(user, modules=COMMERCIAL_MODULES):
     return any(profile.has_module_access(code) for code in modules)
 
 
-def can_approve_commercial(user):
-    return has_commercial_module_access(user, {'project_control', 'finance_incoming'})
+def can_approve_commercial(user, project=None):
+    from apps.rbac.approval_eligibility import approval_access, has_business_position, project_approval_assignment
+    return bool(approval_access(user, 'project_control') and (
+        project_approval_assignment(user, project) or has_business_position(user, (
+            'finance_manager', 'accounting_manager', 'cfo', 'senior_manager_project_controls',
+        ))
+    ))
 
 
 def accessible_enterprise_projects(user):
@@ -60,6 +65,9 @@ class ProjectControlObjectPermission(BasePermission):
             return False
         if request.method in SAFE_METHODS:
             return accessible_enterprise_projects(request.user).filter(pk=project.pk).exists()
+        if (getattr(view, 'action', '') in getattr(view, 'business_approval_actions', ())
+                and can_approve_commercial(request.user, project)):
+            return True
         return can_write_enterprise_project(request.user, project)
 
 

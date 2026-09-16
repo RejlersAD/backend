@@ -1409,11 +1409,17 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
     user_email = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
     user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
+    can_review = serializers.SerializerMethodField()
+
+    def get_can_review(self, obj):
+        from .approval_eligibility import can_review_profile_document
+        request = self.context.get('request')
+        return bool(request and can_review_profile_document(request.user, obj))
 
     class Meta:
         model = ProfileDocument
         fields = [
-            'id', 'user_profile', 'user_email', 'user_name',
+            'id', 'user_profile', 'user_email', 'user_name', 'can_review',
             'document_type', 'document_type_label', 'document_type_icon', 'document_type_color',
             'document_file', 'document_file_url', 'document_file_name',
             'document_number', 'issue_date', 'expiry_date', 'issuing_authority',
@@ -1423,7 +1429,7 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'user_profile', 'created_at', 'updated_at',
-            'verified_by', 'verified_at', 'is_expired', 'expires_soon',
+            'verified_by', 'verified_at', 'verification_status', 'rejection_reason', 'is_expired', 'expires_soon',
             'document_file_url', 'document_file_name',
         ]
     

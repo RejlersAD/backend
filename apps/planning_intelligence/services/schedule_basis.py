@@ -228,6 +228,8 @@ def build_schedule_basis(run):
 @transaction.atomic
 def approve_schedule_basis(basis, user):
     basis = ScheduleBasis.objects.select_for_update().get(pk=basis.pk)
+    from ..access import require_planning_approval, current_basis
+    require_planning_approval(user, basis.project, current=current_basis(basis))
     readiness = refresh_basis_readiness(basis)
     if not readiness['ready']:
         raise ValueError('Schedule Basis is not ready: ' + ' '.join(readiness['blockers']))

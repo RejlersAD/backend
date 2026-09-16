@@ -347,7 +347,9 @@ class ScheduleDefaultProposalSerializer(serializers.ModelSerializer):
 
     def get_can_approve(self, obj):
         request = self.context.get('request')
-        return bool(request and can_final_approve_defaults(request.user, obj.project))
+        return bool(request and obj.status == 'proposed'
+                    and obj.base_configuration_version == obj.configuration.configuration_version
+                    and can_final_approve_defaults(request.user, obj.project))
 
     def get_tests_passed(self, obj):
         return bool(obj.test_results) and all(row.get('status') == 'passed' for row in obj.test_results)

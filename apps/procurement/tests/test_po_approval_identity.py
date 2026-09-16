@@ -13,6 +13,7 @@ from apps.procurement.services.purchase_order_approvals import (
     can_approve, normalize_assignments, notify_assigned_approvers, pending_entries_for, record_decision,
 )
 from apps.rbac.models import Organization, UserProfile
+from .approval_fixtures import grant_approval, set_position
 
 
 SERVICE = 'apps.procurement.services.purchase_order_approvals'
@@ -30,9 +31,11 @@ class PurchaseOrderApprovalIdentityTests(TestCase):
                 first_name=name, is_superuser=index >= 5,
             )
             profile, _ = UserProfile.objects.get_or_create(user=user, defaults={'organization': organization})
+            grant_approval(user)
             profile.signature_image = f'data:image/png;base64,signature-{name}'
             profile.job_title = f'{name} Job Title'
             profile.save(update_fields=['signature_image', 'job_title'])
+            set_position(user, 'CEO' if index == 5 else 'Engineer')
             self.people[index] = user
             self.profiles[index] = profile
         vendor = Vendor.objects.create(vendor_code='PO-SIGNER', name='PO signer vendor')
@@ -50,6 +53,7 @@ class PurchaseOrderApprovalIdentityTests(TestCase):
             'stage': f'Level {index}', 'level': index, 'user_id': str(self.people[index].pk),
             'approver_email': self.people[index].email, 'approver': self.people[index].first_name,
             'status': 'Pending', **kwargs,
+            'business_position': 'ceo' if index == 5 else 'engineer',
         }
 
     def approve(self, index, **kwargs):
@@ -85,7 +89,7 @@ class PurchaseOrderApprovalIdentityTests(TestCase):
         self.assertEqual(self.notify_next.call_count, 5)
         self.assertEqual(self.order.approved_by_id, self.people[5].pk)
         self.assertEqual(self.order.approved_by_name, 'CEO')
-        self.assertEqual(self.order.approved_by_title, 'CEO Job Title')
+        self.assertEqual(self.order.approved_by_title, UserProfile.objects.get(user=self.people[5]).job_title)
         self.assertEqual(self.order.approval_signature, self.profiles[5].signature_image)
         richa = next(stage for stage in self.order.approval_log if stage['level'] == 0)
         self.assertEqual(richa['approved_by_name'], 'Richa')

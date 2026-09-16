@@ -10,6 +10,7 @@ from apps.planning_intelligence.models import PlanningProject
 from apps.planning_intelligence.schedule_models import Schedule, ScheduleControlSnapshot, ScheduleVersion
 from apps.procurement.models import PurchaseOrder, Vendor
 from apps.users.models import User
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
 
 from ..models import (
     ApprovedHourEntry, BudgetAllocation, ControlAccount, CostAllocation,
@@ -24,6 +25,8 @@ class ActualsAndSnapshotTests(TestCase):
         self.approver = User.objects.create_superuser(
             username='actual-approver', email='actual-approver@example.com', password='unused',
         )
+        grant_approval(self.approver, 'project_control')
+        set_position(self.approver, 'Finance Manager')
         self.project = Project.objects.create(
             code='ACT-001', name='Actuals Project', owner=self.owner, currency='AED', progress=Decimal('40'),
             start_date=date(2026, 1, 1), end_date=date(2026, 12, 31),

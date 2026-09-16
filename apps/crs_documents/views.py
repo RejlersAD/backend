@@ -34,6 +34,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
     queryset = CRSDocument.objects.all()
     serializer_class = CRSDocumentSerializer
     permission_classes = [IsAuthenticated]
+    business_approval_actions = {'approve'}
     
     def get_queryset(self):
         """Filter documents based on user permissions"""
@@ -59,6 +60,8 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Approve a document"""
         document = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'crs_documents', document, 'approve')
         document.status = 'approved'
         document.approved_by = request.user
         document.save()

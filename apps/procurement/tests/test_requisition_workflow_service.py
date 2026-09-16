@@ -22,6 +22,11 @@ class FakeRequisition(SimpleNamespace):
 
 class RequisitionWorkflowServiceTests(SimpleTestCase):
     def setUp(self):
+        # This unit suite isolates state-machine behavior; database-backed
+        # three-gate authorization is exercised in test_approval_three_gates.
+        authorization = patch('apps.procurement.services.requisition_workflow.eligible_stage_assignee', return_value=True)
+        authorization.start()
+        self.addCleanup(authorization.stop)
         self.issuer = FakeUser(
             id='issuer',
             is_superuser=False,
@@ -313,6 +318,21 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
 
         self.assertIs(result, pr)
         self.assertFalse(hasattr(pr, 'save_count'))
+
+    def test_submission_accepts_partial_lines_without_changing_recorded_total(self):
+        for row in [
+            {'description': 'Pricing pending', 'quantity': '', 'unit_price': '', 'total': ''},
+            {'description': '', 'quantity': '', 'unit_price': '100', 'total': '250'},
+            {'description': '', 'quantity': '2', 'unit_price': '', 'total': '250'},
+        ]:
+            with self.subTest(row=row):
+                pr = self._pr()
+                pr.items = [row]
+                pr.total_price = 999
+                RequisitionWorkflowService._submit_locked(pr, self.issuer)
+                self.assertEqual(pr.status, 'submitted')
+                self.assertEqual(pr.total_price, 999)
+                self.assertEqual(pr.items[0]['description'], row['description'])
 
     def test_stages_advance_in_order_and_finish_as_approved(self):
         pr = self._pr(status='submitted')

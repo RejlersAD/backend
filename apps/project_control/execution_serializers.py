@@ -158,7 +158,9 @@ class EPCWorkItemSerializer(serializers.ModelSerializer):
 
     def get_can_review(self, obj):
         request = self.context.get('request')
+        from apps.rbac.approval_eligibility import approval_access
         return bool(request and request.user.is_active and request.user.pk == obj.reviewer_id
+                    and approval_access(request.user, 'project_control')
                     and obj.status in ('submitted', 'reviewed'))
 
     def get_can_accept(self, obj):

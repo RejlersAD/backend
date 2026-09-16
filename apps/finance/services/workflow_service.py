@@ -11,6 +11,8 @@ from .pdf_extractor import PDFExtractor
 from .ai_classifier import InvoiceClassifier
 from .email_service import EmailService
 from ..models import Invoice, Approval, AuditLog, ApprovalRoute, InvoiceStatus, ApprovalStatus
+from ..approval_eligibility import can_approve_invoice
+from rest_framework.exceptions import PermissionDenied, ValidationError
 import logging
 import os
 
@@ -32,6 +34,9 @@ class FinanceWorkflowService:
         """
         try:
             invoice = Invoice.objects.get(id=invoice_id)
+            if invoice.approvals.exists():
+                logger.warning('Invoice %s already has a saved approval route; reprocessing is not permitted.', invoice_id)
+                return False
             self._add_audit_log(invoice, "workflow_started", "Invoice processing workflow initiated")
             
             # Step 1: Extract PDF text and data
@@ -250,9 +255,13 @@ class FinanceWorkflowService:
         # Google Drive integration disabled - invoices stored in database
         pass
     
+    @transaction.atomic
     def _create_approval_workflow(self, invoice: Invoice) -> bool:
         """Create approval workflow based on invoice type and amount"""
         try:
+            invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+            if invoice.approvals.exists():
+                return False
             route = self._get_approval_route(invoice)
             
             if not route:
@@ -263,9 +272,11 @@ class FinanceWorkflowService:
                 logger.warning(f"Approval route {route.id} has empty approval_chain")
                 return False
             
-            # Create approval records - SMART: Skip levels with empty/missing emails
+            from ..approval_eligibility import validated_invoice_route
+            chain = validated_invoice_route(route.approval_chain)
+            # Persist the complete validated route as an invoice-specific snapshot.
             created_count = 0
-            for level_config in route.approval_chain:
+            for level_config in chain:
                 # Skip if email is missing or empty
                 email = level_config.get('email', '').strip()
                 name = level_config.get('name', '').strip()
@@ -357,13 +368,20 @@ class FinanceWorkflowService:
             user=None  # System action
         )
     
-    def process_approval_decision(self, approval_token: str, decision: str, comments: str = '') -> bool:
+    @transaction.atomic
+    def process_approval_decision(self, approval_token: str, decision: str, comments: str = '', *, actor=None) -> bool:
         """Process approval or rejection decision"""
+        reference = Approval.objects.get(approval_token=approval_token)
+        invoice = Invoice.objects.select_for_update().get(pk=reference.invoice_id)
+        approval = Approval.objects.select_for_update().get(pk=reference.pk)
+        approval.invoice = invoice
+        if decision not in ('approve', 'reject'):
+            raise ValidationError('Choose approve or reject.')
+        if not can_approve_invoice(approval, actor):
+            raise PermissionDenied('This invoice is not awaiting approval by your assigned account with approval access.')
         try:
             logger.info(f"🔄 Processing approval decision: token={approval_token}, decision={decision}")
             
-            approval = Approval.objects.get(approval_token=approval_token, status=ApprovalStatus.PENDING)
-            invoice = approval.invoice
             
             logger.info(f"📋 Found approval: {approval.approver_name} (Level {approval.approval_level}) for invoice {invoice.invoice_number}")
             
@@ -416,12 +434,13 @@ class FinanceWorkflowService:
                 logger.info(f"✅ All Level {current_level} approvals complete!")
                 
                 # Move to next level or mark as approved
-                next_level_exists = invoice.approvals.filter(approval_level=current_level + 1).exists()
+                next_level = invoice.approvals.filter(status=ApprovalStatus.PENDING).order_by('approval_level').values_list('approval_level', flat=True).first()
+                next_level_exists = next_level is not None
                 
                 if next_level_exists:
                     # Send next level approval requests
                     next_approvals = invoice.approvals.filter(
-                        approval_level=current_level + 1,
+                        approval_level=next_level,
                         status=ApprovalStatus.PENDING
                     )
                     
@@ -456,6 +475,8 @@ class FinanceWorkflowService:
                             logger.error(f"❌ Failed to send email to {next_approval.approver_email}: {email_error}", exc_info=True)
                 else:
                     # All approvals complete - this was the final approval
+                    if invoice.approvals.exclude(status=ApprovalStatus.APPROVED).exists():
+                        raise ValidationError('All assigned approval stages must be completed first.')
                     invoice.status = InvoiceStatus.APPROVED
                     invoice.processed_at = timezone.now()
                     invoice.save()
@@ -487,4 +508,4 @@ class FinanceWorkflowService:
             return False
         except Exception as e:
             logger.error(f"Approval processing failed: {e}", exc_info=True)
-            return False
+            raise

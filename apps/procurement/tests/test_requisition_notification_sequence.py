@@ -6,6 +6,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.notifications.models import Notification
+from .approval_fixtures import grant_approval, set_position
 from apps.procurement.services.requisition_workflow import (
     RequisitionWorkflowService,
     notify_requisition_approver_changes,
@@ -35,6 +36,9 @@ def requisition(workflow, status='submitted'):
 
 class RequisitionNotificationSequenceTests(SimpleTestCase):
     def setUp(self):
+        authorization = patch(f'{SERVICE_PATH}.eligible_stage_assignee', return_value=True)
+        authorization.start()
+        self.addCleanup(authorization.stop)
         self.users = {
             key: FakeUser(
                 id=key, pk=key, is_superuser=False,
@@ -179,7 +183,9 @@ class RequisitionNotificationDeduplicationTests(TestCase):
         self.user = get_user_model().objects.create_user(
             username='notification-sequence-approver', email='sequence@example.com',
         )
-        self.workflow = [{'level': 0, 'user_id': str(self.user.pk), 'status': 'pending'}]
+        grant_approval(self.user)
+        set_position(self.user)
+        self.workflow = [{'level': 0, 'user_id': str(self.user.pk), 'status': 'pending', 'business_position': 'engineer'}]
         self.pr = requisition(self.workflow)
 
     def notify(self):
@@ -222,7 +228,10 @@ class RequisitionNotificationDeduplicationTests(TestCase):
         peer = get_user_model().objects.create_user(
             username='same-level-peer', email='peer@example.com',
         )
-        self.workflow.append({'level': 0, 'user_id': str(peer.pk), 'status': 'pending'})
+        for user in (replacement, peer):
+            grant_approval(user)
+            set_position(user)
+        self.workflow.append({'level': 0, 'user_id': str(peer.pk), 'status': 'pending', 'business_position': 'engineer'})
 
         def save_notification(**kwargs):
             return Notification.objects.create(

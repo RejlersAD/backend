@@ -180,9 +180,13 @@ test_*.py
 !apps/project_control/tests/test_cumulative_actuals.py
 !apps/project_control/tests/test_document_control.py
 !apps/planning_intelligence/tests/test_schedule_approval.py
+!apps/planning_intelligence/tests/test_business_approval_gates.py
 !apps/planning_intelligence/tests/test_control_observation_history.py
 !apps/project_control/tests/test_portfolio_exceptions.py
 !apps/hr_core/tests/test_graph_assistant_governance.py
+!apps/hr_core/tests/test_business_approval_gates.py
+!apps/rbac/tests/test_profile_documents.py
+!apps/sales/tests/test_workflow.py
 !apps/rbac/tests/test_organization_catalog_data.py
 *.md
 *.txt
@@ -191,6 +195,7 @@ test_*.py
 !docs/PROJECT_RELATIONSHIP_MIGRATION_REPORT.md
 !docs/project-control-governance.md
 !docs/ORGANIZATION_CATALOG.md
+!docs/BUSINESS_APPROVAL_ELIGIBILITY.md
 scripts/timesheet_mirror.env
 scripts/timesheet_mirror*.state.json
 # Allow P&ID analysis config prompt files (engineers tune these without code deploys)

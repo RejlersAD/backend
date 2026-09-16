@@ -11,7 +11,8 @@ def protect_approval_route(existing, incoming, *, level, label, freeze_route=Fal
     proposed = [row for row in incoming if isinstance(row, dict) and not row.get('external') and not row.get('evidence_document_id')]
 
     def position(row, index):
-        return level(row, index), str(row.get(label) or '').strip().lower()
+        return (level(row, index), str(row.get(label) or '').strip().lower(),
+                str(row.get('business_position') or '').strip().lower())
 
     if freeze_route and Counter(position(row, index) for index, row in enumerate(previous)) != Counter(
         position(row, index) for index, row in enumerate(proposed)
@@ -30,6 +31,20 @@ def protect_approval_route(existing, incoming, *, level, label, freeze_route=Fal
             for candidate in candidates
         ):
             raise ValidationError('An approval with a recorded decision cannot be removed, moved, or reassigned.')
+
+
+def protect_requisition_approval_route(existing, incoming, **kwargs):
+    """Obsolete Level 1 positions do not prevent a pending employee replacement."""
+    from .approval_eligibility import is_employee_selected_pr_stage
+
+    def comparable(rows):
+        return [
+            {**row, 'business_position': ''}
+            if isinstance(row, dict) and is_employee_selected_pr_stage(row) else row
+            for row in rows
+        ]
+
+    protect_approval_route(comparable(existing), comparable(incoming), **kwargs)
 
 
 def stage_signature_issue(stage):

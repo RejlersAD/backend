@@ -674,6 +674,7 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
 
 class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     """
     ViewSet for P&ID conversion management
     
@@ -1291,6 +1292,8 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Approve P&ID conversion"""
         conversion = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'pfd_to_pid', conversion, 'approve')
         conversion.reviewed_by = request.user
         conversion.reviewed_at = timezone.now()
         conversion.review_notes = request.data.get('review_notes', '')

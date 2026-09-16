@@ -43,7 +43,8 @@ class NotificationActionSerializer(serializers.ModelSerializer):
         data['action_url'] = notification_action_url(instance)
         reason = approval_assignment_issue(instance)
         if reason:
-            data['metadata'] = {**(data.get('metadata') or {}), 'requires_action': False, 'approval_obsolete': True}
+            metadata = data.get('metadata')
+            data['metadata'] = {**(metadata if isinstance(metadata, dict) else {}), 'requires_action': False, 'approval_obsolete': True}
             data['action_label'] = 'View Request'
         return data
 

@@ -16,6 +16,7 @@ from apps.rbac.models import (Module, Organization, Permission, Role, RoleModule
                               UserPermissionOverride, UserProfile, UserRole)
 from apps.rbac.module_actions import ensure_module_actions
 from apps.rbac.route_guard import secure_module_endpoints
+from .approval_fixtures import set_position
 
 
 urlpatterns = [path('api/v1/procurement/', include('apps.procurement.urls'))]
@@ -24,7 +25,10 @@ BASE = '/api/v1/procurement/receipts/'
 SUMMARY = BASE + 'inspection-summary/'
 
 
-@override_settings(ROOT_URLCONF=__name__, TIME_ZONE='Asia/Dubai')
+@override_settings(ROOT_URLCONF=__name__, TIME_ZONE='Asia/Dubai', RADAI_BUSINESS_APPROVAL_ROUTES={
+    f'procurement_receipts.Receipt.{operation}': {'positions': ['engineer'], 'pending_states': ['pending']}
+    for operation in ('accept', 'reject_delivery')
+})
 class ReceiptInspectionTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -32,6 +36,7 @@ class ReceiptInspectionTests(TestCase):
         org, _ = Organization.objects.get_or_create(code='receipt-tests', defaults={'name': 'Receipt tests'})
         self.profile, _ = UserProfile.objects.get_or_create(user=self.user, defaults={'organization': org})
         self.profile.roles.clear()
+        set_position(self.user)
         self.role = Role.objects.create(code='receipt-reader', name='Receipt reader', level=3)
         UserRole.objects.create(user_profile=self.profile, role=self.role)
         self.client = APIClient()
@@ -291,6 +296,21 @@ class ReceiptInspectionTests(TestCase):
         self.assertEqual(response.data['inspection_notes'], 'Recorded damage')
         self.assertFalse(response.data['capabilities']['reject'])
 
+    def test_missing_route_or_wrong_official_position_blocks_even_superuser(self):
+        self.grant()
+        self.grant('approve')
+        item = self.receipt('POSITION-GATES')
+        url = BASE + str(item.pk) + '/accept/'
+        with override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={}):
+            self.assertEqual(self.client.post(url).status_code, 403)
+            self.assertFalse(self.get(summary=False)['results'][0]['capabilities']['accept'])
+        self.user.is_superuser = True
+        self.user.save(update_fields=['is_superuser'])
+        set_position(self.user, 'CEO')
+        self.assertEqual(self.client.post(url).status_code, 403)
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'pending')
+
     def test_create_only_can_record_pending_but_cannot_set_inspection_dispositions(self):
         self.grant()
         self.grant('create')
@@ -322,18 +342,17 @@ class ReceiptInspectionTests(TestCase):
         rejected = self.receipt('REJECTED-EDIT', status='rejected')
         self.assertEqual(self.client.patch(BASE + str(rejected.pk) + '/', {'notes': 'Clarification'}, format='json').status_code, 200)
 
-    def test_approve_grant_allows_generic_dispositions_without_dedicated_accept_side_effects(self):
+    def test_approve_grant_cannot_bypass_named_disposition_actions(self):
         self.grant()
         for action in ['create', 'update', 'approve']:
             self.grant(action)
         order = self.receipt('ORDER-SOURCE').purchase_order
         for disposition in ['accepted', 'rejected', 'partial']:
             response = self.client.post(BASE, {'purchase_order': str(order.pk), 'status': disposition}, format='json')
-            self.assertEqual(response.status_code, 201, response.data)
-            self.assertEqual(response.data['status'], disposition)
+            self.assertEqual(response.status_code, 403, response.data)
         pending = self.receipt('CHANGE-SOURCE', po=order)
         response = self.client.patch(BASE + str(pending.pk) + '/', {'status': 'accepted'}, format='json')
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 403)
         order.refresh_from_db()
         self.assertEqual(order.status, 'draft')
         self.assertIsNone(order.actual_delivery)

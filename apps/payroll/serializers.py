@@ -546,6 +546,12 @@ from .models import DailyWorkLog  # noqa: E402
 
 
 class DailyWorkLogSerializer(serializers.ModelSerializer):
+    can_approve = serializers.SerializerMethodField()
+
+    def get_can_approve(self, obj):
+        from .views import DailyWorkLogViewSet
+        request = self.context.get('request')
+        return bool(request and DailyWorkLogViewSet._can_approve(request.user, obj))
     user_full_name       = serializers.SerializerMethodField(read_only=True)
     priority_display     = serializers.CharField(source='get_priority_display',         read_only=True)
     status_display       = serializers.CharField(source='get_status_display',           read_only=True)
@@ -562,7 +568,7 @@ class DailyWorkLogSerializer(serializers.ModelSerializer):
             'status', 'status_display',
             'notes', 's3_export_key',
             # approval
-            'approval_status', 'approval_status_display',
+            'approval_status', 'approval_status_display', 'can_approve',
             'approved_by', 'approved_by_name', 'approved_at', 'approval_note',
             # routing
             'submitted_to_role', 'submitted_to_role_display',

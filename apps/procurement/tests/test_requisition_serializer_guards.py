@@ -31,6 +31,9 @@ class _Approver:
 
 class PurchaseRequisitionSerializerGuardTests(SimpleTestCase):
     def setUp(self):
+        eligibility = patch('apps.procurement.services.approval_eligibility.eligible_stage_assignee', return_value=True)
+        eligibility.start()
+        self.addCleanup(eligibility.stop)
         self.issuer = SimpleNamespace(id='issuer-1', is_superuser=False)
         self.other_user = SimpleNamespace(id='other-1', is_superuser=False)
         self.approver = _Approver()

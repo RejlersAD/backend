@@ -20,6 +20,8 @@ from apps.rbac.models import Module, Organization, Permission, Role, RoleModule,
 from apps.rbac.module_actions import ensure_module_actions
 from apps.rbac.route_guard import secure_module_endpoints
 
+from .approval_fixtures import grant_approval, set_position
+
 
 urlpatterns = [path('api/v1/procurement/', include('apps.procurement.urls'))]
 secure_module_endpoints(urlpatterns)
@@ -276,6 +278,55 @@ class ProcurementCRUDLifecycleTests(TestCase):
         # Reusing a deleted manual number does not collide with a ghost record.
         recreated = self.client.post(f'{BASE}requisitions/', payload, format='multipart')
         self.assertEqual(recreated.status_code, 201, recreated.data)
+
+    def test_pr_without_supplier_selection_reason_can_be_created_submitted_and_approved(self):
+        grant_approval(self.user, 'procurement_requisitions')
+        issuer_profile = self.user.rbac_profile
+        issuer_profile.signature_image = 'supplier-reason-procurement-signature'
+        issuer_profile.save(update_fields=['signature_image'])
+        set_position(self.user, 'Procurement Manager')
+        approver = get_user_model().objects.create_user(
+            'supplier-reason-approver', email='supplier-reason-approver@example.test',
+        )
+        profile, _ = UserProfile.objects.get_or_create(
+            user=approver, defaults={'organization': self.user.rbac_profile.organization},
+        )
+        profile.signature_image = 'supplier-reason-approval-signature'
+        profile.save(update_fields=['signature_image'])
+        set_position(approver, 'Full Stack Developer')
+        created = self.client.post(f'{BASE}requisitions/', {
+            'pr_number': 'RAD-PRJ-PR-0094_2026',
+            'requisition_type': 'general', 'po_applicable': True,
+            'vendor': str(self.vendor.pk),
+            'selected_vendors': [{'vendor_id': str(self.vendor.pk), 'name': self.vendor.name}],
+            'approval_workflow_config': [{
+                'level': 0, 'role': 'Procurement Department', 'user_id': str(self.user.pk),
+            }, {
+                'level': 1, 'role': 'Level 1 Approver', 'user_id': str(approver.pk),
+            }],
+        }, format='json')
+        self.assertEqual(created.status_code, 201, created.data)
+        detail_url = f"{BASE}requisitions/{created.data['id']}/"
+        submitted = self.client.post(detail_url + 'submit/', {}, format='json')
+        self.assertEqual(submitted.status_code, 200, submitted.data)
+        procurement_approved = self.client.post(detail_url + 'process_dynamic_approval/', {}, format='json')
+        self.assertEqual(procurement_approved.status_code, 200, procurement_approved.data)
+        self.client.force_authenticate(approver)
+        approved = self.client.post(detail_url + 'process_dynamic_approval/', {}, format='json')
+        self.assertEqual(approved.status_code, 200, approved.data)
+        record = PurchaseRequisition.objects.get(pk=created.data['id'])
+        self.assertEqual(record.status, 'approved')
+        self.assertEqual(record.vendor_selection_reason, '')
+
+    def test_pr_edit_without_supplier_selection_reason_preserves_historical_values(self):
+        self.pr.vendor_selection_reason = 'Historical vendor recommendation'
+        self.pr.save(update_fields=['vendor_selection_reason'])
+        response = self.client.patch(f'{BASE}requisitions/{self.pr.pk}/', {
+            'purchase_recommendation': 'Updated purchase recommendation',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.pr.refresh_from_db()
+        self.assertEqual(self.pr.vendor_selection_reason, 'Historical vendor recommendation')
 
     def test_native_pr_attachment_respects_same_owner_rule_as_edit(self):
         other = get_user_model().objects.create_user('other-issuer')

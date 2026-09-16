@@ -222,12 +222,29 @@ class PayslipSerializer(serializers.ModelSerializer):
 
 class PayrollRunSerializer(serializers.ModelSerializer):
     status_label = serializers.SerializerMethodField()
+    can_hr_approve = serializers.SerializerMethodField()
+    can_finance_approve = serializers.SerializerMethodField()
+    can_release = serializers.SerializerMethodField()
+
+    def _can_transition(self, obj, target):
+        from .services.workflow import can_transition
+        request = self.context.get('request')
+        return bool(request and can_transition(obj, request.user, target))
+
+    def get_can_hr_approve(self, obj):
+        return self._can_transition(obj, catalog.Status.HR_APPROVED)
+
+    def get_can_finance_approve(self, obj):
+        return self._can_transition(obj, catalog.Status.FINANCE_APPROVED)
+
+    def get_can_release(self, obj):
+        return self._can_transition(obj, catalog.Status.RELEASED)
 
     class Meta:
         model = PayrollRun
         fields = [
             'id', 'year', 'month', 'cycle_code',
-            'status', 'status_label',
+            'status', 'status_label', 'can_hr_approve', 'can_finance_approve', 'can_release',
             'source_type',
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
             'total_hours', 'total_days',

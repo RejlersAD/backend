@@ -8,6 +8,7 @@ from __future__ import annotations
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.utils import timezone
+from apps.rbac.approval_eligibility import approval_access, has_business_position, require_approval
 
 from ..catalog import (
     Status, WORKFLOW_TRANSITIONS, WORKFLOW_ROLES, status_meta,
@@ -39,20 +40,28 @@ def _user_roles(user) -> set:
 
 
 def _check_role(user, target_status: str) -> None:
-    # `user=None` means a system context (management commands, Celery tasks).
-    # We trust those callers and skip role enforcement.
-    if user is None:
-        return
-    allowed = WORKFLOW_ROLES.get(target_status, [])
-    if not allowed:
-        return
-    if 'Admin' in _user_roles(user):
-        return
-    if _user_roles(user) & set(allowed):
-        return
-    raise PermissionDenied(
-        f"User lacks required role for '{target_status}'. Need one of: {allowed}"
-    )
+    require_approval(user, 'payroll', assigned=True, current=True, positions=_positions(target_status))
+
+
+def _positions(target_status):
+    return {
+        Status.HR_APPROVED: ('hr_manager', 'hr_admin', 'head_hr_administration'),
+        Status.FINANCE_APPROVED: ('finance_manager', 'finance_admin', 'cfo'),
+        Status.RELEASED: ('finance_manager', 'finance_admin', 'cfo'),
+        Status.DRAFT: ('hr_manager', 'hr_admin', 'finance_manager', 'finance_admin'),
+    }.get(target_status, ())
+
+
+def can_transition(run, user, target_status):
+    if target_status not in WORKFLOW_TRANSITIONS.get(run.status, []):
+        return False
+    if target_status == Status.FINANCE_APPROVED and not (run.hr_approved_at and run.hr_approved_by_id):
+        return False
+    if target_status == Status.RELEASED and not (
+        run.hr_approved_at and run.hr_approved_by_id and run.finance_approved_at and run.finance_approved_by_id
+    ):
+        return False
+    return approval_access(user, 'payroll') and has_business_position(user, _positions(target_status))
 
 
 def _check_transition(current: str, target: str) -> None:
@@ -93,8 +102,13 @@ def transition(run: PayrollRun, target_status: str, *, user=None, note: str = ''
     Validates the transition, checks role, stamps timestamps, writes an
     audit log row, persists the run. Returns the saved run.
     """
-    _check_transition(run.status, target_status)
+    locked = PayrollRun.objects.select_for_update().get(pk=run.pk)
+    _check_transition(locked.status, target_status)
     _check_role(user, target_status)
+    if not can_transition(locked, user, target_status):
+        raise ValidationError('Complete the preceding approvals before recording this decision.')
+    original = run
+    run = locked
 
     from_status = run.status
     _stamp(run, target_status, user)
@@ -108,6 +122,7 @@ def transition(run: PayrollRun, target_status: str, *, user=None, note: str = ''
         actor=user if (user and getattr(user, 'is_authenticated', False)) else None,
         note=note or f"{status_meta(from_status).get('label', from_status)} → {status_meta(target_status).get('label', target_status)}",
     )
+    original.refresh_from_db()
     return run
 
 

@@ -267,7 +267,21 @@ class PlanningJobSerializer(serializers.ModelSerializer):
         return obj.status in {'succeeded', 'failed', 'cancelled'}
 
     def to_representation(self, instance):
-        return _json_safe(super().to_representation(instance))
+        data = _json_safe(super().to_representation(instance))
+        result = data.get('result_data') or {}
+        if result.get('state') == 'ready_for_approval':
+            from .models import ScheduleVersion
+            from .services.schedule_approval import can_approve_schedule
+            request = self.context.get('request')
+            version = ScheduleVersion.objects.filter(
+                pk=(result.get('summary') or {}).get('schedule_version_id'),
+                schedule__project=instance.project, is_deleted=False,
+            ).first()
+            result['can_approve'] = bool(request and version and can_approve_schedule(
+                version, request.user, allow_unapproved_assurance=True,
+            ))
+            data['result_data'] = result
+        return data
 
 
 class PlanningAuditEventSerializer(serializers.ModelSerializer):

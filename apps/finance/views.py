@@ -400,6 +400,9 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         Process or reprocess an invoice through the workflow
         """
         invoice = self.get_object()
+        if invoice.approvals.exists():
+            return Response({'detail': 'This invoice already has an approval route. Its review history cannot be rebuilt by reprocessing.'},
+                            status=status.HTTP_409_CONFLICT)
         
         logger.info(f"Processing invoice {invoice.id} (current status: {invoice.status})")
         
@@ -495,9 +498,16 @@ class ApprovalRouteViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'finance'
 
+    def perform_destroy(self, instance):
+        from apps.rbac.approval_eligibility import has_business_position
+        from rest_framework.exceptions import PermissionDenied
+        if not has_business_position(self.request.user, ('finance_manager', 'finance_admin', 'accounting_manager')):
+            raise PermissionDenied('Only the designated Finance administrator may configure invoice approval routes.')
+        instance.delete()
+
 
 @api_view(['GET'])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def get_approval_details(request, token):
     """
     Get approval details for frontend form (no authentication required - token-based)
@@ -506,6 +516,11 @@ def get_approval_details(request, token):
     try:
         approval = get_object_or_404(Approval, approval_token=token)
         invoice = approval.invoice
+        from .approval_eligibility import invoice_approver, can_approve_invoice
+        from apps.rbac.approval_eligibility import approval_access
+        assigned = invoice_approver(approval)
+        if not assigned or assigned.pk != request.user.pk or not approval_access(request.user, 'finance_incoming'):
+            return Response({'error': 'This approval link is not assigned to your account.'}, status=403)
         
         # Check if already processed
         already_decided = approval.status != 'pending'
@@ -520,6 +535,7 @@ def get_approval_details(request, token):
                 'level_name': approval.level_name,
                 'status': approval.status,
                 'already_decided': already_decided,
+                'can_approve': can_approve_invoice(approval, request.user),
                 'decision_date': approval.decision_date,
                 'comments': approval.comments
             },
@@ -544,7 +560,7 @@ def get_approval_details(request, token):
         )
 
 @api_view(['POST'])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def submit_approval_decision(request, token):
     """
     Submit approval decision from RAD AI frontend form
@@ -553,6 +569,9 @@ def submit_approval_decision(request, token):
     try:
         approval = get_object_or_404(Approval, approval_token=token)
         invoice = approval.invoice
+        from .approval_eligibility import can_approve_invoice
+        if not can_approve_invoice(approval, request.user):
+            return Response({'error': 'This approval is not currently assigned to you with approval access.'}, status=403)
         
         # Check if already processed
         if approval.status != 'pending':
@@ -580,7 +599,8 @@ def submit_approval_decision(request, token):
         success = workflow_service.process_approval_decision(
             str(token),
             decision,
-            comments or f"{decision.title()}d via RAD AI by {approval.approver_name}"
+            comments or f"{decision.title()}d via RAD AI by {approval.approver_name}",
+            actor=request.user,
         )
         
         if success:
@@ -625,6 +645,9 @@ def submit_approval_decision(request, token):
             {'error': 'An error occurred while processing your decision'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+submit_approval_decision.cls.business_approval_actions = {'submit_approval_decision'}
+
 
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])  # Email links don't have auth

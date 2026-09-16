@@ -13,6 +13,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.approval_eligibility import guarded_business_approval
 from django.db.models import Q, Count, Sum, Avg
 from django.utils import timezone
 from datetime import timedelta
@@ -241,6 +242,11 @@ class VendorViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {
+        'approve', 'reject', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
+        'eng_manager_approve', 'eng_manager_reject', 'manager_projects_approve',
+        'manager_projects_reject', 'process_dynamic_approval', 'process_dynamic_rejection',
+    }
     """
     ViewSet for Purchase Requisition management
     
@@ -271,9 +277,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     parser_classes = [FormParser, MultiPartParser, JSONParser]
 
     def get_permissions(self):
-        # Approval stages may be assigned to any active employee. The workflow
-        # service verifies that the signed-in user owns the current stage, so
-        # those employees do not also need procurement module access.
+        # The guard and workflow service enforce the current assignment.
+        # Generic Level 1 employees can decide their assigned request without
+        # module-wide access; fixed business roles retain their approval grants.
         approval_actions = {
             'retrieve',
             'uploaded_document_content',
@@ -297,6 +303,27 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if getattr(self, 'action', None) in {'convert_to_po', 'link_purchase_order'}:
             self.module_required = 'procurement_orders'
         return super().get_permissions()
+
+    def record_scoped_approval_allowed(self, request, module):
+        """Allow only the current generic Level 1 employee's own decision."""
+        from .services.approval_eligibility import MODULE_PR, is_employee_selected_pr_stage
+
+        if module != MODULE_PR or getattr(self, 'action', '') not in {
+            'pm_approve', 'pm_reject',
+            'process_dynamic_approval', 'process_dynamic_rejection',
+        }:
+            return False
+        pr = self.get_object()
+        pr = PurchaseRequisition.objects.select_for_update().get(pk=pr.pk)
+        if not RequisitionWorkflowService.can_approve(pr, request.user):
+            return False
+        workflow = RequisitionWorkflowService._workflow(pr)
+        _, active_stages = RequisitionWorkflowService._active_level_stages(pr, workflow)
+        return any(
+            is_employee_selected_pr_stage(stage)
+            and RequisitionWorkflowService._stage_matches_user(stage, request.user)
+            for _, stage in active_stages
+        )
 
     def retrieve(self, request, *args, **kwargs):
         pr = self.get_object()
@@ -1550,11 +1577,12 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 standards = ', '.join([str(s) for s in standards if s])
             standards = standards or 'Standard'
 
-            qty = _to_float(item.get('quantity', item.get('qty', 1)), 1)
+            qty = _to_float(item.get('quantity', item.get('qty')), None)
             uom = item.get('uom') or item.get('unit_of_measure') or item.get('unit') or 'EA'
-            unit_price = _to_float(item.get('unit_price', item.get('price', 0)), 0)
+            unit_price = _to_float(item.get('unit_price', item.get('price')), None)
             discount = _to_float(item.get('discount', item.get('line_discount', 0)), 0)
-            line_total = _to_float(item.get('line_total', item.get('total', (qty * unit_price) - discount)), (qty * unit_price) - discount)
+            calculated_total = (qty * unit_price) - discount if qty is not None and unit_price is not None else None
+            line_total = _to_float(item.get('line_total', item.get('total')), calculated_total)
 
             normalized_items.append({
                 'description': description,
@@ -1571,11 +1599,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 Paragraph(str(idx), style_table_cell),
                 Paragraph(item['description'], style_table_cell),
                 Paragraph(f"<font color='#2563EB'><b>{item['standards']}</b></font>", style_table_cell),
-                Paragraph(f"{item['qty']:,.2f}".rstrip('0').rstrip('.'), style_table_cell),
+                Paragraph(f"{item['qty']:,.2f}".rstrip('0').rstrip('.') if item['qty'] is not None else '', style_table_cell),
                 Paragraph(str(item['uom']), style_table_cell),
-                Paragraph(f"{item['unit_price']:,.2f}", style_table_cell),
+                Paragraph(f"{item['unit_price']:,.2f}" if item['unit_price'] is not None else '', style_table_cell),
                 Paragraph(f"{item['discount']:,.2f}", style_table_cell),
-                Paragraph(f"<b>{item['line_total']:,.2f}</b>", style_table_cell),
+                Paragraph(f"<b>{item['line_total']:,.2f}</b>" if item['line_total'] is not None else '', style_table_cell),
             ])
 
         items_table = Table(items_data, colWidths=[0.35 * inch, 2.15 * inch, 1.6 * inch, 0.5 * inch, 0.5 * inch, 0.85 * inch, 0.8 * inch, 0.9 * inch])
@@ -1593,7 +1621,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         story.append(items_table)
         story.append(Spacer(1, 12))
 
-        subtotal = _to_float(pr.net_total_excl_vat, sum(item['line_total'] for item in normalized_items))
+        subtotal = _to_float(pr.net_total_excl_vat, sum(item['line_total'] or 0 for item in normalized_items))
         vat_value = _to_float(pr.total_price, subtotal) - _to_float(pr.net_total_excl_vat, subtotal)
         grand_total = _to_float(pr.total_price, subtotal + vat_value)
         currency = pr.currency or 'AED'
@@ -1905,6 +1933,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject'}
     queryset = PurchaseOrder.objects.all().select_related(
         'vendor', 'pr_reference', 'project', 'enterprise_project'
     ).prefetch_related('receipts').order_by('-created_at', '-id')
@@ -2467,6 +2496,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     pagination_class = ReceiptPagination
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
+    business_approval_actions = {'accept', 'reject_delivery'}
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     
     def get_queryset(self):
@@ -2497,6 +2527,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return Response(response_data)
 
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('procurement_receipts')
     def accept(self, request, pk=None):
         receipt = self.get_object()
         if receipt.status != 'pending':
@@ -2511,6 +2542,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(receipt).data)
     
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('procurement_receipts')
     def reject_delivery(self, request, pk=None):
         receipt = self.get_object()
         if receipt.status != 'pending':
@@ -2908,6 +2940,7 @@ class BudgetViewSet(viewsets.ModelViewSet):
     serializer_class = BudgetSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement'
+    business_approval_actions = {'approve'}
     filterset_fields = ['project', 'category', 'fiscal_year', 'is_approved']
     search_fields = ['project__project_number', 'project__project_name', 'description']
     ordering_fields = ['category', 'allocated_amount', 'fiscal_year', 'created_at']
@@ -2927,6 +2960,7 @@ class BudgetViewSet(viewsets.ModelViewSet):
         return queryset.select_related('project', 'cost_center', 'approved_by')
     
     @action(detail=True, methods=['post'])
+    @guarded_business_approval('procurement')
     def approve(self, request, pk=None):
         budget = self.get_object()
         budget.is_approved = True

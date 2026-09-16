@@ -87,7 +87,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """Set owner to current user if not specified"""
-        if 'owner_id' not in serializer.validated_data:
+        if 'owner' not in serializer.validated_data:
             serializer.save(owner=self.request.user)
         else:
             serializer.save()
@@ -99,6 +99,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def add_member(self, request, pk=None):
         """Add a team member to the project"""
         project = self.get_object()
@@ -110,6 +111,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 {'error': 'user_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        from django.contrib.auth import get_user_model
+        from django.shortcuts import get_object_or_404
+        from rest_framework.exceptions import ValidationError
+        from .project_assignment_policy import require_membership_change
+
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        target = get_object_or_404(get_user_model().objects.filter(is_active=True), pk=user_id)
+        if role not in dict(ProjectMember._meta.get_field('role').choices):
+            raise ValidationError({'role': 'Select a valid project responsibility.'})
+        current = ProjectMember.objects.filter(project=project, user=target).first()
+        require_membership_change(request.user, project, target, role, current)
 
         try:
             member, created = ProjectMember.objects.get_or_create(
@@ -131,9 +144,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def remove_member(self, request, pk=None):
         """Remove a team member from the project"""
         project = self.get_object()
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        from .project_assignment_policy import require_assignment_manager
+        require_assignment_manager(request.user, project)
         user_id = request.data.get('user_id')
 
         if not user_id:

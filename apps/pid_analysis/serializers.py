@@ -182,7 +182,7 @@ class PIDIssueSerializer(serializers.ModelSerializer):
             'approval', 'remark', 'location_on_drawing', 'engineering_impact',
             'standard_reference', 'related_issues', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'approval']
     
     def get_engineering_impact(self, obj):
         """Extract engineering_impact from analysis report JSON if available"""
@@ -714,6 +714,7 @@ class IssueUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = PIDIssue
         fields = ['severity', 'status', 'approval', 'remark']
+        read_only_fields = ['approval']
         
     def validate_severity(self, value):
         """Validate severity choices"""

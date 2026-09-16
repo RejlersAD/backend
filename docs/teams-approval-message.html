@@ -1,0 +1,12 @@
+<p><b>@{replace(replace(replace(coalesce(triggerBody()?['title'], 'New approval request assigned'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</b></p>
+<p><b>Request:</b> @{replace(replace(replace(coalesce(triggerBody()?['request'], 'Approval request'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>PO Number:</b> @{replace(replace(replace(coalesce(triggerBody()?['po_number'], 'Not issued'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>Project Name:</b> @{replace(replace(replace(coalesce(triggerBody()?['project_name'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>Project Code:</b> @{replace(replace(replace(coalesce(triggerBody()?['project_id'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>Service:</b> @{replace(replace(replace(coalesce(triggerBody()?['service'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>Description:</b> @{replace(replace(replace(coalesce(triggerBody()?['description'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>Vendor:</b> @{replace(replace(replace(coalesce(triggerBody()?['vendor'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><b>Value:</b> @{replace(replace(replace(coalesce(triggerBody()?['value'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+@{if(equals(triggerBody()?['approval_level'], null), '', concat('<p><b>Approval Level:</b> Level ', string(triggerBody()?['approval_level']), '</p>'))}
+<p><b>Submitted By:</b> @{replace(replace(replace(coalesce(triggerBody()?['submitted_by'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</p>
+<p><a href="@{replace(replace(replace(replace(coalesce(triggerBody()?['action_url'], ''), '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), decodeUriComponent('%22'), '&quot;')}">Open Request</a></p>

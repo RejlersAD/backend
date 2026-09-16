@@ -135,6 +135,7 @@ class ElectricalEquipmentTypeViewSet(viewsets.ModelViewSet):
 
 
 class ElectricalDatasheetViewSet(QualityCheckerMixin, viewsets.ModelViewSet):
+    business_approval_actions = {'approve', 'reject', 'request_revision'}
     """ViewSet for managing electrical datasheets with AI-powered quality checking"""
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -246,6 +247,8 @@ class ElectricalDatasheetViewSet(QualityCheckerMixin, viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Approve datasheet"""
         datasheet = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'electrical_datasheet', datasheet, 'approve')
         
         if datasheet.status != 'under_review':
             return Response(
@@ -270,6 +273,8 @@ class ElectricalDatasheetViewSet(QualityCheckerMixin, viewsets.ModelViewSet):
     def reject(self, request, pk=None):
         """Reject datasheet"""
         datasheet = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'electrical_datasheet', datasheet, 'reject')
         rejection_reason = request.data.get('reason', '')
         
         if datasheet.status != 'under_review':
@@ -295,6 +300,8 @@ class ElectricalDatasheetViewSet(QualityCheckerMixin, viewsets.ModelViewSet):
     def request_revision(self, request, pk=None):
         """Request revision for datasheet"""
         datasheet = self.get_object()
+        from apps.rbac.approval_eligibility import require_configured_approval
+        require_configured_approval(request.user, 'electrical_datasheet', datasheet, 'request_revision')
         revision_notes = request.data.get('notes', '')
         
         if datasheet.status != 'under_review':

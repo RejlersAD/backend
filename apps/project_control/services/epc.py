@@ -120,7 +120,7 @@ def setup_payload(project, user):
         'control_scope': control_scope(project.scope_type),
         'capabilities': {'can_setup': can_write, 'can_link': can_write,
                          'can_associate_requisitions': can_write and has_commercial_module_access(user),
-                         'can_capture_baseline': can_write and can_approve_commercial(user)},
+                         'can_capture_baseline': can_write and can_approve_commercial(user, project)},
     }
 
 
@@ -134,6 +134,8 @@ def setup_epc_project(project, values, *, user):
     serializer = EpcSetupSerializer(data=raw)
     serializer.is_valid(raise_exception=True)
     values = serializer.validated_data
+    from apps.core.project_assignment_policy import require_owner_change
+    require_owner_change(user, project, values['owner'])
     require_editable_delivery_scope(project, values['scope_type'])
     if Project.objects.filter(code__iexact=values['code']).exclude(pk=project.pk).exists():
         raise ValidationError({'code': 'This project code is already in use.'})
@@ -270,7 +272,7 @@ def associate_requisition(project, values, *, user):
     state, _, _ = requisition_match(row, project)
     if state == 'other_project':
         raise ValidationError({'requisition': 'This requisition identifies a different project. Resolve its canonical association first.'})
-    if state not in {'associated', 'exact_match'} and not (values['review_confirmed'] and can_approve_commercial(user)):
+    if state not in {'associated', 'exact_match'} and not (values['review_confirmed'] and can_approve_commercial(user, project)):
         raise ValidationError({'review_confirmed': 'An authorized commercial reviewer must confirm this ambiguous or unmatched association with a reason.'})
     # Nullable joins must not be included in PostgreSQL FOR UPDATE.
     orders = list(PurchaseOrder.objects.select_for_update().filter(pr_reference=row))
@@ -335,7 +337,7 @@ def baseline_payload(project, user):
             'schedule_baselines': list(_approved_baselines(project).values('id', 'name', 'source_version', 'data_date', 'approved_at')),
             'budgets': budget_choices, 'excluded_dependency_budget_count': excluded_budgets,
             'can_capture': bool(user.is_active and can_write_enterprise_project(user, project)
-                and can_approve_commercial(user) and any(can_final_approve_defaults(user, row.schedule.project) for row in baselines)),
+                and can_approve_commercial(user, project) and any(can_final_approve_defaults(user, row.schedule.project) for row in baselines)),
             'blockers': blockers}
 
 
@@ -347,7 +349,7 @@ def _json_safe(value):
 def capture_integrated_baseline(project, values, *, user):
     project = _locked_project(project)
     _write_access(project, user)
-    if not can_approve_commercial(user):
+    if not can_approve_commercial(user, project):
         raise PermissionDenied('Existing commercial approval authority is required to seal an integrated baseline.')
     from ..epc_serializers import BaselineInputSerializer
     serializer = BaselineInputSerializer(data=values)

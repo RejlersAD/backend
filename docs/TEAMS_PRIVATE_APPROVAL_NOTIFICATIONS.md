@@ -18,9 +18,10 @@ with these values:
 The flow is managed outside this repository. Deploying the backend alone does
 not update a flow that builds its own message from individual fields.
 
-1. In the private Flow-bot action, replace the old message mapping with the
-   request body's `message` dynamic value. If using an Adaptive Card action,
-   use the request body's `attachments[0].content` instead.
+1. In the private Flow-bot action, replace the old message layout using the HTML
+   template below. For a plain layout, use the request body's `message` dynamic
+   value with newlines converted to HTML line breaks. If using an Adaptive Card
+   action, use the request body's `attachments[0].content` instead.
 2. Remove the old Due Date row and any required `due_date` property from a custom
    Parse JSON schema. Due dates are no longer sent or rendered in Teams.
 3. If retaining a custom layout, map `po_number`, `project_name`, `project_id`,
@@ -29,6 +30,38 @@ not update a flow that builds its own message from individual fields.
 4. Keep the recipient mapped to `recipient_email` and the action URL mapped to
    `action_url`. Save the flow and verify a controlled approval through the
    configured levels after deploying the backend.
+
+### Paste-ready message for the existing Flow-bot action
+
+Keep **Post as** set to **Flow bot**, **Post in** set to **Chat with Flow bot**,
+and **Recipient** mapped to `recipient_email`.
+
+In **Parameters > Message**, select the `</>` button inside the message editor.
+Replace the entire existing message with the contents of
+[`teams-approval-message.html`](teams-approval-message.html), then save the flow.
+Use the message editor's HTML view, rather than the action's separate **Code
+view** tab. The file is a message fragment, not a complete flow definition.
+
+The template reads the top-level webhook fields with `triggerBody()`, so new
+fields do not need to appear in the dynamic-content picker. If an existing
+Parse JSON action requires `due_date`, remove that requirement as well. Its
+`approval_level` property must accept both `integer` and `null` if present in
+the schema.
+
+The displayed **Project Code** uses `project_id`. **Value** uses `value` as-is
+because it already includes currency; do not prepend `currency` again. The
+approval-level row is omitted only when the value is null, preserving Level 0.
+The title comes from `title`, including for purchase-order-created FYIs. Text
+fields are HTML-escaped so names containing `&`, `<`, or `>` display correctly.
+
+After the backend is deployed, verify a controlled approval in the flow run
+history and recipient chat: the new details should be present, Level 0 should
+display correctly, Due Date should be absent, and **Open Request** should open
+the intended RADAI request. Editing these repository files does not update or
+test the hosted flow.
+
+Microsoft references: [Flow bot messages to a user](https://learn.microsoft.com/en-us/power-automate/teams/send-a-message-in-teams#post-a-message-as-the-flow-bot-directly-to-a-user)
+and [workflow expression functions](https://learn.microsoft.com/en-us/azure/logic-apps/expression-functions-reference).
 
 Configure the backend deployment with:
 

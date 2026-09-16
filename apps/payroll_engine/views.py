@@ -389,6 +389,7 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
 
 # ── PayrollRun CRUD + workflow + Excel ──────────────────────────────
 class PayrollRunViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'hr_approve', 'finance_approve', 'release'}
     # PayrollRunSerializer exposes hr_approved_by/finance_approved_by/
     # released_by/created_by as plain FK fields — without select_related each
     # one fires its own query per row (N+1) whenever non-null.

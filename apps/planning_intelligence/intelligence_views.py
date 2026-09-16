@@ -86,7 +86,7 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
             project=run.project, actor=request.user, action='schedule_basis.created', entity=basis,
             after={'version': basis.version, 'readiness': basis.readiness},
         )
-        return Response(ScheduleBasisSerializer(basis).data, status=status.HTTP_201_CREATED)
+        return Response(ScheduleBasisSerializer(basis, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 class IntelligenceFactViewSet(viewsets.ReadOnlyModelViewSet):
@@ -187,6 +187,7 @@ class DocumentAuthorityRuleViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class ScheduleBasisViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
     serializer_class = ScheduleBasisSerializer
     http_method_names = ['get', 'patch', 'post', 'head', 'options']
@@ -280,7 +281,7 @@ class ScheduleBasisViewSet(viewsets.ModelViewSet):
             after={'basis_id': basis.id, 'job_id': job.id, 'async': True},
         )
         job.refresh_from_db()
-        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+        return Response(PlanningJobSerializer(job, context={'request': request}).data, status=status.HTTP_202_ACCEPTED)
 
 
 class BasisDeliverableViewSet(viewsets.ModelViewSet):
@@ -326,6 +327,7 @@ class BasisDeliverableViewSet(viewsets.ModelViewSet):
 
 
 class GenerationPlanViewSet(viewsets.ModelViewSet):
+    business_approval_actions = {'approve'}
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
     serializer_class = GenerationPlanSerializer
     http_method_names = ['get', 'patch', 'post', 'head', 'options']

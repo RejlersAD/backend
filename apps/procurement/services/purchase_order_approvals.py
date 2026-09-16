@@ -12,6 +12,7 @@ from apps.rbac.models import UserProfile
 from .approval_integrity import stage_signature_issue
 from .employee_display import employee_display_name
 from .notification_context import purchase_order_teams_context
+from .approval_eligibility import MODULE_PO, eligible_stage_assignee, position_matches_stage
 
 
 TECHNICAL_STAGE = 'Technical Approval'
@@ -136,15 +137,7 @@ def _active_profiles(user_ids):
 
 
 def is_finance_profile(profile):
-    department = (profile.department or '').strip().lower()
-    if 'finance' in department or 'financial' in department or 'account' in department:
-        return True
-    return any(
-        (module.code or '').lower().startswith(('finance', 'invoice', 'account'))
-        for role in profile.roles.all()
-        for module in role.modules.all()
-        if role.is_active and module.is_active
-    )
+    return position_matches_stage(profile.user, {'stage': FINANCIAL_STAGE})
 
 
 def _jarmo_user():
@@ -196,8 +189,11 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
             # Optional unassigned stages are not part of the approval queue.
             continue
         profile = profiles[user_id]
-        if stage == FINANCIAL_STAGE and not is_finance_profile(profile):
-            raise ValidationError({'approval_log': 'Financial Approval must be assigned to an active Finance employee.'})
+        if not eligible_stage_assignee(profile.user, entry, MODULE_PO):
+            raise ValidationError({'approval_log': (
+                f'{stage or "Approval stage"} requires an employee in the configured business position '
+                'with Purchase Order approval permission.'
+            )})
 
         user = profile.user
         level = _entry_level(entry, index)
@@ -205,6 +201,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
         same_assignee = bool(previous)
         normalized.append({
             'stage': stage,
+            **({'business_position': entry['business_position']} if entry.get('business_position') else {}),
             'level': level,
             'user_id': user_id,
             'approver': employee_display_name(user),
@@ -251,7 +248,7 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
     teams_context = None
     for index, entry in entries:
         recipient = _resolve_entry_user(entry)
-        if recipient is None:
+        if recipient is None or not eligible_stage_assignee(recipient, entry, MODULE_PO):
             continue
         metadata = {
             'event_type': 'approval_assignment',
@@ -371,7 +368,7 @@ def can_approve(order, actor):
     if not _order_is_actionable(order) or _active_actor_profile(actor) is None:
         return False
     return any(
-        _entry_matches_user(entry, actor)
+        _entry_matches_user(entry, actor) and eligible_stage_assignee(actor, entry, MODULE_PO)
         for _, entry in _active_entries(list(order.approval_log or []))
     )
 
@@ -384,7 +381,7 @@ def pending_entries_for(user, queryset):
         if not _order_is_actionable(order):
             continue
         for index, entry in _active_entries(list(order.approval_log or [])):
-            if not _entry_matches_user(entry, user):
+            if not _entry_matches_user(entry, user) or not eligible_stage_assignee(user, entry, MODULE_PO):
                 continue
             results.append((order, index, entry))
     return results
@@ -409,7 +406,7 @@ def record_decision(order, actor, decision, stage='', comment='', require_signat
     workflow = [dict(entry) for entry in (locked.approval_log or [])]
     candidate = None
     for index, entry in _active_entries(workflow):
-        if not _entry_matches_user(entry, actor):
+        if not _entry_matches_user(entry, actor) or not eligible_stage_assignee(actor, entry, MODULE_PO):
             continue
         if stage and str(entry.get('stage') or '') != str(stage):
             continue
