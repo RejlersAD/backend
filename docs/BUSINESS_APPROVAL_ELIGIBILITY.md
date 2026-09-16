@@ -3,7 +3,7 @@
 An approval request is actionable only when all three conditions hold at the time of delivery and decision:
 
 1. The authenticated active employee holds the designated business position or a controlled current responsibility for this record.
-2. Their current effective module permission permits approval. Explicit denies override inherited grants.
+2. Their current effective module permission permits approval, or the workflow explicitly allows a decision on an assigned record as described below. Explicit denies still apply.
 3. The record is pending at that person's stage, all required predecessors are complete, and the assignment/version is current.
 
 Super Admin, staff, CEO and application access roles do not supply a missing business assignment or skip a stage. Existing access grants are not changed by this release. Organizational positions come from the HR employee master, not an editable profile label or an access-role name. An assigned project manager or reporting manager is a business responsibility, not an admin permission.
@@ -16,7 +16,7 @@ Domain services additionally check their own assignment, stage, predecessor, sel
 
 | Workflow | Business assignment source | Sequence checks |
 | --- | --- | --- |
-| PR / PO | Recorded stage assignee plus required organizational position | Current lowest pending level, completed predecessors, current assignment identity |
+| PR / PO | Recorded stage assignee plus required organizational position; the PR Level 1 employee group accepts any active RADAI employee | Current lowest pending level, completed predecessors, current assignment identity |
 | Leave / overtime / HR tasks | Canonical reporting manager and configured HR workflow stage | Current instance and stage; no missing-manager or superuser shortcut |
 | Payroll engine | HR and Finance positions for their respective stages | HR before Finance before release |
 | Invoice | Authenticated user matching the unique assigned approver identity | Pending invoice and approval; all lower-level peers completed |
@@ -55,7 +55,22 @@ Example schema only; this is **not an approved RAD policy**:
 
 `positions` and `pending_states` must be nonempty lists. Position codes resolve to explicit official title aliases; generic Admin/Manager/VP access labels do not confer unrelated authority. Optional `assignee_field` requires that object's user-ID field to match the actor; `department_field` additionally restricts the route to the canonical employee department; `submitter_field` forbids self-approval. Use actual model attributes, including `_id` for foreign keys. Sales Deal routes need `state_field: "stage"`. Configure each decision operation separately. Multi-stage processes require their domain workflow, not a permissive single-step route.
 
-Generic numeric PR stages also need an explicit `business_position` from the organizational role catalog. The form requires it for Level 1; the server does not infer a position from whichever person happens to be selected. Submitted workflows cannot be rewritten by a routine record edit.
+The PR **Level 1 Approver** group accepts any active RADAI employee without a
+designated business position or a module-wide approval grant. Their assignment
+permits a decision only on that request, when Level 1 is current. The account and
+profile must remain active and unlocked; a linked HR employee must remain active,
+on probation, or in their notice period. Disabled modules and explicit approval
+denies still block assignment and decisions. Every selected Level 1 employee must
+approve before the next level opens. This does not grant access to the procurement
+register or authorize changes to other requests.
+
+The Level 1 position selector and dependency on the organization catalog are
+removed. A saved Level 1 `business_position` is retained as legacy route metadata
+when editing an existing assignment, but no longer restricts that group. Fixed
+PR business stages, generic Vice President stages, and all PO stages retain their
+position and module-permission checks. Relabeling a known role's numeric level as
+1 does not make it an open employee stage. Submitted workflows still cannot be
+rewritten by a routine record edit.
 
 ## Rollout and data corrections
 

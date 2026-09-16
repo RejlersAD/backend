@@ -457,9 +457,12 @@ class RequisitionWorkflowService:
         if current_status != 'draft':
             raise ValidationError({'error': 'Only draft requisitions can be submitted.'})
 
-        normalized_items = normalize_line_items(pr.items)
-        if normalized_items:
-            calculated_total = Decimal(str(line_items_total(normalized_items) or 0)).quantize(Decimal('0.01'))
+        normalized_items = normalize_line_items(
+            pr.items, (getattr(pr, 'price_remarks_data', None) or {}).get('line_details'),
+        )
+        calculated_total = line_items_total(normalized_items) if normalized_items else None
+        if calculated_total is not None:
+            calculated_total = calculated_total.quantize(Decimal('0.01'))
             from .procurement_vat import CONFIRMED_BASES, confirmed_totals
             if getattr(pr, 'vat_basis', 'unconfirmed') in CONFIRMED_BASES:
                 calculated_total = confirmed_totals(calculated_total, pr.vat_basis,
@@ -470,7 +473,7 @@ class RequisitionWorkflowService:
                 raise ValidationError({
                     'error': f'Total price ({pr_total}) must equal the sum of line items ({calculated_total}) before submission.'
                 })
-            pr.items = normalized_items
+        pr.items = normalized_items
 
         workflow = cls._workflow(pr)
 

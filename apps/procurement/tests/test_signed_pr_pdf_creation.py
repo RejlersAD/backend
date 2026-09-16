@@ -185,10 +185,12 @@ class SignedPRPdfCreationTests(TestCase):
         self.assertEqual(pr.price_remarks_data['signed_approval_evidence'], evidence)
 
     def test_import_does_not_rewrite_partial_or_conflicting_quantity_rate_evidence(self):
-        for pricing in ({'quantity': '2'}, {'unit_price': '10.00'},
-                        {'qty': '2'}, {'price': '10.00'},
-                        {'quantity': '2', 'unit_price': '10.00'}):
+        for index, pricing in enumerate(({'quantity': '2'}, {'unit_price': '10.00'},
+                                        {'qty': '2'}, {'price': '10.00'},
+                                        {'quantity': '2', 'unit_price': '10.00'}), start=1):
             with self.subTest(pricing=pricing):
+                self.fields['pr_number'] = f'RAD-PRJ-PR-{index:04d}_2026'
+                self.reviewed['pr_number'] = self.fields['pr_number']
                 self.fields['price_lines'] = [{
                     'description': 'Incomplete pricing', 'total': '1250.50', 'currency': 'AED', **pricing,
                 }]
@@ -197,9 +199,22 @@ class SignedPRPdfCreationTests(TestCase):
                 self.assertNotIn('unit', pr.items[0])
                 for key, value in pricing.items():
                     self.assertEqual(pr.items[0][key], value)
-                serializer = PurchaseRequisitionSerializer(pr, data={'items': pr.items}, partial=True)
-                self.assertFalse(serializer.is_valid())
-                self.assertIn('items', serializer.errors)
+                source_lines = deepcopy(pr.price_remarks_data['ocr_source_price_lines'])
+                serializer = PurchaseRequisitionSerializer(pr, data={
+                    'items': pr.items, 'vat_basis': 'none',
+                }, partial=True, context={'request': SimpleNamespace(user=self.issuer)})
+                if 'quantity' in pricing and 'unit_price' in pricing:
+                    self.assertFalse(serializer.is_valid())
+                    self.assertIn('items', serializer.errors)
+                else:
+                    self.assertTrue(serializer.is_valid(), serializer.errors)
+                    serializer.save()
+                    pr.refresh_from_db()
+                    self.assertEqual(pr.total_price, Decimal('1250.50'))
+                    self.assertEqual(pr.items[0]['total'], '1250.50')
+                    missing_field = 'unit_price' if 'quantity' in pricing or 'qty' in pricing else 'quantity'
+                    self.assertEqual(pr.items[0][missing_field], '')
+                    self.assertEqual(pr.price_remarks_data['ocr_source_price_lines'], source_lines)
                 pr.delete()
 
     def test_signed_creation_without_approval_date_is_approved_with_actionable_date_issue(self):

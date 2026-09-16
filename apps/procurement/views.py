@@ -277,9 +277,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     parser_classes = [FormParser, MultiPartParser, JSONParser]
 
     def get_permissions(self):
-        # Approval stages may be assigned to any active employee. The workflow
-        # service verifies that the signed-in user owns the current stage, so
-        # those employees do not also need procurement module access.
+        # The guard and workflow service enforce the current assignment.
+        # Generic Level 1 employees can decide their assigned request without
+        # module-wide access; fixed business roles retain their approval grants.
         approval_actions = {
             'retrieve',
             'uploaded_document_content',
@@ -303,6 +303,27 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if getattr(self, 'action', None) in {'convert_to_po', 'link_purchase_order'}:
             self.module_required = 'procurement_orders'
         return super().get_permissions()
+
+    def record_scoped_approval_allowed(self, request, module):
+        """Allow only the current generic Level 1 employee's own decision."""
+        from .services.approval_eligibility import MODULE_PR, is_employee_selected_pr_stage
+
+        if module != MODULE_PR or getattr(self, 'action', '') not in {
+            'pm_approve', 'pm_reject',
+            'process_dynamic_approval', 'process_dynamic_rejection',
+        }:
+            return False
+        pr = self.get_object()
+        pr = PurchaseRequisition.objects.select_for_update().get(pk=pr.pk)
+        if not RequisitionWorkflowService.can_approve(pr, request.user):
+            return False
+        workflow = RequisitionWorkflowService._workflow(pr)
+        _, active_stages = RequisitionWorkflowService._active_level_stages(pr, workflow)
+        return any(
+            is_employee_selected_pr_stage(stage)
+            and RequisitionWorkflowService._stage_matches_user(stage, request.user)
+            for _, stage in active_stages
+        )
 
     def retrieve(self, request, *args, **kwargs):
         pr = self.get_object()
@@ -1556,11 +1577,12 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 standards = ', '.join([str(s) for s in standards if s])
             standards = standards or 'Standard'
 
-            qty = _to_float(item.get('quantity', item.get('qty', 1)), 1)
+            qty = _to_float(item.get('quantity', item.get('qty')), None)
             uom = item.get('uom') or item.get('unit_of_measure') or item.get('unit') or 'EA'
-            unit_price = _to_float(item.get('unit_price', item.get('price', 0)), 0)
+            unit_price = _to_float(item.get('unit_price', item.get('price')), None)
             discount = _to_float(item.get('discount', item.get('line_discount', 0)), 0)
-            line_total = _to_float(item.get('line_total', item.get('total', (qty * unit_price) - discount)), (qty * unit_price) - discount)
+            calculated_total = (qty * unit_price) - discount if qty is not None and unit_price is not None else None
+            line_total = _to_float(item.get('line_total', item.get('total')), calculated_total)
 
             normalized_items.append({
                 'description': description,
@@ -1577,11 +1599,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 Paragraph(str(idx), style_table_cell),
                 Paragraph(item['description'], style_table_cell),
                 Paragraph(f"<font color='#2563EB'><b>{item['standards']}</b></font>", style_table_cell),
-                Paragraph(f"{item['qty']:,.2f}".rstrip('0').rstrip('.'), style_table_cell),
+                Paragraph(f"{item['qty']:,.2f}".rstrip('0').rstrip('.') if item['qty'] is not None else '', style_table_cell),
                 Paragraph(str(item['uom']), style_table_cell),
-                Paragraph(f"{item['unit_price']:,.2f}", style_table_cell),
+                Paragraph(f"{item['unit_price']:,.2f}" if item['unit_price'] is not None else '', style_table_cell),
                 Paragraph(f"{item['discount']:,.2f}", style_table_cell),
-                Paragraph(f"<b>{item['line_total']:,.2f}</b>", style_table_cell),
+                Paragraph(f"<b>{item['line_total']:,.2f}</b>" if item['line_total'] is not None else '', style_table_cell),
             ])
 
         items_table = Table(items_data, colWidths=[0.35 * inch, 2.15 * inch, 1.6 * inch, 0.5 * inch, 0.5 * inch, 0.85 * inch, 0.8 * inch, 0.9 * inch])
@@ -1599,7 +1621,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         story.append(items_table)
         story.append(Spacer(1, 12))
 
-        subtotal = _to_float(pr.net_total_excl_vat, sum(item['line_total'] for item in normalized_items))
+        subtotal = _to_float(pr.net_total_excl_vat, sum(item['line_total'] or 0 for item in normalized_items))
         vat_value = _to_float(pr.total_price, subtotal) - _to_float(pr.net_total_excl_vat, subtotal)
         grand_total = _to_float(pr.total_price, subtotal + vat_value)
         currency = pr.currency or 'AED'

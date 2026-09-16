@@ -129,8 +129,24 @@ def apply_confirmed_input(values, instance, kind):
     discount = metadata.get('discount_amount', 0) if kind == 'pr' else values.get(
         'discount_amount', getattr(instance, 'discount_amount', 0),
     )
+    items = values.get('items', getattr(instance, 'items', [])) or []
+    partial_pr_lines = kind == 'pr' and any(
+        not isinstance(row, dict)
+        or row.get('quantity', row.get('qty')) in (None, '')
+        or row.get('unit_price', row.get('price')) in (None, '')
+        for row in items
+    )
+    if (partial_pr_lines and instance is not None and supplied_amount is None
+            and basis == getattr(instance, 'vat_basis', 'unconfirmed')
+            and not any(
+                field in values and decimal_amount(values[field]) != decimal_amount(getattr(instance, field, None))
+                for field in ('total_price', 'net_total_excl_vat')
+            )):
+        # Updating incomplete detail does not authorize recalculating legacy
+        # header amounts that were recorded under the same VAT choice.
+        return values
     subtotal = supplied_amount
-    if subtotal is None and 'items' in values:
+    if subtotal is None and 'items' in values and not partial_pr_lines:
         subtotal = items_subtotal(values['items'])
     if subtotal is None:
         field = ('total_price' if kind == 'pr' else 'total_amount') if basis == 'inclusive' else (
@@ -139,6 +155,11 @@ def apply_confirmed_input(values, instance, kind):
         # A submitted canonical net/gross already excludes order discount.
         if values.get(field) is not None:
             subtotal, discount = values[field], 0
+        elif (partial_pr_lines and not {'total_price', 'net_total_excl_vat'}.intersection(values)
+              and getattr(instance, field, None) is not None):
+            # Incomplete quantities/prices cannot replace recorded header money
+            # with a partial quoted subtotal or apply the discount a second time.
+            subtotal, discount = getattr(instance, field), 0
     if subtotal is None:
         if instance is None and all(values.get(field) is None for field in (
             'total_price', 'net_total_excl_vat', 'total_amount', 'net_amount',

@@ -4,6 +4,7 @@ API data serialization for procurement workflows
 """
 
 import copy
+import json
 from uuid import uuid4
 
 from rest_framework import serializers
@@ -45,7 +46,10 @@ from .services.requisition_validation import (
     validate_attachments,
 )
 from .services.requisition_workflow import RequisitionWorkflowService, notify_requisition_approver_changes
-from .services.approval_integrity import stage_signature_issue, purchase_order_signature_issue, protect_approval_route
+from .services.approval_integrity import (
+    stage_signature_issue, purchase_order_signature_issue, protect_approval_route,
+    protect_requisition_approval_route,
+)
 from .services.procurement_vat import apply_confirmed_input, CONFIRMED_BASES
 
 
@@ -397,17 +401,27 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f'Approval stage {index + 1} must reference an active user.'
                 )
-            from .services.approval_eligibility import MODULE_PR, eligible_stage_assignee
-            if not eligible_stage_assignee(approver, stage, MODULE_PR):
-                raise serializers.ValidationError(
-                    f'Approval stage {index + 1} requires the configured business position '
-                    'and Purchase Requisition approval permission.'
-                )
-
             try:
                 level = max(0, int(stage.get('level', index + 1)))
             except (TypeError, ValueError):
                 raise serializers.ValidationError(f'Approval stage {index + 1} has an invalid level.')
+
+            from .services.approval_eligibility import (
+                MODULE_PR, eligible_stage_assignee, is_employee_selected_pr_stage,
+            )
+            eligibility_stage = {**stage, 'level': level}
+            employee_selected = is_employee_selected_pr_stage(eligibility_stage)
+            if not eligible_stage_assignee(approver, eligibility_stage, MODULE_PR):
+                stage_label = f'Level {level} ({role})'
+                if employee_selected:
+                    raise serializers.ValidationError(
+                        f'{stage_label} requires an active RADAI employee '
+                        'whose approval access is not explicitly denied.'
+                    )
+                raise serializers.ValidationError(
+                    f'{stage_label} requires the configured business position '
+                    'and Purchase Requisition approval permission.'
+                )
 
             approver_id = str(approver.pk)
             if approver_id in assigned_user_ids:
@@ -420,7 +434,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'step': index + 1,
                 'level': level,
                 'role': role,
-                **({'business_position': stage['business_position']} if stage.get('business_position') else {}),
+                **({'business_position': stage['business_position']}
+                   if stage.get('business_position') and not employee_selected else {}),
                 'user_id': str(approver.pk),
                 'user_name': employee_display_name(approver),
                 'username': (
@@ -450,6 +465,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 ), None)
                 if previous_stage:
                     normalized_stage['assignment_id'] = previous_stage.get('assignment_id', '')
+                    # Keep saved route metadata stable when editing an existing
+                    # assignment. Level 1 no longer uses this legacy constraint.
+                    if employee_selected and previous_stage.get('business_position'):
+                        normalized_stage['business_position'] = previous_stage['business_position']
                     for state_field in (
                         'status', 'approved_at', 'approved_by_id', 'approved_by_name', 'approved_by_email',
                         'rejected_at', 'rejected_by_id', 'rejected_by_name',
@@ -502,7 +521,15 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         return data
 
     def validate_items(self, value):
-        return normalize_line_items(value)
+        metadata = getattr(self, 'initial_data', {}).get(
+            'price_remarks_data', getattr(self.instance, 'price_remarks_data', None),
+        ) or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (TypeError, ValueError):
+                metadata = {}
+        return normalize_line_items(value, metadata.get('line_details') if isinstance(metadata, dict) else None)
 
     def validate_pr_number(self, value):
         """Persist procurement's manual PR number and reject duplicates."""
@@ -569,7 +596,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 attrs.get('po_number_reference', getattr(self.instance, 'po_number_reference', '')),
                 attrs.get('po_applicable', getattr(self.instance, 'po_applicable', False)),
             )
-            protect_approval_route(
+            protect_requisition_approval_route(
                 old_workflow or [], new_workflow or [],
                 level=RequisitionWorkflowService._stage_level, label='role',
                 freeze_route=bool(old_workflow) and canonicalize_pr_status(self.instance.status) != 'draft',
@@ -586,10 +613,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'total_price',
                 getattr(self.instance, 'total_price', None) if self.instance else None,
             )
-            if requested_total is None:
+            if calculated_total is not None and requested_total is None:
                 attrs['total_price'] = calculated_total
                 attrs.setdefault('net_total_excl_vat', calculated_total)
-            elif requested_total != calculated_total:
+            elif calculated_total is not None and requested_total != calculated_total:
                 raise serializers.ValidationError({
                     'total_price': 'Total price must equal the sum of the line items.'
                 })
@@ -784,7 +811,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 validated_data.get('po_number_reference', instance.po_number_reference),
                 validated_data.get('po_applicable', instance.po_applicable),
             )
-            protect_approval_route(
+            protect_requisition_approval_route(
                 old_workflow or [], new_workflow or [], level=RequisitionWorkflowService._stage_level, label='role',
                 freeze_route=bool(old_workflow) and canonicalize_pr_status(instance.status) != 'draft',
             )

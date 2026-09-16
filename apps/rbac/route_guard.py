@@ -40,8 +40,15 @@ class ModuleActionGuardMixin:
             raise NotAuthenticated()
         if scoped and not record_workflow_not_denied(request.user, module, action):
             raise PermissionDenied('This action is denied for your assigned workflow.')
-        # Assignment can confer record visibility, never approval permission.
-        independent |= scoped and action != 'approve'
+        # A workflow may authorize a narrowly verified record assignment. The
+        # hook must check the current stage; module-wide action grants and all
+        # other workflow decisions still use the normal policy below.
+        assigned_approval = False
+        if scoped and action == 'approve':
+            assignment_check = getattr(self, 'record_scoped_approval_allowed', None)
+            if callable(assignment_check):
+                assigned_approval = assignment_check(request, module)
+        independent |= scoped and (action != 'approve' or assigned_approval)
         if module and not action and request.method != 'OPTIONS' and not independent:
             raise PermissionDenied('This operation has no action permission policy.')
         if module and action and not independent:
