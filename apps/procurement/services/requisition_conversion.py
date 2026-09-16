@@ -259,9 +259,12 @@ class RequisitionConversionService:
             )
 
         # The surrounding transaction rolls back both operations on failure.
+        from .procurement_lifecycle import PREVIOUS_STATUS
+        pr.price_remarks_data = dict(pr.price_remarks_data or {})
+        pr.price_remarks_data[PREVIOUS_STATUS] = canonicalize_pr_status(pr.status)
         pr.status = 'converted'
         pr.po_number_reference = po.po_number
-        update_fields = ['status', 'po_number_reference', 'updated_at']
+        update_fields = ['status', 'po_number_reference', 'price_remarks_data', 'updated_at']
         if vendor_was_linked:
             update_fields.append('vendor')
         pr.save(update_fields=update_fields)

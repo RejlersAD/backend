@@ -191,7 +191,9 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
 
 def _store_source_pdf(pdf_bytes, fields, filename, user):
     digest = hashlib.sha256(pdf_bytes).hexdigest()
-    document = PODocument.objects.filter(extracted_data__source_sha256=digest).first()
+    document = PODocument.objects.filter(extracted_data__source_sha256=digest).filter(
+        Q(uploaded_by=user) | Q(confirmed_po__isnull=False),
+    ).first()
     if document:
         return document, digest
     source_date = fields["po_date"] or timezone.localdate()
@@ -210,6 +212,101 @@ def _serializable_fields(fields):
             for key, value in fields.items()}
 
 
+def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_verified,
+                           stamp_verified, approved_by_name, approved_by_title, approved_date,
+                           retained_document=None):
+    """An upload is evidence, not permission to replace an existing order."""
+    issues = []
+    if Decimal(str(fields['total_amount'])) != po.total_amount:
+        issues.append('The PDF amount differs from the saved order. Review the order amount before reconciling.')
+    if fields['currency'] != po.currency:
+        issues.append('The PDF currency differs from the saved order.')
+    matched = _match_vendor(fields['vendor_name'], [po.vendor])
+    if not matched.get('matched'):
+        issues.append('The PDF supplier differs from the saved order or could not be read. Review the supplier.')
+    if not po.pr_reference_id:
+        issues.append('PR link pending. Link the correct purchase recommendation during reconciliation.')
+    document, digest = (
+        (retained_document, hashlib.sha256(pdf_bytes).hexdigest()) if retained_document is not None
+        else _store_source_pdf(pdf_bytes, fields, filename, user)
+    )
+    if document.confirmed_po_id and document.confirmed_po_id != po.pk:
+        raise SignedPOImportError('This original PDF is already linked to another purchase order.')
+    previous = document.extracted_data or {}
+    # Re-uploading the same original without checking boxes must not erase a
+    # prior reviewer-confirmed signature, stamp, name or source date.
+    signature_verified = signature_verified or bool(previous.get('signature_verified'))
+    stamp_verified = stamp_verified or bool(previous.get('stamp_verified'))
+    approved_by_name = previous.get('approved_by_name') or approved_by_name
+    approved_by_title = previous.get('approved_by_title') or approved_by_title
+    approved_date = previous.get('approved_date') or approved_date
+    source = {
+        **previous, **_serializable_fields(fields), 'source_sha256': digest,
+        'pr_id': str(po.pr_reference_id) if po.pr_reference_id else None,
+        'pr_number': po.pr_reference.pr_number if po.pr_reference_id else '',
+        'reconciliation_required': bool(issues), 'reconciliation_issues': issues,
+        'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
+        'approved_by_name': approved_by_name, 'approved_by_title': approved_by_title,
+        'approved_date': approved_date,
+    }
+    document.document_type = 'purchase_order'
+    document.extraction_status = 'completed'
+    document.extraction_error = ''
+    document.extracted_data = source
+    document.confirmed_po = po
+    document.save()
+    attachment = {
+        'type': 'signed_purchase_order_pdf', 'document_id': str(document.pk),
+        'filename': filename, 'url': document.s3_url, 'sha256': digest,
+        'source_po_number': fields['source_po_number'], 'canonical_po_number': po.po_number,
+        'reconciliation_required': bool(issues), 'reconciliation_issues': issues,
+        'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
+    }
+    po.attachments = [row for row in (po.attachments or [])
+                      if not (isinstance(row, dict) and row.get('type') == 'signed_purchase_order_pdf'
+                              and row.get('sha256') == digest)] + [attachment]
+    changed = ['attachments', 'updated_at']
+    if signature_verified:
+        for field, value in (
+            ('approved_by_name', approved_by_name), ('approved_by_title', approved_by_title),
+            ('approved_date', _date(approved_date)), ('approved_at', timezone.now()),
+            ('approval_signature', f'{document.s3_url}#page=1'),
+        ):
+            if not getattr(po, field) and value:
+                setattr(po, field, value)
+                changed.append(field)
+    if stamp_verified and not po.approval_stamp:
+        po.approval_stamp = f'{document.s3_url}#page=1'
+        changed.append('approval_stamp')
+    # Retain RADAI decisions and append the separate external source evidence.
+    evidence_log = list(po.approval_log or [])
+    existing = next((row for row in evidence_log if isinstance(row, dict)
+                     and str(row.get('evidence_document_id', '')) == str(document.pk)), None)
+    if existing is None or (signature_verified and not existing.get('signature_verified')):
+        if existing is not None:
+            evidence_log.remove(existing)
+        evidence_log.append({
+            'stage': 'Signed PO document approval', 'approver': approved_by_name,
+            'status': 'Approved' if signature_verified else 'Evidence review required',
+            'date': approved_date if signature_verified else '',
+            'evidence_document_id': str(document.pk),
+            'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
+        })
+        po.approval_log = evidence_log
+        changed.append('approval_log')
+    po.save(update_fields=changed)
+    return {
+        'success': True, 'operation': 'attached', 'document_id': str(document.pk),
+        'purchase_order_id': str(po.pk), 'po_number': po.po_number,
+        'pr_id': str(po.pr_reference_id) if po.pr_reference_id else None,
+        'pr_number': source['pr_number'], 'vendor_id': str(po.vendor_id), 'vendor_name': po.vendor.name,
+        'database_verified': True, 'source_document_url': document.s3_url,
+        'reconciliation_required': bool(issues), 'reconciliation_issues': issues,
+        'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
+        'extracted_data': source, 'workflow_issues': [], 'mapping_issues': [],
+    }
+
+
 @transaction.atomic
 def import_signed_po_pdf(
     pdf_bytes: bytes,
@@ -221,6 +318,7 @@ def import_signed_po_pdf(
     approved_by_name: str = "",
     approved_by_title: str = "",
     approved_date: str = "",
+    allow_existing_update: bool = True,
 ) -> dict[str, Any]:
     if not pdf_bytes.startswith(b"%PDF"):
         raise SignedPOImportError("The uploaded file is not a valid PDF.")
@@ -235,6 +333,16 @@ def import_signed_po_pdf(
     ).annotate(
         canonical_first=Case(When(po_number=po_number, then=Value(0)), default=Value(1), output_field=IntegerField()),
     ).order_by("canonical_first").first()
+    if po:
+        if not allow_existing_update:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Purchase order update permission is required to attach a PDF to an existing order.')
+        return _attach_existing_order(
+            po, fields, pdf_bytes, filename, user,
+            signature_verified=signature_verified, stamp_verified=stamp_verified,
+            approved_by_name=approved_by_name, approved_by_title=approved_by_title,
+            approved_date=approved_date,
+        )
     candidates = list(PurchaseRequisition.objects.filter(
         Q(po_number_reference__iexact=source_number) | Q(po_number_reference__iexact=po_number)
     )[:2])
@@ -321,7 +429,10 @@ def import_signed_po_pdf(
     po.status = "sent"
     po.total_amount = fields["total_amount"]
     po.tax_amount = fields["tax_amount"]
-    po.vat_percentage = Decimal("5.00")
+    po.vat_percentage = (
+        (fields['tax_amount'] * Decimal('100') / fields['total_amount']).quantize(Decimal('0.01'))
+        if fields['total_amount'] else Decimal('0.00')
+    )
     po.currency = fields["currency"]
     po.payment_terms = fields["payment_terms"]
     po.payment_mode = fields["payment_mode"] or "Bank Transfer"
@@ -394,10 +505,10 @@ def import_signed_po_pdf(
     po.save(update_fields=["approval_signature", "approval_stamp", "approval_log", "attachments", "updated_at"])
 
     if pr:
+        from .procurement_lifecycle import mark_requisition_converted
         pr.po_applicable = True
-        pr.po_number_reference = po_number
-        pr.status = "converted"
-        pr.save(update_fields=["po_applicable", "po_number_reference", "status", "updated_at"])
+        pr.save(update_fields=['po_applicable'])
+        mark_requisition_converted(pr, po_number)
 
     workflow_issues = []
     pending_pr_approvals = [
@@ -431,6 +542,9 @@ def import_signed_po_pdf(
         "vendor_match": vendor_match,
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,
+        "approved_by_name": approved_by_name,
+        "approved_by_title": approved_by_title,
+        "approved_date": approved_date,
         "workflow_issues": workflow_issues,
         "mapping_issues": mapping_issues,
     }

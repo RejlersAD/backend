@@ -122,7 +122,8 @@ class RequisitionConversionServiceTests(SimpleTestCase):
         self.assertIs(result_po, created_po)
         self.assertEqual(pr.status, 'converted')
         self.assertEqual(pr.po_number_reference, created_po.po_number)
-        self.assertEqual(pr.saved_with['update_fields'], ['status', 'po_number_reference', 'updated_at'])
+        self.assertEqual(pr.saved_with['update_fields'], ['status', 'po_number_reference', 'price_remarks_data', 'updated_at'])
+        self.assertEqual(pr.price_remarks_data['po_link_previous_status'], 'approved')
 
         create_data = purchase_orders.create.call_args.kwargs
         self.assertEqual(create_data['po_number'], 'RAD-PRJ-PUR-0042_2026')

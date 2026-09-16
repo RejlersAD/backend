@@ -86,6 +86,7 @@ from .serializers import (
     ProcurementCategorySerializer,
     PODocumentSerializer,
     PODocumentReviewSerializer,
+    PODocumentReconcileSerializer,
     # Master database serializers
     ProjectListSerializer,
     ProjectDetailSerializer,
@@ -275,6 +276,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         # those employees do not also need procurement module access.
         approval_actions = {
             'retrieve',
+            'uploaded_document_content',
             'pending_for_me',
             'pm_approve',
             'pm_reject',
@@ -298,6 +300,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         pr = self.get_object()
+        self._check_requisition_read_access(request, pr)
+        return Response(self.get_serializer(pr).data)
+
+    def _check_requisition_read_access(self, request, pr):
+        """Original source bytes share the recommendation's read access."""
         has_module = HasModuleAccess().has_permission(request, self)
         is_owner = pr.issued_by_id == request.user.id or pr.requested_by_id == request.user.id
         is_assigned = any(
@@ -306,7 +313,35 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         )
         if not (has_module or is_owner or is_assigned):
             raise PermissionDenied('You are not assigned to this Purchase Requisition.')
-        return Response(self.get_serializer(pr).data)
+
+    @action(detail=True, methods=['get'], url_path=r'uploaded-documents/(?P<document_id>\d+)/content')
+    def uploaded_document_content(self, request, pk=None, document_id=None):
+        """Return saved original bytes for authenticated browser blob previews."""
+        from botocore.exceptions import ClientError
+        from django.core.files.storage import default_storage
+        from django.http import FileResponse
+        from .services.requisition_source_documents import requisition_original_source
+
+        pr = self.get_object()
+        self._check_requisition_read_access(request, pr)
+        source = requisition_original_source(pr, document_id)
+        unavailable = {'error': 'The uploaded PR PDF is unavailable.'}
+        if not source:
+            return Response(unavailable, status=status.HTTP_404_NOT_FOUND)
+        try:
+            stored_file = default_storage.open(source['storage_key'], 'rb')
+        except FileNotFoundError:
+            return Response(unavailable, status=status.HTTP_404_NOT_FOUND)
+        except ClientError as error:
+            if str(error.response.get('Error', {}).get('Code')) in {'NoSuchKey', 'NotFound', '404'}:
+                return Response(unavailable, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'The uploaded PR PDF could not be loaded. Please retry.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception:
+            return Response({'error': 'The uploaded PR PDF could not be loaded. Please retry.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        response = FileResponse(stored_file, content_type='application/pdf', as_attachment=False, filename=source['filename'])
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -371,9 +406,23 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         self._enforce_owner_mutation(self.get_object())
         return super().update(request, *args, **kwargs)
 
+    @action(detail=True, methods=['post'], url_path='source-approvals')
+    def source_approvals(self, request, pk=None):
+        """Review only incomplete evidence from this PR's original signed PDF."""
+        from .services.requisition_source_approvals import edit_requisition_source_approval
+
+        pr = self.get_object()
+        self._enforce_owner_mutation(pr)
+        updated = edit_requisition_source_approval(pr.pk, request.user, request.data)
+        return Response(self.get_serializer(updated).data)
+
     def destroy(self, request, *args, **kwargs):
-        self._enforce_owner_mutation(self.get_object(), deletable=True)
-        return super().destroy(request, *args, **kwargs)
+        from .services.procurement_lifecycle import delete_requisition
+
+        requisition = self.get_object()
+        self._enforce_owner_mutation(requisition, deletable=True)
+        delete_requisition(requisition.pk)
+        return Response(status=status.HTTP_204_NO_CONTENT)
     
     def create(self, request, *args, **kwargs):
         """Create PR with file upload support"""
@@ -1347,6 +1396,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def upload_attachment(self, request, pk=None):
         pr = self.get_object()
+        self._enforce_owner_mutation(pr)
         files = request.FILES.getlist('files', [])
         
         if not files:
@@ -1886,6 +1936,12 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     module_required = 'procurement_orders'
     pagination_class = VendorPagination
     parser_classes = [FormParser, MultiPartParser, JSONParser]
+
+    def destroy(self, request, *args, **kwargs):
+        from .services.procurement_lifecycle import delete_order
+
+        delete_order(self.get_object().pk)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def create(self, request, *args, **kwargs):
         """Create a PO and pass repeated multipart attachment fields intact."""
@@ -2543,6 +2599,13 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     module_required = 'procurement_orders'
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+    @action(detail=False, methods=['get'], url_path='approval-employees')
+    def approval_employees(self, request):
+        """Search public work identities without granting broader HR access."""
+        from .services.approval_employee_directory import approval_employee_directory
+
+        return Response(approval_employee_directory(request.query_params))
+
     def get_queryset(self):
         queryset = super().get_queryset().filter(uploaded_by=self.request.user)
         if str(self.request.query_params.get('pending_reconciliation', '')).lower() == 'true':
@@ -2576,8 +2639,6 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             if 'po_number' in values:
                 supplied = values.pop('po_number')
                 canonical = canonical_po_number(supplied)
-                if PurchaseOrder.objects.filter(po_number=canonical).exists():
-                    raise ValidationError({'po_number': ['This number belongs to an existing purchase order.']})
                 fields.update(po_number=canonical, source_po_number=supplied)
             if 'vendor_name' in values and values['vendor_name'] != fields.get('vendor_name'):
                 fields['vendor_id'] = None
@@ -2595,11 +2656,20 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             document.save(update_fields=['extracted_data', 'updated_at'])
         return Response(self.get_serializer(document).data)
 
+    @action(detail=True, methods=['post'], url_path='reconcile')
+    def reconcile(self, request, pk=None):
+        """Explicitly complete a saved upload using its reviewed fields."""
+        from .services.po_document_reconciliation import reconcile_saved_po_document
+
+        document = self.get_object()
+        mapping = PODocumentReconcileSerializer(data=request.data)
+        mapping.is_valid(raise_exception=True)
+        return Response(reconcile_saved_po_document(document.pk, request, mapping.validated_data))
+
     def destroy(self, request, pk=None):
         """Remove a pending upload; linked orders use the purchase order endpoint."""
         from django.db import transaction
-        from django.core.files.storage import default_storage
-        import logging
+        from .services.procurement_lifecycle import schedule_source_cleanup
 
         document = self.get_object()
         with transaction.atomic():
@@ -2608,13 +2678,7 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'Delete the linked purchase order instead.'}, status=status.HTTP_409_CONFLICT)
             key = document.s3_key
             document.delete()
-            def remove_unreferenced_source():
-                if key and not PODocument.objects.filter(s3_key=key).exists():
-                    try:
-                        default_storage.delete(key)
-                    except Exception:
-                        logging.getLogger(__name__).exception('Pending PO source cleanup failed')
-            transaction.on_commit(remove_unreferenced_source)
+            schedule_source_cleanup([key])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get'], url_path='content')
@@ -2727,10 +2791,28 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=False, methods=['post'], url_path='preview_signed_pdf',
+            parser_classes=[MultiPartParser, FormParser])
+    def preview_signed_pdf(self, request):
+        """Read buyer approval candidates without creating or approving a PO."""
+        from .services.po_pdf_approval import POApprovalPreviewError, preview_signed_po_approval
+
+        pdf_file = request.FILES.get('file')
+        if not pdf_file:
+            return Response({'error': 'Select a signed PDF file to preview.'}, status=status.HTTP_400_BAD_REQUEST)
+        if pdf_file.size > 15 * 1024 * 1024:
+            return Response({'error': 'PDF file must not exceed 15 MB.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = preview_signed_po_approval(pdf_file.read())
+        except POApprovalPreviewError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
+
     @action(detail=False, methods=['post'], url_path='import_signed_pdf',
             parser_classes=[MultiPartParser, FormParser])
     def import_signed_pdf(self, request):
         """Import, reconcile, persist, and verify a signed Purchase Order PDF."""
+        from apps.rbac.action_policy import request_action_allowed
         pdf_file = request.FILES.get('file')
         if not pdf_file:
             return Response({'error': 'Select a signed PDF file to import.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -2747,6 +2829,7 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 approved_by_name=request.data.get('approved_by_name', ''),
                 approved_by_title=request.data.get('approved_by_title', ''),
                 approved_date=request.data.get('approved_date', ''),
+                allow_existing_update=request_action_allowed(request, 'procurement_orders', 'update'),
             )
         except SignedPOImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

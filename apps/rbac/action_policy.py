@@ -114,7 +114,7 @@ RECORD_SCOPED_ACTIONS = {
         'uploaded_documents', 'uploaded_document_content',
     },
     ('apps.procurement.views', 'PurchaseRequisitionViewSet'): {
-        'retrieve', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
+        'retrieve', 'uploaded_document_content', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
         'eng_manager_approve', 'eng_manager_reject', 'manager_projects_approve',
         'manager_projects_reject', 'process_dynamic_approval', 'process_dynamic_rejection',
     },
@@ -125,6 +125,7 @@ READ_OPERATIONS = {'list', 'retrieve', 'preview', 'stats', 'statistics', 'summar
                    'check_permission', 'check_access', 'check_pr_number', 'by_module', 'options',
                    'discover_svc_url', 'test_connection', 'ai_settings_test', 'payment_batch_status'}
 UPDATE_OPERATIONS = {'update', 'partial_update', 'assign', 'unassign', 'reassign',
+                     'source_approvals', 'link_purchase_order',
                      'revoke', 'cancel', 'submit', 'restore', 'resolve', 'ignore',
                      'implement', 'transition', 'complete', 'close', 'reopen',
                      'activate', 'deactivate', 'mark', 'set', 'edit', 'save',
@@ -190,6 +191,12 @@ def operation_action(request, view):
     explicit = getattr(view, 'permission_action', None)
     if explicit:
         return explicit
+    if (
+        view.__class__.__module__ == 'apps.procurement.views'
+        and view.__class__.__name__ == 'PODocumentViewSet'
+        and getattr(view, 'action', '') == 'reconcile'
+    ):
+        return 'create'
     name = getattr(view, 'action', '') or view.__class__.__name__
     name = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower().replace('-', '_')
     words = set(name.split('_'))
@@ -309,7 +316,7 @@ def request_module(request, view):
     """Resolve registered service subdivisions before any broad module alias."""
     from .service_catalogue import required_service
     from .rbac_config import ALL_MODULES_CATALOGUE
-    if view.__class__.__module__ == 'apps.procurement.views' and view.__class__.__name__ == 'PurchaseRequisitionViewSet' and getattr(view, 'action', '') == 'convert_to_po':
+    if view.__class__.__module__ == 'apps.procurement.views' and view.__class__.__name__ == 'PurchaseRequisitionViewSet' and getattr(view, 'action', '') in {'convert_to_po', 'link_purchase_order'}:
         return 'procurement_orders'
     module = route_module(getattr(request, 'path', ''))
     specific = required_service(view)
@@ -322,6 +329,18 @@ def additional_actions(request):
     if request.method not in {'POST', 'PUT', 'PATCH'}:
         return actions
     data = request.data
+    view = (getattr(request, 'parser_context', None) or {}).get('view')
+    if (
+        view is not None
+        and (view.__class__.__module__, view.__class__.__name__)
+        == ('apps.procurement.views', 'PurchaseRequisitionViewSet')
+        and getattr(view, 'action', '') == 'source_approvals'
+        and isinstance(data, dict)
+    ):
+        # This exact action compares the snapshot with locked saved evidence;
+        # it never accepts its status as a proposed decision. Continue scanning
+        # every other payload field and every other endpoint normally.
+        data = {key: value for key, value in data.items() if key != 'expected_row'}
     def inspect(value):
         if isinstance(value, dict):
             for key, item in value.items():
