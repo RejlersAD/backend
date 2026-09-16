@@ -109,7 +109,10 @@ SELF_SERVICE_ACTIONS = {
 # These operations perform their own requester/stage-assignee checks. They do
 # not confer access to the module register; explicit user action denies still win.
 RECORD_SCOPED_ACTIONS = {
-    ('apps.procurement.views', 'PurchaseOrderViewSet'): {'retrieve', 'pending_for_me', 'approve', 'reject'},
+    ('apps.procurement.views', 'PurchaseOrderViewSet'): {
+        'retrieve', 'pending_for_me', 'approve', 'reject',
+        'uploaded_documents', 'uploaded_document_content',
+    },
     ('apps.procurement.views', 'PurchaseRequisitionViewSet'): {
         'retrieve', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
         'eng_manager_approve', 'eng_manager_reject', 'manager_projects_approve',
