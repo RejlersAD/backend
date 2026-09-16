@@ -44,6 +44,7 @@ from .services.requisition_validation import (
     validate_attachments,
 )
 from .services.requisition_workflow import notify_requisition_approver_changes
+from .services.procurement_vat import apply_confirmed_input, CONFIRMED_BASES
 
 
 PR_SERVER_CONTROLLED_FIELDS = {
@@ -201,6 +202,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     )
     
     # Original PR links are temporary storage URLs, refreshed only on reads.
+    entered_amount = serializers.DecimalField(max_digits=15, decimal_places=2, min_value=0, required=False, write_only=True)
     attachments = serializers.SerializerMethodField()
 
     # File upload fields
@@ -258,6 +260,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Pricing Section (Fields 10-13)
             'price_description', 'total_price', 'currency', 'price_remarks', 'net_total_excl_vat', 'price_remarks_data',
+            'vat_basis', 'entered_amount',
             
             # Management Approval (Feedback: For PR > AED 100k)
             'management_approval', 'management_approval_remarks', 'management_approval_evidence',
@@ -464,6 +467,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Pricing metadata must be an object.')
         data = dict(value or {})
         existing = getattr(self.instance, 'price_remarks_data', None) or {}
+        for key in ('discount_amount', 'discount_percentage'):
+            if key in existing and key not in data:
+                data[key] = existing[key]
         # Source-document decisions and comparison evidence are written only by
         # the import/link services, never by ordinary form JSON.
         for key in self.SOURCE_METADATA_FIELDS:
@@ -530,7 +536,12 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 po_applicable,
             )
 
-        if 'items' in attrs and attrs['items']:
+        try:
+            attrs = apply_confirmed_input(attrs, self.instance, 'pr')
+        except ValueError as error:
+            raise serializers.ValidationError({'vat_basis': str(error)}) from error
+
+        if self.instance is None and attrs.get('vat_basis') not in CONFIRMED_BASES and 'items' in attrs and attrs['items']:
             calculated_total = line_items_total(attrs['items'])
             requested_total = attrs.get(
                 'total_price',
@@ -801,6 +812,8 @@ class OptionalDateField(serializers.DateField):
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     """Serializer for Purchase Order"""
 
+    entered_amount = serializers.DecimalField(max_digits=15, decimal_places=2, min_value=0, required=False, write_only=True)
+
     attachments_files = serializers.ListField(
         child=serializers.FileField(),
         write_only=True,
@@ -855,7 +868,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'buyer_reference_pm', 'buyer_reference_email', 'buyer_reference_pe',
             
             # Financial
-            'total_amount', 'currency', 'tax_amount', 'vat_percentage', 'discount_amount', 
+            'total_amount', 'currency', 'tax_amount', 'vat_percentage', 'discount_amount',
+            'net_amount', 'vat_basis', 'entered_amount',
             
             # Payment & delivery
             'payment_terms', 'payment_mode', 'delivery_terms', 'marking', 
@@ -1015,6 +1029,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        try:
+            attrs = apply_confirmed_input(attrs, self.instance, 'po')
+        except ValueError as error:
+            raise serializers.ValidationError({'vat_basis': str(error)}) from error
         if self.instance is not None and self.instance.status == 'completed':
             raise serializers.ValidationError(
                 'Completed purchase orders are read-only and cannot be edited.'
@@ -1227,6 +1245,8 @@ class PODocumentReviewSerializer(serializers.Serializer):
     total_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
     tax_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
     gross_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
+    entered_amount = serializers.DecimalField(max_digits=15, decimal_places=2, min_value=0, required=False)
+    vat_basis = serializers.ChoiceField(choices=['unconfirmed', 'exclusive', 'inclusive', 'none'], required=False)
     po_date = serializers.DateField(required=False, allow_null=True)
     expected_delivery = serializers.DateField(required=False, allow_null=True)
     pr_id = serializers.PrimaryKeyRelatedField(queryset=PurchaseRequisition.objects.all(), required=False, allow_null=True)
@@ -1267,6 +1287,10 @@ class PODocumentSerializer(serializers.ModelSerializer):
     uploaded_by_name = serializers.CharField(source='uploaded_by.get_full_name', read_only=True, allow_null=True)
     extraction_status_display = serializers.CharField(source='get_extraction_status_display', read_only=True)
     document_type_display = serializers.CharField(source='get_document_type_display', read_only=True)
+    canonical_financials = serializers.SerializerMethodField()
+
+    def get_canonical_financials(self, instance):
+        return (instance.extracted_data or {}).get('canonical_financials')
 
     def to_representation(self, instance):
         result = super().to_representation(instance)
@@ -1293,7 +1317,7 @@ class PODocumentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'original_filename', 's3_key', 's3_url', 'file_size_bytes',
             'document_type', 'document_type_display', 'extraction_status',
-            'extraction_status_display', 'extraction_error', 'extracted_data',
+            'extraction_status_display', 'extraction_error', 'extracted_data', 'canonical_financials',
             'uploaded_by', 'uploaded_by_name', 'confirmed_po',
             'created_at', 'updated_at',
         ]

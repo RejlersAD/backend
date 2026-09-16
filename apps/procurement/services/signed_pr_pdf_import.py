@@ -611,6 +611,21 @@ def _apply_manual_overrides(fields: dict, overrides: dict | None) -> dict:
         if corrected["net_total"] < 0:
             raise SignedPRImportError("Total price cannot be negative.")
 
+    from .procurement_vat import CONFIRMED_BASES, confirmed_totals
+    if overrides.get('vat_basis') in CONFIRMED_BASES:
+        entered = overrides.get('entered_amount')
+        if entered is None:
+            raise SignedPRImportError('Enter the price to confirm its VAT treatment.')
+        try:
+            totals = confirmed_totals(entered, overrides['vat_basis'])
+        except ValueError as error:
+            raise SignedPRImportError(str(error)) from error
+        corrected['net_total'] = Decimal(str(entered))
+        corrected['canonical_financials'] = {**{key: str(value) for key, value in totals.items()},
+                                            'vat_basis': overrides['vat_basis'], 'entered_amount': str(entered)}
+    elif 'entered_amount' in overrides:
+        raise SignedPRImportError('Confirm whether VAT applies before changing the price.')
+
     for money_field, label in (("budget_in_aed", "Budget in AED"), ("net_total_aed", "Net total in AED")):
         if money_field not in overrides or corrected.get(money_field) in (None, ""):
             continue
@@ -995,17 +1010,23 @@ def import_signed_pr_pdf(
         pr.description_reason = fields["description_reason"] or pr.description_reason
         pr.preferred_supplier_if_any = fields["preferred_supplier"] or pr.preferred_supplier_if_any
         pr.price_description = pr.product_service
-        if fields["price_lines"]:
+        financial_review_confirmed = create_new or bool(fields.get('canonical_financials'))
+        if fields["price_lines"] and financial_review_confirmed:
             pr.items = _price_lines_as_items(fields["price_lines"])
             first_price_remarks = fields.get("price_remarks") or fields["price_lines"][0].get("remarks", "")
             if first_price_remarks:
                 pr.price_remarks = first_price_remarks
-        if fields["currency"]:
+        if fields["currency"] and financial_review_confirmed:
             pr.currency = fields["currency"]
-        if fields["net_total"] is not None:
+        if fields["net_total"] is not None and financial_review_confirmed:
             pr.total_price = fields["net_total"]
             pr.net_total_excl_vat = fields["net_total"]
-        if fields["budget_in_aed"]:
+        if fields.get('canonical_financials'):
+            financials = fields['canonical_financials']
+            pr.vat_basis = financials['vat_basis']
+            pr.total_price = Decimal(financials['total_amount'])
+            pr.net_total_excl_vat = Decimal(financials['net_amount'])
+        if fields["budget_in_aed"] and financial_review_confirmed:
             pr.estimated_budget = Decimal(fields["budget_in_aed"])
         pr.po_applicable = bool(fields["po_reference"])
         pr.po_number_reference = fields["po_reference"] or pr.po_number_reference
@@ -1016,6 +1037,8 @@ def import_signed_pr_pdf(
     original_import_source = metadata.get("import_source")
     source_snapshot = _serialize_extracted_fields(source_fields)
     approved_snapshot = _serialize_extracted_fields(source_fields if attach_only else fields)
+    if not attach_only and fields.get('canonical_financials'):
+        approved_snapshot['net_total'] = fields['canonical_financials']['net_amount']
     if same_document and attach_only:
         # A signature-only review of the same bytes must retain the original
         # extraction and the commercial corrections already reviewed for them.
@@ -1233,6 +1256,13 @@ def import_signed_pr_pdf(
         "document_signed_off": bool(signatures_verified),
         "document_comparison": comparison,
         "attach_only": attach_only,
+        "financial_values_preserved": not create_new and (attach_only or not fields.get('canonical_financials')),
+        "saved_financials": {
+            'vat_basis': persisted.vat_basis,
+            'net_total_excl_vat': str(persisted.net_total_excl_vat) if persisted.net_total_excl_vat is not None else None,
+            'total_price': str(persisted.total_price) if persisted.total_price is not None else None,
+            'currency': persisted.currency,
+        },
         "po_link": po_link,
         "approval_detection": {
             **detected,

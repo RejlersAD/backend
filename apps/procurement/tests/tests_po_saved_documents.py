@@ -127,11 +127,15 @@ class SavedPODocumentTests(TestCase):
 
     def test_review_saves_fields_and_pr_link_preserving_source_without_creating_order(self):
         self.grant('update')
-        document = self.document(extracted_data={'summary': 'Original source text', 'signature_verified': True, 'source_sha256': 'source-hash'})
+        document = self.document(extracted_data={
+            'summary': 'Original source text', 'signature_verified': True, 'source_sha256': 'source-hash',
+            'total_amount': '400.00', 'tax_amount': '20.00', 'gross_amount': '420.00',
+        })
         pr = PurchaseRequisition.objects.create(pr_number='RAD-PRJ-PR-0002_2026', issued_by=self.user, requested_by=self.user)
         response = self.client.patch(f'{BASE}{document.pk}/', {
             'summary': 'Engineering licenses', 'currency': 'usd', 'total_amount': '413.27',
             'tax_amount': '20.66', 'gross_amount': '433.93', 'po_date': '2026-06-24',
+            'entered_amount': '413.27', 'vat_basis': 'exclusive',
             'pr_id': str(pr.pk), 'po_number': 'RAD-PRJ-PUR-0083_JUN2026',
         }, format='json')
         self.assertEqual(response.status_code, 200, response.data)
@@ -140,7 +144,10 @@ class SavedPODocumentTests(TestCase):
         self.assertEqual(fields['pr_id'], str(pr.pk))
         self.assertEqual(fields['pr_number'], pr.pr_number)
         self.assertEqual(fields['currency'], 'USD')
-        self.assertEqual(fields['total_amount'], '413.27')
+        self.assertEqual(fields['total_amount'], '400.00')
+        self.assertEqual(fields['canonical_financials']['net_amount'], '413.27')
+        self.assertEqual(fields['canonical_financials']['tax_amount'], '20.66')
+        self.assertEqual(fields['canonical_financials']['total_amount'], '433.93')
         self.assertEqual(fields['source_extracted_data']['summary'], 'Original source text')
         self.assertEqual(fields['source_sha256'], 'source-hash')
         self.assertTrue(fields['signature_verified'])

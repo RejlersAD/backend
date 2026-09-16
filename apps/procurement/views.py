@@ -8,7 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 # RBAC - Module-level access control (soft-coded)
@@ -1617,10 +1617,8 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         story.append(items_table)
         story.append(Spacer(1, 12))
 
-        subtotal = sum(item['line_total'] for item in normalized_items)
+        subtotal = _to_float(pr.net_total_excl_vat, sum(item['line_total'] for item in normalized_items))
         vat_value = _to_float(pr.total_price, subtotal) - _to_float(pr.net_total_excl_vat, subtotal)
-        if vat_value == 0:
-            vat_value = subtotal * 0.05
         grand_total = _to_float(pr.total_price, subtotal + vat_value)
         currency = pr.currency or 'AED'
 
@@ -2635,6 +2633,26 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             fields = deepcopy(document.extracted_data or {})
             fields.setdefault('source_extracted_data', deepcopy(fields))
             values = dict(review.validated_data)
+            from .services.procurement_vat import CONFIRMED_BASES, confirmed_totals, decimal_amount
+            basis = values.pop('vat_basis', None)
+            entered = values.pop('entered_amount', None)
+            monetary_fields = {'total_amount', 'tax_amount', 'gross_amount'}
+            changed_money = any(key in values and decimal_amount(values[key]) != decimal_amount(fields.get(key))
+                                for key in monetary_fields)
+            changed_money = changed_money or ('currency' in values and values['currency'] != fields.get('currency'))
+            if basis in CONFIRMED_BASES:
+                if entered is None:
+                    return Response({'entered_amount': 'Enter the price to confirm its VAT treatment.'}, status=400)
+                try:
+                    totals = confirmed_totals(entered, basis)
+                except ValueError as error:
+                    return Response({'vat_basis': str(error)}, status=400)
+                fields['canonical_financials'] = _serializable_fields({**totals, 'entered_amount': entered, 'vat_basis': basis})
+                # Keep OCR values and source evidence intact; reviewed amounts are separate.
+                for key in monetary_fields:
+                    values.pop(key, None)
+            elif entered is not None or changed_money:
+                return Response({'vat_basis': 'Confirm whether VAT applies before changing amounts.'}, status=400)
             if 'pr_id' in values:
                 pr = values.pop('pr_id')
                 fields['pr_id'] = str(pr.pk) if pr else None
@@ -2815,6 +2833,9 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             parser_classes=[MultiPartParser, FormParser])
     def import_signed_pdf(self, request):
         """Import, reconcile, persist, and verify a signed Purchase Order PDF."""
+        import logging
+        from uuid import uuid4
+
         from apps.rbac.action_policy import request_action_allowed
         pdf_file = request.FILES.get('file')
         if not pdf_file:
@@ -2836,6 +2857,23 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except SignedPOImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except APIException:
+            raise
+        except Exception:
+            error_reference = uuid4().hex
+            logging.getLogger(__name__).exception(
+                'Signed PO PDF import failed (reference=%s, user=%s)',
+                error_reference, request.user.pk,
+            )
+            return Response({
+                'error': (
+                    'The signed PO PDF could not be imported because of a server error. '
+                    'Please retry. If it still fails, contact support with reference '
+                    f'{error_reference}.'
+                ),
+                'code': 'signed_po_import_failed',
+                'error_reference': error_reference,
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(result, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='confirm_po')

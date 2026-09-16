@@ -17,10 +17,14 @@ from django.utils import timezone
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition, Vendor
 from ..models_master import Project
 from .po_excel_import import canonical_po_number
-from .po_tesseract_extractor import extract_text_from_pdf_tesseract
+from .po_tesseract_extractor import PDFTextUnreadableError, extract_text_from_pdf_tesseract
 from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
+
+
+# Cover, scope, payment terms and price summary; retain all PDF pages as evidence.
+SIGNED_PO_TEXT_PAGE_LIMIT = 4
 
 
 class SignedPOImportError(ValueError):
@@ -85,7 +89,8 @@ def _native_seller_name(pdf_bytes: bytes) -> str:
         import pymupdf
 
         with pymupdf.open(stream=pdf_bytes, filetype="pdf") as document:
-            for page in document:
+            for page_number in range(min(len(document), SIGNED_PO_TEXT_PAGE_LIMIT)):
+                page = document[page_number]
                 value = _seller_name(page.get_text("text", sort=True))
                 if value:
                     return value
@@ -141,7 +146,21 @@ def normalize_po_summary(text: str) -> str:
 
 
 def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
-    text = extract_text_from_pdf_tesseract(pdf_bytes)
+    try:
+        text = extract_text_from_pdf_tesseract(pdf_bytes, max_pages=SIGNED_PO_TEXT_PAGE_LIMIT)
+    except PDFTextUnreadableError as exc:
+        raise SignedPOImportError(
+            'The PDF text could not be read. Upload an unlocked PDF with clear, readable '
+            'purchase order pages and try again.'
+        ) from exc
+    source_page_count = None
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=pdf_bytes, filetype='pdf') as document:
+            source_page_count = len(document)
+    except (ImportError, RuntimeError, ValueError):
+        pass
     source_number = _match(r"(RAD-(?:GEN|PRJ)-PUR-\d{4}_\s*[A-Z]{3}\d{4})", text)
     if not source_number:
         source_number = re.sub(r"\.pdf$", "", filename, flags=re.IGNORECASE)
@@ -166,6 +185,9 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
 
     return {
         "ocr_text_length": len(text),
+        "source_page_count": source_page_count,
+        "extracted_page_count": min(source_page_count, SIGNED_PO_TEXT_PAGE_LIMIT) if source_page_count is not None else None,
+        "extraction_truncated": source_page_count is not None and source_page_count > SIGNED_PO_TEXT_PAGE_LIMIT,
         "source_po_number": source_number,
         "po_number": po_number,
         "po_date": _date(po_date_text),
@@ -212,12 +234,41 @@ def _serializable_fields(fields):
             for key, value in fields.items()}
 
 
+def _extraction_review_issues(fields):
+    issues = []
+    if not fields.get('extraction_reviewed') and (
+        fields.get('extraction_truncated')
+        or ('source_page_count' in fields and fields['source_page_count'] is None)
+    ):
+        issues.append(
+            'Automatic extraction is limited to the first four purchase order pages. Review the amount, VAT and '
+            'commercial terms against the complete saved PDF before completing reconciliation.'
+        )
+    if Decimal(str(fields.get('total_amount') or '0')) <= 0:
+        issues.append('The purchase amount could not be confirmed. Review and save the amount from the original PDF.')
+    return issues
+
+
 def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_verified,
                            stamp_verified, approved_by_name, approved_by_title, approved_date,
                            retained_document=None):
     """An upload is evidence, not permission to replace an existing order."""
+    document, digest = (
+        (retained_document, hashlib.sha256(pdf_bytes).hexdigest()) if retained_document is not None
+        else _store_source_pdf(pdf_bytes, fields, filename, user)
+    )
+    if document.confirmed_po_id and document.confirmed_po_id != po.pk:
+        raise SignedPOImportError('This original PDF is already linked to another purchase order.')
+    previous = document.extracted_data or {}
+    if previous.get('source_sha256') == digest and (
+        previous.get('extraction_reviewed') or previous.get('reconciled_at')
+    ):
+        # Identical bytes must retain the reviewer's corrections; fresh OCR
+        # cannot replace confirmed amounts or reopen a completed source review.
+        fields = {**fields, **previous}
     issues = []
-    if Decimal(str(fields['total_amount'])) != po.total_amount:
+    saved_net = po.net_amount if po.net_amount is not None else po.total_amount
+    if Decimal(str(fields['total_amount'])) != saved_net:
         issues.append('The PDF amount differs from the saved order. Review the order amount before reconciling.')
     if fields['currency'] != po.currency:
         issues.append('The PDF currency differs from the saved order.')
@@ -226,13 +277,7 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
         issues.append('The PDF supplier differs from the saved order or could not be read. Review the supplier.')
     if not po.pr_reference_id:
         issues.append('PR link pending. Link the correct purchase recommendation during reconciliation.')
-    document, digest = (
-        (retained_document, hashlib.sha256(pdf_bytes).hexdigest()) if retained_document is not None
-        else _store_source_pdf(pdf_bytes, fields, filename, user)
-    )
-    if document.confirmed_po_id and document.confirmed_po_id != po.pk:
-        raise SignedPOImportError('This original PDF is already linked to another purchase order.')
-    previous = document.extracted_data or {}
+    issues[:0] = _extraction_review_issues(fields)
     # Re-uploading the same original without checking boxes must not erase a
     # prior reviewer-confirmed signature, stamp, name or source date.
     signature_verified = signature_verified or bool(previous.get('signature_verified'))
@@ -333,21 +378,33 @@ def import_signed_po_pdf(
     ).annotate(
         canonical_first=Case(When(po_number=po_number, then=Value(0)), default=Value(1), output_field=IntegerField()),
     ).order_by("canonical_first").first()
+    retained_document = None
     if po:
         if not allow_existing_update:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Purchase order update permission is required to attach a PDF to an existing order.')
-        return _attach_existing_order(
-            po, fields, pdf_bytes, filename, user,
-            signature_verified=signature_verified, stamp_verified=stamp_verified,
-            approved_by_name=approved_by_name, approved_by_title=approved_by_title,
-            approved_date=approved_date,
-        )
+        review_issues = _extraction_review_issues(fields)
+        if review_issues:
+            retained_document, _ = _store_source_pdf(pdf_bytes, fields, filename, user)
+            previous = retained_document.extracted_data or {}
+            if previous.get('extraction_reviewed'):
+                fields['extraction_reviewed'] = True
+                review_issues = _extraction_review_issues(fields)
+        if not review_issues or (retained_document and retained_document.confirmed_po_id):
+            return _attach_existing_order(
+                po, fields, pdf_bytes, filename, user,
+                signature_verified=signature_verified, stamp_verified=stamp_verified,
+                approved_by_name=approved_by_name, approved_by_title=approved_by_title,
+                approved_date=approved_date, retained_document=retained_document,
+            )
+        # A linked document is read-only. Keep a partially extracted original
+        # pending until its owner explicitly reviews and attaches it to this PO.
     candidates = list(PurchaseRequisition.objects.filter(
         Q(po_number_reference__iexact=source_number) | Q(po_number_reference__iexact=po_number)
     )[:2])
     pr = po.pr_reference if po and po.pr_reference_id else candidates[0] if len(candidates) == 1 else None
-    reconciliation_issues = []
+    extraction_review_issues = _extraction_review_issues(fields)
+    reconciliation_issues = list(extraction_review_issues)
     if pr:
         verified, message = PurchaseOrderNumberService.verify(po_number, pr.pr_number)
         if not verified and not (po and po.pr_reference_id):
@@ -367,7 +424,14 @@ def import_signed_po_pdf(
             )
 
     vendors = list(Vendor.objects.all().only("id", "vendor_code", "name"))
-    if pr and pr.vendor_id:
+    if po:
+        vendor_match = {
+            'matched': True, 'source': fields['ocr_vendor_name'], 'id': str(po.vendor_id),
+            'vendor_code': po.vendor.vendor_code, 'vendor_name': po.vendor.name,
+            'method': 'existing purchase order vendor master', 'confidence': 1.0,
+        }
+        fields['vendor_name'] = po.vendor.name
+    elif pr and pr.vendor_id:
         vendor_match = {
             "matched": True,
             "source": fields["ocr_vendor_name"],
@@ -386,7 +450,14 @@ def import_signed_po_pdf(
         vendor_match = _match_vendor((pr.supplier_name if pr else "") or fields["vendor_name"], vendors)
     if not vendor_match.get("matched"):
         reconciliation_issues.append("Supplier match pending. Select the correct supplier during reconciliation.")
-        document, digest = _store_source_pdf(pdf_bytes, fields, filename, user)
+    if not vendor_match.get("matched") or extraction_review_issues:
+        # Keep the complete source for explicit review rather than creating an
+        # order from incomplete amounts or a partially extracted long document.
+        vendor_id = vendor_match.get("id") if vendor_match.get("matched") else None
+        document, digest = (
+            (retained_document, hashlib.sha256(pdf_bytes).hexdigest()) if retained_document is not None
+            else _store_source_pdf(pdf_bytes, fields, filename, user)
+        )
         document.document_type = "purchase_order"
         document.extraction_status = "completed"
         document.extraction_error = ""
@@ -397,7 +468,7 @@ def import_signed_po_pdf(
             "approved_by_name": approved_by_name, "approved_by_title": approved_by_title,
             "approved_date": approved_date, "vendor_match": vendor_match,
             "pr_id": str(pr.pk) if pr else None, "pr_number": pr.pr_number if pr else "",
-            "vendor_id": None,
+            "vendor_id": vendor_id,
         }
         document.save()
         return {
@@ -405,7 +476,7 @@ def import_signed_po_pdf(
             "purchase_order_id": str(document.confirmed_po_id) if document.confirmed_po_id else None,
             "po_number": po_number, "source_document_url": document.s3_url,
             "pr_id": str(pr.pk) if pr else None, "pr_number": pr.pr_number if pr else "",
-            "vendor_id": None, "vendor_name": fields["vendor_name"],
+            "vendor_id": vendor_id, "vendor_name": fields["vendor_name"],
             "database_verified": True, "reconciliation_required": True,
             "reconciliation_issues": reconciliation_issues, "extracted_data": document.extracted_data,
             "mapping_issues": mapping_issues, "workflow_issues": [],

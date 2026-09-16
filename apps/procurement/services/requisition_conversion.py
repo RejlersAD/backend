@@ -67,6 +67,8 @@ class RequisitionConversionService:
         try:
             source_total = Decimal(str(snapshot.get('net_total', '')).replace(',', ''))
             current_total = cls._total_amount(pr)
+            if getattr(pr, 'vat_basis', 'unconfirmed') in {'exclusive', 'inclusive', 'none'} and pr.net_total_excl_vat is not None:
+                current_total = pr.net_total_excl_vat
             money_matches = (source_total.is_finite() and current_total.is_finite()
                              and source_total.quantize(Decimal('0.01')) == current_total.quantize(Decimal('0.01')))
         except (InvalidOperation, ValueError, TypeError):
@@ -205,7 +207,18 @@ class RequisitionConversionService:
             requester_name = pr.issued_by.get_full_name() or pr.issued_by.email
 
         pricing_data = pr.price_remarks_data if isinstance(pr.price_remarks_data, dict) else {}
+        confirmed_financials = {}
+        item_amount = total_amount
+        if getattr(pr, 'vat_basis', 'unconfirmed') in {'exclusive', 'inclusive', 'none'} and pr.net_total_excl_vat is not None:
+            confirmed_financials = {
+                'vat_basis': pr.vat_basis, 'net_amount': pr.net_total_excl_vat,
+                'tax_amount': total_amount - pr.net_total_excl_vat,
+                'vat_percentage': Decimal('0') if pr.vat_basis == 'none' else Decimal('5'),
+                'discount_amount': Decimal(str(pricing_data.get('discount_amount') or 0)),
+            }
+            item_amount = (total_amount if pr.vat_basis == 'inclusive' else pr.net_total_excl_vat) + confirmed_financials['discount_amount']
         po = PurchaseOrder.objects.create(
+            **confirmed_financials,
             po_number=po_number,
             pr_reference=pr,
             enterprise_project=getattr(pr, 'enterprise_project', None),
@@ -226,7 +239,7 @@ class RequisitionConversionService:
             project_number=pr.project or '',
             project_manager=pr.pm_name.get_full_name() if pr.pm_name else '',
             budget=pr.estimated_budget,
-            items=cls._items(pr, total_amount),
+            items=cls._items(pr, item_amount),
             expected_delivery=pr.required_date,
             scope_of_services=pr.description_reason or '',
             approval_log=cls._approval_log(pr),

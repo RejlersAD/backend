@@ -79,10 +79,86 @@ class PODocumentReconciliationTests(TestCase):
         fields.update(values)
         return PurchaseOrder.objects.create(**fields)
 
+    def test_explicit_reconciliation_confirms_review_of_partially_extracted_long_pdf(self):
+        self.document.extracted_data.update(
+            extraction_truncated=True, source_page_count=27, extracted_page_count=4,
+        )
+        self.document.save(update_fields=['extracted_data'])
+        response = self.reconcile()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.document.refresh_from_db()
+        self.assertTrue(self.document.extracted_data['extraction_reviewed'])
+        self.assertTrue(self.document.extracted_data['source_extracted_data']['extraction_truncated'])
+        self.assertFalse(any('first four' in issue for issue in response.data['reconciliation_issues']))
+        self.assertIsNotNone(self.document.confirmed_po_id)
+
+    def test_existing_order_long_upload_stays_editable_until_review_then_reupload_is_idempotent(self):
+        order = self.existing(
+            status='completed', vat_basis='inclusive', net_amount='95.24', tax_amount='4.76',
+            total_amount='100.00', approved_by_name='Recorded approver',
+            approved_date=date(2026, 1, 8), approval_signature='saved-signature',
+            approval_log=[{'stage': 'Native approval', 'status': 'Approved'}],
+        )
+        fields = {**self.fields, 'source_page_count': 27, 'extracted_page_count': 4,
+                  'extraction_truncated': True, 'vendor_name': self.vendor.name,
+                  'total_amount': '0.00', 'gross_amount': '0.00'}
+
+        def upload():
+            with patch('apps.procurement.services.signed_po_pdf_import.extract_signed_po_fields',
+                       return_value=deepcopy(fields)):
+                return self.client.post(f'{BASE}po-documents/import_signed_pdf/', {
+                    'file': SimpleUploadedFile('long-original.pdf', self.original, content_type='application/pdf'),
+                }, format='multipart')
+
+        uploaded = upload()
+        self.assertEqual(uploaded.status_code, 200, uploaded.data)
+        self.assertEqual(uploaded.data['operation'], 'uploaded')
+        self.assertIsNone(uploaded.data['purchase_order_id'])
+        self.assertEqual(uploaded.data['pr_id'], str(self.pr.pk))
+        self.assertEqual(uploaded.data['vendor_id'], str(self.vendor.pk))
+        self.document.refresh_from_db()
+        self.assertIsNone(self.document.confirmed_po_id)
+        order.refresh_from_db()
+        self.assertEqual(order.attachments, [])
+        saved = self.client.patch(f'{BASE}po-documents/{self.document.pk}/', {
+            'summary': 'Reviewed full original PDF',
+            'entered_amount': '100.00', 'vat_basis': 'inclusive',
+        }, format='json')
+        self.assertEqual(saved.status_code, 200, saved.data)
+        reconciled = self.reconcile()
+        self.assertEqual(reconciled.status_code, 200, reconciled.data)
+        self.assertEqual(reconciled.data['operation'], 'attached')
+        self.assertFalse(reconciled.data['reconciliation_required'])
+        self.document.refresh_from_db()
+        self.assertTrue(self.document.extracted_data['extraction_reviewed'])
+        self.assertEqual(self.document.confirmed_po_id, order.pk)
+        self.assertEqual(self.document.s3_key, self.key)
+        repeated = upload()
+        self.assertEqual(repeated.status_code, 200, repeated.data)
+        self.assertEqual(repeated.data['operation'], 'attached')
+        self.assertFalse(repeated.data['reconciliation_required'])
+        order.refresh_from_db()
+        self.assertEqual((order.status, order.title, order.total_amount),
+                         ('completed', 'Existing native title', Decimal('100.00')))
+        self.assertEqual((order.net_amount, order.tax_amount, order.vat_basis),
+                         (Decimal('95.24'), Decimal('4.76'), 'inclusive'))
+        self.assertEqual((order.approved_by_name, order.approved_date, order.approval_signature),
+                         ('Recorded approver', date(2026, 1, 8), 'saved-signature'))
+        self.assertEqual(order.approval_log[0], {'stage': 'Native approval', 'status': 'Approved'})
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.extracted_data['summary'], 'Reviewed full original PDF')
+        self.assertEqual(self.document.extracted_data['total_amount'], '95.24')
+        self.assertEqual(self.document.extracted_data['source_extracted_data']['total_amount'], '0.00')
+        self.assertEqual(self.document.extracted_data['canonical_financials']['total_amount'], '100.00')
+        self.assertEqual(PurchaseOrder.objects.count(), 1)
+        self.assertEqual(PODocument.objects.count(), 1)
+        self.assertEqual(len(order.attachments), 1)
+
     def test_review_then_reconcile_uses_saved_fields_and_exact_original_without_ocr_or_copy(self):
         saved = self.client.patch(f'{BASE}po-documents/{self.document.pk}/', {
             'summary': 'Reviewed title', 'total_amount': '125.00', 'tax_amount': '0.00',
             'gross_amount': '125.00', 'pr_id': str(self.pr.pk),
+            'vat_basis': 'none', 'entered_amount': '125.00',
         }, format='json')
         self.assertEqual(saved.status_code, 200, saved.data)
         with patch('apps.procurement.services.signed_po_pdf_import.extract_signed_po_fields') as ocr, patch('django.core.files.storage.default_storage.save') as store:

@@ -81,9 +81,21 @@ def reconcile_saved_po_document(document_id, request, mapping):
         raise ProcurementDeleteConflict('The saved PDF details changed during reconciliation. Refresh and review the latest values.')
     fields = deepcopy(document.extracted_data or {})
     fields.setdefault('source_extracted_data', deepcopy(fields))
-    total, tax = _money(fields, 'total_amount', positive=True), _money(fields, 'tax_amount')
-    if fields.get('gross_amount') is not None and _money(fields, 'gross_amount') != total + tax:
-        raise ValidationError({'gross_amount': 'Save a gross amount equal to the total amount plus tax before reconciliation.'})
+    confirmed = fields.get('canonical_financials') or {}
+    from .procurement_vat import CONFIRMED_BASES, confirmed_totals
+    financial_values = {}
+    if confirmed.get('vat_basis') in CONFIRMED_BASES:
+        try:
+            financial_values = confirmed_totals(confirmed.get('entered_amount'), confirmed['vat_basis'])
+        except ValueError as error:
+            raise ValidationError({'vat_basis': str(error)}) from error
+        total, tax = financial_values['net_amount'], financial_values['tax_amount']
+        if total <= 0:
+            raise ValidationError({'entered_amount': 'Enter a positive price before completing reconciliation.'})
+    else:
+        total, tax = _money(fields, 'total_amount', positive=True), _money(fields, 'tax_amount')
+        if fields.get('gross_amount') is not None and _money(fields, 'gross_amount') != total + tax:
+            raise ValidationError({'gross_amount': 'Save a gross amount equal to the total amount plus tax before reconciliation.'})
     currency = str(fields.get('currency') or '').strip().upper()
     if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
         raise ValidationError({'currency': 'Save a three-letter currency code before reconciliation.'})
@@ -107,7 +119,8 @@ def reconcile_saved_po_document(document_id, request, mapping):
             mismatches.append('supplier')
         if existing.pr_reference_id and existing.pr_reference_id != pr.pk:
             mismatches.append('purchase recommendation')
-        if existing.total_amount != total or existing.tax_amount != tax:
+        existing_total = existing.net_amount if existing.net_amount is not None else existing.total_amount
+        if existing_total != total or existing.tax_amount != tax:
             mismatches.append('amount or tax')
         if existing.currency != currency:
             mismatches.append('currency')
@@ -132,6 +145,8 @@ def reconcile_saved_po_document(document_id, request, mapping):
             'expected_delivery': fields.get('expected_delivery'),
             'items': fields.get('items') or [], 'quote_ref': fields.get('quote_ref') or '',
         }
+        if financial_values:
+            data.update(financial_values, vat_basis=confirmed['vat_basis'], entered_amount=confirmed['entered_amount'])
         serializer = PurchaseOrderSerializer(data=data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         try:
@@ -141,6 +156,10 @@ def reconcile_saved_po_document(document_id, request, mapping):
             raise ProcurementDeleteConflict('An order with this number was created while reconciling. Refresh and retry to review the existing order.') from error
         PurchaseOrder.objects.filter(pk=order.pk).update(po_date=issued)
         order.po_date = issued
+    # Completing reconciliation explicitly confirms the reviewed commercial
+    # fields when automatic OCR was limited to the start of a long document.
+    if fields.get('extraction_truncated') or ('source_page_count' in fields and fields['source_page_count'] is None):
+        fields['extraction_reviewed'] = True
     result = _attach_existing_order(
         order, fields, content, document.original_filename, request.user,
         signature_verified=signature, stamp_verified=fields.get('stamp_verified') is True,
