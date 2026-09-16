@@ -1,8 +1,9 @@
-"""Business position and effective access required for procurement decisions."""
+"""Employee assignments and role-specific eligibility for procurement decisions."""
 
 import re
 
 from apps.rbac.approval_eligibility import approval_access, has_business_position
+from apps.rbac.action_policy import record_workflow_not_denied
 from apps.rbac.organization_catalog import ORGANIZATIONAL_ROLES
 
 
@@ -57,6 +58,35 @@ def position_matches_stage(user, stage):
     return bool(positions and has_business_position(user, positions))
 
 
+def is_employee_selected_pr_stage(stage):
+    """Recognize the configurable Level 1 employee group, not fixed-role stages."""
+    try:
+        if int(stage.get('level', 1)) != 1:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if _key(stage.get('role')) != 'level 1 approver':
+        return False
+    label = _key(stage.get('stage'))
+    return not label or bool(re.fullmatch(r'level 1(?: approver(?: \d+(?: of \d+)?)?)?', label))
+
+
+def _eligible_selected_employee(user, module):
+    """Match the active RADAI directory without granting module-wide access."""
+    from django.contrib.auth import get_user_model
+    from apps.hr_core.models import EmployeeMaster
+
+    if not user or not user.is_authenticated or not getattr(user, 'pk', None):
+        return False
+    current = get_user_model().objects.filter(pk=user.pk, is_active=True).select_related('rbac_profile').first()
+    if not current or not record_workflow_not_denied(current, module, 'approve'):
+        return False
+    employment = EmployeeMaster.objects.filter(user_id=current.pk).values_list('employment_status', flat=True).first()
+    return employment is None or employment in {'active', 'probation', 'notice_period'}
+
+
 def eligible_stage_assignee(user, stage, module):
     """Assignment identity and current sequence are additionally checked by callers."""
+    if module == MODULE_PR and is_employee_selected_pr_stage(stage):
+        return _eligible_selected_employee(user, module)
     return approval_access(user, module) and position_matches_stage(user, stage)

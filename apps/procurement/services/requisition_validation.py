@@ -46,8 +46,8 @@ def _decimal(value, label, *, minimum=None, maximum=None, decimal_places=4):
         raise ValidationError(f'{label} is outside the supported numeric range.')
 
 
-def normalize_line_items(value):
-    """Validate a bounded JSON line-item list and return one canonical schema."""
+def normalize_line_items(value, line_details=None):
+    """Normalize optional line details without inventing missing pricing."""
     if value in (None, ''):
         return []
     if not isinstance(value, list):
@@ -56,6 +56,7 @@ def normalize_line_items(value):
         raise ValidationError(f'No more than {MAX_LINE_ITEMS} line items are allowed.')
 
     normalized = []
+    line_details = line_details if isinstance(line_details, list) else []
     for index, raw_item in enumerate(value, start=1):
         if not isinstance(raw_item, dict):
             raise ValidationError(f'Line item {index} must be an object.')
@@ -63,48 +64,71 @@ def normalize_line_items(value):
         description = str(
             raw_item.get('description') or raw_item.get('item') or raw_item.get('name') or ''
         ).strip()
-        raw_quantity = raw_item.get('quantity', raw_item.get('qty', 1))
-        raw_unit_price = raw_item.get('unit_price', raw_item.get('price', 0))
+        raw_quantity = raw_item.get('quantity', raw_item.get('qty'))
+        raw_unit_price = raw_item.get('unit_price', raw_item.get('price'))
+        raw_total = raw_item.get('total', raw_item.get('line_total'))
+        try:
+            blank_total = raw_total in (None, '') or Decimal(str(raw_total)) == 0
+        except (InvalidOperation, TypeError, ValueError):
+            blank_total = False
+        discount = _decimal(raw_item.get('discount', raw_item.get('line_discount', raw_item.get('discount_amount', 0))) or 0,
+                            f'Line item {index} discount', minimum=Decimal('0'), decimal_places=2)
+        details = line_details[index - 1] if index <= len(line_details) else {}
+        has_metadata = isinstance(details, dict) and any(
+            bool(field.strip()) if isinstance(field, str) else field not in (None, '', [], {})
+            for field in details.values()
+        )
+        has_other_details = (
+            str(raw_item.get('code') or raw_item.get('sku') or '').strip()
+            or str(raw_item.get('unit') or raw_item.get('uom') or 'EA').strip().upper() != 'EA'
+            or discount or has_metadata
+        )
 
         # A completely blank row from the UI is not persisted as a line item.
-        if not description and raw_quantity in ('', None, 1, '1') and raw_unit_price in ('', None, 0, '0'):
+        if (not description and raw_quantity in ('', None, 1, '1') and raw_unit_price in ('', None, 0, '0')
+                and blank_total and not has_other_details):
             continue
-        if not description:
-            raise ValidationError(f'Line item {index} requires a description.')
         if len(description) > 500:
             raise ValidationError(f'Line item {index} description cannot exceed 500 characters.')
 
-        quantity = _decimal(
+        quantity = None if raw_quantity in (None, '') else _decimal(
             raw_quantity,
             f'Line item {index} quantity',
-            minimum=Decimal('0.0001'),
+            minimum=Decimal('0'),
             maximum=Decimal('1000000000'),
         )
-        unit_price = _decimal(
+        unit_price = None if raw_unit_price in (None, '') else _decimal(
             raw_unit_price,
             f'Line item {index} unit price',
             minimum=Decimal('0'),
             maximum=Decimal('9999999999999.99'),
             decimal_places=2,
         )
-        discount = _decimal(raw_item.get('discount', raw_item.get('line_discount', raw_item.get('discount_amount', 0))) or 0,
-                            f'Line item {index} discount', minimum=Decimal('0'), decimal_places=2)
-        calculated_total = max(Decimal('0'), quantity * unit_price - discount).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
-        if calculated_total > Decimal('9999999999999.99'):
+        calculated_total = (
+            max(Decimal('0'), quantity * unit_price - discount).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+            if quantity is not None and unit_price is not None else None
+        )
+        if calculated_total is not None and calculated_total > Decimal('9999999999999.99'):
             raise ValidationError(f'Line item {index} total exceeds the supported monetary range.')
 
-        supplied_total = raw_item.get('total', raw_item.get('line_total'))
+        supplied_total = raw_total
         if supplied_total not in (None, ''):
             supplied_total = _decimal(
                 supplied_total,
                 f'Line item {index} total',
                 minimum=Decimal('0'),
+                maximum=Decimal('9999999999999.99'),
                 decimal_places=2,
             )
-            if supplied_total != calculated_total:
+            if calculated_total is not None and supplied_total != calculated_total:
                 raise ValidationError(
                     f'Line item {index} total must equal quantity multiplied by unit price.'
                 )
+        else:
+            supplied_total = None
+        # A partial row may have a recorded quote total. Keep it, and leave an
+        # unknown total blank instead of turning absent operands into zero.
+        total = calculated_total if calculated_total is not None else supplied_total
 
         unit = str(raw_item.get('unit') or raw_item.get('uom') or 'EA').strip() or 'EA'
         if len(unit) > 30:
@@ -112,10 +136,10 @@ def normalize_line_items(value):
 
         normalized_item = {
             'description': description,
-            'quantity': format(quantity.normalize(), 'f'),
+            'quantity': format(quantity.normalize(), 'f') if quantity is not None else '',
             'unit': unit,
-            'unit_price': format(unit_price, '.2f'),
-            'total': format(calculated_total, '.2f'),
+            'unit_price': format(unit_price, '.2f') if unit_price is not None else '',
+            'total': format(total, '.2f') if total is not None else '',
         }
         if discount or any(key in raw_item for key in ('discount', 'line_discount', 'discount_amount')):
             normalized_item['discount'] = format(discount, '.2f')
@@ -130,6 +154,9 @@ def normalize_line_items(value):
 
 
 def line_items_total(items):
+    """Only reconcile header money against completely specified line pricing."""
+    if any(item.get('quantity') in (None, '') or item.get('unit_price') in (None, '') for item in items):
+        return None
     return sum((Decimal(item['total']) for item in items), Decimal('0.00'))
 
 

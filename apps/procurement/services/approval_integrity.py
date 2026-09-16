@@ -33,6 +33,20 @@ def protect_approval_route(existing, incoming, *, level, label, freeze_route=Fal
             raise ValidationError('An approval with a recorded decision cannot be removed, moved, or reassigned.')
 
 
+def protect_requisition_approval_route(existing, incoming, **kwargs):
+    """Obsolete Level 1 positions do not prevent a pending employee replacement."""
+    from .approval_eligibility import is_employee_selected_pr_stage
+
+    def comparable(rows):
+        return [
+            {**row, 'business_position': ''}
+            if isinstance(row, dict) and is_employee_selected_pr_stage(row) else row
+            for row in rows
+        ]
+
+    protect_approval_route(comparable(existing), comparable(incoming), **kwargs)
+
+
 def stage_signature_issue(stage):
     """Return a review reason when saved signer metadata contradicts assignment.
 
