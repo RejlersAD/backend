@@ -118,7 +118,13 @@ class PurchaseOrderExportTests(TestCase):
         self.assertNotIn('Phone / Email:', first_page_text)
         self.assertRegex(first_page_text, r'Seller Ref\. no:\s+—')
         self.assertRegex(first_page_text, r'Contact Person:\s+Vendor Contact')
-        self.assertIn('SUMMARY OF PRICES', exported.pages[2].extract_text())
+        price_summary_text = exported.pages[2].extract_text()
+        self.assertIn('SUMMARY OF PRICES', price_summary_text)
+        self.assertRegex(price_summary_text, r'Total Price:\s+USD 100\.00')
+        self.assertRegex(price_summary_text, r'VAT \(5%\):\s+USD 5\.00')
+        self.assertRegex(price_summary_text, r'Total Sum:\s+USD 105\.00')
+        self.assertNotIn('Grand Total', price_summary_text)
+        self.assertNotIn('AED', price_summary_text)
         first_cover_text = exported.pages[3].extract_text()
         self.assertIn('PURCHASE ORDER', first_cover_text)
         self.assertIn('Page 4', first_cover_text)
@@ -147,6 +153,11 @@ class PurchaseOrderExportTests(TestCase):
         )
 
         self.assertIn('Summary of Prices', rendered_text)
+        self.assertIn('Total Price: USD 100.00', rendered_text)
+        self.assertIn('VAT (5%): USD 5.00', rendered_text)
+        self.assertIn('Total Sum: USD 105.00', rendered_text)
+        self.assertNotIn('Grand Total', rendered_text)
+        self.assertNotIn('AED', rendered_text)
         self.assertIn('First scope paragraph', rendered_text)
         self.assertIn('Second scope paragraph', rendered_text)
         self.assertNotIn('&nbsp;', rendered_text)
@@ -281,6 +292,18 @@ class PurchaseOrderExportTests(TestCase):
             for reference in order.contact_persons['buyer_references']:
                 for value in reference.values():
                     self.assertIn(''.join(value.split()), text)
+            # Keep the heading at the panel top and the identity/date in the
+            # requested bottom-left signing area, clear of the branded footer.
+            heading = page.search_for('Approved by:')[0]
+            approver = page.search_for('Jarmo Suominen')[0]
+            date_line = page.search_for('__________________________')[0]
+            self.assertAlmostEqual(approver.x0, heading.x0, delta=1)
+            self.assertGreater(approver.y0, page.rect.height - 80 * mm)
+            self.assertGreater(approver.y0, heading.y1)
+            self.assertLess(date_line.x1, page.rect.width / 2)
+            self.assertGreater(date_line.y0, approver.y1)
+            self.assertGreater(date_line.y1, page.rect.height - 48 * mm)
+            self.assertLess(date_line.y1, page.rect.height - 42 * mm)
             self.assertLess(
                 page.search_for('INVOICEFAX9988')[0].y1,
                 min(rect.y0 for rect in page.search_for('Payment Terms:')),
@@ -346,6 +369,7 @@ class PurchaseOrderExportTests(TestCase):
     def test_signature_approver_and_confirmation_stay_together_on_first_page(self):
         order = self._realistic_long_contact_order()
         order.approved_by_name = 'Synthetic Authorised Approver'
+        order.approved_date = '2026-09-12'
         signature = BytesIO()
         PILImage.new('RGB', (180, 50), 'navy').save(signature, format='PNG')
         order.approval_signature = 'data:image/png;base64,' + base64.b64encode(signature.getvalue()).decode()
@@ -367,3 +391,10 @@ class PurchaseOrderExportTests(TestCase):
             self.assertLess(heading.y1, signature_rect.y0)
             self.assertLess(signature_rect.y1, approver.y0)
             self.assertAlmostEqual(signature_rect.x0, approver.x0, delta=1)
+            approval_date = page.search_for(order.approved_date)[0]
+            self.assertGreater(approver.y0, page.rect.height - 80 * mm)
+            self.assertGreater(approval_date.y0, approver.y1)
+            self.assertLess(approval_date.x1, page.rect.width / 2)
+            self.assertGreater(approval_date.y1, page.rect.height - 48 * mm)
+            self.assertLess(approval_date.y1, page.rect.height - 42 * mm)
+            self.assertFalse(page.search_for('__________________________'))
