@@ -4,10 +4,13 @@ from copy import deepcopy
 from datetime import date
 import hashlib
 
+from botocore.exceptions import ClientError
 from django.test import TestCase
+from django.utils.dateparse import parse_datetime
+from django.utils import timezone
 
 from apps.procurement.models import PurchaseRequisition
-from apps.procurement.services.signed_pr_pdf_import import SignedPRImportError, import_signed_pr_pdf
+from apps.procurement.services.signed_pr_pdf_import import SignedPRImportError, SignedPRStorageError, import_signed_pr_pdf
 from apps.procurement.tests import test_signed_pr_pdf_creation as creation_fixtures
 
 
@@ -44,7 +47,11 @@ class DuplicateSignedPRReviewTests(TestCase):
         return pr
 
     def test_same_pdf_preserves_manual_signature_and_approval_date_without_new_overrides(self):
+        before_upload = timezone.now()
         pr = self.first_review()
+        uploaded_at = pr.attachments[0]['uploaded_at']
+        self.assertGreaterEqual(parse_datetime(uploaded_at), before_upload)
+        self.assertLessEqual(parse_datetime(uploaded_at), timezone.now())
         result = self.import_document(existing=pr)
         pr.refresh_from_db()
         self.assertTrue(result["document_signed_off"])
@@ -56,7 +63,92 @@ class DuplicateSignedPRReviewTests(TestCase):
         self.assertEqual(verification["approval_date_source"], "manual")
         self.assertTrue(pr.price_remarks_data["signed_approval_evidence"]["manual_signature_overrides"]["vp"])
         self.assertEqual(len(pr.attachments), 1)
+        self.assertEqual(pr.attachments[0]['uploaded_at'], uploaded_at)
         self.assertEqual(self.storage.save.call_count, 1)
+
+    def test_same_pdf_repairs_missing_original_in_place_without_changing_commercial_values(self):
+        pr = self.first_review()
+        old_key = pr.attachments[0]['storage_key']
+        original_total, original_items = pr.total_price, deepcopy(pr.items)
+        self.storage.reset_mock()
+        self.storage.exists.return_value = False
+
+        result = self.import_document(existing=pr)
+
+        self.storage.exists.assert_called_once_with(old_key)
+        self.storage.save.assert_called_once()
+        key, content = self.storage.save.call_args.args
+        self.assertTrue(key.startswith(f'procurement/signed_requisitions/{pr.pk}/'))
+        self.assertEqual(content.read(), self.source_bytes)
+        self.storage.delete.assert_not_called()
+        pr.refresh_from_db()
+        self.assertTrue(result['document_signed_off'])
+        self.assertEqual(len(pr.attachments), 1)
+        self.assertEqual(pr.attachments[0]['storage_key'], key)
+        self.assertEqual(pr.total_price, original_total)
+        self.assertEqual(pr.items, original_items)
+        self.assertEqual(pr.status, 'approved')
+        self.assertEqual(pr.approved_at.date(), date(2026, 1, 7))
+
+    def test_same_pdf_repairs_unresolvable_source_without_accessing_unrelated_key(self):
+        pr = self.first_review()
+        pr.attachments[0].update(storage_key='private/unrelated.pdf', s3_key='private/unrelated.pdf')
+        pr.save(update_fields=['attachments'])
+        self.storage.reset_mock()
+
+        self.import_document(existing=pr)
+
+        self.storage.exists.assert_not_called()
+        self.storage.delete.assert_not_called()
+        self.storage.save.assert_called_once()
+        pr.refresh_from_db()
+        self.assertEqual(len(pr.attachments), 1)
+        self.assertTrue(pr.attachments[0]['storage_key'].startswith(f'procurement/signed_requisitions/{pr.pk}/'))
+        self.assertNotIn('s3_key', pr.attachments[0])
+        self.assertEqual(pr.attachments[0]['sha256'], hashlib.sha256(self.source_bytes).hexdigest())
+
+    def test_same_hash_quotation_does_not_replace_designated_original(self):
+        pr = self.first_review()
+        pr.attachments[0].update(type='quotation', document_type='quotation')
+        quotation = deepcopy(pr.attachments[0])
+        pr.save(update_fields=['attachments'])
+        self.storage.reset_mock()
+
+        self.import_document(existing=pr)
+
+        self.storage.save.assert_called_once()
+        pr.refresh_from_db()
+        self.assertEqual(len(pr.attachments), 2)
+        self.assertEqual(pr.attachments[0], quotation)
+        self.assertEqual(pr.attachments[1]['type'], 'signed_purchase_requisition_pdf')
+
+    def test_storage_failure_during_reattach_does_not_save_false_success_or_change_evidence(self):
+        pr = self.first_review()
+        original = deepcopy(pr.attachments)
+        metadata = deepcopy(pr.price_remarks_data)
+        failures = [
+            ('exists', OSError('private storage details')),
+            ('exists', ClientError({'Error': {'Code': 'AccessDenied', 'Message': 'private bucket'}}, 'HeadObject')),
+            ('save', OSError('private storage details')),
+            ('url', OSError('private signing details')),
+        ]
+        for operation, failure in failures:
+            with self.subTest(operation=operation, failure=type(failure).__name__):
+                self.storage.reset_mock()
+                self.storage.exists.side_effect = failure if operation == 'exists' else None
+                self.storage.exists.return_value = False
+                self.storage.save.side_effect = failure if operation == 'save' else lambda key, content: key
+                self.storage.url.side_effect = failure if operation == 'url' else lambda key: '/media/' + key
+                with self.assertRaisesRegex(SignedPRStorageError, 'could not be stored or verified') as error:
+                    self.import_document(existing=pr)
+                self.assertNotIn('private', str(error.exception))
+                if operation == 'exists':
+                    self.storage.save.assert_not_called()
+                self.storage.delete.assert_not_called()
+                pr.refresh_from_db()
+                self.assertEqual(pr.attachments, original)
+                self.assertEqual(pr.price_remarks_data, metadata)
+                self.assertEqual(pr.status, 'approved')
 
     def test_remaining_same_pdf_signature_supplements_prior_partial_manual_review(self):
         self.evidence['signatures'] = {role: False for role in self.approvers}

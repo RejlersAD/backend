@@ -3,6 +3,7 @@ from copy import deepcopy
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -14,6 +15,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import include, path
 from django.utils.text import get_valid_filename
 from rest_framework.test import APIClient
+from storages.backends.s3boto3 import S3Boto3Storage
 
 from apps.procurement.models import PurchaseRequisition
 from apps.procurement.serializers import PurchaseRequisitionSerializer
@@ -39,6 +41,16 @@ EXPIRED_URL = f'{MEDIA_BASE}{LEGACY_KEY}?X-Amz-Date=20200101T000000Z&X-Amz-Expir
 FRESH_URL = f'{MEDIA_BASE}{LEGACY_KEY}?X-Amz-Signature=fresh'
 STORAGE_URL = 'django.core.files.storage.default_storage.url'
 LEGACY_DIGEST = 'a1b2c3d4e5f6' + 'ab' * 26
+
+
+def configured_s3_storage():
+    # Explicit dummy credentials sign locally; no network/storage calls occur.
+    return S3Boto3Storage(
+        access_key='test-access-key', secret_key='test-secret-key', security_token=None,
+        bucket_name='source-bucket', region_name='eu-west-1',
+        endpoint_url='https://s3.eu-west-1.amazonaws.com', location='media',
+        custom_domain=False, signature_version='s3v4', querystring_auth=True,
+    )
 
 
 @override_settings(MEDIA_URL=MEDIA_BASE)
@@ -69,6 +81,50 @@ class RequisitionSourceURLTests(SimpleTestCase):
         storage_url.assert_called_once_with(LEGACY_KEY)
         self.assertEqual(refreshed[0], {**before[0], 'url': FRESH_URL, 's3_url': FRESH_URL})
         self.assertEqual(requisition.attachments, before)
+
+    def test_actual_storage_path_style_urls_refresh_when_media_url_uses_virtual_host(self):
+        storage = configured_s3_storage()
+        keys = [LEGACY_KEY, f'procurement/signed_requisitions/2026/{LEGACY_DIGEST[:12]}_original.pdf']
+        for key in keys:
+            old_url = storage.url(key)
+            self.assertEqual(urlsplit(old_url).netloc, 's3.eu-west-1.amazonaws.com')
+            self.assertEqual(urlsplit(old_url).path, '/source-bucket/media/' + key)
+            original = [self.attachment(url=old_url, s3_url=old_url, sha256=LEGACY_DIGEST)]
+            before = deepcopy(original)
+            with self.subTest(key=key), patch(
+                'apps.procurement.services.requisition_source_documents.default_storage', storage,
+            ), patch.object(storage, 'url', wraps=storage.url) as storage_url:
+                refreshed = refreshed_requisition_attachments(self.requisition(original))
+                storage_url.assert_called_once_with(key)
+            self.assertEqual(urlsplit(refreshed[0]['url']).path, '/source-bucket/media/' + key)
+            self.assertEqual(original, before)
+
+    def test_path_style_storage_urls_reject_foreign_bucket_origin_and_record_paths(self):
+        storage = configured_s3_storage()
+        prefix = 'https://s3.eu-west-1.amazonaws.com/source-bucket/media/'
+        invalid_urls = [
+            prefix.replace('/source-bucket/', '/another-bucket/') + LEGACY_KEY,
+            prefix.replace('/source-bucket/', '/source-bucket-other/') + LEGACY_KEY,
+            prefix.replace('/media/', '/private/') + LEGACY_KEY,
+            prefix.replace('s3.eu-west-1.amazonaws.com', 's3.eu-west-1.amazonaws.com.evil.test') + LEGACY_KEY,
+            prefix.replace('https:', 'http:') + LEGACY_KEY,
+            prefix.replace('https://', 'https://username@') + LEGACY_KEY,
+            prefix + LEGACY_KEY.replace(PR_NUMBER, 'RAD-PRJ-PR-9999_2026'),
+            prefix + f'procurement/signed_requisitions/{UUID(int=1)}/2026/{FILENAME}',
+            prefix + f'procurement/signed_requisitions/2026/../2026/{FILENAME}',
+            prefix + f'procurement/signed_requisitions/2026/%2e%2e/2026/{FILENAME}',
+            prefix + f'procurement/signed_requisitions/2026/%252e%252e/2026/{FILENAME}',
+            prefix + f'procurement/signed_requisitions/2026/{LEGACY_DIGEST[:12]}_original.pdf',
+        ]
+        for url in invalid_urls:
+            with self.subTest(url=url), patch(
+                'apps.procurement.services.requisition_source_documents.default_storage', storage,
+            ), patch.object(storage, 'url') as storage_url:
+                refreshed = refreshed_requisition_attachments(self.requisition([
+                    self.attachment(url=url, s3_url=url),
+                ]))
+                storage_url.assert_not_called()
+                self.assertEqual(refreshed[0]['url'], '')
 
     def test_legacy_attachment_with_only_s3_url_is_supported(self):
         attachment = self.attachment()
@@ -366,6 +422,29 @@ class RequisitionSourceURLAccessTests(TestCase):
                 self.assertEqual(response.status_code, 403, response.data)
             storage_url.assert_not_called()
             storage_open.assert_not_called()
+
+    def test_path_style_original_gets_scoped_content_link_and_returns_exact_bytes(self):
+        storage = configured_s3_storage()
+        source_url = storage.url(LEGACY_KEY)
+        self.requisition.attachments = [{
+            **self.original_attachments[0], 'url': source_url, 's3_url': source_url,
+        }]
+        self.requisition.save(update_fields=['attachments'])
+        saved = deepcopy(self.requisition.attachments)
+        self.client.force_authenticate(self.owner)
+        original_pdf = b'%PDF-1.4 original path-style signed document'
+        with patch('apps.procurement.services.requisition_source_documents.default_storage', storage), patch(
+            'django.core.files.storage.default_storage.open', return_value=BytesIO(original_pdf),
+        ) as storage_open:
+            detail = self.client.get(self.url)
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.data['attachments'][0]['content_url'], self.content_url)
+            response = self.client.get(self.content_url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(b''.join(response.streaming_content), original_pdf)
+            storage_open.assert_called_once_with(LEGACY_KEY, 'rb')
+        self.requisition.refresh_from_db()
+        self.assertEqual(self.requisition.attachments, saved)
 
     def test_anonymous_reader_cannot_refresh_or_read_original(self):
         with patch(STORAGE_URL) as storage_url, patch('django.core.files.storage.default_storage.open') as storage_open:

@@ -65,19 +65,37 @@ def _legacy_url_key(requisition, value, sha256=''):
         media = urlsplit(str(settings.MEDIA_URL))
     except ValueError:
         return ''
-    # Relative local URLs and the configured storage origin are supported.
-    # Never turn a foreign URL into credentials for our private bucket.
-    if source.scheme != media.scheme or source.netloc != media.netloc or source.username or source.password:
+    if source.username or source.password:
         return ''
     if source.scheme not in ('http', 'https', '') or (source.netloc and not source.scheme):
         return ''
     if not source.netloc and source.scheme:
         return ''
-    base_path = media.path.rstrip('/') + '/'
+    bases = [media]
+    # django-storages may generate endpoint/bucket/media URLs even though
+    # MEDIA_URL uses bucket.endpoint/media. Trust only the active storage's
+    # exact endpoint, bucket and location, never arbitrary S3 hosts/buckets.
+    try:
+        endpoint = getattr(default_storage, 'endpoint_url', '')
+        bucket = getattr(default_storage, 'bucket_name', '')
+        location = getattr(default_storage, 'location', '')
+        if all(isinstance(part, str) for part in (endpoint, bucket, location)) and endpoint and bucket:
+            endpoint = urlsplit(endpoint)
+            if endpoint.scheme in ('http', 'https') and endpoint.netloc and not (
+                endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
+            ):
+                prefix = '/'.join(part.strip('/') for part in (endpoint.path, bucket, location) if part.strip('/'))
+                bases.append(endpoint._replace(path='/' + prefix + '/'))
+    except (OSError, ValueError, NotImplementedError, BotoCoreError, ClientError):
+        pass
     path = unquote(source.path)
-    if not path.startswith(base_path):
-        return ''
-    return _record_storage_key(requisition, path[len(base_path):], sha256)
+    for base in bases:
+        base_path = base.path.rstrip('/') + '/'
+        if source.scheme == base.scheme and source.netloc == base.netloc and path.startswith(base_path):
+            key = _record_storage_key(requisition, path[len(base_path):], sha256)
+            if key:
+                return key
+    return ''
 
 
 def requisition_source_key(requisition, attachment):
