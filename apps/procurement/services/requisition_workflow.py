@@ -2,9 +2,10 @@
 
 from decimal import Decimal
 import re
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -13,68 +14,42 @@ from ..models import PurchaseRequisition
 from .requisition_status import canonicalize_pr_status
 from .requisition_validation import line_items_total, normalize_line_items
 from .employee_display import employee_display_name, normalize_ceo_workflow
+from .notification_context import requisition_teams_context
+from .approval_integrity import stage_signature_issue
 
 
 def notify_requisition_approver_changes(pr, previous_workflow):
-    """Notify employees newly assigned while an existing PR is edited."""
+    """Notify actionable assignments after an edit, once per recipient and level."""
     if not getattr(pr, 'pk', None):
         return
-
-    previous_user_ids = {
-        (str(stage.get('level', '')), str(stage.get('user_id') or stage.get('approver_id') or ''))
-        for stage in (previous_workflow or [])
-        if isinstance(stage, dict) and (stage.get('user_id') or stage.get('approver_id'))
-    }
-    previous_emails = {
-        (
-            str(stage.get('level', '')),
-            str(stage.get('user_email') or stage.get('approver_email') or '').strip().casefold(),
-        )
-        for stage in (previous_workflow or [])
-        if isinstance(stage, dict) and (stage.get('user_email') or stage.get('approver_email'))
-    }
-    notified_user_ids = set()
-    for stage in pr.approval_workflow_config or []:
-        if not isinstance(stage, dict):
-            continue
-        level = str(stage.get('level', ''))
-        user_id = str(stage.get('user_id') or stage.get('approver_id') or '')
-        email = str(
-            stage.get('user_email') or stage.get('approver_email') or ''
-        ).strip().casefold()
-        if (user_id and (level, user_id) in previous_user_ids) or (
-            email and (level, email) in previous_emails
-        ):
-            continue
+    if canonicalize_pr_status(pr.status) not in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES:
+        return
+    try:
+        workflow = RequisitionWorkflowService._workflow(pr)
+        level, active_stages = RequisitionWorkflowService._active_level_stages(pr, workflow)
+    except ValidationError:
+        return
+    previous_level_stages = [
+        stage for index, stage in enumerate(previous_workflow or [])
+        if isinstance(stage, dict)
+        and RequisitionWorkflowService._stage_level(stage, index) == level
+    ]
+    reassigned_recipient_ids = set()
+    for _, stage in active_stages:
         recipient = RequisitionWorkflowService._resolve_stage_user(stage)
-        if recipient is None or recipient.pk in notified_user_ids:
-            continue
-        notified_user_ids.add(recipient.pk)
-        from apps.notifications.services import NotificationService
-
-        level = RequisitionWorkflowService._stage_level(stage, 0)
-        NotificationService.create_notification(
-            recipient=recipient,
-            sender=pr.issued_by,
-            title=f'PR {pr.pr_number} approval assignment updated',
-            message=f'You have been assigned as a Level {level} approver for Purchase Requisition {pr.pr_number}.',
-            category='APPROVAL',
-            priority='HIGH',
-            action_url='/approvals?tab=procurement',
-            action_label='Open Request',
-            send_teams=True,
-            teams_context={
-                'request_name': f'Purchase Requisition {pr.pr_number}',
-                'submitted_by': employee_display_name(pr.issued_by) if getattr(pr, 'issued_by', None) else 'Not specified',
-                'due_date': getattr(pr, 'review_due_at', None) or getattr(pr, 'required_date', None),
-            },
-            metadata={
-                'pr_id': str(pr.pk),
-                'pr_number': pr.pr_number,
-                'approval_level': level,
-                'assignment_updated': True,
-            },
-        )
+        if recipient and not any(
+            RequisitionWorkflowService._stage_matches_user(previous_stage, recipient)
+            for previous_stage in previous_level_stages
+        ):
+            reassigned_recipient_ids.add(recipient.pk)
+    # Comparing only the changed assignments can miss an existing future
+    # approver whose level became active after an edit. The common sender
+    # selects the current level and deduplicates real approval requests.
+    # A returning assignee still needs a new request after A -> B -> A;
+    # bypass historical deduplication only for changed active recipients.
+    RequisitionWorkflowService._notify_level(
+        pr, workflow, level, reassigned_recipient_ids=reassigned_recipient_ids,
+    )
 
 
 class RequisitionWorkflowService:
@@ -105,7 +80,7 @@ class RequisitionWorkflowService:
             'timestamp_field': 'manager_projects_approved_at',
         },
         'vp': {
-            'labels': ('vp operations', 'vice president', 'procurement manager'),
+            'labels': ('vp operations', 'vice president'),
             'name_field': 'vp_op_name',
             'signature_field': 'vp_op_signature',
             'status_field': 'vp_op_approval_status',
@@ -174,34 +149,49 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _active_level_stages(cls, pr, workflow):
-        pending = [
+        for stage in workflow:
+            if str(stage.get('status', 'pending')).strip().lower() == 'approved':
+                issue = stage_signature_issue(stage)
+                if issue:
+                    raise ValidationError({'error': issue})
+        if any(
+            str(stage.get('status', '')).strip().lower() in ('rejected', 'not_approved', 'declined')
+            for stage in workflow
+        ):
+            raise ValidationError({'error': 'The approval workflow contains a rejected decision.'})
+        unresolved = [
             (index, stage)
             for index, stage in enumerate(workflow)
-            if str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
+            if str(stage.get('status', 'pending')).strip().lower() != 'approved'
         ]
-        if not pending:
+        if not unresolved:
             raise ValidationError({'error': 'No active approval stage awaiting action.'})
-        active_level = min(cls._stage_level(stage, index) for index, stage in pending)
+        active_level = min(cls._stage_level(stage, index) for index, stage in unresolved)
         active = [
-            (index, stage) for index, stage in pending
+            (index, stage) for index, stage in unresolved
             if cls._stage_level(stage, index) == active_level
         ]
+        if any(
+            str(stage.get('status', 'pending')).strip().lower() not in ('pending', 'in_review')
+            for _, stage in active
+        ):
+            raise ValidationError({
+                'error': f'Resolve the missing or invalid Level {active_level} approval evidence before continuing.',
+            })
         pr.current_approval_step = active[0][0]
         return active_level, active
 
     @classmethod
     def _actor_stage(cls, active_stages, actor, expected_stage_key=None):
+        if not cls._actor_is_active(actor):
+            raise PermissionDenied('Only an active employee may record an approval decision.')
         candidates = [
             entry for entry in active_stages
             if not expected_stage_key or cls._stage_key(entry[1]) == expected_stage_key
         ]
-        if cls._is_super_admin(actor):
-            if candidates:
-                return candidates[0]
-        else:
-            for entry in candidates:
-                if cls._stage_matches_user(entry[1], actor):
-                    return entry
+        for entry in candidates:
+            if cls._stage_matches_user(entry[1], actor):
+                return entry
 
         stage_name = active_stages[0][1].get('stage') or active_stages[0][1].get('role') or 'current approval level'
         if expected_stage_key and not candidates:
@@ -222,11 +212,27 @@ class RequisitionWorkflowService:
         return username if '@' in username else ''
 
     @classmethod
+    def _actor_is_active(cls, actor):
+        """Check account/profile flags without performing a separate user lookup."""
+        if actor is None or not getattr(actor, 'is_active', True) or getattr(actor, 'is_deleted', False):
+            return False
+        try:
+            profile = getattr(actor, 'rbac_profile', None)
+        except ObjectDoesNotExist:
+            profile = None
+        return profile is None or (
+            str(getattr(profile, 'status', 'active') or '').strip().lower() == 'active'
+            and not getattr(profile, 'is_deleted', False)
+        )
+
+    @classmethod
     def _stage_matches_user(cls, stage, user):
         """Match migrated assignments by stable email before environment-specific IDs."""
+        if not cls._actor_is_active(user):
+            return False
         assigned_email = cls._stage_email(stage)
         user_email = str(getattr(user, 'email', '') or '').strip().lower()
-        if assigned_email and user_email:
+        if assigned_email:
             return assigned_email == user_email
         assigned_id = stage.get('user_id') or stage.get('approver_id')
         return bool(assigned_id) and str(assigned_id) == str(user.id)
@@ -235,51 +241,104 @@ class RequisitionWorkflowService:
     def _resolve_stage_user(cls, stage):
         User = get_user_model()
         assigned_email = cls._stage_email(stage)
-        if assigned_email:
-            recipient = User.objects.filter(email__iexact=assigned_email, is_active=True).first()
-            if recipient:
-                stage['user_id'] = str(recipient.pk)
-                return recipient
         assigned_id = stage.get('user_id') or stage.get('approver_id')
-        if assigned_id:
-            return User.objects.filter(pk=assigned_id, is_active=True).first()
-        return None
+        try:
+            if assigned_email:
+                # Email is authoritative, but a case-insensitive collision
+                # must never select an arbitrary employee.
+                recipient = User.objects.get(email__iexact=assigned_email, is_active=True)
+            elif assigned_id:
+                recipient = User.objects.get(pk=assigned_id, is_active=True)
+            else:
+                return None
+        except (ObjectDoesNotExist, MultipleObjectsReturned, ValueError, TypeError):
+            return None
+        if not cls._actor_is_active(recipient):
+            return None
+        if assigned_email:
+            stage['user_id'] = str(recipient.pk)
+        return recipient
 
     @classmethod
     def _notify_level(
         cls, pr, workflow, level, force=False, previous_approver='', previous_level=None,
+        reassigned_recipient_ids=None,
     ):
         if not getattr(pr, 'pk', None):
             return
+        current_status = canonicalize_pr_status(pr.status)
+        if not cls._is_awaiting_approval(pr, workflow):
+            return
+        evidence_recovery = current_status == 'converted'
+        try:
+            active_level, active_stages = cls._active_level_stages(pr, workflow)
+        except ValidationError:
+            return
+        if level != active_level:
+            return
         recipients = {}
-        for index, stage in enumerate(workflow):
-            if cls._stage_level(stage, index) != level:
-                continue
-            if str(stage.get('status', 'pending')).strip().lower() not in ('pending', 'in_review'):
+        assignment_ids = {}
+        for _, stage in active_stages:
+            if evidence_recovery and not stage.get('evidence_requested_at'):
                 continue
             recipient = cls._resolve_stage_user(stage)
             if recipient:
                 recipients[recipient.pk] = recipient
+                assignment_ids[recipient.pk] = str(stage.get('assignment_id') or '')
+        if not recipients:
+            return
         recipient_ids = set(recipients)
+        reassigned_recipient_ids = frozenset(reassigned_recipient_ids or ())
         pr_id = pr.pk
         pr_number = pr.pr_number
-        submitted_by = employee_display_name(pr.issued_by) if getattr(pr, 'issued_by', None) else 'Not specified'
-        due_date = getattr(pr, 'review_due_at', None) or getattr(pr, 'required_date', None)
 
         def send_notifications():
             from apps.notifications.models import Notification
             from apps.notifications.services import NotificationService
+            # Decisions and assignment edits can commit before this callback
+            # runs. Never send an alert from an obsolete in-memory route.
+            try:
+                pr.refresh_from_db()
+                current_workflow = cls._workflow(pr)
+                if not cls._is_awaiting_approval(pr, current_workflow):
+                    return
+                current_level, current_stages = cls._active_level_stages(pr, current_workflow)
+            except (ObjectDoesNotExist, ValidationError):
+                return
+            if current_level != level:
+                return
+            current_recipients = {}
+            for _, stage in current_stages:
+                if canonicalize_pr_status(pr.status) == 'converted' and not stage.get('evidence_requested_at'):
+                    continue
+                recipient = cls._resolve_stage_user(stage)
+                if (
+                    recipient is not None and recipient.pk in recipient_ids
+                    and str(stage.get('assignment_id') or '') == assignment_ids[recipient.pk]
+                ):
+                    current_recipients[recipient.pk] = recipient
+            if not current_recipients:
+                return
+            teams_context = requisition_teams_context(pr, approval_level=level)
             already_notified_ids = set()
+            existing_requests = Notification.objects.filter(
+                Q(metadata__event_type='approval_assignment')
+                | Q(metadata__requires_action=True),
+                recipient_id__in=set(current_recipients),
+                metadata__pr_id=str(pr_id),
+                metadata__approval_level=level,
+            )
             if not force:
-                already_notified_ids = set(
-                    Notification.objects.filter(
-                        recipient_id__in=recipient_ids,
-                        metadata__pr_id=str(pr_id),
-                        metadata__approval_level=level,
-                    ).values_list('recipient_id', flat=True)
-                )
-            for recipient_id, recipient in recipients.items():
-                if recipient_id in already_notified_ids:
+                already_notified_ids = set(existing_requests.values_list('recipient_id', flat=True))
+            for recipient_id, recipient in current_recipients.items():
+                assignment_id = assignment_ids[recipient_id]
+                if assignment_id and not force:
+                    already_notified = existing_requests.filter(
+                        recipient_id=recipient_id, metadata__assignment_id=assignment_id,
+                    ).exists()
+                else:
+                    already_notified = recipient_id in already_notified_ids and recipient_id not in reassigned_recipient_ids
+                if already_notified:
                     continue
                 NotificationService.create_notification(
                     recipient=recipient,
@@ -303,31 +362,15 @@ class RequisitionWorkflowService:
                     action_url=f'/procurement/requisitions/{pr_id}',
                     action_label='Open Request',
                     send_teams=True,
-                    teams_context={
-                        'request_name': f'Purchase Requisition {pr_number}',
-                        'submitted_by': submitted_by,
-                        'description': (
-                            getattr(pr, 'description_reason', None)
-                            or getattr(pr, 'product_service', None)
-                            or 'Not specified'
-                        ),
-                        'project_name': (
-                            getattr(getattr(pr, 'enterprise_project', None), 'name', None)
-                            or getattr(pr, 'project_department', None)
-                            or getattr(pr, 'project', None)
-                            or 'Not specified'
-                        ),
-                        'project_id': (
-                            getattr(getattr(pr, 'enterprise_project', None), 'code', None)
-                            or 'Not specified'
-                        ),
-                        'due_date': due_date,
-                    },
+                    teams_context=teams_context,
                     metadata={
                         'pr_id': str(pr_id),
                         'pr_number': pr_number,
+                        'event_type': 'approval_assignment',
                         'approval_level': level,
+                        'assignment_id': assignment_id,
                         'approval_evidence_resend': force,
+                        'assignment_updated': recipient_id in reassigned_recipient_ids,
                         'requires_action': True,
                     },
                 )
@@ -336,15 +379,41 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _enforce_assigned_approver(cls, stage, actor):
-        if cls._is_super_admin(actor):
-            return
-
         stage_name = stage.get('stage') or stage.get('role') or 'current approval stage'
 
         if not (stage.get('user_id') or stage.get('approver_id') or cls._stage_email(stage)):
             raise PermissionDenied(f'No approver is assigned to {stage_name}.')
         if not cls._stage_matches_user(stage, actor):
             raise PermissionDenied(f'Only the assigned approver may act on {stage_name}.')
+
+    @classmethod
+    def _is_awaiting_approval(cls, pr, workflow):
+        status = canonicalize_pr_status(pr.status)
+        return status in cls.ACTIVE_REVIEW_STATUSES or (
+            status == 'converted' and any(
+                str(stage.get('status', 'pending')).strip().lower() in ('pending', 'in_review')
+                and bool(stage.get('evidence_requested_at'))
+                for stage in workflow
+            )
+        )
+
+    @classmethod
+    def can_approve(cls, pr, actor):
+        """Use the decision service's assignment and sequence checks for the UI."""
+        if not cls._actor_is_active(actor):
+            return False
+        current_step = getattr(pr, 'current_approval_step', 0)
+        try:
+            workflow = cls._workflow(pr)
+            if not cls._is_awaiting_approval(pr, workflow):
+                return False
+            _, active_stages = cls._active_level_stages(pr, workflow)
+            _, stage = cls._actor_stage(active_stages, actor)
+            return canonicalize_pr_status(pr.status) != 'converted' or bool(stage.get('evidence_requested_at'))
+        except (ValidationError, PermissionDenied):
+            return False
+        finally:
+            pr.current_approval_step = current_step
 
     @classmethod
     def _enforce_expected_stage(cls, stage, expected_stage_key):
@@ -453,17 +522,20 @@ class RequisitionWorkflowService:
             stage['approved_at'] = None
             stage.pop('approved_by_id', None)
             stage.pop('approved_by_name', None)
+            stage.pop('approved_by_email', None)
+            stage.pop('signature', None)
+            stage.pop('signature_user_id', None)
+            stage.pop('signature_user_email', None)
             stage.pop('rejected_at', None)
             stage.pop('rejected_by_id', None)
             stage.pop('rejected_by_name', None)
             stage.pop('rejection_reason', None)
 
         pr.approval_workflow_config = workflow
-        pr.current_approval_step = 0
+        first_level, _ = cls._active_level_stages(pr, workflow)
         pr.status = 'submitted'
         pr.rejection_reason = ''
         pr.save()
-        first_level = min(cls._stage_level(stage, index) for index, stage in enumerate(workflow))
         cls._notify_level(pr, workflow, first_level)
         return pr
 
@@ -477,22 +549,22 @@ class RequisitionWorkflowService:
     def _approve_locked(cls, pr, actor, signature='', expected_stage_key=None, require_signature=False):
         workflow = cls._workflow(pr)
         current_status = canonicalize_pr_status(pr.status)
-        evidence_recovery = current_status == 'converted' and any(
-            str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
-            and bool(stage.get('evidence_requested_at'))
-            for stage in workflow
-        )
-        if current_status not in cls.ACTIVE_REVIEW_STATUSES and not evidence_recovery:
+        if not cls._is_awaiting_approval(pr, workflow):
             raise ValidationError({'error': 'This requisition is not awaiting approval.'})
+        evidence_recovery = current_status == 'converted'
         active_level, active_stages = cls._active_level_stages(pr, workflow)
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
+        if evidence_recovery and not stage.get('evidence_requested_at'):
+            raise ValidationError({'error': 'Approval evidence has not been requested for this stage.'})
 
-        # Empty signatures from older clients now resolve to the approver's
-        # saved profile signature. Copying the data URL creates an immutable
-        # snapshot: later profile changes do not rewrite past approvals.
-        if not signature:
+        # The authenticated assignee's saved signature is the only signing
+        # source. Retain the argument for older internal callers, but never
+        # trust client-supplied image bytes as another employee's signature.
+        try:
             profile = getattr(actor, 'rbac_profile', None)
-            signature = getattr(profile, 'signature_image', '') if profile else ''
+        except ObjectDoesNotExist:
+            profile = None
+        signature = getattr(profile, 'signature_image', '') or ''
         if require_signature and not signature:
             raise ValidationError({
                 'error': 'Add your signature in Profile > My Signature before approving.'
@@ -504,7 +576,10 @@ class RequisitionWorkflowService:
         stage['approved_at'] = approved_at.isoformat()
         stage['approved_by_id'] = str(actor.id)
         stage['approved_by_name'] = actor_name
+        stage['approved_by_email'] = str(getattr(actor, 'email', '') or '').strip().lower()
         stage['signature'] = signature
+        stage['signature_user_id'] = str(actor.id)
+        stage['signature_user_email'] = stage['approved_by_email']
         cls._mirror_fixed_approval(pr, stage, actor, signature or '', approved_at)
 
         remaining_current_level = [
@@ -512,36 +587,35 @@ class RequisitionWorkflowService:
             if cls._stage_level(candidate, index) == active_level
             and str(candidate.get('status', 'pending')).lower() in ('pending', 'in_review')
         ]
-        next_pending = [
+        unresolved = [
             (index, candidate) for index, candidate in enumerate(workflow)
-            if str(candidate.get('status', 'pending')).lower() in ('pending', 'in_review')
+            if str(candidate.get('status', 'pending')).strip().lower() != 'approved'
         ]
 
-        if not next_pending:
+        notify_next = None
+        if not unresolved:
             pr.current_approval_step = len(workflow)
             pr.status = 'converted' if evidence_recovery else 'approved'
             pr.approved_by = actor
             pr.approved_at = approved_at
         else:
-            next_index, next_stage = (remaining_current_level or next_pending)[0]
+            next_index, next_stage = min(
+                remaining_current_level or unresolved,
+                key=lambda entry: cls._stage_level(entry[1], entry[0]),
+            )
             pr.current_approval_step = next_index
             pr.status = 'converted' if evidence_recovery else 'in_review'
-            workflow[next_index]['status'] = 'pending'
             next_level = cls._stage_level(next_stage, next_index)
             if not remaining_current_level and next_level != active_level:
                 if evidence_recovery:
-                    cls._notify_level(pr, workflow, next_level, force=True)
+                    notify_next = {'force': True}
                 else:
-                    cls._notify_level(
-                        pr,
-                        workflow,
-                        next_level,
-                        previous_approver=actor_name,
-                        previous_level=active_level,
-                    )
+                    notify_next = {'previous_approver': actor_name, 'previous_level': active_level}
 
         pr.approval_workflow_config = workflow
         pr.save()
+        if notify_next is not None:
+            cls._notify_level(pr, workflow, next_level, **notify_next)
         return pr
 
     @classmethod
@@ -554,13 +628,9 @@ class RequisitionWorkflowService:
     def _reject_locked(cls, pr, actor, reason, expected_stage_key=None):
         workflow = cls._workflow(pr)
         current_status = canonicalize_pr_status(pr.status)
-        evidence_recovery = current_status == 'converted' and any(
-            str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
-            and bool(stage.get('evidence_requested_at'))
-            for stage in workflow
-        )
-        if current_status not in cls.ACTIVE_REVIEW_STATUSES and not evidence_recovery:
+        if not cls._is_awaiting_approval(pr, workflow):
             raise ValidationError({'error': 'This requisition is not awaiting approval.'})
+        evidence_recovery = current_status == 'converted'
 
         trimmed_reason = str(reason or '').strip()
         if len(trimmed_reason) < 10:
@@ -570,6 +640,8 @@ class RequisitionWorkflowService:
 
         _, active_stages = cls._active_level_stages(pr, workflow)
         _, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
+        if evidence_recovery and not stage.get('evidence_requested_at'):
+            raise ValidationError({'error': 'Approval evidence has not been requested for this stage.'})
 
         rejected_at = timezone.now()
         actor_name = employee_display_name(actor)

@@ -3,7 +3,7 @@ Notification System Views
 REST API endpoints for notifications management
 """
 
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 from apps.rbac.data_visibility_mixin import PersonalDataMixin
 
 
-class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
+class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
+                          mixins.DestroyModelMixin, viewsets.GenericViewSet):
     """
     API endpoints for notifications
     
@@ -59,7 +60,7 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
         """Return only the current user's notifications using the recipient index."""
         queryset = Notification.objects.filter(
             recipient_id=self.request.user.id,
-        ).select_related('category', 'recipient', 'sender')
+        ).select_related('category', 'recipient', 'recipient__rbac_profile', 'sender')
 
         status_filter = self.request.query_params.get('status')
         if status_filter == 'unread':
@@ -99,10 +100,10 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
             # Log action
             NotificationLog.objects.create(
                 notification=instance,
-                user=request.user,
                 action='READ',
-                metadata={'auto_read': True}
+                details={'auto_read': True, 'user_id': request.user.pk}
             )
+            cache.delete(f'notification_unread_count_{request.user.pk}')
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -142,9 +143,8 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
             # Log action
             NotificationLog.objects.create(
                 notification=notification,
-                user=request.user,
                 action='READ',
-                metadata={'bulk_operation': True}
+                details={'bulk_operation': True, 'user_id': request.user.pk}
             )
         
         # Invalidate cache after marking as read
@@ -258,7 +258,9 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
                 'is_active': True,
             },
         )
-        return Response({'subscribed': True, 'id': subscription.id}, status=status.HTTP_201_CREATED)
+        return Response({
+            'subscribed': True, 'id': subscription.id, 'recipient_user_id': str(request.user.pk),
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='push-unsubscribe')
     def push_unsubscribe(self, request):
@@ -327,9 +329,10 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
         # Log action
         NotificationLog.objects.create(
             notification=notification,
-            user=request.user,
-            action='ARCHIVED'
+            action='ARCHIVED',
+            details={'user_id': request.user.pk},
         )
+        cache.delete(f'notification_unread_count_{request.user.pk}')
         
         return Response({
             'status': 'success',
@@ -449,10 +452,10 @@ class NotificationLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = NotificationLogSerializer
     permission_classes = [IsAuthenticated]
-    ordering = ['-created_at']
+    ordering = ['-timestamp']
     
     def get_queryset(self):
         """Get logs for current user's notifications"""
         return NotificationLog.objects.filter(
-            Q(user=self.request.user) | Q(notification__recipient=self.request.user)
-        ).select_related('notification', 'user')
+            notification__recipient=self.request.user,
+        ).select_related('notification')

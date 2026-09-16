@@ -736,7 +736,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         # Admin (level 2+) can assign/revoke roles — but the action itself guards
         # against assigning the super_admin role without super_admin privileges
         ADMIN_ACTIONS = {'assign_role', 'revoke_role'}
-        AUTH_ONLY_ACTIONS = {'me', 'profile_completeness', 'change_password', 'engineers', 'reporting_managers'}
+        AUTH_ONLY_ACTIONS = {
+            'me', 'profile_completeness', 'change_password', 'engineers',
+            'reporting_managers', 'organization_catalog',
+        }
 
         if self.action in AUTH_ONLY_ACTIONS:
             return [IsAuthenticated()]
@@ -2651,15 +2654,22 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], url_path='department-choices')
     def department_choices(self, request):
-        """
-        Get list of department choices for dropdown
-        Soft-coded constants for Oil & Gas engineering organization
-        """
+        """Return the organization chart choices without changing access roles."""
         from .constants import get_department_choices
+        from .organization_catalog import get_organization_catalog, get_organizational_role_choices
+        departments = get_department_choices()
         return Response({
-            'departments': get_department_choices(),
-            'count': len(get_department_choices())
+            'departments': departments,
+            'count': len(departments),
+            'organizational_roles': get_organizational_role_choices(),
+            'source': get_organization_catalog()['source'],
         })
+
+    @action(detail=False, methods=['get'], url_path='organization-catalog')
+    def organization_catalog(self, request):
+        """Read-only organizational structure available to authenticated staff."""
+        from .organization_catalog import get_organization_catalog
+        return Response(get_organization_catalog())
     
     @action(detail=False, methods=['get'])
     def my_features(self, request):
@@ -2957,40 +2967,52 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='departments')
     def get_departments(self, request):
         """
-        Get unique list of departments from UserProfile
+        Combine chart departments with historical UserProfile values.
         Returns: {
             "departments": ["Engineering", "Sales", ...]
         }
         """
-        departments = UserProfile.objects.filter(
+        from .constants import get_department_choices
+
+        stored_departments = UserProfile.objects.filter(
             is_deleted=False,
             department__isnull=False
         ).exclude(
             department__exact=''
         ).values_list('department', flat=True).distinct().order_by('department')
-        
+        departments = sorted(
+            {item['label'] for item in get_department_choices()} | set(stored_departments),
+            key=str.casefold,
+        )
+
         return Response({
-            'departments': list(departments),
+            'departments': departments,
             'count': len(departments)
         })
     
     @action(detail=False, methods=['get'], url_path='job-titles')
     def get_job_titles(self, request):
         """
-        Get unique list of job titles from UserProfile
+        Combine organizational role titles with historical UserProfile values.
         Returns: {
             "job_titles": ["Engineer", "Manager", ...]
         }
         """
-        job_titles = UserProfile.objects.filter(
+        from .organization_catalog import get_organizational_job_titles
+
+        stored_job_titles = UserProfile.objects.filter(
             is_deleted=False,
             job_title__isnull=False
         ).exclude(
             job_title__exact=''
         ).values_list('job_title', flat=True).distinct().order_by('job_title')
-        
+        job_titles = sorted(
+            set(get_organizational_job_titles()) | set(stored_job_titles),
+            key=str.casefold,
+        )
+
         return Response({
-            'job_titles': list(job_titles),
+            'job_titles': job_titles,
             'count': len(job_titles)
         })
 

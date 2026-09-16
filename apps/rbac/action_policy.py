@@ -100,7 +100,10 @@ INDEPENDENT_WORKFLOWS = {
 # Account bootstrap and owner-scoped profile operations do not require module grants.
 SELF_SERVICE_ACTIONS = {
     'EmployeeProfileViewSet': {'my_employee_profile', 'upload_my_profile_photo', 'my_signature'},
-    'UserProfileViewSet': {'me', 'my_profile', 'my_permissions', 'my_modules', 'change_password', 'reporting_managers'},
+    'UserProfileViewSet': {
+        'me', 'my_profile', 'my_permissions', 'my_modules', 'change_password',
+        'reporting_managers', 'organization_catalog',
+    },
     'PermissionViewSet': {'check_permission', 'my_permissions'},
     'ModuleViewSet': {'my_modules'},
     'AccessRequestViewSet': {'mine', 'create'},

@@ -141,9 +141,12 @@ class Notification(models.Model):
         self.email_sent_at = timezone.now()
         if not success:
             self.email_error = error_message
-            self.status = 'FAILED'
+            if not self.send_in_app and self.status in ('PENDING', 'FAILED'):
+                self.status = 'FAILED'
         else:
-            self.status = 'SENT'
+            self.email_error = None
+            if self.status in ('PENDING', 'FAILED'):
+                self.status = 'SENT'
         self.save(update_fields=['email_sent', 'email_sent_at', 'email_error', 'status', 'updated_at'])
     
     @property

@@ -7,7 +7,9 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from django.utils import timezone
+from .delivery import absolute_action_url, delivery_issue, notification_action_url
 from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog, WebPushSubscription
 from celery import shared_task
 import logging
@@ -193,6 +195,7 @@ class NotificationService:
                 send_email=send_email and prefs.enable_email,
                 send_sms=notification_data.get('send_sms', False) and prefs.enable_sms,
                 metadata=notification_data.get('metadata', {}),
+                expires_at=notification_data.get('expires_at'),
                 # An in-app notification is delivered as soon as its database
                 # row exists. Leaving it PENDING hides it from unread_count.
                 status='SENT' if prefs.enable_in_app else 'PENDING',
@@ -209,14 +212,13 @@ class NotificationService:
             
             # Send email asynchronously if enabled
             if notification.send_email:
-                send_notification_email.delay(notification.id)
+                transaction.on_commit(lambda: send_notification_email.delay(notification.id), robust=True)
 
             if notification_data.get('send_teams', False):
                 from .teams import queue_approval_assignment
-                queue_approval_assignment(
-                    notification,
-                    notification_data.get('teams_context') or {},
-                )
+                transaction.on_commit(lambda: queue_approval_assignment(
+                    notification, notification_data.get('teams_context') or {},
+                ), robust=True)
 
             return notification
             
@@ -254,8 +256,8 @@ class NotificationService:
         return icons.get(category, '📢')
 
 
-@shared_task
-def send_web_push_notification(notification_id):
+@shared_task(bind=True, max_retries=3)
+def send_web_push_notification(self, notification_id, subscription_ids=None):
     """Deliver one notification to every active browser owned by its recipient."""
     import json
 
@@ -266,17 +268,23 @@ def send_web_push_notification(notification_id):
         return {'sent': 0, 'disabled': 0}
 
     try:
-        notification = Notification.objects.get(id=notification_id)
+        notification = Notification.objects.select_related('recipient', 'recipient__rbac_profile').get(id=notification_id)
     except Notification.DoesNotExist:
         return {'sent': 0, 'disabled': 0}
+
+    reason = delivery_issue(notification, 'web_push')
+    if reason:
+        NotificationLog.objects.create(notification=notification, action='web_push_skipped', details={'reason': reason})
+        return {'sent': 0, 'disabled': 0, 'skipped': reason}
 
     payload = json.dumps({
         'title': notification.title,
         'body': notification.message,
-        'url': notification.action_url or '/notifications',
+        'url': notification_action_url(notification),
         'tag': f'radai-notification-{notification.id}',
         'priority': notification.priority,
         'notification_id': notification.id,
+        'recipient_user_id': str(notification.recipient_id),
     })
     sent = 0
     disabled = 0
@@ -284,7 +292,40 @@ def send_web_push_notification(notification_id):
         user=notification.recipient,
         is_active=True,
     )
+    if subscription_ids is not None:
+        subscriptions = subscriptions.filter(pk__in=subscription_ids)
+    delivered_ids = {
+        details.get('subscription_id')
+        for details in notification.logs.filter(action='web_push_sent').values_list('details', flat=True)
+    }
+    retry_ids = []
     for subscription in subscriptions.iterator():
+        if subscription.pk in delivered_ids:
+            continue
+        # A slow browser push can overlap a decision or reassignment. Check
+        # again before the next browser so that the rest of the fanout stops.
+        current_notification = Notification.objects.select_related(
+            'recipient', 'recipient__rbac_profile',
+        ).filter(pk=notification.pk).first()
+        if current_notification is None:
+            return {'sent': sent, 'disabled': disabled, 'skipped': 'notification_missing'}
+        reason = (
+            'recipient_changed' if current_notification.recipient_id != notification.recipient_id
+            else delivery_issue(current_notification, 'web_push')
+        )
+        if reason:
+            NotificationLog.objects.create(
+                notification=current_notification, action='web_push_skipped', details={'reason': reason},
+            )
+            return {'sent': sent, 'disabled': disabled, 'skipped': reason}
+        # Recheck ownership immediately before delivery: this browser may have
+        # signed into another account since the task started iterating.
+        current_subscription = WebPushSubscription.objects.filter(
+            pk=subscription.pk, user_id=notification.recipient_id, is_active=True,
+            endpoint=subscription.endpoint, p256dh=subscription.p256dh, auth=subscription.auth,
+        )
+        if not current_subscription.exists():
+            continue
         try:
             webpush(
                 subscription_info={
@@ -297,16 +338,35 @@ def send_web_push_notification(notification_id):
                 ttl=300,
             )
             sent += 1
+            NotificationLog.objects.create(
+                notification=notification, action='web_push_sent',
+                details={'subscription_id': subscription.pk, 'recipient_user_id': notification.recipient_id},
+            )
         except WebPushException as error:
             response_status = getattr(getattr(error, 'response', None), 'status_code', None)
             if response_status in (404, 410):
-                subscription.is_active = False
-                subscription.save(update_fields=['is_active', 'updated_at'])
-                disabled += 1
+                disabled += current_subscription.update(is_active=False, updated_at=timezone.now())
             else:
-                logger.warning('Web push failed for subscription %s: %s', subscription.id, error)
+                if response_status is None or response_status in (408, 425, 429) or response_status >= 500:
+                    retry_ids.append(subscription.pk)
+                logger.warning('Web push failed for subscription %s (HTTP %s)', subscription.id, response_status)
+            NotificationLog.objects.create(
+                notification=notification, action='web_push_failed',
+                details={'subscription_id': subscription.pk, 'http_status': response_status},
+            )
         except Exception as error:
-            logger.warning('Web push failed for subscription %s: %s', subscription.id, error)
+            retry_ids.append(subscription.pk)
+            logger.warning('Web push failed for subscription %s (%s)', subscription.id, type(error).__name__)
+            NotificationLog.objects.create(
+                notification=notification, action='web_push_failed',
+                details={'subscription_id': subscription.pk, 'error_type': type(error).__name__},
+            )
+    if retry_ids:
+        raise self.retry(
+            args=(),
+            kwargs={'notification_id': notification_id, 'subscription_ids': retry_ids},
+            countdown=min(60, 5 * (2 ** self.request.retries)),
+        )
     return {'sent': sent, 'disabled': disabled}
 
 
@@ -316,7 +376,11 @@ def send_notification_email(self, notification_id):
     Celery task to send notification email
     """
     try:
-        notification = Notification.objects.get(id=notification_id)
+        notification = Notification.objects.select_related('recipient', 'recipient__rbac_profile').get(id=notification_id)
+        reason = delivery_issue(notification, 'email')
+        if reason:
+            NotificationLog.objects.create(notification=notification, action='email_skipped', details={'reason': reason})
+            return {'status': 'skipped', 'reason': reason}
         
         # Build email
         subject = f"[RAD AI] {notification.title}"
@@ -325,7 +389,7 @@ def send_notification_email(self, notification_id):
         html_content = render_to_string('notifications/email.html', {
             'notification': notification,
             'recipient': notification.recipient,
-            'action_url': notification.action_url,
+            'action_url': absolute_action_url(notification_action_url(notification)),
             'action_label': notification.action_label,
             'priority_color': {
                 'LOW': '#10B981',

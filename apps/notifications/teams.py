@@ -1,14 +1,13 @@
 """Private Microsoft Teams delivery for approval assignment notifications."""
 
 import logging
-from datetime import date, datetime
 
 import requests
 from celery import shared_task
 from django.conf import settings
-from django.utils import timezone
 
 from .models import Notification, NotificationLog
+from .delivery import absolute_action_url, delivery_issue, notification_action_url
 
 
 logger = logging.getLogger(__name__)
@@ -21,27 +20,8 @@ def _display_name(user):
     return full_name or str(getattr(user, 'username', '') or getattr(user, 'email', '') or 'Not specified')
 
 
-def _format_due_date(value):
-    if not value:
-        return 'Not specified'
-    if isinstance(value, datetime):
-        if timezone.is_aware(value):
-            value = timezone.localtime(value)
-        value = value.date()
-    if isinstance(value, date):
-        return value.strftime('%d-%b-%Y')
-    try:
-        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).strftime('%d-%b-%Y')
-    except (TypeError, ValueError):
-        return str(value)
-
-
 def _absolute_action_url(action_url):
-    action_url = str(action_url or '').strip()
-    if action_url.startswith(('https://', 'http://')):
-        return action_url
-    frontend_url = str(getattr(settings, 'FRONTEND_URL', '') or '').rstrip('/')
-    return f"{frontend_url}/{action_url.lstrip('/')}" if action_url else frontend_url
+    return absolute_action_url(action_url)
 
 
 def build_approval_assignment_payload(notification, context=None):
@@ -54,20 +34,32 @@ def build_approval_assignment_payload(notification, context=None):
     description = str(context.get('description') or 'Not specified')
     project_name = str(context.get('project_name') or 'Not specified')
     project_id = str(context.get('project_id') or 'Not specified')
-    due_date = _format_due_date(context.get('due_date'))
-    action_url = _absolute_action_url(notification.action_url)
+    po_number = str(context.get('po_number') or 'Not issued')
+    service = str(context.get('service') or description)
+    vendor = str(context.get('vendor') or 'Not specified')
+    value = str(context.get('value') or 'Not specified')
+    approval_level = context.get('approval_level')
+    action_url = _absolute_action_url(notification_action_url(notification))
     recipient_name = _display_name(notification.recipient)
     recipient_email = str(getattr(notification.recipient, 'email', '') or '').strip()
-    plain_message = (
-        f'{message_title}\n'
-        f'Request: {request_name}\n'
-        f'Description: {description}\n'
-        f'Project Name: {project_name}\n'
-        f'Project ID: {project_id}\n'
-        f'Submitted By: {submitted_by}\n'
-        f'Due Date: {due_date}\n'
-        f'Open Request: {action_url}'
-    )
+    facts = [
+        {'title': 'Request', 'value': request_name},
+        {'title': 'PO Number', 'value': po_number},
+        {'title': 'Project Name', 'value': project_name},
+        {'title': 'Project ID', 'value': project_id},
+        {'title': 'Service', 'value': service},
+        {'title': 'Description', 'value': description},
+        {'title': 'Vendor', 'value': vendor},
+        {'title': 'Value', 'value': value},
+    ]
+    if approval_level is not None:
+        facts.append({'title': 'Approval Level', 'value': f'Level {approval_level}'})
+    facts.append({'title': 'Submitted By', 'value': submitted_by})
+    plain_message = '\n'.join([
+        message_title,
+        *(f"{fact['title']}: {fact['value']}" for fact in facts),
+        f'Open Request: {action_url}',
+    ])
     payload = {
         # The native, non-Premium Microsoft Teams webhook trigger requires an
         # Adaptive Card message envelope. The top-level RADAI fields remain so
@@ -81,8 +73,13 @@ def build_approval_assignment_payload(notification, context=None):
         'description': description,
         'project_name': project_name,
         'project_id': project_id,
+        'po_number': po_number,
+        'service': service,
+        'vendor': vendor,
+        'value': value,
+        'currency': str(context.get('currency') or ''),
+        'approval_level': approval_level,
         'submitted_by': submitted_by,
-        'due_date': due_date,
         'action_label': notification.action_label or 'Open Request',
         'action_url': action_url,
         'message': plain_message,
@@ -104,14 +101,7 @@ def build_approval_assignment_payload(notification, context=None):
                 },
                 {
                     'type': 'FactSet',
-                    'facts': [
-                        {'title': 'Request', 'value': request_name},
-                        {'title': 'Description', 'value': description},
-                        {'title': 'Project Name', 'value': project_name},
-                        {'title': 'Project ID', 'value': project_id},
-                        {'title': 'Submitted By', 'value': submitted_by},
-                        {'title': 'Due Date', 'value': due_date},
-                    ],
+                    'facts': facts,
                 },
             ],
             'actions': [{
@@ -133,7 +123,9 @@ def queue_approval_assignment(notification, context=None):
         return False
     try:
         serializable_context = dict(context or {})
-        serializable_context['due_date'] = _format_due_date(serializable_context.get('due_date'))
+        # Legacy callers may still supply a date object. It is no longer part
+        # of the Teams contract and must not enter the JSON task payload.
+        serializable_context.pop('due_date', None)
         send_teams_approval_assignment.delay(notification.pk, serializable_context)
         return True
     except Exception:
@@ -160,6 +152,10 @@ def send_teams_approval_assignment(self, notification_id, context=None):
     if notification is None:
         logger.warning('Teams approval notification %s no longer exists', notification_id)
         return {'status': 'missing'}
+    reason = delivery_issue(notification, 'teams')
+    if reason:
+        NotificationLog.objects.create(notification=notification, action='teams_skipped', details={'reason': reason})
+        return {'status': 'skipped', 'reason': reason}
     payload = build_approval_assignment_payload(notification, context)
     try:
         response = requests.post(

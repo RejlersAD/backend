@@ -1,18 +1,49 @@
 """Employee-backed Purchase Order approval assignment and decisions."""
 
+from uuid import uuid4
+
 from django.contrib.auth import get_user_model
+from django.core.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.rbac.models import UserProfile
+from .approval_integrity import stage_signature_issue
 from .employee_display import employee_display_name
+from .notification_context import purchase_order_teams_context
 
 
 TECHNICAL_STAGE = 'Technical Approval'
 FINANCIAL_STAGE = 'Financial Approval'
 MANAGEMENT_STAGE = 'Final Management Sign-off'
 JARMO_NAME = 'Jarmo Suominen'
+ACTIONABLE_ORDER_STATUSES = {'draft', 'sent', 'acknowledged', 'in_progress', 'partially_received'}
+
+
+def _order_is_actionable(order):
+    return str(getattr(order, 'status', 'draft') or '').strip().lower() in ACTIONABLE_ORDER_STATUSES
+
+
+def _active_actor_profile(actor, *, refresh=False):
+    if not actor or not getattr(actor, 'is_active', False):
+        return None
+    if refresh:
+        return UserProfile.objects.select_related('user').filter(
+            user_id=actor.pk,
+            user__is_active=True,
+            status='active',
+            is_deleted=False,
+        ).first()
+    # The relation is cached on the request user, so serializer/queue checks do
+    # not add one profile query per PO. The decision write always refreshes it.
+    try:
+        profile = actor.rbac_profile
+    except (AttributeError, ObjectDoesNotExist):
+        return None
+    if profile.status != 'active' or profile.is_deleted:
+        return None
+    return profile
 
 
 def _entry_email(entry):
@@ -21,10 +52,12 @@ def _entry_email(entry):
 
 def _entry_matches_user(entry, user):
     """Prefer email because numeric user IDs are different in each environment."""
+    if not getattr(user, 'is_active', True):
+        return False
     assigned_email = _entry_email(entry)
     user_email = str(getattr(user, 'email', '') or '').strip().lower()
-    if assigned_email and user_email:
-        return assigned_email == user_email
+    if assigned_email:
+        return bool(user_email) and assigned_email == user_email
     return bool(entry.get('user_id')) and str(entry.get('user_id')) == str(user.id)
 
 
@@ -37,28 +70,57 @@ def _entry_level(entry, index):
 
 
 def _active_entries(workflow):
-    """Only the first pending approval level may be actioned."""
-    pending = [
-        (index, entry) for index, entry in enumerate(workflow)
-        if str(entry.get('status') or 'pending').lower() == 'pending'
-    ]
-    if not pending:
+    """Every earlier level must be approved before a later one may be actioned."""
+    if any(not isinstance(entry, dict) for entry in workflow):
         return []
-    active_level = min(_entry_level(entry, index) for index, entry in pending)
-    return [(index, entry) for index, entry in pending if _entry_level(entry, index) == active_level]
+    if any(
+        str(entry.get('status') or '').strip().lower() == 'approved' and stage_signature_issue(entry)
+        for entry in workflow
+    ):
+        return []
+    if any(
+        str(entry.get('status') or '').strip().lower() in {'rejected', 'not_approved', 'declined'}
+        for entry in workflow
+    ):
+        return []
+    unresolved = [
+        (index, entry) for index, entry in enumerate(workflow)
+        if str(entry.get('status') or 'pending').strip().lower() != 'approved'
+    ]
+    if not unresolved:
+        return []
+    active_level = min(_entry_level(entry, index) for index, entry in unresolved)
+    active_entries = [
+        (index, entry) for index, entry in unresolved
+        if _entry_level(entry, index) == active_level
+    ]
+    if any(
+        str(entry.get('status') or 'pending').strip().lower() not in {'pending', 'in_review'}
+        for _, entry in active_entries
+    ):
+        return []
+    return active_entries
 
 
 def _resolve_entry_user(entry):
     User = get_user_model()
     assigned_email = _entry_email(entry)
+    try:
+        if assigned_email:
+            recipient = User.objects.get(email__iexact=assigned_email, is_active=True)
+        elif entry.get('user_id'):
+            recipient = User.objects.get(pk=entry['user_id'], is_active=True)
+        else:
+            return None
+    except (ObjectDoesNotExist, MultipleObjectsReturned, ValueError, TypeError):
+        return None
+    # Resolve one active employee; never choose an arbitrary case-variant
+    # email match or notify an account whose employee profile was suspended.
+    if _active_actor_profile(recipient) is None:
+        return None
     if assigned_email:
-        recipient = User.objects.filter(email__iexact=assigned_email, is_active=True).first()
-        if recipient:
-            entry['user_id'] = str(recipient.pk)
-            return recipient
-    if entry.get('user_id'):
-        return User.objects.filter(pk=entry['user_id'], is_active=True).first()
-    return None
+        entry['user_id'] = str(recipient.pk)
+    return recipient
 
 
 def _active_profiles(user_ids):
@@ -99,9 +161,9 @@ def _jarmo_user():
 def normalize_assignments(approval_log, existing_log=None, require_core=True, require_management=False):
     """Validate employee assignments and keep decisions server-controlled."""
     incoming = [dict(entry) for entry in (approval_log or []) if isinstance(entry, dict)]
-    existing_by_stage = {
-        str(entry.get('stage') or ''): entry
-        for entry in (existing_log or [])
+    existing_by_assignment = {
+        (str(entry.get('stage') or ''), _entry_level(entry, index), str(entry.get('user_id') or '')): entry
+        for index, entry in enumerate(existing_log or [])
         if isinstance(entry, dict)
     }
 
@@ -138,19 +200,34 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
             raise ValidationError({'approval_log': 'Financial Approval must be assigned to an active Finance employee.'})
 
         user = profile.user
-        previous = existing_by_stage.get(stage) or {}
-        same_assignee = str(previous.get('user_id') or '') == user_id
+        level = _entry_level(entry, index)
+        previous = existing_by_assignment.get((stage, level, user_id)) or {}
+        same_assignee = bool(previous)
         normalized.append({
             'stage': stage,
-            'level': _entry_level(entry, index),
+            'level': level,
             'user_id': user_id,
             'approver': employee_display_name(user),
             'approver_email': user.email,
+            # A reassignment needs a new alert even if this person held the
+            # same stage earlier. Keep legacy assignments unversioned until
+            # changed so an ordinary edit does not resend their old alerts.
+            'assignment_id': previous.get('assignment_id', '') if same_assignee else str(uuid4()),
             'status': previous.get('status', 'Pending') if same_assignee else 'Pending',
             'date': previous.get('date', '') if same_assignee else '',
             'approved_at': previous.get('approved_at', previous.get('date', '')) if same_assignee else '',
             'comments': previous.get('comments', '') if same_assignee else '',
             'signature': previous.get('signature', '') if same_assignee else '',
+            **{
+                field: previous[field]
+                for field in (
+                    'decided_at', 'decided_by_id', 'decided_by_email', 'decided_by_name',
+                    'approved_by_id', 'approved_by_email', 'approved_by_name',
+                    'rejected_by_id', 'rejected_by_email', 'rejected_by_name',
+                    'signature_user_id', 'signature_user_email',
+                )
+                if same_assignee and field in previous
+            },
         })
     return normalized
 
@@ -160,31 +237,46 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
     from apps.notifications.models import Notification
     from apps.notifications.services import NotificationService
 
-    workflow = list(order.approval_log or [])
+    try:
+        order.refresh_from_db()
+    except ObjectDoesNotExist:
+        return
+    if not _order_is_actionable(order):
+        return
+    workflow = [dict(entry) for entry in (order.approval_log or [])]
     entries = [
         (index, entry) for index, entry in _active_entries(workflow)
         if entry.get('user_id') or _entry_email(entry)
     ]
-    repaired = False
+    teams_context = None
     for index, entry in entries:
-        old_user_id = str(entry.get('user_id') or '')
         recipient = _resolve_entry_user(entry)
         if recipient is None:
             continue
-        repaired = repaired or old_user_id != str(recipient.pk)
         metadata = {
+            'event_type': 'approval_assignment',
             'po_id': str(order.id),
             'po_number': order.po_number,
             'approval_stage': entry.get('stage'),
             'approval_level': _entry_level(entry, index),
+            'assignment_id': entry.get('assignment_id', ''),
             'requires_action': True,
         }
-        if Notification.objects.filter(
+        previous_notifications = Notification.objects.filter(
             recipient=recipient,
             metadata__po_id=str(order.id),
             metadata__approval_stage=entry.get('stage'),
-        ).exists():
+            metadata__approval_level=_entry_level(entry, index),
+            metadata__requires_action=True,
+        )
+        if entry.get('assignment_id'):
+            previous_notifications = previous_notifications.filter(
+                metadata__assignment_id=entry['assignment_id'],
+            )
+        if previous_notifications.exists():
             continue
+        if teams_context is None:
+            teams_context = purchase_order_teams_context(order)
         NotificationService.create_notification(
             recipient=recipient,
             sender=order.created_by,
@@ -200,35 +292,16 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
             action_url=f'/procurement/orders/{order.id}',
             action_label='Open Request',
             send_teams=True,
-            teams_context={
-                'request_name': f'Purchase Order {order.po_number}',
-                'submitted_by': employee_display_name(order.created_by) if getattr(order, 'created_by', None) else 'Not specified',
-                'description': (
-                    getattr(order, 'description', None)
-                    or getattr(order, 'title', None)
-                    or 'Not specified'
-                ),
-                'project_name': (
-                    getattr(getattr(order, 'project', None), 'project_name', None)
-                    or getattr(getattr(order, 'enterprise_project', None), 'name', None)
-                    or getattr(order, 'project_number', None) or 'Not specified'
-                ),
-                'project_id': (
-                    getattr(order, 'project_number', None)
-                    or getattr(getattr(order, 'enterprise_project', None), 'code', None)
-                    or 'Not specified'
-                ),
-                'due_date': getattr(order, 'expected_delivery', None) or getattr(order, 'end_date', None),
-            },
+            teams_context={**teams_context, 'approval_level': _entry_level(entry, index)},
             metadata=metadata,
         )
-    if repaired:
-        order.approval_log = list(order.approval_log or [])
-        order.save(update_fields=['approval_log', 'updated_at'])
+    # Notification delivery must not save the approval log: another decision
+    # can commit while a notification is being prepared. The locked decision
+    # service repairs migrated IDs when it records the actual approval.
 
 
 def notify_purchase_order_created(order):
-    """Notify selected Buyer References and the CEO when a PO is created."""
+    """Send buyer FYIs without notifying approvers before their active level."""
     from apps.notifications.models import Notification
     from apps.notifications.services import NotificationService
 
@@ -248,16 +321,18 @@ def notify_purchase_order_created(order):
         recipient = _resolve_entry_user(entry)
         if recipient:
             recipients.append(('buyer_reference', recipient))
-    jarmo = _jarmo_user()
-    if jarmo:
-        recipients.append(('ceo', jarmo))
-
     seen = set()
+    teams_context = None
     for role, recipient in recipients:
         identity = str(getattr(recipient, 'pk', None) or getattr(recipient, 'email', '')).lower()
         if not identity or identity in seen:
             continue
         seen.add(identity)
+        if any(
+            _entry_matches_user(entry, recipient)
+            for entry in (getattr(order, 'approval_log', None) or [])
+        ):
+            continue
         metadata = {
             'event_type': 'po_created',
             'po_id': str(order.id),
@@ -270,6 +345,8 @@ def notify_purchase_order_created(order):
             metadata__po_id=str(order.id),
         ).exists():
             continue
+        if teams_context is None:
+            teams_context = purchase_order_teams_context(order)
         NotificationService.create_notification(
             recipient=recipient,
             sender=order.created_by,
@@ -281,23 +358,33 @@ def notify_purchase_order_created(order):
             action_label='Open Purchase Order',
             send_teams=True,
             teams_context={
+                **teams_context,
                 'event_type': 'purchase_order_created',
                 'title': 'New purchase order created',
-                'request_name': f'Purchase Order {order.po_number}',
-                'submitted_by': employee_display_name(order.created_by) if order.created_by else 'Not specified',
-                'due_date': order.expected_delivery or order.end_date,
             },
             metadata=metadata,
         )
 
 
+def can_approve(order, actor):
+    """Share assignment eligibility between the PO display and decision API."""
+    if not _order_is_actionable(order) or _active_actor_profile(actor) is None:
+        return False
+    return any(
+        _entry_matches_user(entry, actor)
+        for _, entry in _active_entries(list(order.approval_log or []))
+    )
+
+
 def pending_entries_for(user, queryset):
     results = []
+    if _active_actor_profile(user) is None:
+        return results
     for order in queryset:
+        if not _order_is_actionable(order):
+            continue
         for index, entry in _active_entries(list(order.approval_log or [])):
             if not _entry_matches_user(entry, user):
-                continue
-            if str(entry.get('status') or '').lower() != 'pending':
                 continue
             results.append((order, index, entry))
     return results
@@ -307,7 +394,18 @@ def pending_entries_for(user, queryset):
 def record_decision(order, actor, decision, stage='', comment='', require_signature=False):
     from apps.procurement.models import PurchaseOrder
 
+    if decision not in {'approve', 'reject'}:
+        raise ValidationError('Choose approve or reject for the assigned approval stage.')
+    # Refresh the canonical profile instead of using a possibly stale related
+    # object on request.user. Administrator status never substitutes for an
+    # active employee assignment or somebody else's saved signature.
+    profile = _active_actor_profile(actor, refresh=True)
+    if profile is None:
+        raise PermissionDenied('Only an active RADAI employee may record a Purchase Order decision.')
+    actor = profile.user
     locked = PurchaseOrder.objects.select_for_update(of=('self',)).select_related('created_by').get(pk=order.pk)
+    if not _order_is_actionable(locked):
+        raise ValidationError('This Purchase Order is not open for approval decisions.')
     workflow = [dict(entry) for entry in (locked.approval_log or [])]
     candidate = None
     for index, entry in _active_entries(workflow):
@@ -315,9 +413,8 @@ def record_decision(order, actor, decision, stage='', comment='', require_signat
             continue
         if stage and str(entry.get('stage') or '') != str(stage):
             continue
-        if str(entry.get('status') or '').lower() == 'pending':
-            candidate = (index, entry)
-            break
+        candidate = (index, entry)
+        break
     if candidate is None:
         raise PermissionDenied('This Purchase Order has no pending approval assigned to you for the selected stage.')
 
@@ -325,35 +422,71 @@ def record_decision(order, actor, decision, stage='', comment='', require_signat
     decision_at = timezone.now()
     signature = ''
     if decision == 'approve':
-        profile = getattr(actor, 'rbac_profile', None)
-        signature = getattr(profile, 'signature_image', '') if profile else ''
+        signature = str(profile.signature_image or '').strip()
         if require_signature and not signature:
             raise ValidationError('Add your signature in Profile > My Signature before approving.')
+    actor_name = employee_display_name(actor)
+    actor_email = str(actor.email or '').strip()
+    # Assignment display and decision evidence must identify the person who
+    # actually authenticated, including when a migrated user ID was repaired.
+    entry['user_id'] = str(actor.pk)
+    entry['approver'] = actor_name
+    entry['approver_email'] = actor_email
+    if 'user_email' in entry:
+        entry['user_email'] = actor_email
     entry['status'] = 'Approved' if decision == 'approve' else 'Rejected'
     entry['date'] = decision_at.isoformat()
     entry['approved_at'] = decision_at.isoformat() if decision == 'approve' else ''
     entry['decided_at'] = decision_at.isoformat()
+    entry['decided_by_id'] = str(actor.pk)
+    entry['decided_by_email'] = actor_email
+    entry['decided_by_name'] = actor_name
     entry['comments'] = str(comment or '').strip()
+    entry['signature'] = signature
+    entry['signature_user_id'] = str(actor.pk) if signature else ''
+    entry['signature_user_email'] = actor_email if signature else ''
     if decision == 'approve':
-        entry['signature'] = signature
+        entry['approved_by_id'] = str(actor.pk)
+        entry['approved_by_email'] = actor_email
+        entry['approved_by_name'] = actor_name
+        for field in ('rejected_by_id', 'rejected_by_email', 'rejected_by_name'):
+            entry.pop(field, None)
+    else:
+        entry['rejected_by_id'] = str(actor.pk)
+        entry['rejected_by_email'] = actor_email
+        entry['rejected_by_name'] = actor_name
+        for field in ('approved_by_id', 'approved_by_email', 'approved_by_name'):
+            entry.pop(field, None)
     workflow[index] = entry
     locked.approval_log = workflow
 
     update_fields = ['approval_log', 'updated_at']
-    assigned_entries = [item for item in workflow if item.get('user_id')]
-    if assigned_entries and all(str(item.get('status')).lower() == 'approved' for item in assigned_entries):
+    # Email-only migrated assignments and unresolved evidence still belong to
+    # the route. A missing local user ID must never make a later level vanish
+    # from the final-approval check. Reviewed source rows already marked
+    # approved remain valid history without needing an internal assignment.
+    if workflow and all(str(item.get('status') or '').strip().lower() == 'approved' for item in workflow):
         locked.approved_by = actor
-        locked.approved_by_name = employee_display_name(actor)
+        locked.approved_by_name = actor_name
+        locked.approved_by_title = str(getattr(profile, 'job_title', '') or '').strip()
         locked.approved_date = timezone.localtime(decision_at).date()
         locked.approved_at = decision_at
         locked.approval_signature = signature
-        update_fields.extend(['approved_by', 'approved_by_name', 'approved_date', 'approved_at', 'approval_signature'])
+        update_fields.extend([
+            'approved_by', 'approved_by_name', 'approved_by_title',
+            'approved_date', 'approved_at', 'approval_signature',
+        ])
     locked.save(update_fields=update_fields)
-    if decision == 'approve' and _active_entries(workflow):
+    next_entries = _active_entries(workflow)
+    if (
+        decision == 'approve'
+        and next_entries
+        and _entry_level(next_entries[0][1], next_entries[0][0]) > _entry_level(entry, index)
+    ):
         transaction.on_commit(
             lambda: notify_assigned_approvers(
                 locked,
-                previous_approver=employee_display_name(actor),
+                previous_approver=actor_name,
                 previous_level=_entry_level(entry, index),
             ),
             robust=True,

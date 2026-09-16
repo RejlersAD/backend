@@ -6,6 +6,7 @@ Provides REST API serialization for notifications, preferences, and categories
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog
+from .delivery import approval_assignment_issue, notification_action_url
 
 User = get_user_model()
 
@@ -24,6 +25,7 @@ class UserMinimalSerializer(serializers.ModelSerializer):
 
 class NotificationCategorySerializer(serializers.ModelSerializer):
     """Category serializer with icon and color"""
+    order = serializers.IntegerField(read_only=True, default=0)
     
     class Meta:
         model = NotificationCategory
@@ -33,7 +35,20 @@ class NotificationCategorySerializer(serializers.ModelSerializer):
         ]
 
 
-class NotificationSerializer(serializers.ModelSerializer):
+class NotificationActionSerializer(serializers.ModelSerializer):
+    """Historical assignments remain readable without advertising stale actions."""
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['action_url'] = notification_action_url(instance)
+        reason = approval_assignment_issue(instance)
+        if reason:
+            data['metadata'] = {**(data.get('metadata') or {}), 'requires_action': False, 'approval_obsolete': True}
+            data['action_label'] = 'View Request'
+        return data
+
+
+class NotificationSerializer(NotificationActionSerializer):
     """Main notification serializer"""
     recipient = UserMinimalSerializer(read_only=True)
     sender = UserMinimalSerializer(read_only=True)
@@ -44,6 +59,9 @@ class NotificationSerializer(serializers.ModelSerializer):
     is_expired = serializers.SerializerMethodField()
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    sent_by_email = serializers.BooleanField(source='email_sent', read_only=True)
+    sent_by_sms = serializers.BooleanField(read_only=True, default=False)
+    sent_by_in_app = serializers.BooleanField(source='send_in_app', read_only=True)
     
     class Meta:
         model = Notification
@@ -75,7 +93,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         return obj.expires_at < timezone.now()
 
 
-class NotificationListSerializer(serializers.ModelSerializer):
+class NotificationListSerializer(NotificationActionSerializer):
     """Lightweight serializer for notification lists"""
     category_name = serializers.CharField(source='category.name', read_only=True)
     category_icon = serializers.CharField(source='category.icon', read_only=True)
@@ -114,12 +132,13 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
 
 class NotificationLogSerializer(serializers.ModelSerializer):
     """Notification log/audit trail serializer"""
-    user = UserMinimalSerializer(read_only=True)
+    metadata = serializers.JSONField(source='details', read_only=True)
+    created_at = serializers.DateTimeField(source='timestamp', read_only=True)
     
     class Meta:
         model = NotificationLog
         fields = [
-            'id', 'notification', 'user', 'action',
+            'id', 'notification', 'action', 'details', 'timestamp',
             'metadata', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
@@ -139,9 +158,18 @@ class WebPushSubscriptionSerializer(serializers.Serializer):
     expirationTime = serializers.IntegerField(required=False, allow_null=True)
     keys = serializers.DictField()
 
+    def validate_endpoint(self, value):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(value)
+        if parsed.scheme != 'https' or parsed.username or parsed.password:
+            raise serializers.ValidationError('A secure browser push endpoint is required.')
+        return value
+
     def validate_keys(self, value):
         if not value.get('p256dh') or not value.get('auth'):
             raise serializers.ValidationError('Push subscription keys are required.')
+        if any(not isinstance(value[key], str) or len(value[key]) > 255 for key in ('p256dh', 'auth')):
+            raise serializers.ValidationError('Push subscription keys must be strings of at most 255 characters.')
         return value
 
 
