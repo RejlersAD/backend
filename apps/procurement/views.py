@@ -1919,12 +1919,18 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             'create', 'update', 'partial_update',
             'available_requisitions', 'available_projects', 'create_project',
             'reserve_number',
+            'uploaded_documents', 'uploaded_document_content',
         }:
             return [IsAuthenticated()]
         return super().get_permissions()
 
     def retrieve(self, request, *args, **kwargs):
         order = self.get_object()
+        self._check_order_read_access(request, order)
+        return Response(self.get_serializer(order).data)
+
+    def _check_order_read_access(self, request, order):
+        """Apply the same requester/approver rules to order data and originals."""
         has_module = HasModuleAccess().has_permission(request, self)
         is_owner = order.created_by_id == request.user.id
         is_assigned = any(
@@ -1933,7 +1939,49 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         )
         if not (has_module or is_owner or is_assigned):
             raise PermissionDenied('You are not assigned to this Purchase Order.')
-        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=['get'], url_path='uploaded-documents')
+    def uploaded_documents(self, request, pk=None):
+        """List originals attached to this saved PO, without storage URLs."""
+        from .services.purchase_order_sources import uploaded_purchase_order_sources
+
+        order = self.get_object()
+        self._check_order_read_access(request, order)
+        results = []
+        for source in uploaded_purchase_order_sources(order):
+            results.append({
+                'id': source['id'],
+                'filename': source['filename'],
+                'uploaded_at': source['uploaded_at'],
+                'content_url': self.reverse_action(
+                    'uploaded-document-content', kwargs={'pk': order.pk, 'document_id': source['id']},
+                    request=None,
+                ),
+            })
+        return Response({'count': len(results), 'results': results})
+
+    @action(detail=True, methods=['get'], url_path=r'uploaded-documents/(?P<document_id>[^/.]+)/content')
+    def uploaded_document_content(self, request, pk=None, document_id=None):
+        """Stream original bytes only after checking both order and source link."""
+        from django.core.files.storage import default_storage
+        from django.http import FileResponse
+        from .services.purchase_order_sources import uploaded_purchase_order_sources
+
+        order = self.get_object()
+        self._check_order_read_access(request, order)
+        source = next((item for item in uploaded_purchase_order_sources(order) if item['id'] == document_id), None)
+        if not source or not source['storage_key']:
+            return Response({'error': 'The uploaded PO PDF is unavailable.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            stored_file = default_storage.open(source['storage_key'], 'rb')
+        except FileNotFoundError:
+            return Response({'error': 'The uploaded PO PDF is unavailable.'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception:
+            return Response({'error': 'The uploaded PO PDF could not be loaded. Please retry.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        response = FileResponse(stored_file, content_type='application/pdf', as_attachment=False, filename=source['filename'])
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
     
     def get_queryset(self):
         queryset = super().get_queryset()

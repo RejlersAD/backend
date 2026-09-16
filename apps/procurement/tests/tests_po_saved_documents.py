@@ -73,7 +73,6 @@ class SavedPODocumentTests(TestCase):
             self.assertEqual(response['Cache-Control'], 'private, no-store')
             self.assertTrue(response['Content-Disposition'].startswith('inline;'))
             storage.assert_called_once_with(document.s3_key, 'rb')
-            response.close()
 
     def test_other_uploaders_source_is_not_accessible(self):
         document = self.document(uploaded_by=self.other)
