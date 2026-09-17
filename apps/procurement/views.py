@@ -2664,6 +2664,9 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'vat_basis': 'Confirm whether VAT applies before changing amounts.'}, status=400)
             if 'pr_id' in values:
                 pr = values.pop('pr_id')
+                if fields.get('originating_pr_id') and str(pr.pk if pr else '') != str(fields['originating_pr_id']):
+                    return Response({'error': 'Keep the originating purchase recommendation selected for this uploaded PDF.'},
+                                    status=status.HTTP_409_CONFLICT)
                 fields['pr_id'] = str(pr.pk) if pr else None
                 fields['pr_number'] = pr.pr_number if pr else ''
             if 'po_number' in values:
@@ -2863,6 +2866,7 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 approved_by_title=request.data.get('approved_by_title', ''),
                 approved_date=request.data.get('approved_date', ''),
                 allow_existing_update=request_action_allowed(request, 'procurement_orders', 'update'),
+                pr_id=request.data.get('pr_id'),
             )
         except SignedPOImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

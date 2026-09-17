@@ -1275,7 +1275,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             self._upload_attachments(order, files)
 
         from .services.procurement_lifecycle import mark_requisition_converted
-        mark_requisition_converted(locked_pr, order.po_number)
+        if not self.context.get('defer_requisition_conversion'):
+            mark_requisition_converted(locked_pr, order.po_number)
         # Notification delivery is a side effect and must never turn a
         # successfully committed PO into an HTTP 500 response.
         transaction.on_commit(lambda: notify_assigned_approvers(order), robust=True)
