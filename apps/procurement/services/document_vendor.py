@@ -34,6 +34,12 @@ def _check_vendor(vendor, license_number):
 
 @transaction.atomic
 def resolve_document_vendor(fields, *, user, allow_create, create_missing=True):
+    if fields.get('vendor_id'):
+        vendor = Vendor.objects.select_for_update().filter(pk=fields['vendor_id']).first()
+        if vendor is None:
+            raise ValidationError({'vendor_id': 'The selected supplier no longer exists.'})
+        _check_vendor(vendor, _license(fields.get('vendor_license_no')))
+        return vendor, False
     name = _name(fields.get('vendor_name'))
     if not name or len(name) > 300:
         if not create_missing:
@@ -81,6 +87,7 @@ def resolve_document_vendor(fields, *, user, allow_create, create_missing=True):
         'contact_person': _name(fields.get('seller_contact_person'))[:200],
         'email': email, 'phone': _name(fields.get('seller_phone'))[:50],
         'address': _name(fields.get('seller_address')),
+        'country': _name(fields.get('seller_country'))[:100],
         'created_by': user, 'icv_issuing_authority': '',
         'notes': f"Registered from uploaded purchase order {fields.get('source_po_number') or fields.get('po_number') or ''}.",
     })

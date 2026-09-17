@@ -317,3 +317,28 @@ class PairedSignedImportTests(TestCase):
         self.assertEqual(self.upload().status_code, 201)
         self.assertEqual(PurchaseOrder.objects.get().vendor.name, 'Brand new source supplier')
         self.assertEqual(Vendor.objects.count(), 2)
+
+    def test_originating_pr_id_binds_preview_and_final_pair_to_existing_pr_without_register_read(self):
+        original = self.upload(paired=False)
+        pr = PurchaseRequisition.objects.get(pk=original.data['pr_id'])
+        self.revoke('procurement_requisitions', 'read')
+        with patch('apps.procurement.services.paired_signed_import.preview_signed_po_approval',
+                   return_value={'approval_evidence': {}, 'page_count': 2}):
+            preview = self.upload(preview_only='true', originating_pr_id=str(pr.pk))
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data['bound_pr_number'], pr.pr_number)
+        result = self.upload(originating_pr_id=str(pr.pk))
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['pr_id'], str(pr.pk))
+        self.assertEqual(PurchaseRequisition.objects.count(), 1)
+        self.assertEqual(PurchaseOrder.objects.get().pr_reference_id, pr.pk)
+
+    def test_originating_pr_id_rejects_different_expected_pr_and_requires_attachment_permission(self):
+        original = self.upload(paired=False)
+        pr = PurchaseRequisition.objects.get(pk=original.data['pr_id'])
+        mismatch = self.upload(originating_pr_id=str(pr.pk), expected_pr_number='RAD-PRJ-PR-9999_2026')
+        self.assertEqual(mismatch.status_code, 409, mismatch.data)
+        self.assertFalse(PurchaseOrder.objects.exists())
+        self.revoke('procurement_requisitions', 'update')
+        self.assertEqual(self.upload(originating_pr_id=str(pr.pk)).status_code, 403)
+        self.assertFalse(PurchaseOrder.objects.exists())

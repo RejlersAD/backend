@@ -211,6 +211,15 @@ def operation_action(request, view):
     if (
         view.__class__.__module__ == 'apps.procurement.views'
         and view.__class__.__name__ == 'PODocumentViewSet'
+        and getattr(view, 'action', '') == 'preview_signed_pdf'
+        and record_workflow_not_denied(request.user, 'procurement_orders', 'read')
+        and request_action_allowed(request, 'procurement_orders', 'create')
+    ):
+        # A creator can inspect their own new upload before saving any record.
+        return 'create'
+    if (
+        view.__class__.__module__ == 'apps.procurement.views'
+        and view.__class__.__name__ == 'PODocumentViewSet'
         and getattr(view, 'action', '') == 'reconcile'
     ):
         return 'create'

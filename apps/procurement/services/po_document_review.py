@@ -45,6 +45,9 @@ def reviewed_document_fields(saved_fields, validated_data, *, user):
     if 'vendor_name' in values and values['vendor_name'] != fields.get('vendor_name'):
         fields['vendor_id'] = None
         fields['vendor_name_source'] = 'manual'
+    if 'vendor_id' in values:
+        vendor = values.pop('vendor_id')
+        fields['vendor_id'] = str(vendor.pk) if vendor else None
     fields.update(_serializable_fields(values))
     fields['reconciliation_required'] = True
     fields['reconciliation_issues'] = [

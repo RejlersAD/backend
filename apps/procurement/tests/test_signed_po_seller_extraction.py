@@ -52,6 +52,7 @@ class SignedPOSellerExtractionTests(SimpleTestCase):
             'Seller: Source Supplier LLC\nLicense No.: CN-12345\n'
             'Seller Contact Person: Supplier Contact\nSeller Email: seller@example.test\n'
             'Seller Phone: +971 555 1234\nSeller Address: Supplier Building\n'
+            'Seller Country: United Arab Emirates Buyer Address: Rejlers Office\n'
             'Invoicing Address: Rejlers Office\nLicense No.: CN-99999\n'
             'Email: buyer@example.test\nPhone: +971 999 9999\nBuyer Reference: Buyer Person'
         )
@@ -60,6 +61,7 @@ class SignedPOSellerExtractionTests(SimpleTestCase):
         self.assertEqual(fields['seller_email'], 'seller@example.test')
         self.assertEqual(fields['seller_phone'], '+971 555 1234')
         self.assertEqual(fields['seller_address'], 'Supplier Building')
+        self.assertEqual(fields['seller_country'], 'United Arab Emirates')
 
     def test_buyer_contact_and_license_are_not_registered_as_supplier_details(self):
         fields = self.extract(

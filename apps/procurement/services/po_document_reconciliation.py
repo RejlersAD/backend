@@ -14,8 +14,9 @@ from ..models import PODocument, PurchaseOrder, PurchaseRequisition
 from .po_excel_import import canonical_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict, mark_requisition_converted
 from .purchase_order_numbering import PurchaseOrderNumberService
+from .pr_document_reconciliation import verify_originating_po_link
 from .signed_po_pdf_import import (
-    _attach_existing_order, _date, _verified_origin_link, validate_originating_requisition,
+    _attach_existing_order, _date, validate_originating_requisition,
 )
 
 
@@ -216,5 +217,5 @@ def reconcile_saved_po_document(document_id, request, mapping):
     result.update(operation='attached' if existing else 'created', confirmed_po=str(order.pk))
     result['vendor_registered'] = registered_vendor
     if origin_id:
-        result['po_link'] = _verified_origin_link(pr, order.pk, request.user)
+        result['po_link'] = verify_originating_po_link(pr, order.pk, request.user)
     return result

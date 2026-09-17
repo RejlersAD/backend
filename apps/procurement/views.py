@@ -560,6 +560,14 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         try:
             pdf_bytes = pdf_file.read()
             expected_pr_number = str(request.data.get('expected_pr_number', '')).strip()
+            bound_pr = None
+            if request.data.get('originating_pr_id'):
+                from .services.signed_po_pdf_import import _originating_requisition
+                from .services.procurement_lifecycle import ProcurementDeleteConflict
+                bound_pr = _originating_requisition(request.data['originating_pr_id'], lock=False)
+                if expected_pr_number and expected_pr_number.casefold() != bound_pr.pr_number.casefold():
+                    raise ProcurementDeleteConflict('Keep the originating purchase recommendation selected for these PDFs.')
+                expected_pr_number = bound_pr.pr_number
             if str(request.data.get('preview_only', '')).lower() in {'1', 'true', 'yes'}:
                 if po_file:
                     if not (request_action_allowed(request, 'procurement_orders', 'read')
@@ -574,6 +582,8 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                         filename=pdf_file.name,
                         expected_pr_number=expected_pr_number,
                     )
+                if bound_pr:
+                    result.update(bound_pr_number=bound_pr.pr_number, originating_pr_id=str(bound_pr.pk))
                 return Response(result, status=status.HTTP_200_OK)
 
             raw_overrides = request.data.get('manual_overrides', '')
@@ -596,6 +606,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             attach_value = str(request.data.get('attach_only', 'true' if expected_pr_number and create_value in {'false', '0'} else 'false')).strip().lower()
             if attach_value not in {'true', 'false', '1', '0'}:
                 raise SignedPRImportError('Attach signed document must be true or false.')
+            if bound_pr:
+                create_value, attach_value = 'false', 'true'
+                if not request_action_allowed(request, 'procurement_requisitions', 'update'):
+                    raise PermissionDenied('Purchase requisition update permission is required to attach this PR PDF.')
 
             pr_options = {
                 'approvals': approvals, 'signatures_verified': None,
@@ -2829,8 +2843,9 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['post'], url_path='preview_signed_pdf',
             parser_classes=[MultiPartParser, FormParser])
     def preview_signed_pdf(self, request):
-        """Read buyer approval candidates without creating or approving a PO."""
-        from .services.po_pdf_approval import POApprovalPreviewError, preview_signed_po_approval
+        """Review PO, supplier and approval candidates without saving an upload."""
+        from .services.po_pdf_approval import POApprovalPreviewError
+        from .services.signed_po_pdf_import import SignedPOImportError, preview_signed_po_pdf
 
         pdf_file = request.FILES.get('file')
         if not pdf_file:
@@ -2838,8 +2853,8 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
         if pdf_file.size > 15 * 1024 * 1024:
             return Response({'error': 'PDF file must not exceed 15 MB.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            result = preview_signed_po_approval(pdf_file.read())
-        except POApprovalPreviewError as exc:
+            result = preview_signed_po_pdf(pdf_file.read(), filename=pdf_file.name, pr_id=request.data.get('pr_id'))
+        except (POApprovalPreviewError, SignedPOImportError) as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
 
@@ -2858,20 +2873,36 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'PDF file must not exceed 15 MB.'}, status=status.HTTP_400_BAD_REQUEST)
         from .services.signed_po_pdf_import import SignedPOImportError, import_signed_po_pdf
         try:
-            result = import_signed_po_pdf(
-                pdf_file.read(),
-                filename=pdf_file.name,
-                user=request.user,
-                signature_verified=str(request.data.get('signature_verified', 'false')).lower() == 'true',
-                stamp_verified=str(request.data.get('stamp_verified', 'false')).lower() == 'true',
-                approved_by_name=request.data.get('approved_by_name', ''),
-                approved_by_title=request.data.get('approved_by_title', ''),
-                approved_date=request.data.get('approved_date', ''),
-                allow_existing_update=request_action_allowed(request, 'procurement_orders', 'update'),
-                pr_id=request.data.get('pr_id'),
-                register_missing_vendor=True,
-                allow_vendor_create=request_action_allowed(request, 'procurement_vendors', 'create'),
-            )
+            raw_review = request.data.get('reviewed_fields')
+            reviewed_fields = None
+            if raw_review is not None:
+                try:
+                    review_data = json.loads(raw_review)
+                except (TypeError, ValueError) as exc:
+                    raise SignedPOImportError('PO corrections must be a valid JSON object.') from exc
+                review = PODocumentReviewSerializer(data=review_data)
+                review.is_valid(raise_exception=True)
+                reviewed_fields = review.validated_data
+            evidence = {}
+            for key in ('signature_verified', 'stamp_verified'):
+                value = str(request.data.get(key, 'false')).lower().strip()
+                if reviewed_fields is not None and value not in {'true', 'false', '1', '0'}:
+                    raise SignedPOImportError('PO signature and stamp confirmations must be true or false.')
+                evidence[key] = value in {'true', '1'} if reviewed_fields is not None else value == 'true'
+            from contextlib import nullcontext
+            from .services.atomic_source_import import atomic_source_import
+            with atomic_source_import() if reviewed_fields is not None else nullcontext():
+                result = import_signed_po_pdf(
+                    pdf_file.read(), filename=pdf_file.name, user=request.user, **evidence,
+                    approved_by_name=request.data.get('approved_by_name', ''),
+                    approved_by_title=request.data.get('approved_by_title', ''),
+                    approved_date=request.data.get('approved_date', ''),
+                    allow_existing_update=request_action_allowed(request, 'procurement_orders', 'update'),
+                    pr_id=request.data.get('pr_id'), reviewed_fields=reviewed_fields,
+                    require_complete=reviewed_fields is not None,
+                    register_missing_vendor=True,
+                    allow_vendor_create=request_action_allowed(request, 'procurement_vendors', 'create'),
+                )
         except SignedPOImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except APIException:
