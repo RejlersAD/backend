@@ -223,6 +223,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
     can_approve = serializers.SerializerMethodField()
     current_approval = serializers.SerializerMethodField()
+    registration_warnings = serializers.SerializerMethodField()
     linked_po_id = serializers.SerializerMethodField()
     linked_po_number = serializers.SerializerMethodField()
 
@@ -281,7 +282,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Dynamic Approval Workflow
             'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
-            'can_approve', 'current_approval',
+            'can_approve', 'current_approval', 'registration_warnings',
             
             # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
@@ -365,8 +366,23 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     and stage.get('source') == SIGNED_PR_TYPE for stage in workflow)
         ))
 
+    @staticmethod
+    def _freeze_approval_route(instance, workflow):
+        # Advisory omissions may be corrected after registration until a
+        # decision is recorded. Keep the route fixed once review has begun.
+        status = canonicalize_pr_status(instance.status)
+        if status == 'draft' or not workflow:
+            return False
+        if status not in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES:
+            return True
+        return any(
+            isinstance(stage, dict) and not stage.get('external')
+            and str(stage.get('status') or 'pending').strip().lower() not in {'pending', 'in_review'}
+            for stage in workflow
+        )
+
     def validate_approval_workflow_config(self, value):
-        """Validate approver assignments and discard client-supplied approval state."""
+        """Validate route data; business requirements are registration warnings."""
         if self._preserve_source_workflow(self.instance):
             # Editing commercial fields must not replace recorded PDF decisions
             # with the new-form approval route submitted by an older client.
@@ -379,56 +395,37 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
         User = get_user_model()
         normalized_workflow = []
-        assigned_user_ids = set()
+        previous_stages = [
+            stage for stage in (getattr(self.instance, 'approval_workflow_config', None) or [])
+            if isinstance(stage, dict)
+        ]
 
         for index, stage in enumerate(value):
             if not isinstance(stage, dict):
                 raise serializers.ValidationError(f'Approval stage {index + 1} must be an object.')
 
             role = str(stage.get('role') or '').strip()
-            if not role:
-                raise serializers.ValidationError(f'Approval stage {index + 1} requires a role.')
             if len(role) > 100:
                 raise serializers.ValidationError(f'Approval stage {index + 1} role is too long.')
 
             assigned_user_id = stage.get('user_id') or stage.get('approver_id')
-            if not assigned_user_id:
-                raise serializers.ValidationError(f'Approval stage {index + 1} requires an approver.')
-
+            approver = None
             try:
-                approver = User.objects.get(pk=assigned_user_id, is_active=True)
+                if assigned_user_id:
+                    approver = User.objects.get(pk=assigned_user_id)
             except (User.DoesNotExist, ValueError, TypeError):
                 raise serializers.ValidationError(
-                    f'Approval stage {index + 1} must reference an active user.'
+                    f'Approval stage {index + 1} must reference an existing user.'
                 )
             try:
                 level = max(0, int(stage.get('level', index + 1)))
             except (TypeError, ValueError):
                 raise serializers.ValidationError(f'Approval stage {index + 1} has an invalid level.')
 
-            from .services.approval_eligibility import (
-                MODULE_PR, eligible_stage_assignee, is_employee_selected_pr_stage,
-            )
+            from .services.approval_eligibility import is_employee_selected_pr_stage
             eligibility_stage = {**stage, 'level': level}
             employee_selected = is_employee_selected_pr_stage(eligibility_stage)
-            if not eligible_stage_assignee(approver, eligibility_stage, MODULE_PR):
-                stage_label = f'Level {level} ({role})'
-                if employee_selected:
-                    raise serializers.ValidationError(
-                        f'{stage_label} requires an active RADAI employee '
-                        'whose approval access is not explicitly denied.'
-                    )
-                raise serializers.ValidationError(
-                    f'{stage_label} requires the configured business position '
-                    'and Purchase Requisition approval permission.'
-                )
-
-            approver_id = str(approver.pk)
-            if approver_id in assigned_user_ids:
-                raise serializers.ValidationError(
-                    f'Approval stage {index + 1} duplicates an approver already selected in this workflow.'
-                )
-            assigned_user_ids.add(approver_id)
+            approver_id = str(approver.pk) if approver else ''
 
             normalized_stage = {
                 'step': index + 1,
@@ -436,26 +433,23 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'role': role,
                 **({'business_position': stage['business_position']}
                    if stage.get('business_position') and not employee_selected else {}),
-                'user_id': str(approver.pk),
-                'user_name': employee_display_name(approver),
+                'user_id': approver_id,
+                'user_name': employee_display_name(approver) if approver else '',
                 'username': (
                     approver.get_username()
                     if callable(getattr(approver, 'get_username', None))
                     else getattr(approver, 'username', '')
                 ),
-                'user_email': approver.email,
+                'user_email': approver.email if approver else '',
                 'status': 'pending',
                 'approved_at': None,
                 'assignment_id': str(uuid4()),
             }
 
-            if self.instance:
+            if self.instance and approver:
                 previous_stage = next((
-                    existing for existing in (
-                        getattr(self.instance, 'approval_workflow_config', None) or []
-                    )
-                    if isinstance(existing, dict)
-                    and (
+                    existing for existing in previous_stages
+                    if (
                         RequisitionWorkflowService._stage_email(existing) == str(approver.email or '').strip().lower()
                         if RequisitionWorkflowService._stage_email(existing)
                         else str(existing.get('user_id') or existing.get('approver_id') or '') == approver_id
@@ -464,6 +458,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     and str(existing.get('role') or '').strip().lower() == role.lower()
                 ), None)
                 if previous_stage:
+                    # One recorded decision belongs to one assignment, even
+                    # when the same employee was selected twice with a warning.
+                    previous_stages.remove(previous_stage)
                     normalized_stage['assignment_id'] = previous_stage.get('assignment_id', '')
                     # Keep saved route metadata stable when editing an existing
                     # assignment. Level 1 no longer uses this legacy constraint.
@@ -599,7 +596,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             protect_requisition_approval_route(
                 old_workflow or [], new_workflow or [],
                 level=RequisitionWorkflowService._stage_level, label='role',
-                freeze_route=bool(old_workflow) and canonicalize_pr_status(self.instance.status) != 'draft',
+                freeze_route=self._freeze_approval_route(self.instance, old_workflow),
             )
 
         try:
@@ -672,6 +669,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         actor = getattr(request, 'user', None)
         return bool(actor and RequisitionWorkflowService.can_approve(obj, actor))
+
+    def get_registration_warnings(self, obj):
+        from .services.requisition_registration import requisition_registration_warnings
+
+        return requisition_registration_warnings(obj)
 
     def get_current_approval(self, obj):
         status = canonicalize_pr_status(obj.status)
@@ -813,7 +815,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             )
             protect_requisition_approval_route(
                 old_workflow or [], new_workflow or [], level=RequisitionWorkflowService._stage_level, label='role',
-                freeze_route=bool(old_workflow) and canonicalize_pr_status(instance.status) != 'draft',
+                freeze_route=self._freeze_approval_route(instance, old_workflow),
             )
         source_metadata = instance.price_remarks_data or {}
         if 'price_remarks_data' in validated_data:
