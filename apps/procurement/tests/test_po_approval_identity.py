@@ -8,6 +8,7 @@ from django.test import TestCase, override_settings
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.procurement.models import PurchaseOrder, Vendor
+from apps.procurement.services.purchase_order_approval_artwork import DEFAULT_APPROVAL_STAMP_REFERENCE
 from apps.procurement.services.purchase_order_approvals import (
     _active_entries, _entry_matches_user, _resolve_entry_user,
     can_approve, normalize_assignments, notify_assigned_approvers, pending_entries_for, record_decision,
@@ -77,6 +78,7 @@ class PurchaseOrderApprovalIdentityTests(TestCase):
             entry = self.approve(index)
             self.assertEqual(entry['approved_by_id'], str(self.people[index].pk))
             self.assertEqual(entry['signature_user_email'], self.people[index].email)
+            self.assertEqual(self.order.approval_stamp, '')
             self.assertEqual(self.notify_next.call_count, index + 1)
             self.assertEqual(self.notify_next.call_args.kwargs['previous_level'], index)
             with self.assertRaises(PermissionDenied):
@@ -91,6 +93,7 @@ class PurchaseOrderApprovalIdentityTests(TestCase):
         self.assertEqual(self.order.approved_by_name, 'CEO')
         self.assertEqual(self.order.approved_by_title, UserProfile.objects.get(user=self.people[5]).job_title)
         self.assertEqual(self.order.approval_signature, self.profiles[5].signature_image)
+        self.assertEqual(self.order.approval_stamp, DEFAULT_APPROVAL_STAMP_REFERENCE)
         richa = next(stage for stage in self.order.approval_log if stage['level'] == 0)
         self.assertEqual(richa['approved_by_name'], 'Richa')
         self.assertEqual(richa['signature'], self.profiles[0].signature_image)
