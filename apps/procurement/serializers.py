@@ -52,6 +52,7 @@ from .services.approval_integrity import (
     protect_requisition_approval_route,
 )
 from .services.procurement_vat import apply_confirmed_input, CONFIRMED_BASES
+from .services.requisition_supplier_contacts import requisition_supplier_contacts
 
 
 PR_SERVER_CONTROLLED_FIELDS = {
@@ -176,10 +177,12 @@ class PurchaseRequisitionListSerializer(serializers.ListSerializer):
     def to_representation(self, data):
         instances = list(data.all() if isinstance(data, BaseManager) else data)
         self.child._display_data = self.child._prepare_display_data(instances)
+        self.child._supplier_contact_data = requisition_supplier_contacts(instances, self.context.get('request'))
         try:
             return super().to_representation(instances)
         finally:
             del self.child._display_data
+            del self.child._supplier_contact_data
 
 
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
@@ -205,6 +208,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     # Vendor relationship fields
     vendor_details = VendorSerializer(source='vendor', read_only=True)
     vendor_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
+    supplier_contact_details = serializers.SerializerMethodField()
     
     # Legacy fields
     requester_name = serializers.SerializerMethodField()
@@ -300,7 +304,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'supplier_name', 'supplier_business_id',
             
             # Vendor Integration (Smart linking)
-            'vendor', 'vendor_details', 'vendor_name', 'vendor_selection_reason', 'ai_vendor_recommendations',
+            'vendor', 'vendor_details', 'vendor_name', 'supplier_contact_details', 'vendor_selection_reason', 'ai_vendor_recommendations',
             
             # Enhanced Vendor Selection (Feedback: Multiple vendors with ICV)
             'selected_vendors', 'single_source_justification',
@@ -394,6 +398,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def get_linked_po_number(self, obj):
         linked_order = self._linked_purchase_order(obj)
         return linked_order.po_number if linked_order else None
+
+    def get_supplier_contact_details(self, obj):
+        return self._supplier_contact_data[obj.pk]
 
     def _is_super_admin(self, user):
         if getattr(user, 'is_superuser', False):
@@ -752,10 +759,12 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if hasattr(self, '_display_data'):
             return self._representation(instance)
         self._display_data = self._prepare_display_data([instance])
+        self._supplier_contact_data = requisition_supplier_contacts([instance], self.context.get('request'))
         try:
             return self._representation(instance)
         finally:
             del self._display_data
+            del self._supplier_contact_data
 
     def _representation(self, instance):
         data = super().to_representation(instance)
