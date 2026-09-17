@@ -463,6 +463,7 @@ class PurchaseOrderExportTests(TestCase):
             signature_rect = page.get_image_rects(signature_images[0][0])[0]
             self.assertLess(heading.y1, signature_rect.y0)
             self.assertLess(signature_rect.y1, approver.y0)
+            self.assertLess(approver.y0 - signature_rect.y1, 5 * mm)
             self.assertAlmostEqual(signature_rect.x0, approver.x0, delta=1)
             approval_date = page.search_for(order.approved_date)[0]
             self.assertGreater(approver.y0, page.rect.height - 120 * mm)
@@ -470,7 +471,9 @@ class PurchaseOrderExportTests(TestCase):
             self.assertGreater(approval_date.y0, approver.y1)
             self.assertLess(approval_date.x1, page.rect.width / 2)
             self.assertGreater(approval_date.y1, page.rect.height - 88 * mm)
-            self.assertLess(approval_date.y1, page.rect.height - 82 * mm)
+            # The seal now sits beside the signature/name. Remaining identity
+            # lines flow beneath it, still well clear of the printed footer.
+            self.assertLess(approval_date.y1, page.rect.height - 75 * mm)
             self.assertFalse(page.search_for('__________________________'))
 
     def test_pending_approval_identity_is_higher_and_word_cell_stays_top_aligned(self):

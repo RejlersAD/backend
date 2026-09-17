@@ -341,6 +341,9 @@ class UserProfile(TimeStampedModel):
     # self-contained when the data URL is copied into their audit snapshot.
     signature_image = models.TextField(blank=True)
     signature_updated_at = models.DateTimeField(null=True, blank=True)
+    # Lossless digital company seal managed through the owner's stamp endpoint.
+    stamp_image = models.TextField(blank=True)
+    stamp_updated_at = models.DateTimeField(null=True, blank=True)
     phone = models.CharField(max_length=20, blank=True)
     bio = models.TextField(blank=True, max_length=500)
     location = models.CharField(max_length=100, blank=True)

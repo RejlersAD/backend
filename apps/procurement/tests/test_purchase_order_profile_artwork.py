@@ -219,3 +219,50 @@ class PurchaseOrderProfileArtworkTests(TestCase):
         signature, stamp = completed_jarmo_profile_artwork(self.order)
         self.assertEqual(signature.getvalue(), fresh_bytes)
         self.assertEqual(stamp.getvalue(), self.stamp_bytes)
+
+    def test_uploaded_profile_stamp_is_preferred_in_pdf_and_word_without_changing_saved_po(self):
+        stamp_size = (840, 820)
+        stamp_bytes, stamp_data = signature_image(stamp_size, (30, 90, 185))
+        UserProfile.objects.filter(pk=self.profile.pk).update(stamp_image=stamp_data)
+        before = PurchaseOrder.objects.values().get(pk=self.order.pk)
+        signature, stamp = completed_jarmo_profile_artwork(self.order)
+        self.assertEqual(signature.getvalue(), self.signature_bytes)
+        self.assertEqual(stamp.getvalue(), stamp_bytes)
+        content, _warnings = build_purchase_order_pdf(self.order)
+        images = self.pdf_images(content)
+        self.assertIn(stamp_size, images)
+        self.assertNotIn(self.stamp_size, images)
+        word = self.word_images(build_purchase_order_docx(self.order))
+        self.assertIn(stamp_bytes, word)
+        self.assertNotIn(self.stamp_bytes, word)
+        self.assertEqual(before, PurchaseOrder.objects.values().get(pk=self.order.pk))
+
+    def test_removed_or_invalid_uploaded_stamp_falls_back_to_bundled_company_asset(self):
+        for value in ('', 'data:image/png;base64,invalid', 'https://untrusted.example.test/stamp.png'):
+            with self.subTest(value=value):
+                UserProfile.objects.filter(pk=self.profile.pk).update(stamp_image=value)
+                _signature, stamp = completed_jarmo_profile_artwork(self.order)
+                self.assertEqual(stamp.getvalue(), self.stamp_bytes)
+
+    def test_uploaded_stamp_is_used_with_valid_saved_po_signature_if_profile_signature_is_missing(self):
+        saved_bytes, saved_signature = signature_image(SNAPSHOT_SIZE, (100, 25, 50))
+        stamp_size = (840, 820)
+        stamp_bytes, stamp_data = signature_image(stamp_size, (30, 90, 185))
+        UserProfile.objects.filter(pk=self.profile.pk).update(signature_image='', stamp_image=stamp_data)
+        self.order.approved_by = self.jarmo
+        self.order.approval_signature = saved_signature
+        self.order.approval_log = [{
+            'level': 5, 'status': 'Approved', 'user_id': str(self.jarmo.pk),
+            'approved_by_id': str(self.jarmo.pk), 'signature_user_id': str(self.jarmo.pk),
+            'signature': saved_signature,
+        }]
+        signature, stamp = completed_jarmo_profile_artwork(self.order)
+        self.assertIsNone(signature)
+        self.assertEqual(stamp.getvalue(), stamp_bytes)
+        content, _warnings = build_purchase_order_pdf(self.order)
+        images = self.pdf_images(content)
+        self.assertIn(SNAPSHOT_SIZE, images)
+        self.assertIn(stamp_size, images)
+        word = self.word_images(build_purchase_order_docx(self.order))
+        self.assertIn(saved_bytes, word)
+        self.assertIn(stamp_bytes, word)

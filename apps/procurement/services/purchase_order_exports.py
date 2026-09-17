@@ -103,7 +103,7 @@ def _approval_artwork(order, display, signature_issue):
     signature = _signature_stream(getattr(order, 'approval_signature', ''))
     if signature is None:
         return None, None, source_approval_artwork(order)
-    return signature, approval_stamp_stream(getattr(order, 'approval_stamp', '')), None
+    return signature, company_stamp or approval_stamp_stream(getattr(order, 'approval_stamp', '')), None
 
 
 def _approval_image(stream, width, height):
@@ -542,35 +542,49 @@ def _main_pdf(order):
     signature_stream, stamp_stream, source_stream = _approval_artwork(order, approval, signature_issue)
     heading = '' if source_stream else f'<br/><b>{approval["heading"]}</b>'
     approved = [Paragraph(f'<b>PO status:</b> {escape(approval["status"])}{heading}', preview)]
+    approval_details = (
+        f'{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
+        f'{JARMO_COMPANY}<br/><b>Date:</b> '
+        f'{escape(_value(approval["date"], "__________________________"))}'
+    )
+    approval_identity = Spacer(1, 0) if source_stream else Paragraph(
+        f'<b>{escape(approval_name)}</b><br/>{approval_details}', preview,
+    )
+    signing_block = approval_identity
+    name_offset = 0
+    column_style = TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    ])
     if source_stream:
         # The signed source can have overlapping signature, seal and date.
         # Preserve that complete buyer block instead of reconstructing it.
         approved.extend([Spacer(1, 2 * mm), _approval_image(source_stream, 79, 65)])
     elif signature_stream:
         signature_image = _approval_image(signature_stream, 42 if stamp_stream else 52, 20)
-        artwork = signature_image
+        name_offset = signature_image.drawHeight + mm
+        signing_block = Table([[[signature_image, Spacer(1, mm), approval_identity]]],
+                              colWidths=[79 * mm], style=column_style)
         if stamp_stream:
-            # The company seal uses its original ink/transparent background,
-            # with no watermark opacity. Keep both images above signer/date.
-            artwork = Table([[signature_image, '', _approval_image(stamp_stream, 30, 30)]],
-                            colWidths=[44 * mm, 5 * mm, 30 * mm], style=TableStyle([
-                                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                                ('LEFTPADDING', (0, 0), (-1, -1), 0),
-                                ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-                                ('TOPPADDING', (0, 0), (-1, -1), 0),
-                                ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-                            ]))
-        artwork_gap = 1 * mm if stamp_stream else 2 * mm
-        approved.extend([Spacer(1, artwork_gap), artwork, Spacer(1, artwork_gap)])
+            # Center the seal beside the signature, with the name immediately
+            # below the signature. Flow the remaining identity beneath both
+            # columns so the seal can never cover the title/company/date.
+            stamp_image = _approval_image(stamp_stream, 30, 30)
+            signature_inset = max(0, (stamp_image.drawHeight - signature_image.drawHeight) / 2)
+            name_offset += signature_inset
+            signing_style = TableStyle(column_style.getCommands() + [
+                ('SPAN', (0, 1), (-1, 1)), ('TOPPADDING', (0, 1), (-1, 1), mm),
+            ])
+            signing_block = Table([
+                [[Spacer(1, signature_inset), signature_image, Spacer(1, mm),
+                  Paragraph(f'<b>{escape(approval_name)}</b>', preview)], '', stamp_image],
+                [Paragraph(approval_details, preview), '', ''],
+            ], colWidths=[42 * mm, mm, 36 * mm], style=signing_style)
     else:
         approved.append(Spacer(1, 16 * mm))
     if signature_issue:
         approved.append(Paragraph(escape(signature_issue), preview))
-    approval_identity = Spacer(1, 0) if source_stream else Paragraph(
-        f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
-        f'{JARMO_COMPANY}<br/><b>Date:</b> '
-        f'{escape(_value(approval["date"], "__________________________"))}', preview,
-    )
     raw_seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
     raw_contact_person = str(getattr(order, 'seller_contact_person', '') or '').strip()
     confirmation_contact = raw_contact_person or raw_seller_reference
@@ -630,24 +644,21 @@ def _main_pdf(order):
     width_scale = max(1, cover_width / frame_width)
     preceding_height = sum(item.wrap(cover_width, 1e6)[1] for item in cover)
     approval_table = Table(
-        [[[*approved, approval_identity], '', confirmation]],
+        [[[*approved, signing_block], '', confirmation]],
         colWidths=[86 * mm, 5 * mm, 85 * mm], style=approval_style,
     )
     natural_height = approval_table.wrap(cover_width, 1e6)[1]
     panel_height = max(natural_height, frame_height * width_scale - preceding_height)
     identity_height = approval_identity.wrap(79 * mm, 1e6)[1]
-    column_style = TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-        ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-    ])
     approved_height = Table([[approved]], colWidths=[79 * mm], style=column_style).wrap(79 * mm, 1e6)[1]
-    panel_height = max(panel_height, approved_height + identity_height + 6)
-    identity_top = max(approved_height, panel_height - 6 - identity_height - 40 * mm * width_scale)
-    lower_space = max(0, panel_height - 6 - identity_top - identity_height)
+    signing_height = signing_block.wrap(79 * mm, 1e6)[1]
+    panel_height = max(panel_height, approved_height + signing_height + 6)
+    signing_top = max(approved_height,
+                      panel_height - 6 - identity_height - 40 * mm * width_scale - name_offset)
+    lower_space = max(0, panel_height - 6 - signing_top - signing_height)
     approved_column = Table(
-        [[approved], [approval_identity], ['']], colWidths=[79 * mm],
-        rowHeights=[identity_top, identity_height, lower_space], style=column_style,
+        [[approved], [signing_block], ['']], colWidths=[79 * mm],
+        rowHeights=[signing_top, signing_height, lower_space], style=column_style,
     )
     cover.append(Table(
         [[approved_column, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm],
@@ -1060,6 +1071,8 @@ def build_purchase_order_docx(order):
     signature_stream, stamp_stream, source_stream = _approval_artwork(order, approval_display, signature_issue)
     heading = '' if source_stream else f'\n{approval_display["heading"]}'
     _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}{heading}', size=7, bold=True)
+    approval_name, approval_title = approval_display['name'], approval_display['title']
+    identity_with_artwork = False
     if source_stream:
         source_image = _approval_image(source_stream, 79, 65)
         source_stream.seek(0)
@@ -1067,21 +1080,48 @@ def build_purchase_order_docx(order):
             source_stream, width=Pt(source_image.drawWidth), height=Pt(source_image.drawHeight),
         )
     elif signature_stream:
-        paragraph = approval_cell.add_paragraph()
         signature_image = _approval_image(signature_stream, 42 if stamp_stream else 50, 20)
         signature_stream.seek(0)
-        paragraph.add_run().add_picture(signature_stream, width=Pt(signature_image.drawWidth), height=Pt(signature_image.drawHeight))
         if stamp_stream:
-            paragraph.add_run('  ')
             stamp_image = _approval_image(stamp_stream, 30, 30)
             stamp_stream.seek(0)
+            signing = approval_cell.add_table(rows=2, cols=3)
+            signing.autofit = False
+            _docx_no_borders(signing)
+            for column, width in zip(signing.columns, (42, 1, 36)):
+                column.width = Mm(width)
+                for cell in column.cells:
+                    cell.width = Mm(width)
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+                    margins = OxmlElement('w:tcMar')
+                    for side in ('top', 'left', 'bottom', 'right'):
+                        margin = OxmlElement(f'w:{side}')
+                        margin.set(qn('w:w'), '0')
+                        margin.set(qn('w:type'), 'dxa')
+                        margins.append(margin)
+                    cell._tc.get_or_add_tcPr().append(margins)
+            paragraph = signing.cell(0, 0).paragraphs[0]
+            paragraph.paragraph_format.space_before = Pt(max(0, (stamp_image.drawHeight - signature_image.drawHeight) / 2))
+            paragraph.paragraph_format.space_after = Mm(1)
+            paragraph.add_run().add_picture(signature_stream, width=Pt(signature_image.drawWidth), height=Pt(signature_image.drawHeight))
+            name = signing.cell(0, 0).add_paragraph()
+            name.paragraph_format.space_after = Pt(0)
+            name.add_run(approval_name).bold = True
+            paragraph = signing.cell(0, 2).paragraphs[0]
+            paragraph.paragraph_format.space_after = Pt(0)
             paragraph.add_run().add_picture(stamp_stream, width=Pt(stamp_image.drawWidth), height=Pt(stamp_image.drawHeight))
+            details = signing.cell(1, 0).merge(signing.cell(1, 2))
+            _docx_set_cell_text(details, f'{approval_title}\n{JARMO_COMPANY}\nDate: {_value(approval_display["date"], "")}', size=7)
+            identity_with_artwork = True
+        else:
+            paragraph = approval_cell.add_paragraph()
+            paragraph.paragraph_format.space_after = Mm(1)
+            paragraph.add_run().add_picture(signature_stream, width=Pt(signature_image.drawWidth), height=Pt(signature_image.drawHeight))
     else:
         approval_cell.add_paragraph('\n\n\n')
     if signature_issue:
         approval_cell.add_paragraph(signature_issue)
-    approval_name, approval_title = approval_display['name'], approval_display['title']
-    if not source_stream:
+    if not source_stream and not identity_with_artwork:
         approval_cell.add_paragraph(
             f'{approval_name}\n'
             f'{approval_title}\n{JARMO_COMPANY}\n'
