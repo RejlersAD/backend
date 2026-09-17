@@ -791,6 +791,47 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=False, methods=['get', 'post', 'delete'], url_path='my-digital-stamp')
+    def my_digital_stamp(self, request):
+        """Manage only the eligible authenticated owner's digital company seal."""
+        from .digital_stamps import digital_stamp_profile, stamp_image_data_url
+
+        profile = digital_stamp_profile(request.user)
+        if profile is None:
+            if request.method in ('GET', 'HEAD'):
+                return Response({
+                    'can_manage': False, 'has_stamp': False, 'stamp': None, 'updated_at': None,
+                }, headers={'Cache-Control': 'private, no-store'})
+            return Response(
+                {'error': 'Digital stamp management is available only to the active stamp owner.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if request.method == 'POST':
+            if set(request.data) - {'stamp'}:
+                return Response({'error': 'Only the digital stamp image may be supplied.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                image = stamp_image_data_url(request.FILES.get('stamp'))
+            except ValueError as error:
+                return Response({'error': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        if request.method in ('POST', 'DELETE'):
+            with transaction.atomic():
+                # Recheck ownership after image decoding and serialize changes
+                # to this profile without touching its signature or PO records.
+                profile = digital_stamp_profile(request.user, for_update=True)
+                if profile is None:
+                    return Response({'error': 'Digital stamp owner access has changed.'}, status=status.HTTP_403_FORBIDDEN)
+                profile.stamp_image = image if request.method == 'POST' else ''
+                profile.stamp_updated_at = timezone.now() if request.method == 'POST' else None
+                profile.save(update_fields=['stamp_image', 'stamp_updated_at', 'updated_at'])
+        payload = {
+            'can_manage': True, 'has_stamp': bool(profile.stamp_image),
+            'stamp': profile.stamp_image or None, 'updated_at': profile.stamp_updated_at,
+        }
+        if request.method in ('POST', 'DELETE'):
+            payload['success'] = True
+        return Response(payload, headers={'Cache-Control': 'private, no-store'})
+
     @action(detail=False, methods=['get', 'post', 'delete'], url_path='my-signature')
     def my_signature(self, request):
         """Manage the authenticated user's cropped approval signature."""

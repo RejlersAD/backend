@@ -104,7 +104,7 @@ SELF_SERVICE_ACTIONS = {
         'document_types', 'document_types_profile', 'document_types_onboarding',
         'document_types_by_category', 'expiring_soon',
     },
-    'EmployeeProfileViewSet': {'my_employee_profile', 'upload_my_profile_photo', 'my_signature'},
+    'EmployeeProfileViewSet': {'my_employee_profile', 'upload_my_profile_photo', 'my_signature', 'my_digital_stamp'},
     'UserProfileViewSet': {
         'me', 'my_profile', 'my_permissions', 'my_modules', 'change_password',
         'reporting_managers', 'organization_catalog',
@@ -171,7 +171,7 @@ CREATE_OPERATIONS = {
     'generate_smart_datasheet', 'generate_switchgear_datasheet', 'generate_transformer_datasheet',
     'generate_upload_url', 'governance_comments', 'governance_items', 'import_boq', 'import_excel',
     'import_full_xlsx', 'import_reviewed', 'import_signed_pdf', 'import_xlsx', 'intelligent_generate',
-    'library_watch_start', 'materialize', 'my_signature', 'output_drawings', 'process',
+    'library_watch_start', 'materialize', 'my_signature', 'my_digital_stamp', 'output_drawings', 'process',
     'quality_check', 're_extract', 'recommend_vendors', 'reserve_number', 'run_assurance',
     'run_three_way_match', 'save_output', 'score_lead', 'send_email', 'send_test_mail',
     'send_test_teams', 'send_to_client', 'send_to_vendor', 'smart_upload', 'snapshots', 'start',

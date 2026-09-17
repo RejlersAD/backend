@@ -34,8 +34,9 @@ class PurchaseOrderStampTests(TestCase):
         PILImage.new('RGB', SIGNATURE_SIZE, (35, 20, 145)).save(stream, format='PNG')
         self.signature_bytes = stream.getvalue()
 
-    def recorded_order(self):
-        order = export_fixtures.PurchaseOrderExportTests._realistic_long_contact_order(self)
+    def recorded_order(self, *, dense=True):
+        order = (export_fixtures.PurchaseOrderExportTests._realistic_long_contact_order(self)
+                 if dense else self._order())
         order.status = 'completed'
         order.approved_by_id = 'recorded-ceo'
         order.approved_by_name = 'Synthetic Recorded CEO'
@@ -93,14 +94,18 @@ class PurchaseOrderStampTests(TestCase):
             self.assertLessEqual(signature_rect.height, 18 * mm + 1)
             self.assertLessEqual(stamp_rect.width, 30 * mm + 1)
             self.assertGreater(stamp_rect.width, 25 * mm)
-            # Either top or centre alignment puts both artworks on one row.
-            self.assertTrue(
-                abs(signature_rect.y0 - stamp_rect.y0) < 3 * mm
-                or abs((signature_rect.y0 + signature_rect.y1) / 2 - (stamp_rect.y0 + stamp_rect.y1) / 2) < 3 * mm,
-            )
+            name_rect = page.search_for(order.approved_by_name)[0]
+            # The signature sits immediately above the name, and the seal is
+            # alongside it (not stranded under the "Approved by" heading).
+            self.assertGreater(name_rect.y0, signature_rect.y1)
+            self.assertLess(name_rect.y0 - signature_rect.y1, 5 * mm)
+            self.assertLess(abs((signature_rect.y0 + signature_rect.y1) / 2
+                                - (stamp_rect.y0 + stamp_rect.y1) / 2), mm)
+            self.assertGreater(stamp_rect.y1, name_rect.y0)
+            self.assertFalse(stamp_rect.intersects(name_rect))
+            self.assertLess(stamp_rect.y1, page.search_for(order.approved_by_title)[0].y0)
             for rectangle in (signature_rect, stamp_rect):
                 self.assertGreater(rectangle.y0, page.search_for('Approved by:')[0].y1)
-                self.assertLess(rectangle.y1, page.search_for(order.approved_by_name)[0].y0)
                 self.assertLess(rectangle.y1, page.rect.height - 40 * mm)
             # Inspect rendered pixels too: an embedded but transparent/covered
             # stamp is not a visible stamp.
@@ -129,6 +134,26 @@ class PurchaseOrderStampTests(TestCase):
                 painted.append(alpha)
         self.assertEqual(len(painted), 2)
         self.assertEqual(painted, [1.0, 1.0])
+
+    def test_compact_cover_keeps_signature_and_seal_at_signer_name(self):
+        order = self.recorded_order(dense=False)
+        content, _warnings = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            page = pdf[0]
+            name = page.search_for(order.approved_by_name)[0]
+            signature = next(image for image in page.get_images() if image[2:4] == SIGNATURE_SIZE)
+            stamp = next(image for image in page.get_images() if image[2:4] == self.stamp_size)
+            signature_rect = page.get_image_rects(signature[0])[0]
+            stamp_rect = page.get_image_rects(stamp[0])[0]
+            self.assertGreater(name.y0, signature_rect.y1)
+            self.assertLess(name.y0 - signature_rect.y1, 5 * mm)
+            self.assertLess(abs((signature_rect.y0 + signature_rect.y1) / 2
+                                - (stamp_rect.y0 + stamp_rect.y1) / 2), mm)
+            self.assertFalse(stamp_rect.intersects(name))
+            self.assertLess(stamp_rect.y1, page.search_for(order.approved_by_title)[0].y0)
+            self.assertGreater(name.y0, page.rect.height - 120 * mm)
+            self.assertLess(name.y0, page.rect.height - 95 * mm)
+            export_fixtures.PurchaseOrderExportTests._assert_body_clear_of_footer(self, pdf)
 
     def test_word_keeps_stamp_and_recorded_signature_as_images_on_same_approval_row(self):
         order = self.recorded_order()
@@ -211,7 +236,7 @@ class PurchaseOrderStampTests(TestCase):
         content, _warnings = build_purchase_order_pdf(order)
         with fitz.open(stream=content, filetype='pdf') as pdf:
             text = '\n'.join(page.get_text() for page in pdf)
-        self.assertIn(order.approved_by_name, text)
+            self.assertIn(''.join(order.approved_by_name.split()), ''.join(text.split()))
         self.assertNotIn('Jarmo Suominen', text)
         document = Document(BytesIO(build_purchase_order_docx(order)))
         text = ''.join(document.element.itertext())

@@ -7,10 +7,11 @@ import re
 
 from PIL import Image
 
+from apps.users.digital_stamps import JARMO_PROFILE_EMAIL, digital_stamp_profile
+
 
 DEFAULT_APPROVAL_STAMP_REFERENCE = '/assets/procurement/commercial-license-stamp.png'
 APPROVAL_STAMP_PATH = Path(__file__).resolve().parent.parent / 'assets' / 'commercial-license-stamp.png'
-JARMO_PROFILE_EMAIL = 'jarmo.suominen@rejlers.ae'
 
 
 def approval_image_stream(value):
@@ -71,15 +72,9 @@ def completed_jarmo_profile_artwork(order):
     ):
         return None, None
 
-    from apps.rbac.models import UserProfile
-
-    profiles = list(UserProfile.objects.filter(
-        user__email__iexact=JARMO_PROFILE_EMAIL,
-        user__is_active=True, status='active', is_deleted=False,
-    ).only('user_id', 'signature_image')[:2])
-    if len(profiles) != 1:
+    profile = digital_stamp_profile()
+    if profile is None:
         return None, None
-    profile = profiles[0]
     actor_id = str(getattr(order, 'approved_by_id', '') or '')
     if actor_id and actor_id != str(profile.user_id):
         return None, None
@@ -105,6 +100,7 @@ def completed_jarmo_profile_artwork(order):
                     or not emails and any(value != str(profile.user_id) for value in identifiers)):
                 return None, None
     signature = approval_image_stream(profile.signature_image)
+    stamp = approval_image_stream(profile.stamp_image)
     if signature is None:
-        return None, None
-    return signature, approval_stamp_stream(DEFAULT_APPROVAL_STAMP_REFERENCE)
+        return None, stamp
+    return signature, stamp or approval_stamp_stream(DEFAULT_APPROVAL_STAMP_REFERENCE)
