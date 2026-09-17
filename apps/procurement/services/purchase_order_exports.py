@@ -37,7 +37,11 @@ from reportlab.platypus import (
 from reportlab.lib.utils import ImageReader
 
 from .approval_integrity import purchase_order_signature_issue
-from .purchase_order_approval_artwork import approval_image_stream as _signature_stream, approval_stamp_stream
+from .purchase_order_approval_artwork import (
+    approval_image_stream as _signature_stream,
+    approval_stamp_stream,
+    completed_jarmo_profile_artwork,
+)
 from .purchase_order_source_artwork import source_approval_artwork
 from .purchase_order_sources import is_safe_source_storage_key, uploaded_purchase_order_sources
 from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_rich_flowables
@@ -93,6 +97,9 @@ def _approval_artwork(order, display, signature_issue):
     """Completion keeps genuine signing artwork visible; it creates no approval."""
     if signature_issue or not display['recorded']:
         return None, None, None
+    profile_signature, company_stamp = completed_jarmo_profile_artwork(order)
+    if profile_signature is not None:
+        return profile_signature, company_stamp, None
     signature = _signature_stream(getattr(order, 'approval_signature', ''))
     if signature is None:
         return None, None, source_approval_artwork(order)
