@@ -145,7 +145,8 @@ def _check_bounded_pdf_text(text: str, max_pages: int | None) -> str:
     return text
 
 
-def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None = None) -> str:
+def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None = None, first_page: int = 1, ocr_config: str = '',
+                                    max_image_dimension: int | None = None) -> str:
     """
     Extract text from PDF using pdf2image + Tesseract OCR.
     
@@ -156,7 +157,10 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
     
     Args:
         pdf_bytes: Raw PDF file bytes
-        max_pages: Optional cover-page limit, applied to every extraction method.
+        max_pages: Optional page count, applied to every extraction method.
+        first_page: One-based starting page, including for fallback readers.
+        ocr_config: Optional Tesseract layout configuration for a bounded retry.
+        max_image_dimension: Optional longest rendered dimension, in pixels.
         
     Returns:
         Extracted text string
@@ -166,6 +170,11 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
     """
     if max_pages is not None and (not isinstance(max_pages, int) or max_pages < 1):
         raise ValueError('max_pages must be a positive integer.')
+    if not isinstance(first_page, int) or first_page < 1:
+        raise ValueError('first_page must be a positive integer.')
+    if max_image_dimension is not None and (not isinstance(max_image_dimension, int) or max_image_dimension < 1):
+        raise ValueError('max_image_dimension must be a positive integer.')
+    render_size = {'size': max_image_dimension} if max_image_dimension is not None else {}
     ocr_failure = None
     unreadable_document = False
 
@@ -176,9 +185,10 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
         
         logger.info('[Tesseract] Converting PDF to images...')
         if max_pages is None:
-            image_batches = [(1, pdf2image.convert_from_bytes(pdf_bytes, dpi=300, fmt='png'))]
+            page_start = {'first_page': first_page} if first_page != 1 else {}
+            image_batches = [(first_page, pdf2image.convert_from_bytes(pdf_bytes, dpi=300, fmt='png', **render_size, **page_start))]
         else:
-            page_count = min(max_pages, pdf2image.pdfinfo_from_bytes(pdf_bytes, timeout=15)['Pages'])
+            last_page = min(first_page + max_pages - 1, pdf2image.pdfinfo_from_bytes(pdf_bytes, timeout=15)['Pages'])
             # Render one page at a time without PNG compression. Signed POs can
             # include dozens of scanned contract attachments that need neither
             # rasterizing nor OCR; raw PPM avoids an expensive encode/decode pass.
@@ -187,16 +197,18 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
             image_batches = (
                 (page_number, pdf2image.convert_from_bytes(
                     pdf_bytes, dpi=200, fmt='ppm', first_page=page_number,
-                    last_page=page_number, timeout=20,
+                    last_page=page_number, timeout=20, **render_size,
                 ))
-                for page_number in range(1, page_count + 1)
+                for page_number in range(first_page, last_page + 1)
             )
 
         full_text = ''
-        for first_page, images in image_batches:
+        for batch_first_page, images in image_batches:
             try:
-                for i, img in enumerate(images, first_page):
+                for i, img in enumerate(images, batch_first_page):
                     options = {'timeout': 15} if max_pages is not None else {}
+                    if ocr_config:
+                        options['config'] = ocr_config
                     page_text = pytesseract.image_to_string(img, lang=OCR_LANG, **options)
                     full_text += f'\n--- Page {i} ---\n{page_text}\n'
                     logger.debug(f'[Tesseract] Page {i}: extracted {len(page_text)} chars')
@@ -224,9 +236,9 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
             if max_pages is not None and doc.needs_pass:
                 unreadable_document = True
                 raise PDFTextUnreadableError('The PDF is password protected.')
-            page_count = min(doc.page_count, max_pages) if max_pages is not None else doc.page_count
+            page_count = min(doc.page_count, first_page - 1 + max_pages) if max_pages is not None else doc.page_count
             blank_pages = True
-            for page_num in range(page_count):
+            for page_num in range(first_page - 1, page_count):
                 page = doc[page_num]
                 page_text = page.get_text()
                 if max_pages is not None and (page_text.strip() or page.get_images() or page.get_drawings()):
@@ -248,8 +260,8 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
         logger.info('[PyPDF2] Attempting text extraction (last resort)...')
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         full_text = ''
-        page_count = min(len(pdf_reader.pages), max_pages) if max_pages is not None else len(pdf_reader.pages)
-        for page_num in range(page_count):
+        page_count = min(len(pdf_reader.pages), first_page - 1 + max_pages) if max_pages is not None else len(pdf_reader.pages)
+        for page_num in range(first_page - 1, page_count):
             page = pdf_reader.pages[page_num]
             page_text = page.extract_text() or ''
             full_text += f'\n--- Page {page_num + 1} ---\n{page_text}\n'

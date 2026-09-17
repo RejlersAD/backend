@@ -24,10 +24,13 @@ from .po_tesseract_extractor import PDFTextUnreadableError, extract_text_from_pd
 from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
+from .po_supplier_extraction import complete_wrapped_seller_name, extract_seller_cover_details, needs_seller_layout
+from .po_supplier_contacts import parse_vendor_contact_block
 
 
 # Cover, scope, payment terms and price summary; retain all PDF pages as evidence.
 SIGNED_PO_TEXT_PAGE_LIMIT = 4
+SIGNED_PO_CONTACT_PAGE_LIMIT = 8
 
 
 class SignedPOImportError(ValueError):
@@ -45,15 +48,75 @@ def _match(pattern: str, text: str, default: str = "") -> str:
     return re.sub(r"\s+", " ", result.group(1)).strip() if result else default
 
 
-def _money(label: str, text: str) -> tuple[Decimal | None, str]:
-    result = re.search(
-        rf"{label}\s*:?\s*([\d,]+\.\d{{2}})\s*(USD|AED|EUR|GBP)",
-        text,
-        re.IGNORECASE,
-    )
-    if not result:
-        return None, ""
-    return Decimal(result.group(1).replace(",", "")), result.group(2).upper()
+_TOTAL_LABEL = re.compile(
+    r"\b(?:(?P<net>Total\s+(?:(?:Purchase|Estimated)\s+Price\s*:?|Price\s*:))"
+    r"|(?P<tax>VAT(?:\s*\(\s*\d+(?:\.\d+)?\s*%\s*\))?\s*:)"
+    r"|(?P<gross>Total\s+Sum\s*:))", re.IGNORECASE,
+)
+_AMOUNT_NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
+_AMOUNT_CURRENCY = r"(?:USD|AED|EUR|GBP)"
+_AMOUNT_VALUE = re.compile(
+    rf"[\s|]*(?:(?P<prefix>{_AMOUNT_CURRENCY})[\s|]*(?P<prefix_value>{_AMOUNT_NUMBER})(?![\w.,])"
+    rf"|(?P<suffix_value>{_AMOUNT_NUMBER})[\s|]*(?P<suffix>{_AMOUNT_CURRENCY})(?!\w))",
+    re.IGNORECASE,
+)
+
+
+def _purchase_totals(text: str) -> tuple[Decimal | None, Decimal | None, Decimal | None, str, bool]:
+    """Read adjacent, labelled PO totals without crossing another field.
+
+    The official cover uses amount/currency while the detail table uses
+    currency/amount. OCR can also read the entire label column before the
+    value column; only a complete, ordered group can establish that mapping.
+    """
+    cover = re.split(r'---\s*Page\s+2\s*---', text, maxsplit=1, flags=re.IGNORECASE)[0]
+    if re.search(r'\bTotal\s+(?:Purchase|Estimated)\s+Price\b', cover, re.IGNORECASE):
+        # An explicit cover total is authoritative. Later pages can contain
+        # supplier quotes or contract totals, including different currencies.
+        text = cover
+    labels = list(_TOTAL_LABEL.finditer(text))
+    candidates = {'net': set(), 'tax': set(), 'gross': set()}
+    position = 0
+    while position < len(labels):
+        group = [labels[position]]
+        position += 1
+        while position < len(labels) and re.fullmatch(r'[\s|]*', text[group[-1].end():labels[position].start()]):
+            group.append(labels[position])
+            position += 1
+        kinds = [label.lastgroup for label in group]
+        if len(group) > 1 and kinds != [kind for kind in candidates if kind in kinds]:
+            continue
+        offset = group[-1].end()
+        values = []
+        for label in group:
+            value = _AMOUNT_VALUE.match(text, offset)
+            if not value:
+                break
+            amount = Decimal((value['prefix_value'] or value['suffix_value']).replace(',', ''))
+            currency = (value['prefix'] or value['suffix']).upper()
+            values.append((label.lastgroup, amount, currency))
+            offset = value.end()
+        # Incomplete columns must not make the final label consume the net
+        # value, and surplus values make a column assignment ambiguous.
+        if len(values) != len(group) or (len(group) > 1 and _AMOUNT_VALUE.match(text, offset)):
+            continue
+        for kind, amount, currency in values:
+            candidates[kind].add((amount, currency))
+
+    currencies = {currency for values in candidates.values() for _, currency in values}
+    if any(len(values) > 1 for values in candidates.values()) or len(currencies) > 1:
+        # Repeated cover/detail totals must agree; never combine currencies
+        # or silently choose one of conflicting source amounts.
+        return None, None, None, '', False
+    values = [next(iter(candidates[kind]))[0] if candidates[kind] else None for kind in candidates]
+    net, tax, gross = values
+    if net is not None and gross is not None and gross != net + (tax or Decimal('0')):
+        # An unreadable VAT value must not become zero beside a higher gross.
+        return None, None, None, next(iter(currencies), ''), False
+    # A second layout pass can recover a displaced value column, but must
+    # never override conflicting or partially read source totals.
+    retry_layout = not any(candidates.values()) and bool(labels) and bool(_AMOUNT_VALUE.search(text))
+    return *values, next(iter(currencies), ''), retry_layout
 
 
 def _date(value: str):
@@ -73,7 +136,7 @@ _SELLER_FIELD_END = (
     r"|\b(?:Address|Invoicing(?:\s+Address)?|Invoice\s+Address|Buyer(?:\s+(?:Reference|Address))?)\s*:"
     r"|\bInvoicing\b"
     r"|\b(?:Quote\s*Ref(?:erence)?\.?|License\s*No\.?|Payment\s+(?:Terms?|Mode)"
-    r"|Delivery\s+(?:Terms?|Date)|Project|Purchase\s+Summary|Total\s+Purchase\s+Price)\s*:"
+    r"|Delivery\s+(?:Terms?|Date)|Project|Purchase\s+Summary|Total\s+(?:Purchase|Estimated)\s+Price)\s*:"
 )
 
 
@@ -109,28 +172,11 @@ def _native_seller_name(pdf_bytes: bytes) -> str:
 
 
 def _seller_details(text):
-    """Only explicitly labelled seller contacts belong to a supplier master."""
-    seller = re.search(r'\bSeller\s*:', text, re.IGNORECASE)
-    section = text[seller.start():] if seller else ''
-    section = re.split(r'\b(?:Invoicing|Invoice\s+Address|Buyer|Purchase\s+Summary)\b',
-                       section, maxsplit=1, flags=re.IGNORECASE)[0]
-    def contact(pattern):
-        value = _match(pattern, text)
-        return re.split(r'\b(?:Seller\s+(?:Address|Country|Contact|E[- ]?mail|Phone|Telephone|Reference|Fax)'
-                        r'|Buyer(?:\s+(?:Reference|Address))?|Invoic(?:e|ing)(?:\s+Address)?)\s*:',
-                        value, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    return {
-        'vendor_license_no': _match(r'(?:Trade\s+)?License\s+No\.?\s*:?\s*([A-Z0-9][A-Z0-9/-]*)', section),
-        'seller_contact_person': contact(r'Seller\s+Contact(?:\s+Person)?\s*:\s*([^\n]+)'),
-        'seller_email': _match(r'Seller\s+E[- ]?mail\s*:\s*([^\s<>]+@[^\s<>]+)', text),
-        'seller_phone': _match(r'Seller\s+(?:Phone|Telephone)\s*:\s*([+\d][\d ()+.-]+)', text),
-        'seller_address': contact(r'Seller\s+Address\s*:\s*([^\n]+)'),
-        'seller_country': contact(r'Seller\s+Country\s*:\s*([^\n]+)'),
-    }
+    return extract_seller_cover_details(text)
 
 
 _PO_SUMMARY_END = (
-    r"\b(?:Total\s+(?:Purchase\s+)?Price|Total\s+Sum|Net\s+Total|VAT\s*(?:\([^)]*\))?)\s*:"
+    r"\b(?:Total\s+(?:(?:Purchase|Estimated)\s+)?Price|Total\s+Sum|Net\s+Total|VAT\s*(?:\([^)]*\))?)\s*:"
     r"|\b(?:Approved\s+by|Approvals?|Order\s+Confirmation|Seller\s+(?:Name|Signature|Ref(?:erence)?\.?))\s*:"
     r"|\b(?:Scope|Prices|Summary\s+of\s+Prices|Payment|Terms\s*&\s*Conditions"
     r"|Delivery\s*(?:&\s*Installation|Place)|Software\s+Maintenance\s+Support)\s*:"
@@ -166,7 +212,7 @@ def normalize_po_summary(text: str) -> str:
     # Cover-page OCR can interleave the right-hand price column immediately
     # after the summary label, before the actual title on the following line.
     value = re.sub(
-        r"^Total\s+Purchase\s+Price\s*:\s*"
+        r"^Total\s+(?:Purchase|Estimated)\s+Price\s*:?\s*"
         r"(?:(?:USD|AED|EUR|GBP)\s*[\d,]+\.\d{2}|[\d,]+\.\d{2}\s*(?:USD|AED|EUR|GBP))\s*",
         "", value, count=1, flags=re.IGNORECASE,
     )
@@ -200,16 +246,52 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
 
     po_date_text = _match(r"\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})\b", text)
     delivery_text = _match(r"Delivery\s+date\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4})", text)
-    net, currency = _money(r"Total\s+Purchase\s+Price", text)
-    if net is None:
-        net, currency = _money(r"Total\s+Price", text)
-    vat, vat_currency = _money(r"VAT\s*\(5%\)", text)
-    gross, gross_currency = _money(r"Total\s+Sum", text)
-    currency = currency or vat_currency or gross_currency or "USD"
+    net, vat, gross, currency, retry_layout = _purchase_totals(text)
+    seller_details = _seller_details(text)
+    amount_text = ''
+    if retry_layout or needs_seller_layout(text, seller_details):
+        try:
+            # Some scanned covers are read column-first, separating amount
+            # labels from their values by addresses. Re-read only the cover
+            # as rows; do not search contract pages for a plausible amount.
+            amount_text = extract_text_from_pdf_tesseract(
+                pdf_bytes, max_pages=1, ocr_config='--psm 6', max_image_dimension=2400,
+            )
+        except (PDFTextUnreadableError, RuntimeError):
+            pass  # The original missing-amount review remains actionable.
+        else:
+            if retry_layout:
+                net, vat, gross, currency, _ = _purchase_totals(amount_text)
+            seller_details.update({key: value for key, value in _seller_details(amount_text).items() if value})
+    currency = currency or "USD"
 
     raw_vendor_name = _match(r"Seller\s*:\s*(.+?)(?:\s+Seller\s+Reference|\Z)", text)
     native_vendor_name = _native_seller_name(pdf_bytes)
-    vendor_name = native_vendor_name or _seller_name(text)
+    vendor_name = native_vendor_name or complete_wrapped_seller_name(amount_text or text, _seller_name(text))
+
+    def merge_contacts(contact_text):
+        contacts = parse_vendor_contact_block(contact_text, vendor_name)
+        for key, value in contacts.items():
+            if value and (key in {'seller_contact_person', 'seller_email', 'seller_phone'} or not seller_details.get(key)):
+                seller_details[key] = value
+        return bool(contacts.get('seller_phone'))
+
+    contact_found = merge_contacts(text) if vendor_name else False
+    contact_keys = ('seller_contact_person', 'seller_email', 'seller_phone', 'seller_address', 'seller_country')
+    if vendor_name and not contact_found and not all(seller_details.get(key) for key in contact_keys):
+        # Contact sections can follow the commercial pages. Inspect only the
+        # next few pages, stopping at a supplier-owned phone block. Reuse the
+        # existing cover OCR, and never read a full contract attachment again.
+        for page_number in range(SIGNED_PO_TEXT_PAGE_LIMIT + 1, min(source_page_count or 0, SIGNED_PO_CONTACT_PAGE_LIMIT) + 1):
+            try:
+                contact_text = extract_text_from_pdf_tesseract(
+                    pdf_bytes, first_page=page_number, max_pages=1,
+                    ocr_config='--psm 6', max_image_dimension=2400,
+                )
+            except (PDFTextUnreadableError, RuntimeError):
+                continue
+            if merge_contacts(contact_text):
+                break
     project_number = _match(r"Project\s*:\s*(\d{5,12})", text)
     summary = normalize_po_summary(text)
 
@@ -227,7 +309,7 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
         "vendor_name": vendor_name,
         "ocr_vendor_name_raw": raw_vendor_name,
         "vendor_name_source": "native" if native_vendor_name else "ocr",
-        **_seller_details(text),
+        **seller_details,
         "seller_reference": _match(r"Seller\s+Reference\s*:\s*(Mr\.\s+[A-Za-z ]+)", text),
         "quote_ref": _match(r"Quote\s+Ref\.\s*:\s*([^\n]+)", text),
         "project_number": project_number,
