@@ -1275,7 +1275,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             self._upload_attachments(order, files)
 
         from .services.procurement_lifecycle import mark_requisition_converted
-        mark_requisition_converted(locked_pr, order.po_number)
+        if not self.context.get('defer_requisition_conversion'):
+            mark_requisition_converted(locked_pr, order.po_number)
         # Notification delivery is a side effect and must never turn a
         # successfully committed PO into an HTTP 500 response.
         transaction.on_commit(lambda: notify_assigned_approvers(order), robust=True)
@@ -1414,6 +1415,18 @@ class PODocumentReviewSerializer(serializers.Serializer):
     po_number = serializers.CharField(max_length=100, required=False)
     summary = serializers.CharField(max_length=1000, required=False, allow_blank=True)
     vendor_name = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    vendor_id = serializers.PrimaryKeyRelatedField(queryset=Vendor.objects.filter(status='active'), required=False, allow_null=True)
+    vendor_license_no = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    seller_contact_person = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    seller_email = serializers.EmailField(required=False, allow_blank=True)
+    seller_phone = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    seller_address = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+    seller_country = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    seller_reference = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    quote_ref = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    payment_terms = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    payment_mode = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    delivery_terms = serializers.CharField(max_length=200, required=False, allow_blank=True)
     currency = serializers.CharField(max_length=3, min_length=3, required=False)
     total_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
     tax_amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0, required=False, allow_null=True)
@@ -1436,21 +1449,24 @@ class PODocumentReviewSerializer(serializers.Serializer):
             raise serializers.ValidationError('Enter a valid RAD purchase order number.')
         return value
 
-    def validate(self, attrs):
-        unknown = set(self.initial_data) - set(self.fields)
+    def to_internal_value(self, data):
+        unknown = set(data) - set(self.fields) if isinstance(data, dict) else set()
         if unknown:
             raise serializers.ValidationError({field: 'This field cannot be edited.' for field in unknown})
-        return attrs
+        return super().to_internal_value(data)
 
 
 class PODocumentReconcileSerializer(serializers.Serializer):
-    vendor_id = serializers.PrimaryKeyRelatedField(queryset=Vendor.objects.filter(status='active'))
+    vendor_id = serializers.PrimaryKeyRelatedField(queryset=Vendor.objects.filter(status='active'), required=False, allow_null=True)
     pr_id = serializers.PrimaryKeyRelatedField(queryset=PurchaseRequisition.objects.all(), required=False)
+    reviewed_fields = PODocumentReviewSerializer(required=False)
 
     def validate(self, attrs):
         unknown = set(self.initial_data) - set(self.fields)
         if unknown:
             raise serializers.ValidationError({field: 'Save reviewed business fields before completing reconciliation.' for field in unknown})
+        if 'reviewed_fields' not in attrs and not attrs.get('vendor_id'):
+            raise serializers.ValidationError({'vendor_id': 'This field is required.'})
         return attrs
 
 

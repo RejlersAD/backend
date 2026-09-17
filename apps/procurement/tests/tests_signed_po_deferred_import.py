@@ -38,6 +38,7 @@ class SignedPODeferredImportTests(TestCase):
         self.addCleanup(storage.stop)
         self.storage.save.return_value = "test-only/signed-po.pdf"
         self.storage.url.return_value = "/test-only/signed-po.pdf"
+        self.storage.open.return_value.__enter__.return_value.read.return_value = b"%PDF-synthetic-deferred-po"
 
     def upload(self):
         return import_signed_po_pdf(

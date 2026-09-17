@@ -122,7 +122,7 @@ RECORD_SCOPED_ACTIONS = {
         'uploaded_documents', 'uploaded_document_content',
     },
     ('apps.procurement.views', 'PurchaseRequisitionViewSet'): {
-        'retrieve', 'uploaded_document_content', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
+        'retrieve', 'uploaded_document_content', 'approval_record_pdf', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
         'eng_manager_approve', 'eng_manager_reject', 'manager_projects_approve',
         'manager_projects_reject', 'process_dynamic_approval', 'process_dynamic_rejection',
     },
@@ -208,6 +208,15 @@ def operation_action(request, view):
         return 'approve'
     if operation in getattr(view, 'business_approval_actions', ()) and method not in {'GET', 'HEAD', 'OPTIONS'}:
         return 'approve'
+    if (
+        view.__class__.__module__ == 'apps.procurement.views'
+        and view.__class__.__name__ == 'PODocumentViewSet'
+        and getattr(view, 'action', '') == 'preview_signed_pdf'
+        and record_workflow_not_denied(request.user, 'procurement_orders', 'read')
+        and request_action_allowed(request, 'procurement_orders', 'create')
+    ):
+        # A creator can inspect their own new upload before saving any record.
+        return 'create'
     if (
         view.__class__.__module__ == 'apps.procurement.views'
         and view.__class__.__name__ == 'PODocumentViewSet'

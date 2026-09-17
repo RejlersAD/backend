@@ -15,6 +15,16 @@ from django.utils import timezone
 from ..models import PurchaseOrder, PurchaseRequisition
 
 
+def verify_originating_po_link(pr, po_id, user):
+    """Verify the explicit PR link using the same conflict rules as manual linking."""
+    from .procurement_lifecycle import ProcurementDeleteConflict
+
+    result = link_selected_purchase_order(pr, po_id, actor=user)
+    if result['manual_link_required']:
+        raise ProcurementDeleteConflict(result['message'])
+    return result
+
+
 def _text(value):
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or ""))).strip()
 

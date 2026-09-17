@@ -805,7 +805,10 @@ CORS_ALLOW_HEADERS = [
 ]
 
 # Expose headers for downloads
-CORS_EXPOSE_HEADERS = ['content-disposition', 'content-type', 'cache-control']
+CORS_EXPOSE_HEADERS = [
+    'content-disposition', 'content-type', 'cache-control',
+    'X-Approval-Record-PR-Source', 'X-Approval-Record-PO-Source', 'X-PO-Attachment-Warnings',
+]
 
 # Cache preflight for 1 hour
 CORS_PREFLIGHT_MAX_AGE = safe_cast_int(config('CORS_PREFLIGHT_MAX_AGE', default='3600'), 3600)

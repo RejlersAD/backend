@@ -10,6 +10,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from django.utils.html import strip_tags
+from django.utils import timezone
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -363,6 +364,25 @@ def _pdf_page(canvas, document, order, page_number=None):
     canvas.restoreState()
 
 
+def _approval_display(order):
+    name = str(getattr(order, 'approved_by_name', '') or '').strip()
+    approved_date = getattr(order, 'approved_date', None)
+    approved_at = getattr(order, 'approved_at', None)
+    if not approved_date and approved_at:
+        approved_date = (timezone.localtime(approved_at) if timezone.is_aware(approved_at) else approved_at).date()
+    recorded = bool(name and approved_date)
+    pending = str(getattr(order, 'status', '') or '').lower() in {'draft', 'pending_approval'}
+    status_display = getattr(order, 'get_status_display', None)
+    status = status_display() if callable(status_display) else str(getattr(order, 'status', '') or 'Not recorded').replace('_', ' ').title()
+    return {
+        'recorded': recorded, 'status': status,
+        'heading': 'Approved by:' if recorded else 'Approval pending:' if pending else 'Approval record:',
+        'name': name if recorded else 'Not yet approved' if pending else 'Not recorded',
+        'title': str(getattr(order, 'approved_by_title', '') or '') if recorded else '',
+        'date': approved_date if recorded else None,
+    }
+
+
 def _main_pdf(order):
     output = BytesIO()
     styles = _pdf_styles()
@@ -470,11 +490,11 @@ def _main_pdf(order):
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
         ('TOPPADDING', (0, 0), (-1, -1), 1.5 * mm), ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5 * mm),
     ]))
-    approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
-    approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE if approval_name == JARMO_NAME else '')
-    approved = [Paragraph('<b>Approved by:</b>', preview)]
+    approval = _approval_display(order)
+    approval_name, approval_title = approval['name'], approval['title']
+    approved = [Paragraph(f'<b>PO status:</b> {escape(approval["status"])}<br/><b>{approval["heading"]}</b>', preview)]
     signature_issue = purchase_order_signature_issue(order)
-    signature_stream = _signature_stream('' if signature_issue else getattr(order, 'approval_signature', ''))
+    signature_stream = _signature_stream('' if signature_issue or not approval['recorded'] else getattr(order, 'approval_signature', ''))
     if signature_stream:
         signature_image = Image(signature_stream)
         signature_image._restrictSize(52 * mm, 20 * mm)
@@ -487,7 +507,7 @@ def _main_pdf(order):
     approval_identity = Paragraph(
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
         f'{JARMO_COMPANY}<br/><b>Date:</b> '
-        f'{escape(_value(getattr(order, "approved_date", None), "__________________________"))}', preview,
+        f'{escape(_value(approval["date"], "__________________________"))}', preview,
     )
     raw_seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
     raw_contact_person = str(getattr(order, 'seller_contact_person', '') or '').strip()
@@ -764,7 +784,11 @@ def build_purchase_order_pdf(order):
             writer.add_page(page)
 
     append(_main_pdf(order))
-    for index, raw_attachment in enumerate(order.attachments or []):
+    renderable_attachments = [row for row in (order.attachments or []) if not (
+        isinstance(row, dict) and row.get('type') == 'po_excel_import_source'
+        and not any(row.get(key) for key in ('s3_key', 'storage_key', 'url', 's3_url', 'file_url'))
+    )]
+    for index, raw_attachment in enumerate(renderable_attachments):
         attachment = _attachment(raw_attachment, index)
         append(_cover_pdf(order, attachment, index, len(writer.pages) + 1))
         content = _download_attachment(attachment)
@@ -949,9 +973,10 @@ def build_purchase_order_docx(order):
     approval = document.add_table(rows=1, cols=2)
     _docx_no_borders(approval)
     approval_cell = approval.cell(0, 0)
-    _docx_set_cell_text(approval_cell, 'Approved by:', size=7, bold=True)
+    approval_display = _approval_display(order)
+    _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}\n{approval_display["heading"]}', size=7, bold=True)
     signature_issue = purchase_order_signature_issue(order)
-    signature_stream = _signature_stream('' if signature_issue else getattr(order, 'approval_signature', ''))
+    signature_stream = _signature_stream('' if signature_issue or not approval_display['recorded'] else getattr(order, 'approval_signature', ''))
     if signature_stream:
         signature_run = approval_cell.add_paragraph().add_run()
         signature_run.add_picture(signature_stream, width=Mm(50))
@@ -959,12 +984,11 @@ def build_purchase_order_docx(order):
         approval_cell.add_paragraph('\n\n\n')
     if signature_issue:
         approval_cell.add_paragraph(signature_issue)
-    approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
-    approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE if approval_name == JARMO_NAME else '')
+    approval_name, approval_title = approval_display['name'], approval_display['title']
     approval_cell.add_paragraph(
         f'{approval_name}\n'
         f'{approval_title}\n{JARMO_COMPANY}\n'
-        f'Date: {_value(getattr(order, "approved_date", None), "")}'
+        f'Date: {_value(approval_display["date"], "")}'
     )
     _docx_set_cell_text(
         approval.cell(0, 1),

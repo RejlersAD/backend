@@ -14,7 +14,10 @@ from ..models import PODocument, PurchaseOrder, PurchaseRequisition
 from .po_excel_import import canonical_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict, mark_requisition_converted
 from .purchase_order_numbering import PurchaseOrderNumberService
-from .signed_po_pdf_import import _attach_existing_order, _date
+from .pr_document_reconciliation import verify_originating_po_link
+from .signed_po_pdf_import import (
+    _attach_existing_order, _date, validate_originating_requisition,
+)
 
 
 def _money(fields, key, *, positive=False):
@@ -41,6 +44,21 @@ def _source_bytes(document, fields):
     return content
 
 
+def _already_reconciled(document):
+    order = document.confirmed_po
+    result = {'success': True, 'operation': 'already_reconciled', 'document_id': str(document.pk),
+              'purchase_order_id': str(order.pk), 'confirmed_po': str(order.pk), 'po_number': order.po_number}
+    origin_id = (document.extracted_data or {}).get('originating_pr_id')
+    if origin_id:
+        if str(order.pr_reference_id) != str(origin_id):
+            raise ProcurementDeleteConflict('The saved purchase order PR link changed. Refresh and review the existing order.')
+        result.update(pr_id=str(order.pr_reference_id), pr_number=order.pr_reference.pr_number,
+                      po_link={'status': 'already_linked', 'po_id': str(order.pk),
+                               'po_number': order.po_number, 'manual_link_required': False,
+                               'message': f'Linked to purchase order {order.po_number}.'})
+    return result
+
+
 @transaction.atomic
 def reconcile_saved_po_document(document_id, request, mapping):
     from apps.rbac.action_policy import request_action_allowed
@@ -49,17 +67,26 @@ def reconcile_saved_po_document(document_id, request, mapping):
     observed = get_object_or_404(PODocument, pk=document_id, uploaded_by=request.user)
     if observed.document_type != 'purchase_order':
         raise ValidationError({'error': 'Only purchase order PDFs can be reconciled here.'})
-    if observed.confirmed_po_id:
-        return {'success': True, 'operation': 'already_reconciled', 'document_id': str(observed.pk),
-                'purchase_order_id': str(observed.confirmed_po_id), 'confirmed_po': str(observed.confirmed_po_id),
-                'po_number': observed.confirmed_po.po_number}
     snapshot = observed.extracted_data or {}
+    review = mapping.get('reviewed_fields')
+    if review is not None and not observed.confirmed_po_id:
+        if not request_action_allowed(request, 'procurement_orders', 'update'):
+            raise PermissionDenied('Purchase order update permission is required to save reviewed PDF fields.')
+        from .po_document_review import reviewed_document_fields
+        snapshot = reviewed_document_fields(snapshot, review, user=request.user)
+    origin_id = snapshot.get('originating_pr_id')
     selected_pr = mapping.get('pr_id')
-    pr_id = selected_pr.pk if selected_pr else snapshot.get('pr_id')
+    if selected_pr and review and review.get('pr_id') and selected_pr.pk != review['pr_id'].pk:
+        raise ValidationError({'pr_id': 'Select the same purchase recommendation in the saved PO details.'})
+    if origin_id and selected_pr and str(selected_pr.pk) != str(origin_id):
+        raise ProcurementDeleteConflict('Keep the originating purchase recommendation selected for this uploaded PDF.')
+    if observed.confirmed_po_id:
+        return _already_reconciled(observed)
+    pr_id = origin_id or (selected_pr.pk if selected_pr else snapshot.get('pr_id'))
     if not pr_id:
         raise ValidationError({'pr_id': 'Select the matching purchase recommendation before reconciliation.'})
     pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
-    vendor = mapping['vendor_id']
+    vendor = mapping.get('vendor_id')
     number = canonical_po_number(snapshot.get('po_number') or snapshot.get('source_po_number'))
     verified, message = PurchaseOrderNumberService.verify(number, pr.pr_number)
     if not verified:
@@ -72,15 +99,22 @@ def reconcile_saved_po_document(document_id, request, mapping):
     if len(candidates) > 1:
         raise ProcurementDeleteConflict('More than one saved order matches this PDF number. Resolve the duplicate references before reconciliation.')
     existing = candidates[0] if candidates else None
+    if origin_id:
+        validate_originating_requisition(pr, snapshot, po=existing)
     document = get_object_or_404(PODocument.objects.select_for_update(), pk=document_id, uploaded_by=request.user)
     if document.confirmed_po_id:
-        return {'success': True, 'operation': 'already_reconciled', 'document_id': str(document.pk),
-                'purchase_order_id': str(document.confirmed_po_id), 'confirmed_po': str(document.confirmed_po_id),
-                'po_number': document.confirmed_po.po_number}
+        return _already_reconciled(document)
     if document.updated_at != observed.updated_at:
         raise ProcurementDeleteConflict('The saved PDF details changed during reconciliation. Refresh and review the latest values.')
-    fields = deepcopy(document.extracted_data or {})
+    fields = deepcopy(snapshot)
     fields.setdefault('source_extracted_data', deepcopy(fields))
+    registered_vendor = False
+    if vendor is None:
+        from .document_vendor import resolve_document_vendor
+        vendor, registered_vendor = resolve_document_vendor(
+            fields, user=request.user,
+            allow_create=request_action_allowed(request, 'procurement_vendors', 'create'),
+        )
     confirmed = fields.get('canonical_financials') or {}
     from .procurement_vat import CONFIRMED_BASES, confirmed_totals
     financial_values = {}
@@ -111,6 +145,12 @@ def reconcile_saved_po_document(document_id, request, mapping):
     fields.update(po_number=number, vendor_id=str(vendor.pk), vendor_name=vendor.name,
                   pr_id=str(pr.pk), pr_number=pr.pr_number, total_amount=total, tax_amount=tax,
                   currency=currency, po_date=issued)
+    if review is not None:
+        fields['vendor_match'] = {
+            'matched': True, 'id': str(vendor.pk), 'vendor_code': vendor.vendor_code,
+            'vendor_name': vendor.name, 'registered': registered_vendor,
+            'method': 'registered from PO source' if registered_vendor else 'selected or matched existing supplier',
+        }
     if existing:
         if not request_action_allowed(request, 'procurement_orders', 'update'):
             raise PermissionDenied('Purchase order update permission is required to attach this PDF to an existing order.')
@@ -130,7 +170,8 @@ def reconcile_saved_po_document(document_id, request, mapping):
         if not order.pr_reference_id:
             order.pr_reference = pr
             order.save(update_fields=['pr_reference', 'updated_at'])
-            mark_requisition_converted(pr, order.po_number)
+            if not origin_id:
+                mark_requisition_converted(pr, order.po_number)
     else:
         data = {
             'po_number': number, 'pr_reference': str(pr.pk), 'vendor': str(vendor.pk),
@@ -147,7 +188,9 @@ def reconcile_saved_po_document(document_id, request, mapping):
         }
         if financial_values:
             data.update(financial_values, vat_basis=confirmed['vat_basis'], entered_amount=confirmed['entered_amount'])
-        serializer = PurchaseOrderSerializer(data=data, context={'request': request})
+        serializer = PurchaseOrderSerializer(data=data, context={
+            'request': request, 'defer_requisition_conversion': bool(origin_id),
+        })
         serializer.is_valid(raise_exception=True)
         try:
             with transaction.atomic():
@@ -172,4 +215,7 @@ def reconcile_saved_po_document(document_id, request, mapping):
     document.extracted_data = metadata
     document.save(update_fields=['extracted_data', 'updated_at'])
     result.update(operation='attached' if existing else 'created', confirmed_po=str(order.pk))
+    result['vendor_registered'] = registered_vendor
+    if origin_id:
+        result['po_link'] = verify_originating_po_link(pr, order.pk, request.user)
     return result

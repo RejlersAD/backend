@@ -64,6 +64,11 @@ class POApprovalPreviewAPITests(TestCase):
         )
         self.client = APIClient()
         self.client.force_authenticate(self.actor)
+        extraction = patch('apps.procurement.services.signed_po_pdf_import.extract_signed_po_fields',
+                           return_value={'po_number': 'RAD-PRJ-PUR-0088_2026', 'total_amount': '100.00',
+                                         'vendor_name': 'Source supplier'})
+        extraction.start()
+        self.addCleanup(extraction.stop)
 
     def upload(self, content=PDF, filename='source.pdf', **extra):
         return self.client.post(self.url, {
@@ -85,7 +90,9 @@ class POApprovalPreviewAPITests(TestCase):
                 patch('apps.procurement.models.PurchaseOrder.save') as order_save:
             response = self.upload()
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data, RESULT)
+        self.assertEqual({key: response.data[key] for key in RESULT}, RESULT)
+        self.assertTrue(response.data['preview_only'])
+        self.assertEqual(response.data['extracted_data']['vendor_name'], 'Source supplier')
         detector.assert_called_once_with(PDF)
         storage_save.assert_not_called()
         storage_delete.assert_not_called()
