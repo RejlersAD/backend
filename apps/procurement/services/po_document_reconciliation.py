@@ -16,7 +16,7 @@ from .procurement_lifecycle import ProcurementDeleteConflict, mark_requisition_c
 from .purchase_order_numbering import PurchaseOrderNumberService
 from .pr_document_reconciliation import verify_originating_po_link
 from .signed_po_pdf_import import (
-    _attach_existing_order, _date, validate_originating_requisition,
+    _approval_evidence, _attach_existing_order, _date, validate_originating_requisition,
 )
 
 
@@ -46,8 +46,12 @@ def _source_bytes(document, fields):
 
 def _already_reconciled(document):
     order = document.confirmed_po
+    fields = document.extracted_data or {}
     result = {'success': True, 'operation': 'already_reconciled', 'document_id': str(document.pk),
               'purchase_order_id': str(order.pk), 'confirmed_po': str(order.pk), 'po_number': order.po_number}
+    evidence = _approval_evidence(previous=fields)
+    result.update(evidence)
+    result['workflow_issues'] = list(dict.fromkeys([*(fields.get('workflow_issues') or []), *evidence['approval_evidence_issues']]))
     origin_id = (document.extracted_data or {}).get('originating_pr_id')
     if origin_id:
         if str(order.pr_reference_id) != str(origin_id):
@@ -139,9 +143,13 @@ def reconcile_saved_po_document(document_id, request, mapping):
     if not str(fields.get('summary') or '').strip():
         raise ValidationError({'summary': 'Save the purchase description before reconciliation.'})
     content = _source_bytes(document, fields)
-    signature = fields.get('signature_verified') is True
-    if signature and (not str(fields.get('approved_by_name') or '').strip() or not _date(str(fields.get('approved_date') or ''))):
-        raise ValidationError({'error': 'The saved approval evidence is incomplete. Review the approver and approval date on the original upload.'})
+    signature_visible = fields.get('signature_visible', fields.get('signature_verified')) is True
+    evidence = _approval_evidence(
+        signature_verified=signature_visible, stamp_verified=fields.get('stamp_verified') is True,
+        approved_by_name=fields.get('approved_by_name') or '', approved_by_title=fields.get('approved_by_title') or '',
+        approved_date=fields.get('approved_date') or '',
+    )
+    signature = evidence['signature_verified']
     fields.update(po_number=number, vendor_id=str(vendor.pk), vendor_name=vendor.name,
                   pr_id=str(pr.pk), pr_number=pr.pr_number, total_amount=total, tax_amount=tax,
                   currency=currency, po_date=issued)
@@ -205,7 +213,7 @@ def reconcile_saved_po_document(document_id, request, mapping):
         fields['extraction_reviewed'] = True
     result = _attach_existing_order(
         order, fields, content, document.original_filename, request.user,
-        signature_verified=signature, stamp_verified=fields.get('stamp_verified') is True,
+        signature_verified=signature_visible, stamp_verified=fields.get('stamp_verified') is True,
         approved_by_name=fields.get('approved_by_name') or '',
         approved_by_title=fields.get('approved_by_title') or '',
         approved_date=fields.get('approved_date') or '', retained_document=document,

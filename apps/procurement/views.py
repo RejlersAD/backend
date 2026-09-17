@@ -14,7 +14,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess
 from apps.rbac.approval_eligibility import guarded_business_approval
-from django.db.models import Q, Count, Sum, Avg
+from django.db.models import Q, Count, Sum, Avg, Prefetch
 from django.utils import timezone
 from datetime import timedelta
 from apps.core.project_models import Project as CoreProject
@@ -270,7 +270,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         'eng_manager_name',
         'manager_projects_name',
         'vp_op_name',
-    ).prefetch_related('purchase_orders').order_by('-created_at')
+    ).prefetch_related(Prefetch('purchase_orders', queryset=PurchaseOrder.objects.select_related('vendor'))).order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_requisitions'

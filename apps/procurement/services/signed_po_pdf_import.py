@@ -129,6 +129,43 @@ def _date(value: str):
     return None
 
 
+def _approval_evidence(*, signature_verified=False, stamp_verified=False, approved_by_name='',
+                       approved_by_title='', approved_date='', previous=None):
+    """A visible signature is an observation, not a complete approval record."""
+    from rest_framework.exceptions import ValidationError
+
+    values = {}
+    for key, value in (('approved_by_name', approved_by_name), ('approved_by_title', approved_by_title),
+                       ('approved_date', approved_date)):
+        if value is None:
+            value = ''
+        if not isinstance(value, str) or (key != 'approved_date' and len(value.strip()) > 300):
+            raise ValidationError({key: 'Enter a valid PO approval detail or leave it blank for review.'})
+        values[key] = value.strip()
+    if values['approved_date'] and not _date(values['approved_date']):
+        raise ValidationError({'approved_date': 'Enter a valid PO approval date or leave it blank for review.'})
+    previous = previous if isinstance(previous, dict) else {}
+    prior_complete = bool(previous.get('signature_verified') and
+                          str(previous.get('approved_by_name') or '').strip() and _date(previous.get('approved_date')))
+    for key in values:
+        prior = previous.get(key)
+        if isinstance(prior, str) and prior.strip() and (prior_complete or not values[key]):
+            values[key] = prior.strip()
+    visible = bool(signature_verified or previous.get('signature_visible') or previous.get('signature_verified'))
+    complete = bool(visible and values['approved_by_name'] and _date(values['approved_date']))
+    issues = []
+    if visible and not complete:
+        issues.append('PO signature is visible, but the approver name or a valid approval date is missing. '
+                      'The documents were saved; PO approval evidence requires review.')
+    elif not visible:
+        issues.append('PO approval signature requires visual verification.')
+    return {
+        **values, 'signature_visible': visible, 'signature_verified': complete,
+        'stamp_verified': bool(stamp_verified or previous.get('stamp_verified')),
+        'approval_evidence_complete': complete, 'approval_evidence_issues': issues,
+    }
+
+
 _SELLER_FIELD_END = (
     r"\bSeller\s*(?:Address|Country|Reference|Contact|E[- ]?mail|Phone|Telephone|Fax|Signature)\b"
     # Two-column OCR may put the address value between 'Seller' and 'Address:'.
@@ -508,11 +545,13 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
     issues[:0] = _extraction_review_issues(fields)
     # Re-uploading the same original without checking boxes must not erase a
     # prior reviewer-confirmed signature, stamp, name or source date.
-    signature_verified = signature_verified or bool(previous.get('signature_verified'))
-    stamp_verified = stamp_verified or bool(previous.get('stamp_verified'))
-    approved_by_name = previous.get('approved_by_name') or approved_by_name
-    approved_by_title = previous.get('approved_by_title') or approved_by_title
-    approved_date = previous.get('approved_date') or approved_date
+    evidence = _approval_evidence(
+        signature_verified=signature_verified, stamp_verified=stamp_verified, approved_by_name=approved_by_name,
+        approved_by_title=approved_by_title, approved_date=approved_date, previous=previous,
+    )
+    signature_verified, stamp_verified = evidence['signature_verified'], evidence['stamp_verified']
+    approved_by_name, approved_by_title, approved_date = (evidence[key] for key in ('approved_by_name', 'approved_by_title', 'approved_date'))
+    workflow_issues = [*evidence['approval_evidence_issues'], *([] if stamp_verified else ['Company stamp requires visual verification.'])]
     source = {
         **previous, **_serializable_fields(fields), 'source_sha256': digest,
         'pr_id': str(po.pr_reference_id) if po.pr_reference_id else None,
@@ -521,6 +560,7 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
         'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
         'approved_by_name': approved_by_name, 'approved_by_title': approved_by_title,
         'approved_date': approved_date,
+        **evidence, 'workflow_issues': workflow_issues,
     }
     document.document_type = 'purchase_order'
     document.extraction_status = 'completed'
@@ -534,6 +574,7 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
         'source_po_number': fields['source_po_number'], 'canonical_po_number': po.po_number,
         'reconciliation_required': bool(issues), 'reconciliation_issues': issues,
         'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
+        'signature_visible': evidence['signature_visible'], 'approval_evidence_complete': signature_verified,
     }
     po.attachments = [row for row in (po.attachments or [])
                       if not (isinstance(row, dict) and row.get('type') == 'signed_purchase_order_pdf'
@@ -555,16 +596,23 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
     evidence_log = list(po.approval_log or [])
     existing = next((row for row in evidence_log if isinstance(row, dict)
                      and str(row.get('evidence_document_id', '')) == str(document.pk)), None)
-    if existing is None or (signature_verified and not existing.get('signature_verified')):
-        if existing is not None:
-            evidence_log.remove(existing)
-        evidence_log.append({
+    updated = dict(existing or {})
+    if existing is None or existing.get('status') != ('Approved' if signature_verified else 'Evidence review required'):
+        updated.update({
             'stage': 'Signed PO document approval', 'approver': approved_by_name,
             'status': 'Approved' if signature_verified else 'Evidence review required',
             'date': approved_date if signature_verified else '',
             'evidence_document_id': str(document.pk),
-            'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
         })
+    if not signature_verified:
+        updated['approver'] = approved_by_name
+    updated.update(signature_verified=signature_verified, stamp_verified=stamp_verified,
+                   signature_visible=evidence['signature_visible'], approval_evidence_complete=signature_verified)
+    if updated != existing:
+        if existing is not None:
+            evidence_log[evidence_log.index(existing)] = updated
+        else:
+            evidence_log.append(updated)
         po.approval_log = evidence_log
         changed.append('approval_log')
     po.save(update_fields=changed)
@@ -576,7 +624,7 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
         'database_verified': True, 'source_document_url': document.s3_url,
         'reconciliation_required': bool(issues), 'reconciliation_issues': issues,
         'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
-        'extracted_data': source, 'workflow_issues': [], 'mapping_issues': [],
+        **evidence, 'extracted_data': source, 'workflow_issues': workflow_issues, 'mapping_issues': [],
     }
 
 
@@ -595,6 +643,7 @@ def _import_signed_po_pdf(
     extracted_fields=None,
     register_missing_vendor: bool = False,
     allow_vendor_create: bool = False,
+    previous_evidence=None,
 ) -> dict[str, Any]:
     if not pdf_bytes.startswith(b"%PDF"):
         raise SignedPOImportError("The uploaded file is not a valid PDF.")
@@ -633,6 +682,12 @@ def _import_signed_po_pdf(
             )
         # A linked document is read-only. Keep a partially extracted original
         # pending until its owner explicitly reviews and attaches it to this PO.
+    evidence = _approval_evidence(
+        signature_verified=signature_verified, stamp_verified=stamp_verified, approved_by_name=approved_by_name,
+        approved_by_title=approved_by_title, approved_date=approved_date, previous=previous_evidence,
+    )
+    signature_verified, stamp_verified = evidence['signature_verified'], evidence['stamp_verified']
+    approved_by_name, approved_by_title, approved_date = (evidence[key] for key in ('approved_by_name', 'approved_by_title', 'approved_date'))
     candidates = list(PurchaseRequisition.objects.filter(
         Q(po_number_reference__iexact=source_number) | Q(po_number_reference__iexact=po_number)
     )[:2])
@@ -715,6 +770,7 @@ def _import_signed_po_pdf(
             "approved_date": approved_date, "vendor_match": vendor_match,
             "pr_id": str(pr.pk) if pr else None, "pr_number": pr.pr_number if pr else "",
             "vendor_id": vendor_id,
+            **evidence, 'workflow_issues': evidence['approval_evidence_issues'],
         }
         document.save()
         return {
@@ -725,8 +781,9 @@ def _import_signed_po_pdf(
             "vendor_id": vendor_id, "vendor_name": fields["vendor_name"],
             "database_verified": True, "reconciliation_required": True,
             "reconciliation_issues": reconciliation_issues, "extracted_data": document.extracted_data,
-            "mapping_issues": mapping_issues, "workflow_issues": [],
+            "mapping_issues": mapping_issues, "workflow_issues": evidence['approval_evidence_issues'],
             "signature_verified": signature_verified, "stamp_verified": stamp_verified,
+            **evidence,
         }
     created = po is None
     if created:
@@ -788,6 +845,7 @@ def _import_signed_po_pdf(
         "evidence_document_id": str(document.id),
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,
+        'signature_visible': evidence['signature_visible'], 'approval_evidence_complete': signature_verified,
     }]
     attachment = {
         "type": "signed_purchase_order_pdf",
@@ -801,6 +859,7 @@ def _import_signed_po_pdf(
         "reconciliation_issues": reconciliation_issues,
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,
+        'signature_visible': evidence['signature_visible'], 'approval_evidence_complete': signature_verified,
         "procurement_register": {
             "PO Number": po_number,
             "PR Number": pr.pr_number if pr else "",
@@ -843,8 +902,7 @@ def _import_signed_po_pdf(
         workflow_issues.append(
             "The historical PR is linked and converted, but RADAI does not contain its individual internal approval/signature evidence."
         )
-    if not signature_verified:
-        workflow_issues.append("PO approval signature requires visual verification.")
+    workflow_issues.extend(evidence['approval_evidence_issues'])
     if not stamp_verified:
         workflow_issues.append("Company stamp requires visual verification.")
 
@@ -869,6 +927,7 @@ def _import_signed_po_pdf(
         "approved_date": approved_date,
         "workflow_issues": workflow_issues,
         "mapping_issues": mapping_issues,
+        **evidence,
     }
     document.document_type = "purchase_order"
     document.extraction_status = "completed"
@@ -898,6 +957,7 @@ def _import_signed_po_pdf(
         "extracted_data": extracted_data,
         "workflow_issues": workflow_issues,
         "mapping_issues": mapping_issues,
+        **evidence,
     }
 
 
@@ -906,6 +966,10 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, r
                          require_complete=False, **options) -> dict[str, Any]:
     """Keep an explicitly selected PR and its resulting PO in one transaction."""
     from .procurement_lifecycle import ProcurementDeleteConflict
+
+    _approval_evidence(**{key: options[key] for key in (
+        'signature_verified', 'stamp_verified', 'approved_by_name', 'approved_by_title', 'approved_date',
+    ) if key in options})
 
     if not pdf_bytes.startswith(b'%PDF'):
         raise SignedPOImportError('The uploaded file is not a valid PDF.')
@@ -936,11 +1000,6 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, r
             fields[key] = Decimal(str(fields.get(key) or '0'))
     if require_complete:
         from rest_framework.exceptions import ValidationError
-        if options.get('signature_verified') and (
-            not str(options.get('approved_by_name') or '').strip()
-            or not _date(options.get('approved_date'))
-        ):
-            raise ValidationError({'approval_evidence': 'Confirm the PO approver name and a valid approval date from its signed PDF.'})
         issues = _extraction_review_issues(fields)
         if issues:
             raise ValidationError({'po_reviewed_fields': issues})
@@ -976,10 +1035,11 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, r
                 'reconciliation_required': True, 'reconciliation_issues': previous.get('reconciliation_issues', []),
                 'extracted_data': previous, 'signature_verified': bool(previous.get('signature_verified')),
                 'stamp_verified': bool(previous.get('stamp_verified')),
+                **_approval_evidence(previous=previous),
                 'mapping_issues': previous.get('mapping_issues', []), 'workflow_issues': previous.get('workflow_issues', []),
             }
     result = _import_signed_po_pdf(
-        pdf_bytes, filename=filename, user=user, originating_pr=pr, extracted_fields=fields, **options,
+        pdf_bytes, filename=filename, user=user, originating_pr=pr, extracted_fields=fields, previous_evidence=previous, **options,
     )
     if require_complete and not result.get('purchase_order_id'):
         raise SignedPOImportError('The PO was not saved. ' + ' '.join(result.get('reconciliation_issues') or ['Review the supplier and PO details.']))
