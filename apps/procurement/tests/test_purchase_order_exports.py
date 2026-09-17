@@ -230,7 +230,7 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('Total Sum: USD 105.00', rendered_text)
         self.assertNotIn('Grand Total', rendered_text)
         self.assertNotIn('AED', rendered_text)
-        self.assertIn('First scope paragraph', rendered_text)
+        self.assertIn('First scope\u00a0paragraph', rendered_text)
         self.assertIn('Second scope paragraph', rendered_text)
         self.assertNotIn('&nbsp;', rendered_text)
         self.assertNotIn('Should not be exported to Word', rendered_text)

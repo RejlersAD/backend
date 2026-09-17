@@ -17,12 +17,14 @@ from xml.sax.saxutils import escape, quoteattr
 
 from PIL import Image as PILImage
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.styles import ParagraphStyle
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import Image, PageBreak, Paragraph, Spacer, Table, TableStyle
 
 
@@ -50,6 +52,7 @@ class Block:
     height: float | None = None
     list_info: dict | None = None
     columns: list = field(default_factory=list)
+    row_styles: list = field(default_factory=list)
 
 
 @dataclass
@@ -64,7 +67,7 @@ class Cell:
 _VOID = {'br', 'img', 'hr', 'meta', 'link', 'input', 'wbr', 'col'}
 _UNSAFE = {'script', 'style', 'iframe', 'object', 'embed', 'head', 'svg', 'math', 'template'}
 _BLOCKS = {'p', 'div', 'section', 'article', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'blockquote', 'ul', 'ol', 'li', 'table', 'hr'}
-_INHERITED = {'font_size', 'font_family', 'bold', 'italic', 'underline', 'strike', 'color', 'background', 'align', 'line_height', 'pre', 'vertical', 'href', 'list_depth'}
+_INHERITED = {'font_size', 'font_family', 'bold', 'italic', 'underline', 'strike', 'color', 'background', 'align', 'line_height', 'pre', 'vertical', 'href', 'list_depth', 'tab_stops', 'tab_interval'}
 
 
 class _Tree(HTMLParser):
@@ -123,12 +126,16 @@ def _style(node, parent):
     tag, attrs = node.tag, node.attrs
     if tag in {'b', 'strong', 'th'}:
         result['bold'] = True
+    if tag == 'th':
+        result['align'] = 'center'
     if tag in {'i', 'em'}:
         result['italic'] = True
     if tag == 'u':
         result['underline'] = True
     if tag in {'s', 'strike', 'del'}:
         result['strike'] = True
+    if tag == 'a' and _safe_link(attrs.get('href')):
+        result.update(color='#1d4ed8', underline=True)
     if tag in {'sub', 'sup'}:
         result['vertical'] = tag
     if tag in {'pre', 'code'}:
@@ -155,7 +162,9 @@ def _style(node, parent):
         result['font_family'] = font.split(',')[0].strip(' "\'')[:100]
     size = _length(css.get('font-size'), result.get('font_size', 10.5))
     if size is None and tag == 'font' and attrs.get('size'):
-        size = {'1': 8, '2': 10, '3': 12, '4': 14, '5': 18, '6': 24, '7': 36}.get(attrs['size'])
+        # Chrome's native execCommand('fontSize') uses legacy HTML sizes in
+        # CSS pixels (10/13/16/18/24/32/48), converted here to physical points.
+        size = {'1': 7.5, '2': 9.75, '3': 12, '4': 13.5, '5': 18, '6': 24, '7': 36}.get(attrs['size'])
     if size is not None:
         result['font_size'] = min(72, max(5, size))
     if 'font-weight' in css:
@@ -181,11 +190,21 @@ def _style(node, parent):
         ('indent', ('margin-left', 'padding-left')), ('right_indent', ('margin-right', 'padding-right')),
         ('first_indent', ('text-indent',)),
     ):
-        values = [_length(css.get(name), result.get('font_size', 10.5)) for name in css_names]
+        values = [_length(css.get(name), result.get('font_size', 10.5)) for name in css_names if not (tag in {'td', 'th'} and name.startswith('padding-'))]
         if any(value is not None for value in values):
             result[field_name] = max(-36 if field_name == 'first_indent' else 0, min(180, sum(value or 0 for value in values)))
     if css.get('white-space') in {'pre', 'pre-wrap', 'break-spaces'}:
         result['pre'] = True
+    if css.get('mso-spacerun') == 'yes':
+        result['pre'] = True
+    if css.get('mso-tab-count', '').isdigit():
+        result['tab_count'] = min(20, int(css['mso-tab-count']))
+    stops = css.get('tab-stops', css.get('mso-tab-stops', ''))
+    if stops:
+        result['tab_stops'] = sorted({value for token in stops.split() if (value := _length(token)) is not None and 0 < value < 1500})
+    interval = _length(css.get('mso-default-tab-stop'))
+    if interval and interval > 0:
+        result['tab_interval'] = interval
     if css.get('page-break-before') == 'always' or css.get('break-before') == 'page':
         result['break_before'] = True
     if css.get('page-break-after') == 'always' or css.get('break-after') == 'page':
@@ -200,9 +219,19 @@ def _style(node, parent):
             pass
     elif _length(width) is not None:
         result['width'] = ('points', max(1, _length(width)))
-    padding = _length(css.get('padding-top'))
-    if padding is not None:
-        result['cell_padding'] = min(30, max(0, padding))
+    padding = {}
+    for side in ('top', 'right', 'bottom', 'left'):
+        value = _length(css.get('padding-' + side))
+        if value is not None:
+            padding[side] = min(72, max(0, value))
+    if padding:
+        result['cell_padding'] = padding
+    height = _length(css.get('height', attrs.get('height', css.get('min-height'))))
+    if height is not None:
+        result['min_height'] = max(0, min(600, height))
+    valign = css.get('vertical-align', attrs.get('valign', '')).lower()
+    if valign in {'top', 'middle', 'bottom'}:
+        result['valign'] = valign
     border = css.get('border', '')
     border_width = re.search(r'(\d+(?:\.\d+)?(?:pt|px))', border)
     if border_width:
@@ -281,13 +310,18 @@ class _Builder:
 
         def visit(node, inherited):
             if isinstance(node, str):
-                value = node if inherited.get('pre') else re.sub(r'\s+', ' ', node)
+                # NBSPs and tabs are intentional layout from Word/browser
+                # editing; only collapsible HTML whitespace becomes a space.
+                value = node if inherited.get('pre') else re.sub(r'[ \r\n\f\v]+', ' ', node)
                 if value:
                     runs.append(Run(value, dict(inherited)))
                 return
             if node.tag in _UNSAFE:
                 return
             style = _style(node, inherited)
+            if style.get('tab_count'):
+                runs.append(Run('\t' * style['tab_count'], style))
+                return
             if node.attrs.get('data-po-page-break') == 'true':
                 flush()
                 blocks.append(Block('break'))
@@ -356,7 +390,7 @@ class _Builder:
         return result
 
     def table(self, node, style):
-        rows, columns = [], []
+        rows, columns, row_styles = [], [], []
 
         def visit(children, header=False):
             for child in children:
@@ -370,10 +404,16 @@ class _Builder:
                             columns.append(_style(column, {}).get('width'))
                 elif child.tag == 'tr':
                     cells = []
+                    row_style = _style(child, style)
                     for cell in child.children:
                         if not isinstance(cell, Node) or cell.tag not in {'td', 'th'}:
                             continue
-                        cell_style = _style(cell, style)
+                        cell_style = _style(cell, row_style)
+                        cell_style.setdefault('after', 0)
+                        if 'cell_padding' not in cell_style and node.attrs.get('cellpadding'):
+                            padding = _length(node.attrs['cellpadding'])
+                            if padding is not None:
+                                cell_style['cell_padding'] = {side: max(0, min(72, padding)) for side in ('top', 'right', 'bottom', 'left')}
                         spans = []
                         for key in ('colspan', 'rowspan'):
                             try:
@@ -383,8 +423,9 @@ class _Builder:
                         cells.append(Cell(self.content(cell.children, cell_style), *spans, header or cell.tag == 'th', cell_style))
                     if cells:
                         rows.append(cells)
+                        row_styles.append(row_style)
         visit(node.children)
-        return Block('table', style, rows=rows, columns=columns)
+        return Block('table', style, rows=rows, columns=columns, row_styles=row_styles)
 
 
 def parse_rich_content(value):
@@ -492,6 +533,87 @@ class _RichTable(Table):
         return self.width, self.height
 
 
+def _cell_padding(cell):
+    return {**dict.fromkeys(('top', 'right', 'bottom', 'left'), 6), **cell.style.get('cell_padding', {})}
+
+
+def _row_heights(block):
+    return [max([row_style.get('min_height', 0)] + [cell.style.get('min_height', 0) for cell in row if cell.rowspan == 1])
+            for row, row_style in zip(block.rows, block.row_styles or [{} for _ in block.rows])]
+
+
+def _pdf_tabbed_paragraph(block, width, paragraph_style):
+    """Lay out Word tab fields at measured stops, keeping each field editable.
+
+    ReportLab Paragraph has no tab-stop support. Borderless row segments retain
+    styled runs and wrap the value column without approximating tabs with spaces.
+    """
+    width = max(12, width)
+    rows, cells, runs = [], [], []
+    start, cursor = 0, 0
+    stops = block.style.get('tab_stops', [])
+    interval = block.style.get('tab_interval', 36)
+
+    def flush_cell():
+        nonlocal runs
+        cells.append((start, runs))
+        runs = []
+
+    def flush_row():
+        nonlocal cells, start, cursor
+        flush_cell()
+        rows.append(cells)
+        cells, start, cursor = [], 0, 0
+
+    for run in block.runs:
+        for part in re.split(r'(\t|\n)', run.text):
+            if part == '\t':
+                flush_cell()
+                target = next((position for position in stops if position > cursor + .1), None)
+                if target is None:
+                    target = (int(cursor / interval) + 1) * interval
+                start = cursor = min(max(0, width - 24), target)
+            elif part == '\n':
+                flush_row()
+            elif part:
+                runs.append(Run(part, run.style))
+                cursor += stringWidth(part, _pdf_font(run.style), run.style.get('font_size', paragraph_style.fontSize))
+    if runs or cells:
+        flush_row()
+    result = []
+    for row_index, fields in enumerate(rows):
+        # Consecutive tabs may make empty fields; their widths still carry the
+        # original tab positions, while the final field gets remaining space.
+        starts = [position for position, _ in fields]
+        values, widths, pending = [], [], []
+        for index, (position, content) in enumerate(fields):
+            end = starts[index + 1] if index + 1 < len(fields) else width
+            if end <= position:
+                if content:
+                    if values:
+                        values[-1].extend(content)
+                    else:
+                        pending.extend(content)
+                continue
+            widths.append(end - position)
+            values.append(pending + list(content))
+            pending = []
+        if not values:
+            continue
+        cell_style = ParagraphStyle('POTabField', parent=paragraph_style, leftIndent=0, rightIndent=0, firstLineIndent=0, spaceBefore=0, spaceAfter=0, alignment=TA_LEFT)
+        rendered = [Paragraph(_pdf_markup(value), cell_style) for value in values]
+        if paragraph_style.leftIndent:
+            widths.insert(0, paragraph_style.leftIndent)
+            marker = block.list_info['marker'] if block.list_info and row_index == 0 else ''
+            rendered.insert(0, Paragraph(escape(marker), cell_style))
+        result.append(_RichTable([rendered], colWidths=widths,
+                                 hAlign='LEFT', splitByRow=1, splitInRow=1,
+                                 spaceBefore=paragraph_style.spaceBefore if row_index == 0 else 0,
+                                 spaceAfter=paragraph_style.spaceAfter if row_index == len(rows) - 1 else 0,
+                                 style=TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0), ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0)])))
+    return result
+
+
 def pdf_rich_flowables(blocks, width, base_style):
     result = []
     for block in blocks:
@@ -518,7 +640,10 @@ def pdf_rich_flowables(blocks, width, base_style):
                 textColor=colors.toColor(style.get('color', '#000000')),
                 keepWithNext=bool(style.get('heading')), allowWidows=0, allowOrphans=0,
             )
-            result.append(Paragraph(_pdf_markup(block.runs), paragraph_style, bulletText=bullet))
+            if any('\t' in run.text for run in block.runs):
+                result.extend(_pdf_tabbed_paragraph(block, width - indent - style.get('right_indent', 0), paragraph_style))
+            else:
+                result.append(Paragraph(_pdf_markup(block.runs), paragraph_style, bulletText=bullet))
         elif block.kind == 'image':
             factor = min(width * style.get('width_fraction', 1) / block.width, 500 / block.height)
             if not style.get('width_fraction'):
@@ -530,19 +655,20 @@ def pdf_rich_flowables(blocks, width, base_style):
             positions, columns = _table_grid(block)
             widths = _table_widths(block, positions, columns, width)
             grid = [['' for _ in range(columns)] for _ in block.rows]
-            commands = [('GRID', (0, 0), (-1, -1), .5, colors.HexColor('#64748b')), ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LEFTPADDING', (0, 0), (-1, -1), 4), ('RIGHTPADDING', (0, 0), (-1, -1), 4), ('TOPPADDING', (0, 0), (-1, -1), 4), ('BOTTOMPADDING', (0, 0), (-1, -1), 4)]
+            commands = [('GRID', (0, 0), (-1, -1), .5, colors.HexColor('#64748b')), ('VALIGN', (0, 0), (-1, -1), 'TOP')]
             for row, column, rowspan, cell in positions:
-                grid[row][column] = pdf_rich_flowables(cell.blocks, max(12, sum(widths[column:column + cell.colspan]) - 8), base_style) or [Paragraph('&#160;', base_style)]
+                padding = _cell_padding(cell)
+                grid[row][column] = pdf_rich_flowables(cell.blocks, max(12, sum(widths[column:column + cell.colspan]) - padding['left'] - padding['right']), base_style) or [Paragraph('&#160;', base_style)]
                 if cell.colspan > 1 or rowspan > 1:
                     commands.append(('SPAN', (column, row), (column + cell.colspan - 1, row + rowspan - 1)))
                 if cell.style.get('background'):
                     commands.append(('BACKGROUND', (column, row), (column + cell.colspan - 1, row + rowspan - 1), colors.toColor(cell.style['background'])))
-                if 'cell_padding' in cell.style:
-                    for edge in ('LEFTPADDING', 'RIGHTPADDING', 'TOPPADDING', 'BOTTOMPADDING'):
-                        commands.append((edge, (column, row), (column, row), cell.style['cell_padding']))
+                for edge, value in padding.items():
+                    commands.append((edge.upper() + 'PADDING', (column, row), (column + cell.colspan - 1, row + rowspan - 1), value))
+                commands.append(('VALIGN', (column, row), (column + cell.colspan - 1, row + rowspan - 1), {'middle': 'MIDDLE', 'bottom': 'BOTTOM'}.get(cell.style.get('valign'), 'TOP')))
                 if 'border_width' in cell.style or 'border_color' in cell.style:
                     commands.append(('BOX', (column, row), (column + cell.colspan - 1, row + rowspan - 1), cell.style.get('border_width', .5), colors.toColor(cell.style.get('border_color', '#64748b'))))
-            result.extend((_RichTable(grid, colWidths=widths, hAlign=style.get('align', 'left').upper(), repeatRows=_header_rows(block), splitByRow=1, splitInRow=1, style=TableStyle(commands)), Spacer(1, 6)))
+            result.extend((_RichTable(grid, colWidths=widths, minRowHeights=_row_heights(block), hAlign=style.get('align', 'left').upper(), repeatRows=_header_rows(block), splitByRow=1, splitInRow=1, style=TableStyle(commands)), Spacer(1, 6)))
     return result
 
 
@@ -616,6 +742,12 @@ def append_docx_rich_content(container, blocks, width=504, *, document=None, num
             line = style.get('line_height', ('multiple', 1.3))
             formatting.line_spacing = line[1] if line[0] == 'multiple' else Pt(line[1])
             formatting.keep_with_next = bool(style.get('heading'))
+            for stop in style.get('tab_stops', []):
+                formatting.tab_stops.add_tab_stop(Pt(stop))
+            if any('\t' in run.text for run in block.runs) and not style.get('tab_stops'):
+                interval = style.get('tab_interval', 36)
+                for multiple in range(1, int(width / interval) + 1):
+                    formatting.tab_stops.add_tab_stop(Pt(interval * multiple))
             if block.list_info:
                 info = block.list_info
                 formatting.left_indent = Pt(style.get('indent', 0) + 18 * (info['depth'] + 1))
@@ -646,12 +778,25 @@ def append_docx_rich_content(container, blocks, width=504, *, document=None, num
             for row in table.rows:
                 for cell, column_width in zip(row.cells, widths):
                     cell.width = Pt(column_width)
+            for row, height in zip(table.rows, _row_heights(block)):
+                if height:
+                    row.height = Pt(height)
+                    row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
             for row, column, rowspan, cell in positions:
                 rendered = table.cell(row, column)
                 if cell.colspan > 1 or rowspan > 1:
                     rendered = rendered.merge(table.cell(row + rowspan - 1, column + cell.colspan - 1))
                 initial = rendered.paragraphs[0]._p
-                append_docx_rich_content(rendered, cell.blocks, max(12, sum(widths[column:column + cell.colspan]) - 8), document=document, numbering=numbering)
+                padding = _cell_padding(cell)
+                append_docx_rich_content(rendered, cell.blocks, max(12, sum(widths[column:column + cell.colspan]) - padding['left'] - padding['right']), document=document, numbering=numbering)
+                rendered.vertical_alignment = {'middle': WD_CELL_VERTICAL_ALIGNMENT.CENTER, 'bottom': WD_CELL_VERTICAL_ALIGNMENT.BOTTOM}.get(cell.style.get('valign'), WD_CELL_VERTICAL_ALIGNMENT.TOP)
+                margins = OxmlElement('w:tcMar')
+                for edge, value in padding.items():
+                    element = OxmlElement('w:' + edge)
+                    element.set(qn('w:w'), str(round(value * 20)))
+                    element.set(qn('w:type'), 'dxa')
+                    margins.append(element)
+                rendered._tc.get_or_add_tcPr().append(margins)
                 if cell.blocks:
                     initial.getparent().remove(initial)
                 if not rendered.paragraphs:
