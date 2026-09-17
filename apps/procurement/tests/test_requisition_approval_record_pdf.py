@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 from tempfile import TemporaryDirectory
@@ -130,6 +131,7 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.assertIn('_Approval_Record.pdf', response['Content-Disposition'])
         self.assertEqual(response['Cache-Control'], 'private, no-store')
         self.assertEqual(response['X-Content-Type-Options'], 'nosniff')
+        self.assertEqual(response['X-Approval-Record-PO-Source'], 'uploaded_original')
         for key, original in ((pr_source['storage_key'], pr_content), (po_source.s3_key, po_content)):
             with default_storage.open(key, 'rb') as saved:
                 self.assertEqual(saved.read(), original)
@@ -199,7 +201,7 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.assertEqual(missing_pr.data['requisition_id'], str(self.pr.pk))
         self.assertNotIn('purchase_order_id', missing_pr.data)
         self.pr_source()
-        order = self.order()
+        order = self.order(approval_log=[{'stage': 'Signed PO document approval', 'evidence_document_id': 'missing-original'}])
         missing_po = self.client.get(self.url())
         self.assertEqual(missing_po.status_code, 404)
         self.assertEqual(missing_po.data['code'], 'approval_record_source_missing')
@@ -210,7 +212,7 @@ class RequisitionApprovalRecordPDFTests(TestCase):
 
     def test_missing_original_recovery_uploads_to_existing_po_then_combines_actual_sources(self):
         self.pr_source(pdf_bytes('Actual original PR'))
-        order = self.order(status='completed')
+        order = self.order(status='completed', approval_log=[{'stage': 'Signed PO document approval', 'evidence_document_id': 'missing-original'}])
         self.assertEqual(self.client.get(self.url()).data['source'], 'po')
         module = Module.objects.get(code='procurement_orders')
         for permission in module.permissions.filter(action__in=['create', 'update'], is_active=True):
@@ -228,11 +230,14 @@ class RequisitionApprovalRecordPDFTests(TestCase):
             'total_amount': Decimal('100.00'), 'tax_amount': Decimal('0.00'),
             'gross_amount': Decimal('100.00'), 'currency': order.currency, 'items': [],
         }
-        with patch('apps.procurement.services.signed_po_pdf_import.extract_signed_po_fields', return_value=fields):
-            saved = self.client.post('/api/v1/procurement/po-documents/import_signed_pdf/', {
-                'file': SimpleUploadedFile('original-po.pdf', content, content_type='application/pdf'),
-                'pr_id': str(self.pr.pk), 'reviewed_fields': json.dumps({'summary': fields['summary']}),
-            }, format='multipart')
+        def upload():
+            with patch('apps.procurement.services.signed_po_pdf_import.extract_signed_po_fields', return_value=deepcopy(fields)):
+                return self.client.post('/api/v1/procurement/po-documents/import_signed_pdf/', {
+                    'file': SimpleUploadedFile('original-po.pdf', content, content_type='application/pdf'),
+                    'pr_id': str(self.pr.pk), 'reviewed_fields': json.dumps({'summary': fields['summary']}),
+                }, format='multipart')
+
+        saved = upload()
         self.assertEqual(saved.status_code, 200, saved.data)
         self.assertEqual(saved.data['purchase_order_id'], str(order.pk))
         self.assertEqual(self.labels(self.read()[1]), ['Actual original PR', 'Actual uploaded PO'])
@@ -240,6 +245,44 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.assertEqual(order.status, 'completed')
         self.assertEqual(order.total_amount, Decimal('100.00'))
         self.assertEqual(PurchaseOrder.objects.count(), 1)
+        document = PODocument.objects.get(confirmed_po=order)
+        original_document_id, original_key = document.pk, document.s3_key
+        default_storage.delete(original_key)
+        missing = self.client.get(self.url())
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.data['reason'], 'file_missing')
+        restored = upload()
+        self.assertEqual(restored.status_code, 200, restored.data)
+        document.refresh_from_db()
+        self.assertEqual(document.pk, original_document_id)
+        self.assertEqual(document.confirmed_po_id, order.pk)
+        self.assertNotEqual(document.s3_key, original_key)
+        self.assertEqual(document.extracted_data['source_storage_history'][-1]['previous_storage_key'], original_key)
+        self.assertEqual(self.labels(self.read()[1]), ['Actual original PR', 'Actual uploaded PO'])
+        self.assertEqual(PODocument.objects.count(), 1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.total_amount, Decimal('100.00'))
+
+        invalid_key = 'https://external.example.test/private-original.pdf'
+        document.s3_key = invalid_key
+        document.save(update_fields=['s3_key'])
+        self.assertEqual(self.client.get(self.url()).data['reason'], 'invalid_reference')
+        with patch('apps.procurement.services.signed_po_pdf_import.default_storage.open',
+                   wraps=default_storage.open) as opened:
+            restored = upload()
+        self.assertEqual(restored.status_code, 200, restored.data)
+        self.assertNotIn(invalid_key, [call.args[0] for call in opened.call_args_list])
+        document.refresh_from_db()
+        self.assertEqual(self.labels(self.read()[1]), ['Actual original PR', 'Actual uploaded PO'])
+
+        # Existing bytes with the wrong digest must never be overwritten by recovery.
+        with default_storage.open(document.s3_key, 'wb') as stored:
+            stored.write(b'%PDF-different-content')
+        conflict = upload()
+        self.assertEqual(conflict.status_code, 409, conflict.data)
+        with default_storage.open(document.s3_key, 'rb') as stored:
+            self.assertEqual(stored.read(), b'%PDF-different-content')
 
     def test_missing_stored_po_file_reports_upload_recovery_not_storage_retry(self):
         self.pr_source()
@@ -251,6 +294,48 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.assertEqual(response.data['source'], 'po')
         self.assertEqual(response.data['reason'], 'file_missing')
         self.assertEqual(response.data['recovery'], 'upload_original_po')
+
+    def test_app_created_po_uses_official_renderer_without_uploading_or_recording_approval(self):
+        self.pr_source(pdf_bytes('Original uploaded PR'))
+        order = self.order(status='draft')
+        before = PurchaseOrder.objects.values().get(pk=order.pk)
+        from apps.procurement.services.purchase_order_exports import build_purchase_order_pdf
+        with patch('apps.procurement.services.purchase_order_exports.build_purchase_order_pdf',
+                   wraps=build_purchase_order_pdf) as renderer:
+            response, content = self.read()
+        self.assertEqual(response['X-Approval-Record-PO-Source'], 'radai_generated')
+        self.assertEqual(response['X-Approval-Record-PR-Source'], 'uploaded_original')
+        renderer.assert_called_once()
+        pages = self.labels(content)
+        self.assertEqual(pages[0], 'Original uploaded PR')
+        self.assertIn(order.po_number, '\n'.join(pages[1:]))
+        self.assertIn(order.title, '\n'.join(pages[1:]))
+        self.assertIn('PO status: Draft', '\n'.join(pages[1:]))
+        self.assertIn('Approval pending:', '\n'.join(pages[1:]))
+        self.assertNotIn('Jarmo Suominen', '\n'.join(pages[1:]))
+        self.assertNotIn('Approved by:', '\n'.join(pages[1:]))
+        self.assertEqual(PurchaseOrder.objects.values().get(pk=order.pk), before)
+        self.assertFalse(PODocument.objects.exists())
+
+    def test_excel_data_without_pdf_provenance_can_use_official_po_renderer(self):
+        self.pr_source(pdf_bytes('Original PR'))
+        self.order(attachments=[{'type': 'po_excel_import_source', 'source_sheet': 'PO register', 'filename': 'register.xlsx'}])
+        response, content = self.read()
+        self.assertEqual(response['X-Approval-Record-PO-Source'], 'radai_generated')
+        self.assertEqual(self.labels(content)[0], 'Original PR')
+        self.assertNotIn('X-PO-Attachment-Warnings', response)
+        self.assertNotIn('Attachment 1', '\n'.join(self.labels(content)))
+
+    def test_missing_retained_pdf_never_falls_back_to_official_generated_po(self):
+        self.pr_source()
+        order = self.order()
+        document, _ = self.po_source(order)
+        default_storage.delete(document.s3_key)
+        with patch('apps.procurement.services.purchase_order_exports.build_purchase_order_pdf') as renderer:
+            response = self.client.get(self.url())
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data['source'], 'po')
+        renderer.assert_not_called()
 
     def test_missing_current_pr_does_not_silently_substitute_older_original(self):
         self.pr_source(pdf_bytes('Older PR'), current=False)

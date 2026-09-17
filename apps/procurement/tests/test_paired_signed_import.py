@@ -289,6 +289,27 @@ class PairedSignedImportTests(TestCase):
         self.assertEqual(response.status_code, 409, response.data)
         self.assertIn('source changed', response.data['error'])
 
+    def test_exact_pair_retry_restores_missing_same_digest_po_source_without_duplicate_records(self):
+        first = self.upload()
+        self.assertEqual(first.status_code, 201, first.data)
+        document = PODocument.objects.get()
+        previous_key = document.s3_key
+        default_storage.delete(previous_key)
+        self.revoke('procurement_orders', 'update')
+        denied = self.upload()
+        self.assertEqual(denied.status_code, 403, denied.data)
+        self.assertFalse(default_storage.exists(previous_key))
+        self.grant('procurement_orders', ['update'])
+        restored = self.upload()
+        self.assertEqual(restored.status_code, 200, restored.data)
+        self.assertEqual(restored.data['operation'], 'already_imported')
+        document.refresh_from_db()
+        self.assertNotEqual(document.s3_key, previous_key)
+        with default_storage.open(document.s3_key, 'rb') as source:
+            self.assertEqual(source.read(), self.content)
+        self.assertEqual(PurchaseOrder.objects.count(), 1)
+        self.assertEqual(PODocument.objects.count(), 1)
+
     def test_retry_retains_warnings_and_preserved_values_for_an_existing_completed_po(self):
         po = PurchaseOrder.objects.create(po_number=self.fields['po_number'], vendor=self.vendor,
                                           title='Existing completed PO', total_amount=200, status='completed')

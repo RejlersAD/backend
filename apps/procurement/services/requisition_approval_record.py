@@ -1,9 +1,8 @@
-"""Read-only approval previews assembled from the authorized original PDFs."""
+"""Approval records combine original PRs with uploaded or RADAI-generated POs."""
 
 import hashlib
 import re
 from datetime import timezone as datetime_timezone
-from pathlib import PurePosixPath
 
 from botocore.exceptions import ClientError
 from django.core.files.storage import default_storage
@@ -14,7 +13,7 @@ from apps.rbac.action_policy import record_workflow_not_denied, request_action_a
 
 from ..models import PurchaseOrder
 from .purchase_order_approvals import _entry_matches_user
-from .purchase_order_sources import uploaded_purchase_order_sources
+from .purchase_order_sources import is_safe_source_storage_key, uploaded_purchase_order_sources
 from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
 from .requisition_workflow import RequisitionWorkflowService
 
@@ -109,10 +108,7 @@ def _po_source(order):
 
 def _original_bytes(source, label):
     key = source.get('storage_key')
-    if (not isinstance(key, str) or not key or key != key.strip()
-            or any(value in key for value in ('\\', ':', '%')) or key.startswith('/')
-            or any(part in ('', '.', '..') for part in key.split('/'))
-            or str(PurePosixPath(key)) != key):
+    if not is_safe_source_storage_key(key):
         raise ApprovalRecordSourceMissing(label, reason='invalid_reference')
     try:
         with default_storage.open(key, 'rb') as stored:
@@ -133,11 +129,23 @@ def _original_bytes(source, label):
     return content
 
 
-def build_requisition_approval_record_pdf(pr, request):
-    """Return (PDF bytes, filename), preserving originals and current relations.
+def _order_without_uploaded_pdf(order):
+    """App/Excel data may be rendered; evidence of an uploaded PDF wins."""
+    if order.source_documents.filter(document_type__in=('purchase_order', 'unknown')).exists():
+        return False
+    if any(isinstance(row, dict) and row.get('type') == 'signed_purchase_order_pdf'
+           for row in (order.attachments or [])):
+        return False
+    return not any(isinstance(row, dict) and (
+        row.get('evidence_document_id') or str(row.get('stage') or '').casefold() == 'signed po document approval'
+    ) for row in (order.approval_log or []))
 
-    Each current source appears once, with every PR page preceding every PO
-    page. With no linked PO the exact original PR bytes are returned.
+
+def build_requisition_approval_record_pdf(pr, request, *, include_metadata=False):
+    """Return the PDF and filename, optionally followed by source metadata.
+
+    Original PR pages precede the linked PO. Native POs use the same official
+    renderer as their export; retained original uploads always take precedence.
     """
     import pymupdf
 
@@ -147,16 +155,24 @@ def build_requisition_approval_record_pdf(pr, request):
     order = PurchaseOrder.objects.filter(pr_reference_id=pr.pk).order_by('-created_at', '-pk').first()
     if order:
         _check_read(request, order, order=True)
+    metadata = {'po_source': 'none', 'attachment_warning_count': 0}
+    native = bool(order and _order_without_uploaded_pdf(order))
     try:
         sources = [('PR', _pr_source(pr))]
-        if order:
+        if order and not native:
             sources.append(('linked PO', _po_source(order)))
+            metadata['po_source'] = 'uploaded_original'
         originals = [(label, _original_bytes(source, label)) for label, source in sources]
     except ApprovalRecordSourceMissing as error:
         error.detail['requisition_id'] = str(pr.pk)
         if order:
             error.detail['purchase_order_id'] = str(order.pk)
         raise
+    if native:
+        from .purchase_order_exports import build_purchase_order_pdf
+        generated, warnings = build_purchase_order_pdf(order)
+        originals.append(('RADAI-generated PO', generated))
+        metadata.update(po_source='radai_generated', attachment_warning_count=len(warnings))
     try:
         with pymupdf.open() as combined:
             for label, content in originals:
@@ -170,4 +186,5 @@ def build_requisition_approval_record_pdf(pr, request):
     except Exception as error:
         raise ApprovalRecordInvalid({'error': 'An original PDF could not be read. Review the uploaded PR and PO originals.'}) from error
     number = re.sub(r'[^A-Za-z0-9._-]+', '_', str(pr.pr_number)).strip('._-') or 'PR'
-    return content, f'{number}_Approval_Record.pdf'
+    result = (content, f'{number}_Approval_Record.pdf')
+    return (*result, metadata) if include_metadata else result

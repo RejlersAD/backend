@@ -1,5 +1,6 @@
 import base64
 from io import BytesIO
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -20,6 +21,23 @@ from apps.procurement.services.purchase_order_exports import (
 
 
 class PurchaseOrderExportTests(TestCase):
+    def test_pending_po_exports_status_without_inventing_a_completed_approver(self):
+        order = self._order()
+        order.status, order.approved_at = 'draft', None
+        order.approved_by_name = 'Preselected Approver'
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            text = '\n'.join(page.get_text() for page in pdf)
+        self.assertIn('PO status: Draft', text)
+        self.assertIn('Approval pending:', text)
+        self.assertIn('Not yet approved', text)
+        self.assertNotIn('Preselected Approver', text)
+        self.assertNotIn('Approved by:', text)
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+        self.assertIn('Approval pending:', text)
+        self.assertNotIn('Preselected Approver', text)
+
     def test_pdf_and_docx_flag_mismatched_approval_instead_of_printing_signature(self):
         order = self._order()
         order.approved_by_name = 'Assigned Approver'
@@ -78,8 +96,10 @@ class PurchaseOrderExportTests(TestCase):
             expected_delivery='2026-09-30',
             marking='RAD-PRJ-PUR-0001_2026',
             form_note='(PO no. to be used in all documents)',
-            approved_by_name='',
-            approved_by_title='',
+            status='sent',
+            approved_by_name='Jarmo Suominen',
+            approved_by_title='Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi',
+            approved_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
             approved_date=None,
             confirmation_date=None,
             attachments=attachments or [],

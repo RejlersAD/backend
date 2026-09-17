@@ -8,12 +8,14 @@ import hashlib
 import re
 from typing import Any
 
+from botocore.exceptions import ClientError
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
+from rest_framework.exceptions import APIException, PermissionDenied
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition, Vendor
 from ..models_master import Project
@@ -30,6 +32,12 @@ SIGNED_PO_TEXT_PAGE_LIMIT = 4
 
 class SignedPOImportError(ValueError):
     pass
+
+
+class SignedPOSourceStorageUnavailable(APIException):
+    status_code = 503
+    default_detail = 'The retained PO source could not be checked or restored. Please retry.'
+    default_code = 'signed_po_source_storage_unavailable'
 
 
 def _match(pattern: str, text: str, default: str = "") -> str:
@@ -251,6 +259,55 @@ def preview_signed_po_pdf(pdf_bytes, *, filename, pr_id=None):
     return result
 
 
+def ensure_retained_po_source(document, pdf_bytes, fields, user, *, allow_restore=True):
+    """Restore absent bytes from the same verified original, retaining its document."""
+    from uuid import uuid4
+    from .atomic_source_import import save_import_source
+    from .procurement_lifecycle import ProcurementDeleteConflict
+    from .purchase_order_sources import is_safe_source_storage_key
+
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    if (document.extracted_data or {}).get('source_sha256') != digest:
+        raise ProcurementDeleteConflict('The uploaded PDF differs from this retained source. Its original evidence was kept.')
+    missing = not is_safe_source_storage_key(document.s3_key)
+    if not missing:
+        try:
+            with default_storage.open(document.s3_key, 'rb') as stored:
+                retained = stored.read(15 * 1024 * 1024 + 1)
+        except FileNotFoundError:
+            missing = True
+        except ClientError as error:
+            if str(error.response.get('Error', {}).get('Code')) in {'NoSuchKey', 'NotFound', '404'}:
+                missing = True
+            else:
+                raise SignedPOSourceStorageUnavailable() from error
+        except Exception as error:
+            raise SignedPOSourceStorageUnavailable() from error
+        else:
+            if hashlib.sha256(retained).hexdigest() != digest:
+                raise ProcurementDeleteConflict('The stored PO source differs from its saved evidence. It was not overwritten; review the source with an administrator.')
+    if not missing:
+        return document
+    if not allow_restore:
+        raise PermissionDenied('Purchase order update permission is required to restore its original PDF.')
+    source_date = _date(fields.get('po_date')) or timezone.localdate()
+    safe_name = build_procurement_pdf_filename(fields['po_number'], 'po', source_date)
+    # A new key avoids overwriting a concurrent restore or unrelated content.
+    key = save_import_source(default_storage,
+        f'procurement/signed_documents/{source_date.year}/{uuid4().hex}_{safe_name}', ContentFile(pdf_bytes),
+    )
+    metadata = dict(document.extracted_data or {})
+    metadata['source_storage_history'] = [*(metadata.get('source_storage_history') or []), {
+        'previous_storage_key': document.s3_key, 'restored_at': timezone.now().isoformat(),
+        'restored_by': str(user.pk), 'sha256': digest,
+    }]
+    document.s3_key, document.s3_url = key, default_storage.url(key)
+    document.file_size_bytes = len(pdf_bytes)
+    document.extracted_data = metadata
+    document.save(update_fields=['s3_key', 's3_url', 'file_size_bytes', 'extracted_data', 'updated_at'])
+    return document
+
+
 def _store_source_pdf(pdf_bytes, fields, filename, user):
     from .atomic_source_import import save_import_source
     digest = hashlib.sha256(pdf_bytes).hexdigest()
@@ -258,7 +315,7 @@ def _store_source_pdf(pdf_bytes, fields, filename, user):
         Q(uploaded_by=user) | Q(confirmed_po__isnull=False),
     ).first()
     if document:
-        return document, digest
+        return ensure_retained_po_source(document, pdf_bytes, fields, user), digest
     source_date = fields["po_date"] or timezone.localdate()
     safe_name = build_procurement_pdf_filename(fields["po_number"], "po", source_date)
     key = save_import_source(default_storage,

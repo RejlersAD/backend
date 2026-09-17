@@ -3,6 +3,14 @@
 from pathlib import PurePosixPath
 
 
+def is_safe_source_storage_key(key):
+    """Accept only normalized relative storage keys, never URLs or local paths."""
+    return (isinstance(key, str) and bool(key) and key == key.strip()
+            and not any(value in key for value in ('\\', ':', '%')) and not key.startswith('/')
+            and not any(part in ('', '.', '..') for part in key.split('/'))
+            and str(PurePosixPath(key)) == key)
+
+
 def uploaded_purchase_order_sources(order):
     """Return source metadata and private storage keys without regenerating PDFs.
 

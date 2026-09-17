@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.test import TestCase, override_settings
 
 from apps.procurement.models import PODocument, PurchaseOrder, PurchaseRequisition, Vendor
@@ -119,6 +120,30 @@ class UnifiedPOPDFReviewTests(TestCase):
         self.assert_no_po()
         self.assertEqual(Vendor.objects.count(), 1)
         self.assertEqual(PurchaseRequisition.objects.values().get(pk=self.pr.pk), before_pr)
+
+    def test_restoring_a_missing_retained_file_rolls_back_if_final_link_verification_fails(self):
+        self.assert_linked(self.save())
+        document = PODocument.objects.get()
+        default_storage.delete(document.s3_key)
+        before_document = PODocument.objects.values().get(pk=document.pk)
+        before_order = PurchaseOrder.objects.values().get(pk=document.confirmed_po_id)
+        before_files = self.files()
+        from apps.procurement.services.signed_po_pdf_import import _verified_origin_link
+        calls = []
+
+        def verify(pr, po_id, user):
+            calls.append(po_id)
+            if len(calls) == 2:
+                raise ProcurementDeleteConflict('Final link verification failed.')
+            return _verified_origin_link(pr, po_id, user)
+
+        with patch(f'{originating.SERVICE}._verified_origin_link', side_effect=verify):
+            response = self.save()
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(PODocument.objects.values().get(pk=document.pk), before_document)
+        self.assertEqual(PurchaseOrder.objects.values().get(pk=document.confirmed_po_id), before_order)
+        self.assertEqual(self.files(), before_files)
 
     def test_review_does_not_override_source_approvals_or_accept_invalid_contact(self):
         for values in ({'signature_verified': True}, {'seller_email': 'invalid email'},

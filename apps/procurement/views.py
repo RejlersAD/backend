@@ -345,15 +345,19 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='approval-record-pdf')
     def approval_record_pdf(self, request, pk=None):
-        """Show retained PR pages followed by the linked PO's original pages."""
+        """Show the original PR followed by its uploaded or RADAI-generated PO."""
         from django.http import FileResponse
         from .services.requisition_approval_record import build_requisition_approval_record_pdf
 
-        content, filename = build_requisition_approval_record_pdf(self.get_object(), request)
+        content, filename, metadata = build_requisition_approval_record_pdf(self.get_object(), request, include_metadata=True)
         response = FileResponse(io.BytesIO(content), content_type='application/pdf',
                                 as_attachment=False, filename=filename)
         response['Cache-Control'] = 'private, no-store'
         response['X-Content-Type-Options'] = 'nosniff'
+        response['X-Approval-Record-PO-Source'] = metadata['po_source']
+        response['X-Approval-Record-PR-Source'] = 'uploaded_original'
+        if metadata['attachment_warning_count']:
+            response['X-PO-Attachment-Warnings'] = str(metadata['attachment_warning_count'])
         return response
 
     @action(detail=True, methods=['get'], url_path=r'uploaded-documents/(?P<document_id>\d+)/content')

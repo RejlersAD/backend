@@ -12,7 +12,7 @@ from .po_excel_import import canonical_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict
 from .signed_po_pdf_import import (
     SignedPOImportError, _date, _extraction_review_issues, _serializable_fields,
-    extract_signed_po_fields, import_signed_po_pdf,
+    ensure_retained_po_source, extract_signed_po_fields, import_signed_po_pdf,
 )
 from .signed_pr_pdf_import import import_signed_pr_pdf, preview_signed_pr_pdf
 
@@ -90,6 +90,8 @@ def import_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, request,
                 source = PODocument.objects.filter(confirmed_po=po, document_type='purchase_order').order_by('-created_at', '-id').first() if po else None
                 current_pr_digest = ((existing.price_remarks_data or {}).get('signed_document_verification') or {}).get('document_sha256')
                 if po and source and current_pr_digest == pr_digest and (source.extracted_data or {}).get('source_sha256') == po_digest:
+                    ensure_retained_po_source(source, po_bytes, {**(source.extracted_data or {}), 'po_number': po.po_number},
+                                              request.user, allow_restore=request_action_allowed(request, 'procurement_orders', 'update'))
                     return _existing_pair_result(existing, po, source)
                 raise ProcurementDeleteConflict('The saved PR or PO source changed after this paired import. Refresh and review the current documents before saving again.')
         result = import_signed_pr_pdf(
