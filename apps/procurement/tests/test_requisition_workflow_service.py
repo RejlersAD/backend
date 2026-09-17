@@ -207,13 +207,15 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             RequisitionWorkflowService._stage_matches_user(stage, self.engineering_manager)
         )
 
-    def test_no_po_submission_requires_level_zero_and_jarmo_level_five(self):
+    def test_no_po_submission_accepts_missing_recommended_approval_levels(self):
         pr = self._pr()
         pr.po_applicable = False
 
-        with self.assertRaisesMessage(ValidationError, 'Level 5 Jarmo Suominen'):
-            RequisitionWorkflowService._submit_locked(pr, self.issuer)
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+        self.assertEqual(result.status, 'submitted')
 
+        pr = self._pr()
+        pr.po_applicable = False
         pr.approval_workflow_config = [
             {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
             {
@@ -265,7 +267,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         self.assertEqual(len(result.approval_workflow_config), 1)
         self.assertEqual(result.approval_workflow_config[0]['role'], 'Procurement Department')
 
-    def test_project_submission_requires_mohamad_as_level_four_default(self):
+    def test_project_submission_accepts_a_nondefault_level_four_approver(self):
         pr = self._pr()
         pr.requisition_type = 'project'
         pr.po_applicable = True
@@ -274,16 +276,10 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             {'level': 4, 'role': 'VP Delivery', 'user_id': 'wrong-vp', 'user_name': 'Wrong VP'},
         ]
 
-        with self.assertRaisesMessage(ValidationError, 'Mohamad El-Ghawanmeh'):
-            RequisitionWorkflowService._submit_locked(pr, self.issuer)
-
-        pr.approval_workflow_config[1].update({
-            'user_id': 'mohamad',
-            'user_name': 'Mohamad El-Ghawanmeh',
-        })
         result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
 
         self.assertEqual(result.status, 'submitted')
+        self.assertEqual(result.approval_workflow_config[1]['user_id'], 'wrong-vp')
 
     def test_only_issuer_can_submit(self):
         pr = self._pr()
@@ -291,12 +287,17 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         with self.assertRaises(PermissionDenied):
             RequisitionWorkflowService._submit_locked(pr, self.pm)
 
-    def test_submission_requires_configured_approvers(self):
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_submission_without_configured_approvers_does_not_send_notifications(self, notify_level):
         pr = self._pr()
         pr.approval_workflow_config = []
 
-        with self.assertRaisesMessage(ValidationError, 'configured approval workflow is required'):
-            RequisitionWorkflowService._submit_locked(pr, self.issuer)
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        self.assertEqual(result.status, 'submitted')
+        self.assertEqual(result.approval_workflow_config, [])
+        self.assertEqual(result.current_approval_step, 0)
+        notify_level.assert_not_called()
 
     def test_submission_rejects_line_item_total_mismatch(self):
         pr = self._pr()

@@ -103,13 +103,13 @@ class RequisitionWorkflowService:
             return False
 
     @classmethod
-    def _workflow(cls, pr):
+    def _workflow(cls, pr, *, allow_empty=False):
         workflow = normalize_ceo_workflow(
             pr.approval_workflow_config,
             pr.po_number_reference,
             getattr(pr, 'po_applicable', None),
         )
-        if not isinstance(workflow, list) or not workflow:
+        if not isinstance(workflow, list) or (not workflow and not allow_empty):
             raise ValidationError({'error': 'A configured approval workflow is required.'})
         if any(not isinstance(stage, dict) for stage in workflow):
             raise ValidationError({'error': 'The approval workflow contains an invalid stage.'})
@@ -475,51 +475,11 @@ class RequisitionWorkflowService:
                 })
         pr.items = normalized_items
 
-        workflow = cls._workflow(pr)
+        # Registration is permitted with advisory business/assignment warnings.
+        # Actual approval decisions still check identity, access, and sequence.
+        workflow = cls._workflow(pr, allow_empty=True)
 
-        if str(getattr(pr, 'requisition_type', '') or '').strip().lower() == 'project':
-            has_mohamad_level_four = any(
-                cls._stage_level(stage, index) == 4
-                and any(
-                    identity in ' '.join(str(stage.get(field) or '').strip().lower() for field in (
-                        'user_name', 'approver', 'user_email', 'approver_email',
-                    ))
-                    for identity in (
-                        'mohamad el-ghawanmeh',
-                        'mohamed el-ghawanmeh',
-                        'moghawanmeh@rejlers.ae',
-                    )
-                )
-                for index, stage in enumerate(workflow)
-            )
-            if not has_mohamad_level_four:
-                raise ValidationError({
-                    'error': 'Project workflows require Mohamad El-Ghawanmeh as the default Level 4 VP Delivery approver.'
-                })
-
-        if getattr(pr, 'po_applicable', True) is False:
-            has_level_zero = any(cls._stage_level(stage, index) == 0 for index, stage in enumerate(workflow))
-            has_jarmo_level_five = any(
-                cls._stage_level(stage, index) == 5
-                and any(label in f"{stage.get('role', '')} {stage.get('stage', '')}".lower() for label in ('general manager', 'ceo'))
-                and str(stage.get('user_name') or '').strip().lower() == 'jarmo suominen'
-                for index, stage in enumerate(workflow)
-            )
-            if not has_level_zero or not has_jarmo_level_five:
-                raise ValidationError({
-                    'error': 'When PO is not applicable, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (CEO).'
-                })
-
-        # Pass 1: Validate all stages before mutating memory
-        assigned_ids = []
-        for index, stage in enumerate(workflow):
-            if not (stage.get('user_id') or stage.get('approver_id')):
-                raise ValidationError({'error': f'Approval stage {index + 1} has no assigned approver.'})
-            assigned_ids.append(str(stage.get('user_id') or stage.get('approver_id')))
-        if len(assigned_ids) != len(set(assigned_ids)):
-            raise ValidationError({'error': 'Each employee may only be assigned once in an approval workflow.'})
-
-        # Pass 2: Clean and initialize
+        # Discard any client-supplied approval state before starting review.
         for index, stage in enumerate(workflow):
             stage['step'] = index + 1
             stage['status'] = 'pending'
@@ -536,11 +496,16 @@ class RequisitionWorkflowService:
             stage.pop('rejection_reason', None)
 
         pr.approval_workflow_config = workflow
-        first_level, _ = cls._active_level_stages(pr, workflow)
+        first_level = None
+        if workflow:
+            first_level, _ = cls._active_level_stages(pr, workflow)
+        else:
+            pr.current_approval_step = 0
         pr.status = 'submitted'
         pr.rejection_reason = ''
         pr.save()
-        cls._notify_level(pr, workflow, first_level)
+        if first_level is not None:
+            cls._notify_level(pr, workflow, first_level)
         return pr
 
     @classmethod

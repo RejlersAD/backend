@@ -12,7 +12,7 @@ class _ApproverManager:
         self.approver = approver
 
     def get(self, **kwargs):
-        if str(kwargs.get('pk')) != str(self.approver.pk) or not kwargs.get('is_active'):
+        if str(kwargs.get('pk')) != str(self.approver.pk):
             raise _Approver.DoesNotExist
         return self.approver
 

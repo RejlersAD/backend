@@ -169,7 +169,10 @@ class ApprovalSequenceAPITests(TestCase):
         self.assertFalse(order.approval_stamp)
         self.assertFalse(order.approved_by_name)
 
-    def test_submitted_route_cannot_remove_predecessors_or_move_ceo_forward(self):
+    def test_route_with_recorded_decisions_cannot_remove_predecessors_or_move_ceo_forward(self):
+        RequisitionWorkflowService.approve(self.pr.pk, self.procurement, require_signature=True)
+        self.pr.refresh_from_db()
+        self.workflow = deepcopy(self.pr.approval_workflow_config)
         self.client.force_authenticate(self.ceo)
         moved = deepcopy(self.workflow)
         moved[1]['level'] = 0

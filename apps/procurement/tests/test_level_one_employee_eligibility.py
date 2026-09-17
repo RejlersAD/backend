@@ -1,4 +1,4 @@
-"""Level 1 employee selection, delivery, and decisions share one eligibility rule."""
+"""Level 1 registration warns on eligibility; delivery and decisions enforce it."""
 
 from copy import deepcopy
 from datetime import timedelta
@@ -8,7 +8,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied
 
 from apps.hr_core.models import EmployeeMaster
 from apps.notifications.delivery import approval_assignment_issue
@@ -125,8 +125,10 @@ class LevelOneEmployeeEligibilityTests(TestCase):
                 UserProfile.objects.filter(pk=profile.pk).update(status='active', is_deleted=False, locked_until=None)
                 UserProfile.objects.filter(pk=profile.pk).update(**changes)
                 self.assertFalse(eligible_stage_assignee(self.developer, self.stage, MODULE_PR))
-                with self.assertRaises(ValidationError):
-                    self.validate_stage(self.stage)
+                normalized = self.validate_stage(self.stage)
+                self.assertEqual(normalized['user_id'], str(self.developer.pk))
+                self.assertTrue(any('Level 1' in warning for warning in
+                    PurchaseRequisitionSerializer(self.pr).data['registration_warnings']))
         UserProfile.objects.filter(pk=profile.pk).update(status='active', is_deleted=False, locked_until=None)
         EmployeeMaster.objects.filter(user=self.developer).update(employment_status='terminated')
         self.assertFalse(eligible_stage_assignee(self.developer, self.stage, MODULE_PR))
@@ -138,15 +140,17 @@ class LevelOneEmployeeEligibilityTests(TestCase):
         EmployeeMaster.objects.filter(user=self.developer).delete()
         self.assertTrue(eligible_stage_assignee(self.developer, self.stage, MODULE_PR))
 
-    def test_explicit_deny_blocks_selection_decision_and_queued_delivery(self):
+    def test_explicit_deny_warns_on_selection_but_blocks_decision_and_queued_delivery(self):
         notice = self.notice()
         self.assertEqual(approval_assignment_issue(notice), '')
         permission = Permission.objects.get(code=f'{MODULE_PR}.approve')
         UserPermissionOverride.objects.create(
             user_profile=self.developer.rbac_profile, permission=permission, allowed=False,
         )
-        with self.assertRaises(ValidationError):
-            self.validate_stage(self.stage)
+        normalized = self.validate_stage(self.stage)
+        self.assertEqual(normalized['user_id'], str(self.developer.pk))
+        self.assertTrue(any('Level 1' in warning for warning in
+            PurchaseRequisitionSerializer(self.pr).data['registration_warnings']))
         self.assertFalse(workflow.can_approve(self.pr, self.developer))
         with self.assertRaises(PermissionDenied):
             workflow.approve(self.pr.pk, self.developer)
