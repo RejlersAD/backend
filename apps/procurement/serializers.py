@@ -5,7 +5,7 @@ API data serialization for procurement workflows
 
 import copy
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -37,6 +37,8 @@ from .services.requisition_source_documents import (
     SIGNED_PR_TYPE, refreshed_requisition_attachments, requisition_original_source,
 )
 from .services.project_relationships import (
+    extract_requisition_project_codes,
+    normalize_project_code,
     resolve_enterprise_project_by_code,
     resolve_order_enterprise_project,
     resolve_requisition_enterprise_project,
@@ -707,21 +709,43 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     'total_price': 'Total price must equal the sum of the line items.'
                 })
 
-        project_fields_changed = self.instance is None or bool(
-            {'project', 'project_details'}.intersection(attrs)
-        )
-        if 'enterprise_project' not in attrs and project_fields_changed:
-            candidate, _reason = resolve_requisition_enterprise_project(
-                project=attrs.get('project', getattr(self.instance, 'project', '')),
-                project_details=attrs.get(
-                    'project_details', getattr(self.instance, 'project_details', []),
-                ),
-            )
-            # A null value is deliberate for no-match, conflicting, or
-            # multi-project requisitions; the migration report surfaces them.
-            attrs['enterprise_project'] = candidate
+        self._explicit_enterprise_project = 'enterprise_project' in attrs
+        self._set_automatic_enterprise_project(attrs, self.instance)
 
         return attrs
+
+    @staticmethod
+    def _project_reference_key(project, project_details):
+        """Compare the references used by the resolver, not form presentation."""
+        codes = frozenset(normalize_project_code(code) for code in
+                          extract_requisition_project_codes(project, project_details))
+        master_ids = set()
+        for detail in project_details if isinstance(project_details, list) else []:
+            if isinstance(detail, dict) and detail.get('project_id'):
+                try:
+                    master_ids.add(UUID(str(detail['project_id'])))
+                except (TypeError, ValueError, AttributeError):
+                    # Match the resolver: core integer IDs/legacy labels are
+                    # not procurement-master identities.
+                    continue
+        return codes, frozenset(master_ids)
+
+    def _set_automatic_enterprise_project(self, attrs, instance):
+        if 'enterprise_project' in attrs:
+            return
+        project = attrs.get('project', getattr(instance, 'project', ''))
+        details = attrs.get('project_details', getattr(instance, 'project_details', []))
+        if instance is not None and self._project_reference_key(project, details) == self._project_reference_key(
+            getattr(instance, 'project', ''), getattr(instance, 'project_details', []),
+        ):
+            # A full form resends unchanged legacy references. Keep the
+            # canonical link confirmed by reconciliation, including null.
+            return
+        candidate, _reason = resolve_requisition_enterprise_project(
+            project=project, project_details=details,
+        )
+        # Actual reference edits still clear ambiguous/missing matches.
+        attrs['enterprise_project'] = candidate
     
     def validate_approval_reassignments(self, value):
         commands = ApprovalReassignmentSerializer(data=value, many=True, allow_empty=False)
@@ -916,6 +940,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # finished. Save against the locked current record so its status,
         # source decisions and audit cannot be replaced by that stale copy.
         instance = PurchaseRequisition.objects.select_for_update().get(pk=instance.pk)
+        if not getattr(self, '_explicit_enterprise_project', 'enterprise_project' in validated_data):
+            # Reconciliation may have committed after form validation. Decide
+            # automatic linkage against the locked current references/link.
+            validated_data.pop('enterprise_project', None)
+            self._set_automatic_enterprise_project(validated_data, instance)
         # Recheck route changes against decisions committed during validation.
         self.instance = instance
         if not self._preserve_source_workflow(instance):
