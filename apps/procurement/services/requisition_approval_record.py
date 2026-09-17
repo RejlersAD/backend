@@ -32,6 +32,18 @@ class ApprovalRecordStorageUnavailable(APIException):
     default_code = 'approval_record_storage_unavailable'
 
 
+class ApprovalRecordSourceMissing(NotFound):
+    default_code = 'approval_record_source_missing'
+
+    def __init__(self, label, *, reason='not_attached'):
+        source = 'po' if label == 'linked PO' else 'pr'
+        super().__init__({
+            'error': f'The original {label} PDF is unavailable. Upload its original PDF to include it in the approval record.',
+            'code': self.default_code, 'source': source, 'reason': reason,
+            'recovery': f'upload_original_{source}',
+        })
+
+
 def _check_read(request, record, *, order=False):
     user = request.user
     module = 'procurement_orders' if order else 'procurement_requisitions'
@@ -67,7 +79,7 @@ def _pr_source(pr):
     sources = [row for row in (pr.attachments or []) if isinstance(row, dict)
                and SIGNED_PR_TYPE in (row.get('type'), row.get('document_type'))]
     if not sources:
-        raise NotFound({'error': 'The original PR PDF is unavailable.'})
+        raise ApprovalRecordSourceMissing('PR')
     selected = max(sources, key=lambda row: (bool(current_sha and row.get('sha256') == current_sha), _uploaded_at(row)))
     return {'storage_key': requisition_source_key(pr, selected), 'sha256': selected.get('sha256')}
 
@@ -91,7 +103,7 @@ def _po_source(order):
         return {'storage_key': selected.s3_key, 'sha256': (selected.extracted_data or {}).get('source_sha256')}
     legacy = uploaded_purchase_order_sources(order)
     if not legacy or not legacy[-1].get('storage_key'):
-        raise NotFound({'error': 'The original linked PO PDF is unavailable.'})
+        raise ApprovalRecordSourceMissing('linked PO')
     return legacy[-1]
 
 
@@ -101,15 +113,15 @@ def _original_bytes(source, label):
             or any(value in key for value in ('\\', ':', '%')) or key.startswith('/')
             or any(part in ('', '.', '..') for part in key.split('/'))
             or str(PurePosixPath(key)) != key):
-        raise NotFound({'error': f'The original {label} PDF is unavailable.'})
+        raise ApprovalRecordSourceMissing(label, reason='invalid_reference')
     try:
         with default_storage.open(key, 'rb') as stored:
             content = stored.read(MAX_SOURCE_BYTES + 1)
     except FileNotFoundError as error:
-        raise NotFound({'error': f'The original {label} PDF is unavailable.'}) from error
+        raise ApprovalRecordSourceMissing(label, reason='file_missing') from error
     except ClientError as error:
         if str(error.response.get('Error', {}).get('Code')) in {'NoSuchKey', 'NotFound', '404'}:
-            raise NotFound({'error': f'The original {label} PDF is unavailable.'}) from error
+            raise ApprovalRecordSourceMissing(label, reason='file_missing') from error
         raise ApprovalRecordStorageUnavailable({'error': f'The original {label} PDF could not be loaded. Please retry.'}) from error
     except Exception as error:
         raise ApprovalRecordStorageUnavailable({'error': f'The original {label} PDF could not be loaded. Please retry.'}) from error
@@ -135,10 +147,16 @@ def build_requisition_approval_record_pdf(pr, request):
     order = PurchaseOrder.objects.filter(pr_reference_id=pr.pk).order_by('-created_at', '-pk').first()
     if order:
         _check_read(request, order, order=True)
-    sources = [('PR', _pr_source(pr))]
-    if order:
-        sources.append(('linked PO', _po_source(order)))
-    originals = [(label, _original_bytes(source, label)) for label, source in sources]
+    try:
+        sources = [('PR', _pr_source(pr))]
+        if order:
+            sources.append(('linked PO', _po_source(order)))
+        originals = [(label, _original_bytes(source, label)) for label, source in sources]
+    except ApprovalRecordSourceMissing as error:
+        error.detail['requisition_id'] = str(pr.pk)
+        if order:
+            error.detail['purchase_order_id'] = str(order.pk)
+        raise
     try:
         with pymupdf.open() as combined:
             for label, content in originals:

@@ -1,6 +1,9 @@
 """The approval-record PDF contains only authorized current original pages."""
 
 import hashlib
+import json
+from datetime import date
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -9,6 +12,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import include, path
 from rest_framework.test import APIClient
@@ -187,10 +191,66 @@ class RequisitionApprovalRecordPDFTests(TestCase):
             opened.assert_not_called()
 
     def test_missing_pr_or_linked_po_original_reports_unavailable(self):
-        self.assertEqual(self.client.get(self.url()).status_code, 404)
+        missing_pr = self.client.get(self.url())
+        self.assertEqual(missing_pr.status_code, 404)
+        self.assertEqual(missing_pr.data['code'], 'approval_record_source_missing')
+        self.assertEqual(missing_pr.data['source'], 'pr')
+        self.assertEqual(missing_pr.data['recovery'], 'upload_original_pr')
+        self.assertEqual(missing_pr.data['requisition_id'], str(self.pr.pk))
+        self.assertNotIn('purchase_order_id', missing_pr.data)
         self.pr_source()
-        self.order()
-        self.assertEqual(self.client.get(self.url()).status_code, 404)
+        order = self.order()
+        missing_po = self.client.get(self.url())
+        self.assertEqual(missing_po.status_code, 404)
+        self.assertEqual(missing_po.data['code'], 'approval_record_source_missing')
+        self.assertEqual(missing_po.data['source'], 'po')
+        self.assertEqual(missing_po.data['reason'], 'not_attached')
+        self.assertEqual(missing_po.data['recovery'], 'upload_original_po')
+        self.assertEqual(missing_po.data['purchase_order_id'], str(order.pk))
+
+    def test_missing_original_recovery_uploads_to_existing_po_then_combines_actual_sources(self):
+        self.pr_source(pdf_bytes('Actual original PR'))
+        order = self.order(status='completed')
+        self.assertEqual(self.client.get(self.url()).data['source'], 'po')
+        module = Module.objects.get(code='procurement_orders')
+        for permission in module.permissions.filter(action__in=['create', 'update'], is_active=True):
+            RolePermission.objects.get_or_create(role=self.role, permission=permission)
+        cache.clear()
+        content = pdf_bytes('Actual uploaded PO')
+        fields = {
+            'source_po_number': order.po_number, 'po_number': order.po_number,
+            'source_pr_numbers': [self.pr.pr_number], 'source_page_count': 1,
+            'extracted_page_count': 1, 'extraction_truncated': False,
+            'po_date': date(2026, 9, 17), 'vendor_name': self.vendor.name,
+            'vendor_license_no': '', 'seller_reference': '', 'quote_ref': '',
+            'project_number': '', 'summary': 'Source PO description', 'payment_terms': '',
+            'payment_mode': '', 'delivery_terms': '', 'expected_delivery': None,
+            'total_amount': Decimal('100.00'), 'tax_amount': Decimal('0.00'),
+            'gross_amount': Decimal('100.00'), 'currency': order.currency, 'items': [],
+        }
+        with patch('apps.procurement.services.signed_po_pdf_import.extract_signed_po_fields', return_value=fields):
+            saved = self.client.post('/api/v1/procurement/po-documents/import_signed_pdf/', {
+                'file': SimpleUploadedFile('original-po.pdf', content, content_type='application/pdf'),
+                'pr_id': str(self.pr.pk), 'reviewed_fields': json.dumps({'summary': fields['summary']}),
+            }, format='multipart')
+        self.assertEqual(saved.status_code, 200, saved.data)
+        self.assertEqual(saved.data['purchase_order_id'], str(order.pk))
+        self.assertEqual(self.labels(self.read()[1]), ['Actual original PR', 'Actual uploaded PO'])
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.total_amount, Decimal('100.00'))
+        self.assertEqual(PurchaseOrder.objects.count(), 1)
+
+    def test_missing_stored_po_file_reports_upload_recovery_not_storage_retry(self):
+        self.pr_source()
+        order = self.order()
+        document, _ = self.po_source(order)
+        default_storage.delete(document.s3_key)
+        response = self.client.get(self.url())
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data['source'], 'po')
+        self.assertEqual(response.data['reason'], 'file_missing')
+        self.assertEqual(response.data['recovery'], 'upload_original_po')
 
     def test_missing_current_pr_does_not_silently_substitute_older_original(self):
         self.pr_source(pdf_bytes('Older PR'), current=False)
