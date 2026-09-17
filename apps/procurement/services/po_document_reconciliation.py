@@ -67,8 +67,16 @@ def reconcile_saved_po_document(document_id, request, mapping):
     if observed.document_type != 'purchase_order':
         raise ValidationError({'error': 'Only purchase order PDFs can be reconciled here.'})
     snapshot = observed.extracted_data or {}
+    review = mapping.get('reviewed_fields')
+    if review is not None and not observed.confirmed_po_id:
+        if not request_action_allowed(request, 'procurement_orders', 'update'):
+            raise PermissionDenied('Purchase order update permission is required to save reviewed PDF fields.')
+        from .po_document_review import reviewed_document_fields
+        snapshot = reviewed_document_fields(snapshot, review, user=request.user)
     origin_id = snapshot.get('originating_pr_id')
     selected_pr = mapping.get('pr_id')
+    if selected_pr and review and review.get('pr_id') and selected_pr.pk != review['pr_id'].pk:
+        raise ValidationError({'pr_id': 'Select the same purchase recommendation in the saved PO details.'})
     if origin_id and selected_pr and str(selected_pr.pk) != str(origin_id):
         raise ProcurementDeleteConflict('Keep the originating purchase recommendation selected for this uploaded PDF.')
     if observed.confirmed_po_id:
@@ -77,7 +85,7 @@ def reconcile_saved_po_document(document_id, request, mapping):
     if not pr_id:
         raise ValidationError({'pr_id': 'Select the matching purchase recommendation before reconciliation.'})
     pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
-    vendor = mapping['vendor_id']
+    vendor = mapping.get('vendor_id')
     number = canonical_po_number(snapshot.get('po_number') or snapshot.get('source_po_number'))
     verified, message = PurchaseOrderNumberService.verify(number, pr.pr_number)
     if not verified:
@@ -97,8 +105,15 @@ def reconcile_saved_po_document(document_id, request, mapping):
         return _already_reconciled(document)
     if document.updated_at != observed.updated_at:
         raise ProcurementDeleteConflict('The saved PDF details changed during reconciliation. Refresh and review the latest values.')
-    fields = deepcopy(document.extracted_data or {})
+    fields = deepcopy(snapshot)
     fields.setdefault('source_extracted_data', deepcopy(fields))
+    registered_vendor = False
+    if vendor is None:
+        from .document_vendor import resolve_document_vendor
+        vendor, registered_vendor = resolve_document_vendor(
+            fields, user=request.user,
+            allow_create=request_action_allowed(request, 'procurement_vendors', 'create'),
+        )
     confirmed = fields.get('canonical_financials') or {}
     from .procurement_vat import CONFIRMED_BASES, confirmed_totals
     financial_values = {}
@@ -129,6 +144,12 @@ def reconcile_saved_po_document(document_id, request, mapping):
     fields.update(po_number=number, vendor_id=str(vendor.pk), vendor_name=vendor.name,
                   pr_id=str(pr.pk), pr_number=pr.pr_number, total_amount=total, tax_amount=tax,
                   currency=currency, po_date=issued)
+    if review is not None:
+        fields['vendor_match'] = {
+            'matched': True, 'id': str(vendor.pk), 'vendor_code': vendor.vendor_code,
+            'vendor_name': vendor.name, 'registered': registered_vendor,
+            'method': 'registered from PO source' if registered_vendor else 'selected or matched existing supplier',
+        }
     if existing:
         if not request_action_allowed(request, 'procurement_orders', 'update'):
             raise PermissionDenied('Purchase order update permission is required to attach this PDF to an existing order.')
@@ -193,6 +214,7 @@ def reconcile_saved_po_document(document_id, request, mapping):
     document.extracted_data = metadata
     document.save(update_fields=['extracted_data', 'updated_at'])
     result.update(operation='attached' if existing else 'created', confirmed_po=str(order.pk))
+    result['vendor_registered'] = registered_vendor
     if origin_id:
         result['po_link'] = _verified_origin_link(pr, order.pk, request.user)
     return result

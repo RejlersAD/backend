@@ -1437,21 +1437,24 @@ class PODocumentReviewSerializer(serializers.Serializer):
             raise serializers.ValidationError('Enter a valid RAD purchase order number.')
         return value
 
-    def validate(self, attrs):
-        unknown = set(self.initial_data) - set(self.fields)
+    def to_internal_value(self, data):
+        unknown = set(data) - set(self.fields) if isinstance(data, dict) else set()
         if unknown:
             raise serializers.ValidationError({field: 'This field cannot be edited.' for field in unknown})
-        return attrs
+        return super().to_internal_value(data)
 
 
 class PODocumentReconcileSerializer(serializers.Serializer):
-    vendor_id = serializers.PrimaryKeyRelatedField(queryset=Vendor.objects.filter(status='active'))
+    vendor_id = serializers.PrimaryKeyRelatedField(queryset=Vendor.objects.filter(status='active'), required=False, allow_null=True)
     pr_id = serializers.PrimaryKeyRelatedField(queryset=PurchaseRequisition.objects.all(), required=False)
+    reviewed_fields = PODocumentReviewSerializer(required=False)
 
     def validate(self, attrs):
         unknown = set(self.initial_data) - set(self.fields)
         if unknown:
             raise serializers.ValidationError({field: 'Save reviewed business fields before completing reconciliation.' for field in unknown})
+        if 'reviewed_fields' not in attrs and not attrs.get('vendor_id'):
+            raise serializers.ValidationError({'vendor_id': 'This field is required.'})
         return attrs
 
 

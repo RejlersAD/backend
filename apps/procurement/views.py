@@ -2627,10 +2627,8 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
 
     def partial_update(self, request, pk=None):
         """Review a retained upload without manufacturing approval or a PO."""
-        from copy import deepcopy
         from django.db import transaction
-        from .services.po_excel_import import canonical_po_number
-        from .services.signed_po_pdf_import import _serializable_fields
+        from .services.po_document_review import reviewed_document_fields
 
         document = self.get_object()
         review = PODocumentReviewSerializer(data=request.data, partial=True)
@@ -2639,53 +2637,9 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             document = self.get_queryset().select_for_update().get(pk=document.pk)
             if document.confirmed_po_id or document.document_type != 'purchase_order':
                 return Response({'error': 'Edit the linked purchase order instead.'}, status=status.HTTP_409_CONFLICT)
-            fields = deepcopy(document.extracted_data or {})
-            fields.setdefault('source_extracted_data', deepcopy(fields))
-            values = dict(review.validated_data)
-            from .services.procurement_vat import CONFIRMED_BASES, confirmed_totals, decimal_amount
-            basis = values.pop('vat_basis', None)
-            entered = values.pop('entered_amount', None)
-            monetary_fields = {'total_amount', 'tax_amount', 'gross_amount'}
-            changed_money = any(key in values and decimal_amount(values[key]) != decimal_amount(fields.get(key))
-                                for key in monetary_fields)
-            changed_money = changed_money or ('currency' in values and values['currency'] != fields.get('currency'))
-            if basis in CONFIRMED_BASES:
-                if entered is None:
-                    return Response({'entered_amount': 'Enter the price to confirm its VAT treatment.'}, status=400)
-                try:
-                    totals = confirmed_totals(entered, basis)
-                except ValueError as error:
-                    return Response({'vat_basis': str(error)}, status=400)
-                fields['canonical_financials'] = _serializable_fields({**totals, 'entered_amount': entered, 'vat_basis': basis})
-                # Keep OCR values and source evidence intact; reviewed amounts are separate.
-                for key in monetary_fields:
-                    values.pop(key, None)
-            elif entered is not None or changed_money:
-                return Response({'vat_basis': 'Confirm whether VAT applies before changing amounts.'}, status=400)
-            if 'pr_id' in values:
-                pr = values.pop('pr_id')
-                if fields.get('originating_pr_id') and str(pr.pk if pr else '') != str(fields['originating_pr_id']):
-                    return Response({'error': 'Keep the originating purchase recommendation selected for this uploaded PDF.'},
-                                    status=status.HTTP_409_CONFLICT)
-                fields['pr_id'] = str(pr.pk) if pr else None
-                fields['pr_number'] = pr.pr_number if pr else ''
-            if 'po_number' in values:
-                supplied = values.pop('po_number')
-                canonical = canonical_po_number(supplied)
-                fields.update(po_number=canonical, source_po_number=supplied)
-            if 'vendor_name' in values and values['vendor_name'] != fields.get('vendor_name'):
-                fields['vendor_id'] = None
-                fields['vendor_name_source'] = 'manual'
-            fields.update(_serializable_fields(values))
-            fields['reconciliation_required'] = True
-            fields['reconciliation_issues'] = [
-                *([] if fields.get('pr_id') else ['Link the matching purchase recommendation.']),
-                'Supplier and order details await reconciliation.',
-            ]
-            fields['reviewed_by'] = str(request.user.pk)
-            fields['reviewed_at'] = timezone.now().isoformat()
-            fields['manually_reviewed_fields'] = sorted(set(fields.get('manually_reviewed_fields', [])) | set(request.data))
-            document.extracted_data = fields
+            document.extracted_data = reviewed_document_fields(
+                document.extracted_data, review.validated_data, user=request.user,
+            )
             document.save(update_fields=['extracted_data', 'updated_at'])
         return Response(self.get_serializer(document).data)
 
@@ -2867,6 +2821,8 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 approved_date=request.data.get('approved_date', ''),
                 allow_existing_update=request_action_allowed(request, 'procurement_orders', 'update'),
                 pr_id=request.data.get('pr_id'),
+                register_missing_vendor=True,
+                allow_vendor_create=request_action_allowed(request, 'procurement_vendors', 'create'),
             )
         except SignedPOImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

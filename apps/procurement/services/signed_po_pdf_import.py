@@ -62,7 +62,7 @@ _SELLER_FIELD_END = (
     r"\bSeller\s*(?:Address|Reference|Contact|E[- ]?mail|Phone|Telephone|Fax|Signature)\b"
     # Two-column OCR may put the address value between 'Seller' and 'Address:'.
     r"|\bSeller\s*(?=\s+(?:Unit|Suite|Office|Building|P\.?\s*O\.?\s*Box)\b)"
-    r"|\b(?:Address|Invoicing(?:\s+Address)?|Invoice\s+Address|Buyer\s+Reference)\s*:"
+    r"|\b(?:Address|Invoicing(?:\s+Address)?|Invoice\s+Address|Buyer(?:\s+(?:Reference|Address))?)\s*:"
     r"|\bInvoicing\b"
     r"|\b(?:Quote\s*Ref(?:erence)?\.?|License\s*No\.?|Payment\s+(?:Terms?|Mode)"
     r"|Delivery\s+(?:Terms?|Date)|Project|Purchase\s+Summary|Total\s+Purchase\s+Price)\s*:"
@@ -98,6 +98,26 @@ def _native_seller_name(pdf_bytes: bytes) -> str:
     except Exception:
         pass
     return ""
+
+
+def _seller_details(text):
+    """Only explicitly labelled seller contacts belong to a supplier master."""
+    seller = re.search(r'\bSeller\s*:', text, re.IGNORECASE)
+    section = text[seller.start():] if seller else ''
+    section = re.split(r'\b(?:Invoicing|Invoice\s+Address|Buyer|Purchase\s+Summary)\b',
+                       section, maxsplit=1, flags=re.IGNORECASE)[0]
+    def contact(pattern):
+        value = _match(pattern, text)
+        return re.split(r'\b(?:Seller\s+(?:Address|Contact|E[- ]?mail|Phone|Telephone|Reference|Fax)'
+                        r'|Buyer(?:\s+(?:Reference|Address))?|Invoic(?:e|ing)(?:\s+Address)?)\s*:',
+                        value, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return {
+        'vendor_license_no': _match(r'(?:Trade\s+)?License\s+No\.?\s*:?\s*([A-Z0-9][A-Z0-9/-]*)', section),
+        'seller_contact_person': contact(r'Seller\s+Contact(?:\s+Person)?\s*:\s*([^\n]+)'),
+        'seller_email': _match(r'Seller\s+E[- ]?mail\s*:\s*([^\s<>]+@[^\s<>]+)', text),
+        'seller_phone': _match(r'Seller\s+(?:Phone|Telephone)\s*:\s*([+\d][\d ()+.-]+)', text),
+        'seller_address': contact(r'Seller\s+Address\s*:\s*([^\n]+)'),
+    }
 
 
 _PO_SUMMARY_END = (
@@ -198,7 +218,7 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
         "vendor_name": vendor_name,
         "ocr_vendor_name_raw": raw_vendor_name,
         "vendor_name_source": "native" if native_vendor_name else "ocr",
-        "vendor_license_no": _match(r"License\s+No\.\s*(CN-\d+)", text),
+        **_seller_details(text),
         "seller_reference": _match(r"Seller\s+Reference\s*:\s*(Mr\.\s+[A-Za-z ]+)", text),
         "quote_ref": _match(r"Quote\s+Ref\.\s*:\s*([^\n]+)", text),
         "project_number": project_number,
@@ -420,6 +440,8 @@ def _import_signed_po_pdf(
     allow_existing_update: bool = True,
     originating_pr=None,
     extracted_fields=None,
+    register_missing_vendor: bool = False,
+    allow_vendor_create: bool = False,
 ) -> dict[str, Any]:
     if not pdf_bytes.startswith(b"%PDF"):
         raise SignedPOImportError("The uploaded file is not a valid PDF.")
@@ -490,6 +512,18 @@ def _import_signed_po_pdf(
             'method': 'existing purchase order vendor master', 'confidence': 1.0,
         }
         fields['vendor_name'] = po.vendor.name
+    elif register_missing_vendor:
+        from .document_vendor import resolve_document_vendor
+        vendor, registered = resolve_document_vendor(
+            fields, user=user, allow_create=allow_vendor_create,
+            create_missing=not extraction_review_issues and bool(str(fields.get('vendor_name') or '').strip()),
+        )
+        vendor_match = ({
+            'matched': True, 'source': fields['ocr_vendor_name'], 'id': str(vendor.pk),
+            'vendor_code': vendor.vendor_code, 'vendor_name': vendor.name,
+            'method': 'registered from PO source' if registered else 'supplier name or trade license',
+            'registered': registered,
+        } if vendor else {'matched': False, 'source': fields['ocr_vendor_name']})
     elif pr and pr.vendor_id and not originating_pr:
         vendor_match = {
             "matched": True,
@@ -696,6 +730,7 @@ def _import_signed_po_pdf(
         "pr_number": persisted.pr_reference.pr_number if persisted.pr_reference_id else "",
         "vendor_id": str(persisted.vendor_id),
         "vendor_name": persisted.vendor.name,
+        "vendor_registered": vendor_match.get('registered', False),
         "database_verified": True,
         "source_document_url": document.s3_url,
         "reconciliation_required": bool(reconciliation_issues),

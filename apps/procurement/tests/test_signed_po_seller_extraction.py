@@ -46,3 +46,40 @@ class SignedPOSellerExtractionTests(SimpleTestCase):
             fields = self.extract("Seller: Examp1e Natlve Eng1neering LLC\nSeller Reference: Mr. Buyer", document.tobytes())
         self.assertEqual(fields["vendor_name"], "Example Native Engineering LLC")
         self.assertEqual(fields["vendor_name_source"], "native")
+
+    def test_supplier_registration_uses_only_labelled_seller_contact_and_license(self):
+        fields = self.extract(
+            'Seller: Source Supplier LLC\nLicense No.: CN-12345\n'
+            'Seller Contact Person: Supplier Contact\nSeller Email: seller@example.test\n'
+            'Seller Phone: +971 555 1234\nSeller Address: Supplier Building\n'
+            'Invoicing Address: Rejlers Office\nLicense No.: CN-99999\n'
+            'Email: buyer@example.test\nPhone: +971 999 9999\nBuyer Reference: Buyer Person'
+        )
+        self.assertEqual(fields['vendor_license_no'], 'CN-12345')
+        self.assertEqual(fields['seller_contact_person'], 'Supplier Contact')
+        self.assertEqual(fields['seller_email'], 'seller@example.test')
+        self.assertEqual(fields['seller_phone'], '+971 555 1234')
+        self.assertEqual(fields['seller_address'], 'Supplier Building')
+
+    def test_buyer_contact_and_license_are_not_registered_as_supplier_details(self):
+        fields = self.extract(
+            'Seller: Source Supplier LLC\nInvoicing Address: Rejlers Office\n'
+            'License No.: CN-99999\nEmail: buyer@example.test\n'
+            'Phone: +971 999 9999\nBuyer Reference: Buyer Person'
+        )
+        for name in ('vendor_license_no', 'seller_contact_person', 'seller_email', 'seller_phone', 'seller_address'):
+            self.assertEqual(fields[name], '', name)
+        generic_buyer = self.extract('Seller: Source Supplier LLC\nBuyer: Rejlers\nLicense No.: CN-99999')
+        self.assertEqual(generic_buyer['vendor_name'], 'Source Supplier LLC')
+        self.assertEqual(generic_buyer['vendor_license_no'], '')
+
+    def test_same_line_neighbouring_fields_and_generic_buyer_stop_supplier_details(self):
+        fields = self.extract(
+            'Seller: Source Supplier LLC\n'
+            'Seller Contact: Jane Supplier Seller Email: seller@example.test\n'
+            'Seller Address: Office 4 Buyer Reference: Alice Buyer\n'
+            'Buyer: Rejlers\nLicense No.: CN-99999'
+        )
+        self.assertEqual(fields['seller_contact_person'], 'Jane Supplier')
+        self.assertEqual(fields['seller_address'], 'Office 4')
+        self.assertEqual(fields['vendor_license_no'], '')
