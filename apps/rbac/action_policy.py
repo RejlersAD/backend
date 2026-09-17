@@ -122,7 +122,7 @@ RECORD_SCOPED_ACTIONS = {
         'uploaded_documents', 'uploaded_document_content',
     },
     ('apps.procurement.views', 'PurchaseRequisitionViewSet'): {
-        'retrieve', 'uploaded_document_content', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
+        'retrieve', 'uploaded_document_content', 'approval_record_pdf', 'pending_for_me', 'pm_approve', 'pm_reject', 'vp_approve', 'vp_reject',
         'eng_manager_approve', 'eng_manager_reject', 'manager_projects_approve',
         'manager_projects_reject', 'process_dynamic_approval', 'process_dynamic_rejection',
     },

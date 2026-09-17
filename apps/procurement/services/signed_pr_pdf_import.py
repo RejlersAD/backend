@@ -1143,7 +1143,8 @@ def import_signed_pr_pdf(
             # Never inspect, overwrite or delete an unvalidated historical key.
             effective_date = fields["issued_date"] or timezone.localdate()
             safe_name = build_procurement_pdf_filename(pr.pr_number, "pr", effective_date)
-            key = default_storage.save(
+            from .atomic_source_import import save_import_source
+            key = save_import_source(default_storage,
                 f"procurement/signed_requisitions/{pr.pk}/{effective_date.year}/{safe_name}",
                 ContentFile(pdf_bytes),
             )

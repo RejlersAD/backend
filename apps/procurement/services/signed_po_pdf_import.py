@@ -236,6 +236,7 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
 
 
 def _store_source_pdf(pdf_bytes, fields, filename, user):
+    from .atomic_source_import import save_import_source
     digest = hashlib.sha256(pdf_bytes).hexdigest()
     document = PODocument.objects.filter(extracted_data__source_sha256=digest).filter(
         Q(uploaded_by=user) | Q(confirmed_po__isnull=False),
@@ -244,7 +245,7 @@ def _store_source_pdf(pdf_bytes, fields, filename, user):
         return document, digest
     source_date = fields["po_date"] or timezone.localdate()
     safe_name = build_procurement_pdf_filename(fields["po_number"], "po", source_date)
-    key = default_storage.save(
+    key = save_import_source(default_storage,
         f"procurement/signed_documents/{source_date.year}/{safe_name}", ContentFile(pdf_bytes),
     )
     return PODocument.objects.create(
@@ -598,6 +599,11 @@ def _import_signed_po_pdf(
         if fields['total_amount'] else Decimal('0.00')
     )
     po.currency = fields["currency"]
+    if fields.get('canonical_financials'):
+        financials = fields['canonical_financials']
+        po.net_amount = Decimal(financials['net_amount'])
+        po.total_amount = Decimal(financials['total_amount'])
+        po.vat_basis = financials['vat_basis']
     po.payment_terms = fields["payment_terms"]
     po.payment_mode = fields["payment_mode"] or "Bank Transfer"
     po.delivery_terms = fields["delivery_terms"]
@@ -744,7 +750,8 @@ def _import_signed_po_pdf(
 
 
 @transaction.atomic
-def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, **options) -> dict[str, Any]:
+def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, reviewed_fields=None,
+                         require_complete=False, **options) -> dict[str, Any]:
     """Keep an explicitly selected PR and its resulting PO in one transaction."""
     from .procurement_lifecycle import ProcurementDeleteConflict
 
@@ -759,6 +766,31 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, *
     # Keep the established PR -> PO lock order used by manual link actions.
     pr = _originating_requisition(origin_id) if origin_id else None
     fields = extract_signed_po_fields(pdf_bytes, filename)
+    if reviewed_fields is not None:
+        from .po_document_review import reviewed_document_fields
+        fields = reviewed_document_fields(_serializable_fields(fields), reviewed_fields, user=user)
+        fields['extraction_reviewed'] = True
+        for key in ('po_date', 'expected_delivery'):
+            if isinstance(fields.get(key), str):
+                fields[key] = _date(fields[key])
+        if fields.get('canonical_financials'):
+            financials = fields['canonical_financials']
+            fields.update(total_amount=Decimal(financials['net_amount']), tax_amount=Decimal(financials['tax_amount']),
+                          gross_amount=Decimal(financials['total_amount']))
+        for key in ('total_amount', 'tax_amount', 'gross_amount'):
+            fields[key] = Decimal(str(fields.get(key) or '0'))
+    if require_complete:
+        from rest_framework.exceptions import ValidationError
+        issues = _extraction_review_issues(fields)
+        if issues:
+            raise ValidationError({'po_reviewed_fields': issues})
+        if not fields.get('po_date'):
+            raise ValidationError({'po_date': 'Enter the purchase order date from the PDF.'})
+        if not str(fields.get('summary') or '').strip():
+            raise ValidationError({'summary': 'Enter the purchase description from the PDF.'})
+        currency = str(fields.get('currency') or '').strip().upper()
+        if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+            raise ValidationError({'currency': 'Enter a three-letter purchase order currency.'})
     if pr:
         candidates = list(PurchaseOrder.objects.select_for_update().filter(
             po_number__in={fields['po_number'], fields['source_po_number']},
@@ -772,7 +804,7 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, *
         if retained and retained.confirmed_po_id and (existing is None or retained.confirmed_po_id != existing.pk):
             raise ProcurementDeleteConflict('This original PDF is already linked to another purchase order.')
         fields['originating_pr_id'] = str(pr.pk)
-        if retained and not retained.confirmed_po_id and previous.get('originating_pr_id'):
+        if retained and not retained.confirmed_po_id and previous.get('originating_pr_id') and reviewed_fields is None:
             # Identical bytes already have a retained review. Keep corrections,
             # VAT confirmation and signature evidence; complete via reconcile.
             return {
