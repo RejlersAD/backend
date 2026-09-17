@@ -29,7 +29,9 @@ def employee_display_names(users):
         try:
             from apps.hr_core.models import EmployeeMaster
 
-            for employee in EmployeeMaster.objects.filter(user_id__in=user_ids):
+            for employee in EmployeeMaster.objects.filter(user_id__in=user_ids).only(
+                'user_id', 'first_name', 'last_name', 'preferred_given_name',
+            ):
                 name = _clean(employee.get_display_name())
                 if name:
                     names[str(employee.user_id)] = name
@@ -43,7 +45,7 @@ def employee_display_names(users):
 
                 records = OnboardingRecord.objects.filter(
                     user_id__in=missing_ids,
-                ).exclude(employee_name='').order_by('user_id', '-updated_at')
+                ).exclude(employee_name='').only('user_id', 'employee_name').order_by('user_id', '-updated_at')
                 for record in records:
                     names.setdefault(str(record.user_id), _clean(record.employee_name))
             except Exception:

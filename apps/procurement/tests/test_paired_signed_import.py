@@ -130,7 +130,7 @@ class PairedSignedImportTests(TestCase):
     def test_pair_preview_returns_independent_po_evidence_without_storing_anything(self):
         evidence = {'approved_by_name': 'Preview PO Signer', 'signature_detected': True,
                     'stamp_detected': False, 'issues': ['Verify the source PDF.']}
-        with patch('apps.procurement.services.paired_signed_import.preview_signed_po_approval',
+        with patch('apps.procurement.services.po_pdf_approval.preview_signed_po_approval',
                    return_value={'approval_evidence': evidence, 'page_count': 2}):
             response = self.upload(preview_only='true')
         self.assertEqual(response.status_code, 200, response.data)
@@ -343,7 +343,7 @@ class PairedSignedImportTests(TestCase):
         original = self.upload(paired=False)
         pr = PurchaseRequisition.objects.get(pk=original.data['pr_id'])
         self.revoke('procurement_requisitions', 'read')
-        with patch('apps.procurement.services.paired_signed_import.preview_signed_po_approval',
+        with patch('apps.procurement.services.po_pdf_approval.preview_signed_po_approval',
                    return_value={'approval_evidence': {}, 'page_count': 2}):
             preview = self.upload(preview_only='true', originating_pr_id=str(pr.pk))
         self.assertEqual(preview.status_code, 200, preview.data)

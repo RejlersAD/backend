@@ -7,25 +7,21 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition
 from .atomic_source_import import atomic_source_import
-from .po_pdf_approval import preview_signed_po_approval
 from .po_excel_import import canonical_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict
 from .signed_po_pdf_import import (
-    SignedPOImportError, _date, _extraction_review_issues, _serializable_fields,
-    ensure_retained_po_source, extract_signed_po_fields, import_signed_po_pdf,
+    SignedPOImportError, _date, ensure_retained_po_source, import_signed_po_pdf, preview_signed_po_pdf,
 )
 from .signed_pr_pdf_import import import_signed_pr_pdf, preview_signed_pr_pdf
 
 
 def preview_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, expected_pr_number=''):
     result = preview_signed_pr_pdf(pr_bytes, filename=pr_filename, expected_pr_number=expected_pr_number)
-    fields = extract_signed_po_fields(po_bytes, po_filename)
-    approval = preview_signed_po_approval(po_bytes)
-    issues = _extraction_review_issues(fields)
+    preview = preview_signed_po_pdf(po_bytes, filename=po_filename)
     result['po_preview'] = {
-        'extracted_data': _serializable_fields(fields), 'approval_evidence': approval['approval_evidence'],
-        'mapping_issues': issues, 'reconciliation_issues': issues,
-        'page_count': approval['page_count'],
+        key: preview[key] for key in (
+            'extracted_data', 'approval_evidence', 'mapping_issues', 'reconciliation_issues', 'page_count',
+        )
     }
     return result
 

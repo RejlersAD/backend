@@ -13,7 +13,9 @@ from apps.rbac.action_policy import record_workflow_not_denied, request_action_a
 
 from ..models import PurchaseOrder
 from .purchase_order_approvals import _entry_matches_user
-from .purchase_order_sources import is_safe_source_storage_key, uploaded_purchase_order_sources
+from .purchase_order_sources import (
+    confirmed_purchase_order_documents, is_safe_source_storage_key, uploaded_purchase_order_sources,
+)
 from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
 from .requisition_workflow import RequisitionWorkflowService
 
@@ -83,9 +85,7 @@ def _pr_source(pr):
     return {'storage_key': requisition_source_key(pr, selected), 'sha256': selected.get('sha256')}
 
 
-def _po_source(order):
-    documents = list(order.source_documents.filter(document_type__in=('purchase_order', 'unknown'))
-                     .only('id', 's3_key', 'extracted_data', 'created_at').order_by('-created_at', '-id'))
+def _po_source(order, documents):
     by_id = {str(document.pk): document for document in documents}
     # A signed attachment's digest can identify a current re-upload of an older
     # document, but its ID must belong to this order's confirmed relation.
@@ -100,7 +100,7 @@ def _po_source(order):
     selected = selected or (documents[0] if documents else None)
     if selected:
         return {'storage_key': selected.s3_key, 'sha256': (selected.extracted_data or {}).get('source_sha256')}
-    legacy = uploaded_purchase_order_sources(order)
+    legacy = uploaded_purchase_order_sources(order, documents=documents)
     if not legacy or not legacy[-1].get('storage_key'):
         raise ApprovalRecordSourceMissing('linked PO')
     return legacy[-1]
@@ -129,9 +129,9 @@ def _original_bytes(source, label):
     return content
 
 
-def _order_without_uploaded_pdf(order):
+def _order_without_uploaded_pdf(order, documents):
     """App/Excel data may be rendered; evidence of an uploaded PDF wins."""
-    if order.source_documents.filter(document_type__in=('purchase_order', 'unknown')).exists():
+    if documents:
         return False
     if any(isinstance(row, dict) and row.get('type') == 'signed_purchase_order_pdf'
            for row in (order.attachments or [])):
@@ -152,15 +152,16 @@ def build_requisition_approval_record_pdf(pr, request, *, include_metadata=False
     _check_read(request, pr)
     # Query the actual relation afresh; cached PR metadata and editable number
     # references cannot authorize another order's original document.
-    order = PurchaseOrder.objects.filter(pr_reference_id=pr.pk).order_by('-created_at', '-pk').first()
+    order = PurchaseOrder.objects.select_related('vendor').filter(pr_reference_id=pr.pk).order_by('-created_at', '-pk').first()
     if order:
         _check_read(request, order, order=True)
     metadata = {'po_source': 'none', 'attachment_warning_count': 0}
-    native = bool(order and _order_without_uploaded_pdf(order))
+    documents = list(confirmed_purchase_order_documents(order, include_evidence=True)) if order else []
+    native = bool(order and _order_without_uploaded_pdf(order, documents))
     try:
         sources = [('PR', _pr_source(pr))]
         if order and not native:
-            sources.append(('linked PO', _po_source(order)))
+            sources.append(('linked PO', _po_source(order, documents)))
             metadata['po_source'] = 'uploaded_original'
         originals = [(label, _original_bytes(source, label)) for label, source in sources]
     except ApprovalRecordSourceMissing as error:

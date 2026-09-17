@@ -11,7 +11,17 @@ def is_safe_source_storage_key(key):
             and str(PurePosixPath(key)) == key)
 
 
-def uploaded_purchase_order_sources(order):
+def confirmed_purchase_order_documents(order, *, include_evidence=False):
+    """Load confirmed original candidates once for source selection and metadata."""
+    fields = ['id', 'confirmed_po_id', 'document_type', 'original_filename', 's3_key', 'created_at']
+    if include_evidence:
+        fields.append('extracted_data')
+    return order.source_documents.filter(
+        document_type__in=('purchase_order', 'unknown'),
+    ).only(*fields).order_by('-created_at', '-id')
+
+
+def uploaded_purchase_order_sources(order, *, documents=None):
     """Return source metadata and private storage keys without regenerating PDFs.
 
     Confirmed document links are authoritative. Older, explicitly signed PO
@@ -21,9 +31,9 @@ def uploaded_purchase_order_sources(order):
     sources = []
     document_ids = set()
     storage_keys = set()
-    for document in order.source_documents.filter(
-        document_type__in=('purchase_order', 'unknown'),
-    ).only('id', 'original_filename', 's3_key', 'created_at').order_by('-created_at', '-id'):
+    for document in confirmed_purchase_order_documents(order) if documents is None else documents:
+        if document.confirmed_po_id != order.pk or document.document_type not in ('purchase_order', 'unknown'):
+            continue
         document_ids.add(str(document.pk))
         if document.s3_key and document.s3_key in storage_keys:
             continue

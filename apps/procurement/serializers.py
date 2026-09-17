@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import Q
+from django.db.models.manager import BaseManager
 from django.urls import reverse
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
@@ -171,6 +172,16 @@ class VendorICVSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class PurchaseRequisitionListSerializer(serializers.ListSerializer):
+    def to_representation(self, data):
+        instances = list(data.all() if isinstance(data, BaseManager) else data)
+        self.child._display_data = self.child._prepare_display_data(instances)
+        try:
+            return super().to_representation(instances)
+        finally:
+            del self.child._display_data
+
+
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     """
     Serializer for Purchase Requisition
@@ -234,9 +245,49 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         'po_link_previous_status',
         '_retained_attachment_sources',
     )
+
+    DISPLAY_USER_FIELDS = (
+        'issued_by', 'requested_by', 'approved_by', 'pm_name',
+        'eng_manager_name', 'manager_projects_name', 'vp_op_name',
+    )
+
+    @classmethod
+    def _prepare_display_data(cls, instances):
+        """Batch presentation identities for this serialization, never access checks."""
+        related_users, identifiers, emails = {}, set(), set()
+        for instance in instances:
+            for field in cls.DISPLAY_USER_FIELDS:
+                if getattr(instance, f'{field}_id', None):
+                    user = getattr(instance, field)
+                    related_users[str(user.pk)] = user
+            workflow = instance.approval_workflow_config
+            for stage in workflow if isinstance(workflow, list) else []:
+                if not isinstance(stage, dict):
+                    continue
+                identifier = stage.get('user_id') or stage.get('approver_id')
+                if str(identifier or '').isdigit():
+                    identifiers.add(identifier)
+                email = str(stage.get('user_email') or stage.get('approver_email') or '').strip().lower()
+                if email:
+                    emails.add(email)
+        workflow_users = list(get_user_model().objects.filter(
+            Q(pk__in=identifiers) | Q(email__in=emails),
+        )) if identifiers or emails else []
+        users_by_id = {str(user.pk): user for user in workflow_users}
+        users_by_email = {str(user.email or '').strip().lower(): user for user in workflow_users}
+        names = employee_display_names({**related_users, **users_by_id}.values())
+        return names, users_by_id, users_by_email
+
+    def _display_name(self, user):
+        if user is None:
+            return ''
+        if hasattr(self, '_display_data'):
+            return self._display_data[0].get(str(user.pk), 'Assigned Employee')
+        return employee_display_name(user)
     
     class Meta:
         model = PurchaseRequisition
+        list_serializer_class = PurchaseRequisitionListSerializer
         extra_kwargs = {
             # Validation below is case-insensitive and excludes the edited draft.
             'pr_number': {'validators': []},
@@ -638,29 +689,29 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
 
     def get_issued_by_name(self, obj):
-        return employee_display_name(obj.issued_by) if obj.issued_by_id else ''
+        return self._display_name(obj.issued_by) if obj.issued_by_id else ''
 
     def get_requested_by_name(self, obj):
         requester = obj.requested_by or obj.issued_by
-        return employee_display_name(requester) if requester else ''
+        return self._display_name(requester)
 
     def get_requester_name(self, obj):
         return self.get_requested_by_name(obj)
 
     def get_approved_by_name(self, obj):
-        return employee_display_name(obj.approved_by) if obj.approved_by_id else ''
+        return self._display_name(obj.approved_by) if obj.approved_by_id else ''
 
     def get_pm_name_display(self, obj):
-        return employee_display_name(obj.pm_name) if obj.pm_name_id else ''
+        return self._display_name(obj.pm_name) if obj.pm_name_id else ''
 
     def get_eng_manager_name_display(self, obj):
-        return employee_display_name(obj.eng_manager_name) if obj.eng_manager_name_id else ''
+        return self._display_name(obj.eng_manager_name) if obj.eng_manager_name_id else ''
 
     def get_manager_projects_name_display(self, obj):
-        return employee_display_name(obj.manager_projects_name) if obj.manager_projects_name_id else ''
+        return self._display_name(obj.manager_projects_name) if obj.manager_projects_name_id else ''
 
     def get_vp_op_name_display(self, obj):
-        return employee_display_name(obj.vp_op_name) if obj.vp_op_name_id else ''
+        return self._display_name(obj.vp_op_name) if obj.vp_op_name_id else ''
 
     def get_status_display(self, obj):
         return canonicalize_pr_status(obj.status).replace('_', ' ').title()
@@ -698,27 +749,20 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         }
 
     def to_representation(self, instance):
+        if hasattr(self, '_display_data'):
+            return self._representation(instance)
+        self._display_data = self._prepare_display_data([instance])
+        try:
+            return self._representation(instance)
+        finally:
+            del self._display_data
+
+    def _representation(self, instance):
         data = super().to_representation(instance)
         data['status'] = canonicalize_pr_status(instance.status)
         workflow = data.get('approval_workflow_config')
         if isinstance(workflow, list):
-            User = get_user_model()
-            user_ids = {
-                stage.get('user_id') or stage.get('approver_id')
-                for stage in workflow if isinstance(stage, dict)
-            }
-            user_emails = {
-                str(stage.get('user_email') or stage.get('approver_email') or '').strip().lower()
-                for stage in workflow if isinstance(stage, dict)
-            }
-            valid_user_ids = [value for value in user_ids if str(value or '').isdigit()]
-            valid_emails = [value for value in user_emails if value]
-            users = list(User.objects.filter(
-                Q(pk__in=valid_user_ids) | Q(email__in=valid_emails)
-            ))
-            users_by_id = {str(user.pk): user for user in users}
-            users_by_email = {str(user.email or '').strip().lower(): user for user in users}
-            names = employee_display_names(users)
+            names, users_by_id, users_by_email = self._display_data
             normalized = []
             for raw_stage in workflow:
                 if not isinstance(raw_stage, dict):
