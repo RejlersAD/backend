@@ -59,7 +59,7 @@ def _reason(value, *, required=False):
     return reason
 
 
-def _suggest_projects(record_type, row, projects, masters, orders_by_number):
+def _suggest_projects(record_type, row, projects, masters, orders_by_number, *, exact_candidate=None):
     """Explain real reference evidence without auto-linking or invented confidence."""
     evidence = {}
     strengths = {'high': 3, 'medium': 2, 'low': 1}
@@ -74,6 +74,9 @@ def _suggest_projects(record_type, row, projects, masters, orders_by_number):
             item['match_strength'] = strength
         if reason not in item['reasons']:
             item['reasons'].append(reason)
+
+    if exact_candidate is not None:
+        add(exact_candidate, 'high', f'Saved project references resolve to {exact_candidate.code}; confirm this link.')
 
     codes, names, text = [], [], ''
     if record_type == 'procurement_project':
@@ -109,9 +112,26 @@ def _suggest_projects(record_type, row, projects, masters, orders_by_number):
 
     normalized_codes = {normalize_project_code(code) for code in codes if code}
     normalized_names = {normalize_project_code(name) for name in names if name}
+    numeric_codes = defaultdict(list)
+    numeric_projects = defaultdict(list)
+    for code in codes:
+        key = _numeric_project_suggestion_key(code)
+        if key:
+            numeric_codes[key].append(str(code).strip())
     for project in projects:
+        key = _numeric_project_suggestion_key(project.code)
+        if key:
+            numeric_projects[key].append(project)
+    for project in projects:
+        numeric_key = _numeric_project_suggestion_key(project.code)
         if normalize_project_code(project.code) in normalized_codes:
             add(project, 'high', f'Exact project code reference: {project.code}.')
+        elif numeric_key and numeric_key in numeric_codes:
+            references = ', '.join(dict.fromkeys(numeric_codes[numeric_key]))
+            reason = f'Numeric formatting differs: source {references}, project {project.code}. Confirm against the original record.'
+            if len(numeric_projects[numeric_key]) > 1:
+                reason += ' Multiple project codes share this numeric form; a manual choice is required.'
+            add(project, 'medium', reason)
         elif text and re.search(r'(?<![\w-])' + re.escape(project.code) + r'(?![\w-])', text, re.IGNORECASE):
             add(project, 'medium', f'Project code {project.code} appears in the record description.')
         if normalize_project_code(project.name) in normalized_names:
@@ -130,6 +150,16 @@ def _suggest_projects(record_type, row, projects, masters, orders_by_number):
 def normalize_project_code(value) -> str:
     """Normalize harmless formatting without changing project-code meaning."""
     return ' '.join(str(value or '').strip().casefold().split())
+
+
+def _numeric_project_suggestion_key(value):
+    """Explain spreadsheet decimal formatting without broadening exact matches.
+
+    Keep leading zeros and alphanumeric codes significant. This helper is used
+    only for suggestions, never for automatic linking or stored/displayed codes.
+    """
+    match = re.fullmatch(r'([0-9]+)(?:\.0+)?', normalize_project_code(value))
+    return match.group(1) if match else None
 
 
 def extract_requisition_project_codes(project='', project_details=None) -> list[str]:
@@ -208,8 +238,13 @@ def resolve_order_enterprise_project(*, project=None, project_number='', requisi
     return _unique_candidate(candidates)
 
 
-def build_project_relationship_report(*, apply=False, sample_limit=50):
-    """Report and optionally apply safe, unambiguous canonical links."""
+def build_project_relationship_report(*, apply=False, sample_limit=50, include_resolvable=False):
+    """Report and optionally apply safe, unambiguous canonical links.
+
+    The interactive queue includes unsaved exact candidates for confirmation.
+    Default command-line reporting/apply semantics remain unchanged.
+    """
+    include_resolvable = include_resolvable and not apply
     index = _enterprise_index()
     report = {
         'mode': 'apply' if apply else 'report',
@@ -222,14 +257,17 @@ def build_project_relationship_report(*, apply=False, sample_limit=50):
         'changes_applied': 0,
     }
 
-    def unresolved(kind, object_id, reference, reason):
+    def unresolved(kind, object_id, reference, reason, candidate=None):
         if len(report['unresolved']) < sample_limit:
-            report['unresolved'].append({
+            item = {
                 'record_type': kind,
                 'id': str(object_id),
                 'reference': reference,
                 'reason': reason,
-            })
+            }
+            if candidate is not None:
+                item['candidate_project_id'] = str(candidate.pk)
+            report['unresolved'].append(item)
 
     context = transaction.atomic() if apply else nullcontext()
     with context:
@@ -247,6 +285,8 @@ def build_project_relationship_report(*, apply=False, sample_limit=50):
             if candidate:
                 master_resolved += 1
                 master_candidates[str(row.pk)] = candidate
+                if include_resolvable and row.enterprise_project_id is None:
+                    unresolved('procurement_project', row.pk, row.project_number, 'exact_match_available', candidate)
                 if apply and row.enterprise_project_id != candidate.pk:
                     row.enterprise_project = candidate
                     row.save(update_fields=['enterprise_project', 'updated_at'])
@@ -273,6 +313,10 @@ def build_project_relationship_report(*, apply=False, sample_limit=50):
             if candidate:
                 pr_resolved += 1
                 pr_candidates[str(row.pk)] = candidate
+                if include_resolvable and row.enterprise_project_id is None:
+                    unresolved('purchase_requisition', row.pk,
+                               extract_requisition_project_codes(row.project, row.project_details),
+                               'exact_match_available', candidate)
                 if apply and row.enterprise_project_id != candidate.pk:
                     row.enterprise_project = candidate
                     row.save(update_fields=['enterprise_project', 'updated_at'])
@@ -305,6 +349,8 @@ def build_project_relationship_report(*, apply=False, sample_limit=50):
                 candidate, reason = _unique_candidate(candidates)
             if candidate:
                 po_resolved += 1
+                if include_resolvable and row.enterprise_project_id is None:
+                    unresolved('purchase_order', row.pk, row.project_number, 'exact_match_available', candidate)
                 if apply and row.enterprise_project_id != candidate.pk:
                     row.enterprise_project = candidate
                     row.save(update_fields=['enterprise_project', 'updated_at'])
@@ -314,15 +360,15 @@ def build_project_relationship_report(*, apply=False, sample_limit=50):
 
         report['procurement_projects'] = {
             'total': len(masters), 'linked_before': master_linked_before,
-            'resolvable': master_resolved, 'unresolved': len(masters) - master_resolved,
+            'resolvable': master_resolved, 'unresolved': len(masters) - (master_linked_before if include_resolvable else master_resolved),
         }
         report['purchase_requisitions'] = {
             'total': len(requisitions), 'linked_before': pr_linked_before,
-            'resolvable': pr_resolved, 'unresolved': len(requisitions) - pr_resolved,
+            'resolvable': pr_resolved, 'unresolved': len(requisitions) - (pr_linked_before if include_resolvable else pr_resolved),
         }
         report['purchase_orders'] = {
             'total': len(orders), 'linked_before': po_linked_before,
-            'resolvable': po_resolved, 'unresolved': len(orders) - po_resolved,
+            'resolvable': po_resolved, 'unresolved': len(orders) - (po_linked_before if include_resolvable else po_resolved),
         }
 
     report['unresolved_sample_count'] = len(report['unresolved'])
@@ -331,7 +377,7 @@ def build_project_relationship_report(*, apply=False, sample_limit=50):
 
 def build_project_reconciliation_payload(*, sample_limit=1000):
     """Return the operator-facing reconciliation queue and canonical choices."""
-    report = build_project_relationship_report(apply=False, sample_limit=sample_limit)
+    report = build_project_relationship_report(apply=False, sample_limit=sample_limit, include_resolvable=True)
     master_by_id = {
         str(row.pk): row
         for row in Project.objects.select_related('enterprise_project')
@@ -348,6 +394,7 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
     }
 
     rows = []
+    exact_candidate_ids = {}
     for item in report['unresolved']:
         record_id = item['id']
         record_type = item['record_type']
@@ -375,8 +422,9 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
                 currency = row.currency
         if row is None:
             continue
+        exact_candidate_ids[(record_type, record_id)] = item.get('candidate_project_id')
         rows.append({
-            **item,
+            **{key: value for key, value in item.items() if key != 'candidate_project_id'},
             'identifier': identifier,
             'title': title,
             'amount': amount,
@@ -455,6 +503,7 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
         pass
 
     projects = list(EnterpriseProject.objects.filter(is_deleted=False).order_by('code'))
+    projects_by_id = {str(project.pk): project for project in projects}
     canonical_projects = [_project_choice(project) for project in projects]
     record_maps = {
         'procurement_project': master_by_id, 'purchase_requisition': pr_by_id,
@@ -474,6 +523,7 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
         source = record_maps[item['record_type']][item['id']]
         item['suggested_projects'] = _suggest_projects(
             item['record_type'], source, projects, master_by_id, orders_by_number,
+            exact_candidate=projects_by_id.get(exact_candidate_ids.get((item['record_type'], item['id']))),
         )
         audit = latest_audit.get((item['record_type'], item['id']))
         item['exception'] = {

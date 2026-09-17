@@ -10,15 +10,18 @@ from django.core.exceptions import ValidationError
 from django.db import connection, models
 from django.db.migrations.state import ModelState, ProjectState
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework.test import APIClient
 
 from apps.core.project_models import Project as EnterpriseProject
 from apps.finance.models import Invoice, InvoicePurchaseOrderAllocation
+from apps.procurement.models import Project as ProcurementProject
 from apps.procurement.models import ProjectRelationshipResolution, PurchaseOrder, PurchaseRequisition, Vendor
 from apps.procurement.services.project_relationships import (
-    build_project_reconciliation_payload, resolve_project_relationship, save_project_relationship_exception,
+    build_project_reconciliation_payload, build_project_relationship_report,
+    normalize_project_code, resolve_project_relationship, save_project_relationship_exception,
 )
 from apps.procurement.views import ProjectViewSet
 from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, RolePermission, UserProfile, UserRole
@@ -69,6 +72,120 @@ class ReconciliationPayloadTests(TestCase):
             self.assertNotIn('confidence', suggestion)
         requisition.refresh_from_db()
         self.assertIsNone(requisition.enterprise_project_id)
+
+    def test_unlinked_exact_match_remains_in_queue_until_confirmed(self):
+        requisition = self.requisition(project=self.alpha.code)
+        self.requisition(pr_number='RECON-ALREADY-LINKED', enterprise_project=self.alpha)
+        payload = build_project_reconciliation_payload()
+        self.assertEqual(len(payload['unresolved']), 1)
+        row = payload['unresolved'][0]
+        self.assertEqual(row['id'], str(requisition.pk))
+        self.assertEqual(row['reason'], 'exact_match_available')
+        self.assertIsNone(row['current_project'])
+        self.assertNotIn('candidate_project_id', row)
+        self.assertEqual(row['suggested_projects'][0]['id'], str(self.alpha.pk))
+        self.assertEqual(row['suggested_projects'][0]['match_strength'], 'high')
+        self.assertEqual(payload['summary']['purchase_requisitions']['unresolved'], 1)
+        self.assertEqual(payload['summary']['unresolved_total'], 1)
+        self.assertEqual(payload['summary']['sample_count'], 1)
+        self.assertTrue(payload['summary']['sample_complete'])
+        requisition.refresh_from_db()
+        self.assertIsNone(requisition.enterprise_project_id)
+        self.assertFalse(ProjectRelationshipResolution.objects.exists())
+
+        resolve_project_relationship(record_type='purchase_requisition', record_id=requisition.pk,
+            enterprise_project_id=self.alpha.pk, expected_project_id=None, user=None, reason='Confirmed source code')
+        payload = build_project_reconciliation_payload()
+        self.assertEqual(payload['unresolved'], [])
+        self.assertEqual(payload['summary']['unresolved_total'], 0)
+
+    def test_unsaved_exact_master_pr_po_chain_is_visible_with_explained_candidates(self):
+        master = ProcurementProject.objects.create(project_number=self.alpha.code, project_name='Legacy Alpha')
+        requisition = self.requisition(project_details=[{'project_id': str(master.pk)}])
+        order = PurchaseOrder.objects.create(po_number='RECON-EXACT-CHAIN', vendor=self.vendor,
+            title='Inherited project reference', total_amount=200, pr_reference=requisition)
+        payload = build_project_reconciliation_payload()
+        self.assertEqual({row['id'] for row in payload['unresolved']}, {str(record.pk) for record in (master, requisition, order)})
+        for row in payload['unresolved']:
+            self.assertEqual(row['reason'], 'exact_match_available')
+            self.assertEqual(row['suggested_projects'][0]['id'], str(self.alpha.pk))
+            self.assertTrue(row['suggested_projects'][0]['reasons'])
+        for record in (master, requisition, order):
+            record.refresh_from_db()
+            self.assertIsNone(record.enterprise_project_id)
+        self.assertEqual(payload['summary']['unresolved_total'], 3)
+
+    def test_sample_counts_include_exact_candidates_and_unmatched_rows_honestly(self):
+        self.requisition(project=self.alpha.code)
+        self.requisition(pr_number='RECON-EXACT-TWO', project=self.beta.code)
+        PurchaseOrder.objects.create(po_number='RECON-NO-PROJECT', title='No reference', vendor=self.vendor, total_amount=30)
+        self.invoice()
+        payload = build_project_reconciliation_payload(sample_limit=1)
+        summary = payload['summary']
+        self.assertEqual(summary['unresolved_total'], 4)
+        self.assertEqual(summary['purchase_requisitions']['unresolved'], 2)
+        self.assertEqual(summary['purchase_orders']['unresolved'], 1)
+        self.assertEqual(summary['sample_count'], len(payload['unresolved']))
+        self.assertEqual(summary['sample_count'], 2)
+        self.assertFalse(summary['sample_complete'])
+        self.assertEqual(summary['suggested_record_count'], 1)
+        self.assertEqual(sum(row['record_count'] for row in summary['unresolved_amounts_by_currency']), 2)
+
+    def test_cli_report_and_explicit_apply_keep_existing_exact_code_semantics(self):
+        requisition = self.requisition(project=self.alpha.code)
+        report = build_project_relationship_report(apply=False)
+        self.assertEqual(report['unresolved'], [])
+        self.assertEqual(report['purchase_requisitions']['resolvable'], 1)
+        self.assertEqual(report['purchase_requisitions']['unresolved'], 0)
+        self.assertEqual(report['changes_applied'], 0)
+        requisition.refresh_from_db()
+        self.assertIsNone(requisition.enterprise_project_id)
+        applied = build_project_relationship_report(apply=True)
+        self.assertEqual(applied['changes_applied'], 1)
+        requisition.refresh_from_db()
+        self.assertEqual(requisition.enterprise_project_id, self.alpha.pk)
+
+    def test_numeric_decimal_format_is_only_a_suggestion_and_preserves_source_codes(self):
+        project = EnterpriseProject.objects.create(code='420123', name='Numeric project')
+        requisition = self.requisition(project='420123.0')
+        row = self.row(requisition)
+        self.assertEqual(row['reason'], 'no_exact_match')
+        suggestion = row['suggested_projects'][0]
+        self.assertEqual(suggestion['id'], str(project.pk))
+        self.assertEqual(suggestion['code'], '420123')
+        self.assertEqual(suggestion['match_strength'], 'medium')
+        self.assertTrue(any('Numeric formatting differs: source 420123.0, project 420123' in reason for reason in suggestion['reasons']))
+        self.assertEqual(build_project_relationship_report(apply=True)['changes_applied'], 0)
+        requisition.refresh_from_db()
+        self.assertEqual(requisition.project, '420123.0')
+        self.assertIsNone(requisition.enterprise_project_id)
+        self.assertEqual(normalize_project_code('420123.0'), '420123.0')
+
+    def test_numeric_collisions_remain_multiple_manual_suggestions(self):
+        candidates = [EnterpriseProject.objects.create(code=code, name='Numeric project') for code in ('420123', '420123.0')]
+        requisition = self.requisition(project='420123.00')
+        row = self.row(requisition)
+        self.assertEqual(row['reason'], 'no_exact_match')
+        self.assertEqual({item['id'] for item in row['suggested_projects']}, {str(project.pk) for project in candidates})
+        for suggestion in row['suggested_projects']:
+            self.assertEqual(suggestion['match_strength'], 'medium')
+            self.assertTrue(any('Multiple project codes share this numeric form' in reason for reason in suggestion['reasons']))
+        self.assertEqual(build_project_relationship_report(apply=True)['changes_applied'], 0)
+        requisition.refresh_from_db()
+        self.assertIsNone(requisition.enterprise_project_id)
+
+    def test_numeric_suggestions_keep_leading_zeros_and_do_not_rewrite_literal_exact_codes(self):
+        EnterpriseProject.objects.create(code='420123', name='Unpadded project')
+        padded = EnterpriseProject.objects.create(code='00420123', name='Padded project')
+        literal = EnterpriseProject.objects.create(code='420123.0', name='Literal decimal code')
+        requisition = self.requisition(project='00420123.0')
+        self.assertEqual([item['id'] for item in self.row(requisition)['suggested_projects']], [str(padded.pk)])
+        exact = self.requisition(pr_number='RECON-EXACT-DECIMAL', project='420123.0')
+        row = self.row(exact)
+        self.assertEqual(row['reason'], 'exact_match_available')
+        self.assertEqual(row['suggested_projects'][0]['id'], str(literal.pk))
+        self.assertEqual(row['suggested_projects'][0]['match_strength'], 'high')
+        self.assertEqual(row['reference'], ['420123.0'])
 
     def test_suggestions_are_limited_and_absent_when_there_is_no_evidence(self):
         projects = [self.alpha, self.beta] + [EnterpriseProject.objects.create(code=f'X-{index}', name=f'Other {index}') for index in range(2)]
@@ -189,6 +306,23 @@ class ReconciliationAuthorizationTests(TestCase):
         ):
             with self.subTest(action=action):
                 self.assertEqual(self.client.post(BASE + action, data, format='json').status_code, 403)
+        self.assertFalse(ProjectRelationshipResolution.objects.exists())
+
+    def test_guarded_get_exposes_exact_candidate_without_writing_any_procurement_record(self):
+        self.requisition.project = self.project.code
+        self.requisition.save(update_fields=['project'])
+        before = PurchaseRequisition.objects.values().get(pk=self.requisition.pk)
+        self.client.force_authenticate(self.reader)
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(BASE + 'relationship-report/')
+        self.assertEqual(response.status_code, 200, response.data)
+        row = next(row for row in response.data['unresolved'] if row['id'] == str(self.requisition.pk))
+        self.assertEqual(row['reason'], 'exact_match_available')
+        writes = [query['sql'] for query in queries
+                  if query['sql'].lstrip().upper().startswith(('UPDATE ', 'INSERT ', 'DELETE '))
+                  and 'procurement_' in query['sql']]
+        self.assertEqual(writes, [])
+        self.assertEqual(before, PurchaseRequisition.objects.values().get(pk=self.requisition.pk))
         self.assertFalse(ProjectRelationshipResolution.objects.exists())
 
     def test_editor_can_save_exception_through_registered_action_guard(self):
