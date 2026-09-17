@@ -185,6 +185,17 @@ class PurchaseRequisitionListSerializer(serializers.ListSerializer):
             del self.child._supplier_contact_data
 
 
+class ApprovalReassignmentSerializer(serializers.Serializer):
+    stage_index = serializers.IntegerField(min_value=0)
+    expected_user_id = serializers.CharField(allow_blank=True, allow_null=True)
+    expected_user_email = serializers.CharField(allow_blank=True, allow_null=True)
+    expected_status = serializers.CharField()
+    expected_assignment_id = serializers.CharField(allow_blank=True, allow_null=True)
+    expected_role = serializers.CharField(allow_blank=True)
+    expected_level = serializers.JSONField(allow_null=True)
+    user_id = serializers.CharField()
+
+
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     """
     Serializer for Purchase Requisition
@@ -239,6 +250,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     can_approve = serializers.SerializerMethodField()
     current_approval = serializers.SerializerMethodField()
     registration_warnings = serializers.SerializerMethodField()
+    can_reassign_approvers = serializers.SerializerMethodField()
+    reassignable_approval_stage_indices = serializers.SerializerMethodField()
+    # JSONField accepts both JSON requests and the import/edit form's multipart
+    # JSON string; nested ListSerializer alone silently skips that form field.
+    approval_reassignments = serializers.JSONField(write_only=True, required=False)
     linked_po_id = serializers.SerializerMethodField()
     linked_po_number = serializers.SerializerMethodField()
 
@@ -248,6 +264,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         'signed_pdf_attached', 'source_approval_reviews', 'po_link',
         'po_link_previous_status',
         '_retained_attachment_sources',
+        'approval_reassignment_history',
     )
 
     DISPLAY_USER_FIELDS = (
@@ -338,6 +355,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Dynamic Approval Workflow
             'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
             'can_approve', 'current_approval', 'registration_warnings',
+            'can_reassign_approvers', 'reassignable_approval_stage_indices', 'approval_reassignments',
             
             # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
@@ -612,7 +630,18 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 for field in sorted(attempted_server_fields)
             })
 
+        if 'approval_reassignments' in attrs:
+            from .services.requisition_reassignments import can_reassign
+            if not self.instance or not can_reassign(self.instance, self.context.get('request')):
+                raise serializers.ValidationError({'approval_reassignments': 'You may reassign only pending approvers on an editable recommendation with Purchase Requisition update permission.'})
+            if 'approval_workflow_config' in attrs:
+                raise serializers.ValidationError({'approval_reassignments': 'Send pending assignment changes separately from a replacement approval workflow.'})
+            indices = [command['stage_index'] for command in attrs['approval_reassignments']]
+            if len(indices) > 20 or len(set(indices)) != len(indices):
+                raise serializers.ValidationError({'approval_reassignments': 'Select each approval stage once, up to 20 stages.'})
+
         if self.instance and 'approval_workflow_config' in attrs:
+            from apps.rbac.action_policy import request_action_allowed
             request = self.context.get('request')
             user = getattr(request, 'user', None)
             if (
@@ -620,10 +649,12 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 or (
                     str(self.instance.issued_by_id) != str(user.id)
                     and not self._is_super_admin(user)
+                    and (not getattr(user, 'is_authenticated', False)
+                         or not request_action_allowed(request, 'procurement_requisitions', 'update'))
                 )
             ):
                 raise serializers.ValidationError({
-                    'approval_workflow_config': 'Only the requisition issuer may change approval assignments.'
+                    'approval_workflow_config': 'Purchase Requisition update permission is required to change approval assignments.'
                 })
 
         if 'approval_workflow_config' in attrs:
@@ -692,6 +723,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
         return attrs
     
+    def validate_approval_reassignments(self, value):
+        commands = ApprovalReassignmentSerializer(data=value, many=True, allow_empty=False)
+        commands.is_valid(raise_exception=True)
+        return commands.validated_data
+
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
 
@@ -755,6 +791,14 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             } for index, stage in stages],
         }
 
+    def get_can_reassign_approvers(self, obj):
+        from .services.requisition_reassignments import can_reassign
+        return can_reassign(obj, self.context.get('request'))
+
+    def get_reassignable_approval_stage_indices(self, obj):
+        from .services.requisition_reassignments import reassignable_indices
+        return reassignable_indices(obj) if self.get_can_reassign_approvers(obj) else []
+
     def to_representation(self, instance):
         if hasattr(self, '_display_data'):
             return self._representation(instance)
@@ -773,11 +817,21 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if isinstance(workflow, list):
             names, users_by_id, users_by_email = self._display_data
             normalized = []
-            for raw_stage in workflow:
+            for index, raw_stage in enumerate(workflow):
                 if not isinstance(raw_stage, dict):
                     normalized.append(raw_stage)
                     continue
                 stage = dict(raw_stage)
+                if index in data['reassignable_approval_stage_indices']:
+                    stage['reassignment_snapshot'] = {
+                        'stage_index': index,
+                        'expected_user_id': str(raw_stage.get('user_id') or raw_stage.get('approver_id') or ''),
+                        'expected_user_email': RequisitionWorkflowService._stage_email(raw_stage),
+                        'expected_status': str(raw_stage.get('status') or 'pending'),
+                        'expected_assignment_id': str(raw_stage.get('assignment_id') or ''),
+                        'expected_role': str(raw_stage.get('role') or ''),
+                        'expected_level': raw_stage.get('level'),
+                    }
                 user_id = str(stage.get('user_id') or stage.get('approver_id') or '')
                 user_email = str(
                     stage.get('user_email') or stage.get('approver_email') or ''
@@ -813,6 +867,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             )
             data['approval_workflow_config'] = normalized
             data['approval_hierarchy'] = normalized
+            data['reassignable_approval_stage_indices'] = [
+                index for index, stage in enumerate(normalized)
+                if isinstance(stage, dict) and stage.get('reassignment_snapshot')
+            ]
+            data['can_reassign_approvers'] = bool(data['reassignable_approval_stage_indices'])
         return data
     
     @transaction.atomic
@@ -900,6 +959,23 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             if isinstance(stage, dict)
         ]
         workflow_changed = 'approval_workflow_config' in validated_data
+        commands = validated_data.pop('approval_reassignments', None)
+        if commands:
+            from .services.requisition_reassignments import HISTORY_KEY, reassigned_workflow
+            workflow, audit = reassigned_workflow(instance, commands, self.context.get('request'))
+            if audit:
+                validated_data['approval_workflow_config'] = workflow
+                metadata = copy.deepcopy(validated_data.get('price_remarks_data', instance.price_remarks_data) or {})
+                metadata[HISTORY_KEY] = list(metadata.get(HISTORY_KEY) or []) + audit
+                validated_data['price_remarks_data'] = metadata
+                workflow_changed = True
+                if canonicalize_pr_status(instance.status) in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES:
+                    unresolved = [(index, row) for index, row in enumerate(workflow)
+                                  if isinstance(row, dict) and str(row.get('status') or 'pending').lower() != 'approved']
+                    if unresolved:
+                        validated_data['current_approval_step'] = min(
+                            unresolved, key=lambda entry: (RequisitionWorkflowService._stage_level(entry[1], entry[0]), entry[0]),
+                        )[0]
         if 'management_approval_evidence' in validated_data:
             validated_data['management_approval_evidence'] = (
                 validated_data.get('management_approval_evidence') or []
@@ -1521,6 +1597,7 @@ class PODocumentReconcileSerializer(serializers.Serializer):
         if 'reviewed_fields' not in attrs and not attrs.get('vendor_id'):
             raise serializers.ValidationError({'vendor_id': 'This field is required.'})
         return attrs
+
 
 
 class PODocumentSerializer(serializers.ModelSerializer):
