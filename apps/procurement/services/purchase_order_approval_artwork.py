@@ -3,12 +3,14 @@
 import base64
 from io import BytesIO
 from pathlib import Path
+import re
 
 from PIL import Image
 
 
 DEFAULT_APPROVAL_STAMP_REFERENCE = '/assets/procurement/commercial-license-stamp.png'
 APPROVAL_STAMP_PATH = Path(__file__).resolve().parent.parent / 'assets' / 'commercial-license-stamp.png'
+JARMO_PROFILE_EMAIL = 'jarmo.suominen@rejlers.ae'
 
 
 def approval_image_stream(value):
@@ -37,3 +39,72 @@ def approval_stamp_stream(value):
     if reference in ('', DEFAULT_APPROVAL_STAMP_REFERENCE):
         return BytesIO(APPROVAL_STAMP_PATH.read_bytes())
     return approval_image_stream(reference)
+
+
+def completed_jarmo_profile_artwork(order):
+    """Display Jarmo's profile artwork on his already-approved completed POs.
+
+    This is a document presentation policy, not an approval action. Recorded
+    names, dates, signatures and original source PDFs are never rewritten.
+    Read the profile each time so a saved replacement is reflected in exports.
+    """
+    from .approval_integrity import purchase_order_signature_issue
+
+    name = re.sub(r'\s+', ' ', str(getattr(order, 'approved_by_name', '') or '')).strip().casefold()
+    if (str(getattr(order, 'status', '')).strip().casefold() != 'completed'
+            or name != 'jarmo suominen'
+            or not (getattr(order, 'approved_date', None) or getattr(order, 'approved_at', None))
+            or purchase_order_signature_issue(order)):
+        return None, None
+
+    rows = [row for row in (getattr(order, 'approval_log', None) or []) if isinstance(row, dict)]
+    internal = [row for row in rows if not row.get('external') and not row.get('evidence_document_id')]
+    if any(str(row.get('status', '')).strip().casefold() != 'approved' for row in internal):
+        return None, None
+    external = [row for row in rows if row.get('external') or row.get('evidence_document_id')]
+    if external and not any(
+        str(row.get('status', '')).strip().casefold() == 'approved'
+        and row.get('signature_verified') is not False
+        and row.get('approval_evidence_complete') is not False
+        and re.sub(r'\s+', ' ', str(row.get('approver') or row.get('approved_by_name') or '')).strip().casefold() == name
+        for row in external
+    ):
+        return None, None
+
+    from apps.rbac.models import UserProfile
+
+    profiles = list(UserProfile.objects.filter(
+        user__email__iexact=JARMO_PROFILE_EMAIL,
+        user__is_active=True, status='active', is_deleted=False,
+    ).only('user_id', 'signature_image')[:2])
+    if len(profiles) != 1:
+        return None, None
+    profile = profiles[0]
+    actor_id = str(getattr(order, 'approved_by_id', '') or '')
+    if actor_id and actor_id != str(profile.user_id):
+        return None, None
+    if internal:
+        def level(item):
+            index, row = item
+            try:
+                return max(0, int(row.get('level')))
+            except (ValueError, TypeError):
+                return index
+
+        final_level = max(level(item) for item in enumerate(internal))
+        final_rows = [row for index, row in enumerate(internal) if level((index, row)) == final_level]
+        # Source-only imports have no internal assignments. For internal
+        # workflows, the final recorded actor must be this exact account.
+        for row in final_rows:
+            identifiers = [str(row[key]) for key in ('approved_by_id', 'user_id', 'signature_user_id') if row.get(key)]
+            emails = [str(row[key]).strip().casefold() for key in (
+                'approved_by_email', 'approver_email', 'user_email', 'signature_user_email',
+            ) if row.get(key)]
+            if (not identifiers and not emails
+                    or any(value != JARMO_PROFILE_EMAIL for value in emails)
+                    or not emails and any(value != str(profile.user_id) for value in identifiers)):
+                return None, None
+    signature = approval_image_stream(profile.signature_image)
+    if signature is None:
+        return None, None
+    return signature, approval_stamp_stream(DEFAULT_APPROVAL_STAMP_REFERENCE)
