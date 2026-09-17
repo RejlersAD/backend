@@ -38,6 +38,8 @@ from reportlab.lib.utils import ImageReader
 
 from .approval_integrity import purchase_order_signature_issue
 from .purchase_order_approval_artwork import approval_image_stream as _signature_stream, approval_stamp_stream
+from .purchase_order_source_artwork import source_approval_artwork
+from .purchase_order_sources import is_safe_source_storage_key, uploaded_purchase_order_sources
 from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_rich_flowables
 
 JARMO_NAME = 'Jarmo Suominen'
@@ -90,11 +92,11 @@ def _value(value, fallback='—'):
 def _approval_artwork(order, display, signature_issue):
     """Completion keeps genuine signing artwork visible; it creates no approval."""
     if signature_issue or not display['recorded']:
-        return None, None
+        return None, None, None
     signature = _signature_stream(getattr(order, 'approval_signature', ''))
     if signature is None:
-        return None, None
-    return signature, approval_stamp_stream(getattr(order, 'approval_stamp', ''))
+        return None, None, source_approval_artwork(order)
+    return signature, approval_stamp_stream(getattr(order, 'approval_stamp', '')), None
 
 
 def _approval_image(stream, width, height):
@@ -529,10 +531,15 @@ def _main_pdf(order):
     ]))
     approval = _approval_display(order)
     approval_name, approval_title = approval['name'], approval['title']
-    approved = [Paragraph(f'<b>PO status:</b> {escape(approval["status"])}<br/><b>{approval["heading"]}</b>', preview)]
     signature_issue = purchase_order_signature_issue(order)
-    signature_stream, stamp_stream = _approval_artwork(order, approval, signature_issue)
-    if signature_stream:
+    signature_stream, stamp_stream, source_stream = _approval_artwork(order, approval, signature_issue)
+    heading = '' if source_stream else f'<br/><b>{approval["heading"]}</b>'
+    approved = [Paragraph(f'<b>PO status:</b> {escape(approval["status"])}{heading}', preview)]
+    if source_stream:
+        # The signed source can have overlapping signature, seal and date.
+        # Preserve that complete buyer block instead of reconstructing it.
+        approved.extend([Spacer(1, 2 * mm), _approval_image(source_stream, 79, 65)])
+    elif signature_stream:
         signature_image = _approval_image(signature_stream, 42 if stamp_stream else 52, 20)
         artwork = signature_image
         if stamp_stream:
@@ -552,7 +559,7 @@ def _main_pdf(order):
         approved.append(Spacer(1, 16 * mm))
     if signature_issue:
         approved.append(Paragraph(escape(signature_issue), preview))
-    approval_identity = Paragraph(
+    approval_identity = Spacer(1, 0) if source_stream else Paragraph(
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
         f'{JARMO_COMPANY}<br/><b>Date:</b> '
         f'{escape(_value(approval["date"], "__________________________"))}', preview,
@@ -841,8 +848,20 @@ def build_purchase_order_pdf(order):
         isinstance(row, dict) and row.get('type') == 'po_excel_import_source'
         and not any(row.get(key) for key in ('s3_key', 'storage_key', 'url', 's3_url', 'file_url'))
     )]
+    source_keys = None
     for index, raw_attachment in enumerate(renderable_attachments):
         attachment = _attachment(raw_attachment, index)
+        if attachment.get('type') == 'signed_purchase_order_pdf' and attachment.get('document_id'):
+            # Signed imports store their private key on the confirmed source
+            # document. Resolve that binding rather than fetching a public URL
+            # or silently dropping the original from preview and download.
+            if source_keys is None:
+                source_keys = {
+                    source['id']: source['storage_key']
+                    for source in uploaded_purchase_order_sources(order)
+                    if is_safe_source_storage_key(source['storage_key'])
+                } if getattr(order, 'pk', None) else {}
+            attachment['s3_key'] = source_keys.get(str(attachment['document_id']), '')
         append(_cover_pdf(order, attachment, index, len(writer.pages) + 1))
         content = _download_attachment(attachment)
         if content is None:
@@ -1030,10 +1049,17 @@ def build_purchase_order_docx(order):
     # make that upper placement explicit even when confirmation is taller.
     approval_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
     approval_display = _approval_display(order)
-    _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}\n{approval_display["heading"]}', size=7, bold=True)
     signature_issue = purchase_order_signature_issue(order)
-    signature_stream, stamp_stream = _approval_artwork(order, approval_display, signature_issue)
-    if signature_stream:
+    signature_stream, stamp_stream, source_stream = _approval_artwork(order, approval_display, signature_issue)
+    heading = '' if source_stream else f'\n{approval_display["heading"]}'
+    _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}{heading}', size=7, bold=True)
+    if source_stream:
+        source_image = _approval_image(source_stream, 79, 65)
+        source_stream.seek(0)
+        approval_cell.add_paragraph().add_run().add_picture(
+            source_stream, width=Pt(source_image.drawWidth), height=Pt(source_image.drawHeight),
+        )
+    elif signature_stream:
         paragraph = approval_cell.add_paragraph()
         signature_image = _approval_image(signature_stream, 42 if stamp_stream else 50, 20)
         signature_stream.seek(0)
@@ -1048,11 +1074,12 @@ def build_purchase_order_docx(order):
     if signature_issue:
         approval_cell.add_paragraph(signature_issue)
     approval_name, approval_title = approval_display['name'], approval_display['title']
-    approval_cell.add_paragraph(
-        f'{approval_name}\n'
-        f'{approval_title}\n{JARMO_COMPANY}\n'
-        f'Date: {_value(approval_display["date"], "")}'
-    )
+    if not source_stream:
+        approval_cell.add_paragraph(
+            f'{approval_name}\n'
+            f'{approval_title}\n{JARMO_COMPANY}\n'
+            f'Date: {_value(approval_display["date"], "")}'
+        )
     _docx_set_cell_text(
         approval.cell(0, 1),
         f'Order Confirmation:\nWe acknowledge receipt of your documents and will perform according to this PO.\n\n'
