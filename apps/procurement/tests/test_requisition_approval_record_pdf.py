@@ -14,7 +14,9 @@ from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import include, path
 from rest_framework.test import APIClient
 
@@ -111,6 +113,14 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.assertEqual(response.status_code, 200, getattr(response, 'data', ''))
         return response, b''.join(response.streaming_content)
 
+    def read_with_one_source_query(self):
+        with CaptureQueriesContext(connection) as queries:
+            result = self.read()
+        source_queries = [query['sql'] for query in queries if 'FROM "procurement_po_documents"' in query['sql']]
+        self.assertEqual(len(source_queries), 1)
+        self.assertFalse(any('FROM "procurement_vendors"' in query['sql'] for query in queries))
+        return result
+
     def labels(self, content):
         with pymupdf.open(stream=content, filetype='pdf') as document:
             return [page.get_text().strip() for page in document]
@@ -124,7 +134,7 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         order = self.order(status='completed')
         po_source, po_content = self.po_source(order)
         before = (PurchaseRequisition.objects.values().get(pk=self.pr.pk), PurchaseOrder.objects.values().get(pk=order.pk), PODocument.objects.values().get(pk=po_source.pk))
-        response, content = self.read()
+        response, content = self.read_with_one_source_query()
         self.assertEqual(self.labels(content), ['PR page 1', 'PR page 2', 'PO page 1', 'PO page 2', 'PO page 3'])
         self.assertEqual(response['Content-Type'], 'application/pdf')
         self.assertIn('inline;', response['Content-Disposition'])
@@ -180,6 +190,16 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.po_source(order, pdf_bytes('Older PO'), signed=False)
         self.po_source(order, pdf_bytes('Latest PO'), signed=False)
         self.assertEqual(self.labels(self.read()[1]), ['PR', 'Latest PO'])
+
+    def test_legacy_original_uses_the_same_confirmed_source_query(self):
+        self.pr_source(pdf_bytes('PR'))
+        order = self.order()
+        key = default_storage.save(f'procurement/orders/{order.po_number}/legacy.pdf', ContentFile(pdf_bytes('Legacy PO')))
+        order.attachments = [{'type': 'signed_purchase_order_pdf', 's3_key': key}]
+        order.save(update_fields=['attachments'])
+        response, content = self.read_with_one_source_query()
+        self.assertEqual(response['X-Approval-Record-PO-Source'], 'uploaded_original')
+        self.assertEqual(self.labels(content), ['PR', 'Legacy PO'])
 
     def test_foreign_po_document_attachment_cannot_authorize_its_source(self):
         self.pr_source()
@@ -302,7 +322,7 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         from apps.procurement.services.purchase_order_exports import build_purchase_order_pdf
         with patch('apps.procurement.services.purchase_order_exports.build_purchase_order_pdf',
                    wraps=build_purchase_order_pdf) as renderer:
-            response, content = self.read()
+            response, content = self.read_with_one_source_query()
         self.assertEqual(response['X-Approval-Record-PO-Source'], 'radai_generated')
         self.assertEqual(response['X-Approval-Record-PR-Source'], 'uploaded_original')
         renderer.assert_called_once()

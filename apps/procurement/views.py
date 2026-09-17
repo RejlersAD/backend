@@ -262,7 +262,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     queryset = PurchaseRequisition.objects.select_related(
         'issued_by',
-        'issued_by__employee_master',
         'vendor',
         'enterprise_project',
         'requested_by',
@@ -271,7 +270,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         'eng_manager_name',
         'manager_projects_name',
         'vp_op_name',
-    ).prefetch_related('issued_by__onboarding_records', 'purchase_orders').all().order_by('-created_at')
+    ).prefetch_related('purchase_orders').order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_requisitions'
@@ -2002,8 +2001,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     business_approval_actions = {'approve', 'reject'}
     queryset = PurchaseOrder.objects.all().select_related(
-        'vendor', 'pr_reference', 'project', 'enterprise_project'
-    ).prefetch_related('receipts').order_by('-created_at', '-id')
+        'vendor', 'pr_reference', 'project', 'enterprise_project',
+        'created_by', 'approved_by', 'budget_allocation',
+    ).order_by('-created_at', '-id')
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
