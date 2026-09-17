@@ -272,7 +272,7 @@ class PairedSignedImportTests(TestCase):
         self.assertFalse(response.data['purchase_order']['signature_verified'])
 
     def test_invalid_po_approval_confirmation_is_not_replaced_by_pr_evidence(self):
-        for changes in ({'po_approved_by_name': ''}, {'po_approved_date': 'invalid'}, {'po_signature_verified': 'yes please'}):
+        for changes in ({'po_approved_date': 'invalid'}, {'po_signature_verified': 'yes please'}):
             with self.subTest(changes=changes):
                 self.assertEqual(self.upload(**changes).status_code, 400)
                 self.assert_no_pair()

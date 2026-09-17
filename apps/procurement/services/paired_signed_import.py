@@ -3,14 +3,14 @@
 import hashlib
 import json
 
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition
 from .atomic_source_import import atomic_source_import
 from .po_excel_import import canonical_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict
 from .signed_po_pdf_import import (
-    SignedPOImportError, _date, ensure_retained_po_source, import_signed_po_pdf, preview_signed_po_pdf,
+    SignedPOImportError, _approval_evidence, ensure_retained_po_source, import_signed_po_pdf, preview_signed_po_pdf,
 )
 from .signed_pr_pdf_import import import_signed_pr_pdf, preview_signed_pr_pdf
 
@@ -30,6 +30,7 @@ def _existing_pair_result(pr, po, source):
     metadata = pr.price_remarks_data or {}
     verified = metadata.get('signed_document_verification') or {}
     extracted = source.extracted_data or {}
+    evidence = _approval_evidence(previous=extracted)
     order_result = {
         'success': True, 'operation': 'attached' if (metadata.get('paired_signed_import') or {}).get('po_operation') == 'attached' else 'already_imported',
         'purchase_order_id': str(po.pk), 'po_number': po.po_number,
@@ -38,9 +39,11 @@ def _existing_pair_result(pr, po, source):
         'extracted_data': extracted,
         'signature_verified': bool(extracted.get('signature_verified')),
         'stamp_verified': bool(extracted.get('stamp_verified')),
+        **evidence,
         'reconciliation_required': bool(extracted.get('reconciliation_required')),
         **{key: extracted.get(key, []) for key in ('reconciliation_issues', 'mapping_issues', 'workflow_issues')},
     }
+    order_result['workflow_issues'] = list(dict.fromkeys([*order_result['workflow_issues'], *evidence['approval_evidence_issues']]))
     link = {'status': 'already_linked', 'po_id': str(po.pk), 'po_number': po.po_number,
             'manual_link_required': False, 'message': f'Linked to purchase order {po.po_number}.'}
     order_result['po_link'] = link
@@ -65,11 +68,6 @@ def import_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, request,
     if not pr_options.get('create_new') and not request_action_allowed(request, 'procurement_requisitions', 'update'):
         raise PermissionDenied('Purchase requisition update permission is required to attach to or update this PR.')
     po_evidence = dict(po_evidence or {})
-    if po_evidence.get('signature_verified') and (
-        not str(po_evidence.get('approved_by_name') or '').strip()
-        or not _date(str(po_evidence.get('approved_date') or ''))
-    ):
-        raise ValidationError({'po_approval': 'Confirm the PO approver name and a valid PO approval date from its own signed PDF.'})
     pr_digest, po_digest = (hashlib.sha256(content).hexdigest() for content in (pr_bytes, po_bytes))
     fingerprint = hashlib.sha256(json.dumps({
         'pr_sha256': pr_digest, 'po_sha256': po_digest,
