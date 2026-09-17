@@ -38,6 +38,7 @@ from reportlab.platypus import (
 from reportlab.lib.utils import ImageReader
 
 from .approval_integrity import purchase_order_signature_issue
+from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_rich_flowables
 
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
@@ -135,27 +136,22 @@ def _html_blocks(value):
 
 
 def _pdf_rich_text(value, styles):
-    flowables = []
-    for block in _html_blocks(value):
-        is_bullet = block.startswith('• ')
-        content = block[2:].strip() if is_bullet else block
-        style = styles['bullet'] if is_bullet else styles['body']
-        flowables.extend((
-            Paragraph(escape(content), style, bulletText='•' if is_bullet else None),
-            Spacer(1, 1.5 * mm),
-        ))
-    return flowables
+    return pdf_rich_flowables(parse_rich_content(value), 176 * mm, styles['body'])
 
 
 def _docx_rich_text(document, value):
-    for block in _html_blocks(value):
-        is_bullet = block.startswith('• ')
-        content = block[2:].strip() if is_bullet else block
-        document.add_paragraph(content, style='List Bullet' if is_bullet else None)
+    append_docx_rich_content(document, parse_rich_content(value), width=176 * mm)
 
 
 def _money(value, currency):
     return f'{currency or "AED"} {float(value or 0):,.2f}'
+
+
+def _purchase_summary(order):
+    contacts = getattr(order, 'contact_persons', None) or {}
+    if isinstance(contacts, dict) and 'purchase_summary' in contacts:
+        return _value(contacts.get('purchase_summary'), order.title)
+    return _value(getattr(order, 'summary', None), order.title)
 
 
 def _date_text(value):
@@ -226,6 +222,7 @@ def _items(order):
         if not total:
             total = max(0, (quantity * unit_price) - discount)
         normalized.append({
+            **item,
             'line': item.get('line_code') or item.get('item_code') or index + 1,
             'description': item.get('description') or item.get('item') or item.get('name') or order.title,
             'specification': item.get('specification') or '',
@@ -237,6 +234,39 @@ def _items(order):
             'total': total,
         })
     return normalized
+
+
+def _item_columns(order):
+    defaults = {
+        'line_code': 'Line Code', 'description': 'Item Description',
+        'specification': 'Specification', 'comment': 'Comments',
+        'quantity': 'Qty.', 'uom': 'UOM', 'unit_price': 'Rate',
+        'discount': 'Discount', 'total_price': 'Total Price',
+    }
+    headers = getattr(order, 'items_table_headers', None) or defaults
+    if not isinstance(headers, dict):
+        headers = defaults
+    order_keys = headers.get('__column_order')
+    if not isinstance(order_keys, list):
+        order_keys = [key for key in headers if not key.startswith('__')]
+    seen, columns = set(), []
+    for key in order_keys:
+        if not isinstance(key, str) or key.startswith('__') or key in seen:
+            continue
+        title = headers.get(key)
+        if not isinstance(title, str) or not title.strip():
+            continue
+        seen.add(key)
+        columns.append((key, title.strip()))
+    return columns
+
+
+def _item_value(item, key, currency):
+    if key in {'unit_price', 'discount', 'total_price'}:
+        return _money(item['total' if key == 'total_price' else key], currency)
+    if key == 'quantity':
+        return f'{item["quantity"]:g}'
+    return str(item.get('line' if key == 'line_code' else key) or '')
 
 
 def _attachment(entry, index):
@@ -472,7 +502,7 @@ def _main_pdf(order):
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     summary_table = Table([[
-        Paragraph(f'<b>Purchase Summary:</b><br/><b>{escape(_value(getattr(order, "summary", None) or order.title))}</b>', preview),
+        Paragraph(f'<b>Purchase Summary:</b><br/><b>{escape(_value(_purchase_summary(order)))}</b>', preview),
         '',
         _FlowTable([
             [Paragraph('<b>Total Purchase Price:</b>', preview), Paragraph(escape(f'{subtotal:,.2f} {currency}'), styles['right'])],
@@ -607,29 +637,13 @@ def _main_pdf(order):
     # Match the live A4 document: the price summary starts on a clean page.
     # This also prevents an orphaned heading or split table after long scope text.
     story.extend((PageBreak(), Paragraph('SUMMARY OF PRICES', styles['heading'])))
-    price_rows = [[
-        Paragraph('<b>Line Code</b>', styles['small']),
-        Paragraph('<b>Item Description</b>', styles['small']),
-        Paragraph('<b>Comment</b>', styles['small']),
-        Paragraph('<b>Qty.</b>', styles['small']),
-        Paragraph('<b>UOM</b>', styles['small']),
-        Paragraph('<b>Unit Price</b>', styles['small']),
-        Paragraph('<b>Discount</b>', styles['small']),
-        Paragraph('<b>Total Price</b>', styles['small']),
-    ]]
+    item_columns = _item_columns(order)
+    price_rows = [[Paragraph(f'<b>{escape(title)}</b>', styles['small']) for _, title in item_columns]]
     for item in items:
-        price_rows.append([
-            Paragraph(escape(str(item['line'])), styles['small']),
-            Paragraph(escape(_value(item['description'])), styles['small']),
-            Paragraph(escape(_value(item['comment'], '')), styles['small']),
-            Paragraph(f'{item["quantity"]:g}', styles['right']),
-            Paragraph(escape(_value(item['uom'], '')), styles['small']),
-            Paragraph(escape(_money(item['unit_price'], currency)), styles['right']),
-            Paragraph(escape(_money(item['discount'], currency)), styles['right']),
-            Paragraph(escape(_money(item['total'], currency)), styles['right']),
-        ])
-    story.extend([
-        Table(price_rows, repeatRows=1, colWidths=[11 * mm, 55 * mm, 32 * mm, 9 * mm, 10 * mm, 20 * mm, 16 * mm, 23 * mm], style=TableStyle([
+        price_rows.append([Paragraph(escape(_item_value(item, key, currency)), styles['small']) for key, _ in item_columns])
+    if item_columns:
+        weights = [{'description': 3, 'specification': 2, 'comment': 2}.get(key, 1) for key, _ in item_columns]
+        story.append(Table(price_rows, repeatRows=1, colWidths=[176 * mm * weight / sum(weights) for weight in weights], style=TableStyle([
             ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
             ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -637,7 +651,8 @@ def _main_pdf(order):
             ('RIGHTPADDING', (0, 0), (-1, -1), 3),
             ('TOPPADDING', (0, 0), (-1, -1), 4),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ])),
+        ])))
+    story.extend([
         Spacer(1, 6 * mm),
         Table([
             ['Total Price:', _money(subtotal, currency)],
@@ -663,12 +678,18 @@ def _cover_pdf(order, attachment, index, page_number):
     output = BytesIO()
     styles = _pdf_styles()
     document = SimpleDocTemplate(output, pagesize=A4, leftMargin=25 * mm, rightMargin=25 * mm, topMargin=35 * mm, bottomMargin=25 * mm)
-    document.build([
+    story = [
         Spacer(1, 55 * mm),
         Paragraph(f'ATTACHMENT - {index + 1}', styles['cover']),
         Spacer(1, 12 * mm),
-        Paragraph(escape(_value(attachment['description'])), styles['cover_body']),
-    ], onFirstPage=lambda canvas, doc: _pdf_page(canvas, doc, order, page_number))
+    ]
+    title = str(attachment.get('title') or '').strip()
+    description = str(attachment.get('description') or '').strip()
+    if title and title.casefold() != f'attachment {index + 1}'.casefold():
+        story.extend((Paragraph(escape(title), styles['cover_body']), Spacer(1, 5 * mm)))
+    if description and description != title:
+        story.append(Paragraph(escape(description), styles['cover_body']))
+    document.build(story, onFirstPage=lambda canvas, doc: _pdf_page(canvas, doc, order, page_number))
     return output.getvalue()
 
 
@@ -676,6 +697,10 @@ def _download_attachment(attachment):
     from django.conf import settings
     from django.core.files.storage import default_storage
 
+    # Only server-created preview snapshots carry bytes. Public request
+    # metadata cannot supply this type, and no storage mutation is needed.
+    if isinstance(attachment.get('_preview_content'), bytes):
+        return attachment['_preview_content']
     key = str(attachment.get('s3_key') or '').strip()
     if not key:
         return None
@@ -778,9 +803,15 @@ def build_purchase_order_pdf(order):
     """Return one PDF containing the PO, attachment covers, and renderable files."""
     writer = PdfWriter()
     warnings = []
+    source_readers = []
 
     def append(pdf_bytes):
-        for page in PdfReader(BytesIO(pdf_bytes)).pages:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        # PyPDF2 caches imported references by id(reader). Keep every source
+        # alive through write(), so garbage collection cannot recycle an ID
+        # and substitute another document's content/resources in a later page.
+        source_readers.append(reader)
+        for page in reader.pages:
             writer.add_page(page)
 
     append(_main_pdf(order))
@@ -959,7 +990,7 @@ def build_purchase_order_docx(order):
 
     summary = document.add_table(rows=1, cols=2)
     summary.style = 'Table Grid'
-    _docx_set_cell_text(summary.cell(0, 0), f'Purchase Summary:\n{_value(getattr(order, "summary", None) or order.title)}', size=7, bold=True)
+    _docx_set_cell_text(summary.cell(0, 0), f'Purchase Summary:\n{_value(_purchase_summary(order))}', size=7, bold=True)
     subtotal_for_summary = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in _items(order))
     _docx_set_cell_text(
         summary.cell(0, 1),
@@ -1001,24 +1032,25 @@ def build_purchase_order_docx(order):
     document.add_heading(f'PURCHASE ORDER:  {_value(order.title)}', level=1)
     document.add_paragraph(f'We, {COMPANY_NAME} (Buyer), issue this purchase order to {_value(getattr(vendor, "name", None))} (Seller).')
     document.add_heading('PO DESCRIPTION & SCOPE', level=1)
-    if _html_blocks(order.description):
+    if parse_rich_content(order.description):
         _docx_rich_text(document, order.description)
     else:
         document.add_paragraph(_value(order.title))
     document.add_page_break()
     document.add_heading('Summary of Prices', level=1)
     items = _items(order)
-    table = document.add_table(rows=1, cols=8)
-    table.style = 'Table Grid'
-    for cell, heading in zip(table.rows[0].cells, ('Line Code', 'Item Description', 'Comment', 'Qty.', 'UOM', 'Unit Price', 'Discount', 'Total Price')):
-        cell.text = heading
+    item_columns = _item_columns(order)
+    table = document.add_table(rows=1, cols=len(item_columns)) if item_columns else None
+    if table is not None:
+        table.style = 'Table Grid'
+        for cell, (_, heading) in zip(table.rows[0].cells, item_columns):
+            cell.text = heading
     currency = order.currency or 'AED'
     for item in items:
+        if table is None:
+            break
         cells = table.add_row().cells
-        values = (
-            item['line'], item['description'], item['comment'], f'{item["quantity"]:g}', item['uom'],
-            _money(item['unit_price'], currency), _money(item['discount'], currency), _money(item['total'], currency),
-        )
+        values = [_item_value(item, key, currency) for key, _ in item_columns]
         for cell, value in zip(cells, values):
             cell.text = str(value)
     subtotal = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in items)

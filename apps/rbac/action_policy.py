@@ -208,6 +208,11 @@ def operation_action(request, view):
         return 'approve'
     if operation in getattr(view, 'business_approval_actions', ()) and method not in {'GET', 'HEAD', 'OPTIONS'}:
         return 'approve'
+    if (view.__class__.__module__ == 'apps.procurement.views'
+            and view.__class__.__name__ == 'PurchaseOrderViewSet' and operation == 'preview_document'):
+        # The editor may inspect a draft with create access, without allocating
+        # a number or saving it. Existing document snapshots require edit access.
+        return 'update' if request.data.get('order_id') else 'create'
     if (
         view.__class__.__module__ == 'apps.procurement.views'
         and view.__class__.__name__ == 'PODocumentViewSet'
