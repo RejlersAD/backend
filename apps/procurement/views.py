@@ -2048,6 +2048,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             'create', 'update', 'partial_update',
             'available_requisitions', 'available_projects', 'create_project',
             'reserve_number',
+            'preview_document',
             'uploaded_documents', 'uploaded_document_content',
         }:
             return [IsAuthenticated()]
@@ -2185,6 +2186,53 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         return self._record_approval_decision(request, 'reject')
+
+    @action(detail=False, methods=['post'], url_path='preview-document')
+    def preview_document(self, request):
+        """Preview/export current editor content without saving or uploading it."""
+        from django.core.exceptions import ValidationError as ModelValidationError
+        from rest_framework.exceptions import ValidationError, NotFound
+        from apps.rbac.action_policy import request_action_allowed, record_workflow_not_denied
+        from .services.purchase_order_document_preview import document_preview_order
+
+        order_id = request.data.get('order_id')
+        required_action = 'update' if order_id else 'create'
+        if not (record_workflow_not_denied(request.user, 'procurement_orders', 'read')
+                and request_action_allowed(request, 'procurement_orders', required_action)):
+            raise PermissionDenied('Purchase order edit access is required to preview editor changes.')
+        base = None
+        if order_id:
+            try:
+                base = self.get_queryset().get(pk=order_id)
+            except (PurchaseOrder.DoesNotExist, ModelValidationError, TypeError, ValueError) as exc:
+                raise NotFound('Purchase order not found.') from exc
+            self._check_order_read_access(request, base)
+        output_format = request.data.get('format', 'pdf')
+        if output_format not in {'pdf', 'word'}:
+            raise ValidationError({'format': 'Select PDF or Word.'})
+        order = document_preview_order(
+            request.data.get('snapshot'), base=base,
+            attachment_metadata=request.data.get('attachment_metadata'),
+            uploads=request.FILES.getlist('attachments'),
+        )
+        filename = build_procurement_pdf_filename(order.po_number or 'Purchase-Order-Draft', 'po', order.po_date)
+        warnings = []
+        try:
+            if output_format == 'word':
+                content = build_purchase_order_docx(order)
+                content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                filename = filename[:-4] + '.docx'
+            else:
+                content, warnings = build_purchase_order_pdf(order)
+                content_type = 'application/pdf'
+        except ValueError as exc:
+            raise ValidationError({'description': 'This narrative layout could not be rendered. Simplify deeply nested content or unusually wide tables.'}) from exc
+        response = HttpResponse(content, content_type=content_type)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Cache-Control'] = 'no-store'
+        if warnings:
+            response['X-PO-Attachment-Warnings'] = str(len(warnings))
+        return response
 
     @action(detail=True, methods=['get'], url_path='export-pdf')
     def export_pdf(self, request, pk=None):
