@@ -326,6 +326,16 @@ class RequisitionApprovalRecordPDFTests(TestCase):
         self.assertNotIn('X-PO-Attachment-Warnings', response)
         self.assertNotIn('Attachment 1', '\n'.join(self.labels(content)))
 
+    def test_generated_sent_po_with_missing_approval_evidence_reports_not_recorded(self):
+        self.pr_source(pdf_bytes('Original PR'))
+        self.order(status='sent')
+        response, content = self.read()
+        text = '\n'.join(self.labels(content)[1:])
+        self.assertEqual(response['X-Approval-Record-PO-Source'], 'radai_generated')
+        self.assertIn('Approval record:', text)
+        self.assertIn('Not recorded', text)
+        self.assertNotIn('Not yet approved', text)
+
     def test_missing_retained_pdf_never_falls_back_to_official_generated_po(self):
         self.pr_source()
         order = self.order()

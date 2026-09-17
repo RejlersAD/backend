@@ -10,6 +10,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from django.utils.html import strip_tags
+from django.utils import timezone
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -365,15 +366,20 @@ def _pdf_page(canvas, document, order, page_number=None):
 
 def _approval_display(order):
     name = str(getattr(order, 'approved_by_name', '') or '').strip()
-    recorded = bool(name and (getattr(order, 'approved_at', None) or getattr(order, 'approved_date', None)))
+    approved_date = getattr(order, 'approved_date', None)
+    approved_at = getattr(order, 'approved_at', None)
+    if not approved_date and approved_at:
+        approved_date = (timezone.localtime(approved_at) if timezone.is_aware(approved_at) else approved_at).date()
+    recorded = bool(name and approved_date)
+    pending = str(getattr(order, 'status', '') or '').lower() in {'draft', 'pending_approval'}
     status_display = getattr(order, 'get_status_display', None)
     status = status_display() if callable(status_display) else str(getattr(order, 'status', '') or 'Not recorded').replace('_', ' ').title()
     return {
         'recorded': recorded, 'status': status,
-        'heading': 'Approved by:' if recorded else 'Approval pending:',
-        'name': name if recorded else 'Not yet approved',
+        'heading': 'Approved by:' if recorded else 'Approval pending:' if pending else 'Approval record:',
+        'name': name if recorded else 'Not yet approved' if pending else 'Not recorded',
         'title': str(getattr(order, 'approved_by_title', '') or '') if recorded else '',
-        'date': getattr(order, 'approved_date', None) if recorded else None,
+        'date': approved_date if recorded else None,
     }
 
 

@@ -61,6 +61,35 @@ class PurchaseOrderExportTests(TestCase):
         ))
         self.assertNotIn(signature.getvalue(), [part.blob for part in document.part.package.parts])
 
+    def test_later_lifecycle_with_missing_approval_details_is_unknown_not_pending(self):
+        for status in ('sent', 'completed', 'approved'):
+            with self.subTest(status=status):
+                order = self._order()
+                order.status, order.approved_at, order.approved_by_name = status, None, ''
+                content, _ = build_purchase_order_pdf(order)
+                with fitz.open(stream=content, filetype='pdf') as pdf:
+                    text = '\n'.join(page.get_text() for page in pdf)
+                self.assertIn('Approval record:', text)
+                self.assertIn('Not recorded', text)
+                self.assertNotIn('Not yet approved', text)
+                self.assertNotIn('Approval pending:', text)
+                document = Document(BytesIO(build_purchase_order_docx(order)))
+                text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+                self.assertIn('Approval record:', text)
+                self.assertIn('Not recorded', text)
+
+    def test_recorded_timestamp_supplies_date_when_separate_approval_date_is_missing(self):
+        order = self._order()
+        self.assertIsNone(order.approved_date)
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            text = pdf[0].get_text()
+        self.assertIn('Approved by:', text)
+        self.assertIn('2026-09-03', text)
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+        self.assertIn('Date: 2026-09-03', text)
+
     def _order(self, attachments=None):
         return SimpleNamespace(
             vendor=SimpleNamespace(name='Test Vendor'),
@@ -339,7 +368,7 @@ class PurchaseOrderExportTests(TestCase):
             # requested bottom-left signing area, clear of the branded footer.
             heading = page.search_for('Approved by:')[0]
             approver = page.search_for('Jarmo Suominen')[0]
-            date_line = page.search_for('__________________________')[0]
+            date_line = page.search_for('2026-09-03')[0]
             self.assertAlmostEqual(approver.x0, heading.x0, delta=1)
             self.assertGreater(approver.y0, page.rect.height - 80 * mm)
             self.assertGreater(approver.y0, heading.y1)
