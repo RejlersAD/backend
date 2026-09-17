@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import html
 import re
 from io import BytesIO
@@ -38,6 +37,7 @@ from reportlab.platypus import (
 from reportlab.lib.utils import ImageReader
 
 from .approval_integrity import purchase_order_signature_issue
+from .purchase_order_approval_artwork import approval_image_stream as _signature_stream, approval_stamp_stream
 from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_rich_flowables
 
 JARMO_NAME = 'Jarmo Suominen'
@@ -87,19 +87,21 @@ def _value(value, fallback='—'):
     return rendered or fallback
 
 
-def _signature_stream(value):
-    """Decode a stored signature data URL for PDF/DOCX renderers."""
-    raw = str(value or '')
-    if not raw.startswith('data:image/') or ';base64,' not in raw:
-        return None
-    try:
-        stream = BytesIO(base64.b64decode(raw.split(',', 1)[1], validate=True))
-        with PILImage.open(stream) as image:
-            image.verify()
-        stream.seek(0)
-        return stream
-    except (ValueError, OSError):
-        return None
+def _approval_artwork(order, display, signature_issue):
+    """Completion keeps genuine signing artwork visible; it creates no approval."""
+    if signature_issue or not display['recorded']:
+        return None, None
+    signature = _signature_stream(getattr(order, 'approval_signature', ''))
+    if signature is None:
+        return None, None
+    return signature, approval_stamp_stream(getattr(order, 'approval_stamp', ''))
+
+
+def _approval_image(stream, width, height):
+    image = Image(stream)
+    image._restrictSize(width * mm, height * mm)
+    image.hAlign = 'LEFT'
+    return image
 
 
 def _decode_html(value):
@@ -529,12 +531,23 @@ def _main_pdf(order):
     approval_name, approval_title = approval['name'], approval['title']
     approved = [Paragraph(f'<b>PO status:</b> {escape(approval["status"])}<br/><b>{approval["heading"]}</b>', preview)]
     signature_issue = purchase_order_signature_issue(order)
-    signature_stream = _signature_stream('' if signature_issue or not approval['recorded'] else getattr(order, 'approval_signature', ''))
+    signature_stream, stamp_stream = _approval_artwork(order, approval, signature_issue)
     if signature_stream:
-        signature_image = Image(signature_stream)
-        signature_image._restrictSize(52 * mm, 20 * mm)
-        signature_image.hAlign = 'LEFT'
-        approved.extend([Spacer(1, 2 * mm), signature_image, Spacer(1, 2 * mm)])
+        signature_image = _approval_image(signature_stream, 42 if stamp_stream else 52, 20)
+        artwork = signature_image
+        if stamp_stream:
+            # The company seal uses its original ink/transparent background,
+            # with no watermark opacity. Keep both images above signer/date.
+            artwork = Table([[signature_image, '', _approval_image(stamp_stream, 30, 30)]],
+                            colWidths=[44 * mm, 5 * mm, 30 * mm], style=TableStyle([
+                                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                                ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                                ('TOPPADDING', (0, 0), (-1, -1), 0),
+                                ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+                            ]))
+        artwork_gap = 1 * mm if stamp_stream else 2 * mm
+        approved.extend([Spacer(1, artwork_gap), artwork, Spacer(1, artwork_gap)])
     else:
         approved.append(Spacer(1, 16 * mm))
     if signature_issue:
@@ -1019,10 +1032,17 @@ def build_purchase_order_docx(order):
     approval_display = _approval_display(order)
     _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}\n{approval_display["heading"]}', size=7, bold=True)
     signature_issue = purchase_order_signature_issue(order)
-    signature_stream = _signature_stream('' if signature_issue or not approval_display['recorded'] else getattr(order, 'approval_signature', ''))
+    signature_stream, stamp_stream = _approval_artwork(order, approval_display, signature_issue)
     if signature_stream:
-        signature_run = approval_cell.add_paragraph().add_run()
-        signature_run.add_picture(signature_stream, width=Mm(50))
+        paragraph = approval_cell.add_paragraph()
+        signature_image = _approval_image(signature_stream, 42 if stamp_stream else 50, 20)
+        signature_stream.seek(0)
+        paragraph.add_run().add_picture(signature_stream, width=Pt(signature_image.drawWidth), height=Pt(signature_image.drawHeight))
+        if stamp_stream:
+            paragraph.add_run('  ')
+            stamp_image = _approval_image(stamp_stream, 30, 30)
+            stamp_stream.seek(0)
+            paragraph.add_run().add_picture(stamp_stream, width=Pt(stamp_image.drawWidth), height=Pt(stamp_image.drawHeight))
     else:
         approval_cell.add_paragraph('\n\n\n')
     if signature_issue:

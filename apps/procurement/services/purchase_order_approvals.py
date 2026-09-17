@@ -13,6 +13,7 @@ from .approval_integrity import stage_signature_issue
 from .employee_display import employee_display_name
 from .notification_context import purchase_order_teams_context
 from .approval_eligibility import MODULE_PO, eligible_stage_assignee, position_matches_stage
+from .purchase_order_approval_artwork import DEFAULT_APPROVAL_STAMP_REFERENCE
 
 
 TECHNICAL_STAGE = 'Technical Approval'
@@ -469,9 +470,10 @@ def record_decision(order, actor, decision, stage='', comment='', require_signat
         locked.approved_date = timezone.localtime(decision_at).date()
         locked.approved_at = decision_at
         locked.approval_signature = signature
+        locked.approval_stamp = DEFAULT_APPROVAL_STAMP_REFERENCE
         update_fields.extend([
             'approved_by', 'approved_by_name', 'approved_by_title',
-            'approved_date', 'approved_at', 'approval_signature',
+            'approved_date', 'approved_at', 'approval_signature', 'approval_stamp',
         ])
     locked.save(update_fields=update_fields)
     next_entries = _active_entries(workflow)
