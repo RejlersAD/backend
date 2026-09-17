@@ -135,12 +135,17 @@ def _html_blocks(value):
     return blocks
 
 
-def _pdf_rich_text(value, styles):
-    return pdf_rich_flowables(parse_rich_content(value), 176 * mm, styles['body'])
+def _pdf_rich_text(value, styles, width=None):
+    # SimpleDocTemplate's frame reserves 6pt on each side inside its margins.
+    # Tables and tab fields must use the same line width as its paragraphs.
+    width = A4[0] - 32 * mm - 12 if width is None else width
+    return pdf_rich_flowables(parse_rich_content(value), width, styles['body'])
 
 
 def _docx_rich_text(document, value):
-    append_docx_rich_content(document, parse_rich_content(value), width=176 * mm)
+    section = document.sections[-1]
+    width = (section.page_width - section.left_margin - section.right_margin) / Pt(1)
+    append_docx_rich_content(document, parse_rich_content(value), width=width)
 
 
 def _money(value, currency):
@@ -632,7 +637,7 @@ def _main_pdf(order):
         ),
         Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']),
     ]
-    narrative = _pdf_rich_text(order.description, styles)
+    narrative = _pdf_rich_text(order.description, styles, width=document.width - 12)
     story.extend(narrative or [Paragraph(escape(_value(order.title)), styles['body'])])
     # Match the live A4 document: the price summary starts on a clean page.
     # This also prevents an orphaned heading or split table after long scope text.
