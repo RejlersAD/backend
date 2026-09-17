@@ -364,18 +364,19 @@ class PurchaseOrderExportTests(TestCase):
             for reference in order.contact_persons['buyer_references']:
                 for value in reference.values():
                     self.assertIn(''.join(value.split()), text)
-            # Keep the heading at the panel top and the identity/date in the
-            # requested bottom-left signing area, clear of the branded footer.
+            # Keep the identity/date roughly 40mm above the previous bottom
+            # anchor, grouped with the heading and clear of the footer.
             heading = page.search_for('Approved by:')[0]
             approver = page.search_for('Jarmo Suominen')[0]
             date_line = page.search_for('2026-09-03')[0]
             self.assertAlmostEqual(approver.x0, heading.x0, delta=1)
-            self.assertGreater(approver.y0, page.rect.height - 80 * mm)
+            self.assertGreater(approver.y0, page.rect.height - 120 * mm)
+            self.assertLess(approver.y0, page.rect.height - 95 * mm)
             self.assertGreater(approver.y0, heading.y1)
             self.assertLess(date_line.x1, page.rect.width / 2)
             self.assertGreater(date_line.y0, approver.y1)
-            self.assertGreater(date_line.y1, page.rect.height - 48 * mm)
-            self.assertLess(date_line.y1, page.rect.height - 42 * mm)
+            self.assertGreater(date_line.y1, page.rect.height - 88 * mm)
+            self.assertLess(date_line.y1, page.rect.height - 82 * mm)
             self.assertLess(
                 page.search_for('INVOICEFAX9988')[0].y1,
                 min(rect.y0 for rect in page.search_for('Payment Terms:')),
@@ -464,9 +465,32 @@ class PurchaseOrderExportTests(TestCase):
             self.assertLess(signature_rect.y1, approver.y0)
             self.assertAlmostEqual(signature_rect.x0, approver.x0, delta=1)
             approval_date = page.search_for(order.approved_date)[0]
-            self.assertGreater(approver.y0, page.rect.height - 80 * mm)
+            self.assertGreater(approver.y0, page.rect.height - 120 * mm)
+            self.assertLess(approver.y0, page.rect.height - 95 * mm)
             self.assertGreater(approval_date.y0, approver.y1)
             self.assertLess(approval_date.x1, page.rect.width / 2)
-            self.assertGreater(approval_date.y1, page.rect.height - 48 * mm)
-            self.assertLess(approval_date.y1, page.rect.height - 42 * mm)
+            self.assertGreater(approval_date.y1, page.rect.height - 88 * mm)
+            self.assertLess(approval_date.y1, page.rect.height - 82 * mm)
             self.assertFalse(page.search_for('__________________________'))
+
+    def test_pending_approval_identity_is_higher_and_word_cell_stays_top_aligned(self):
+        order = self._realistic_long_contact_order()
+        order.status, order.approved_at, order.approved_date = 'draft', None, None
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertFalse(warnings)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertEqual(len(pdf), 3)
+            self._assert_body_clear_of_footer(pdf)
+            page = pdf[0]
+            heading = page.search_for('Approval pending:')[0]
+            identity = page.search_for('Not yet approved')[0]
+            self.assertGreater(identity.y0, heading.y1)
+            self.assertAlmostEqual(identity.x0, heading.x0, delta=1)
+            self.assertGreater(identity.y0, page.rect.height - 115 * mm)
+            self.assertLess(identity.y0, page.rect.height - 95 * mm)
+            self.assertNotIn(order.approved_by_name, page.get_text())
+            self.assertTrue(page.search_for('Order Confirmation:'))
+        word = Document(BytesIO(build_purchase_order_docx(order)))
+        cell = next(cell for table in word.tables for row in table.rows for cell in row.cells if 'Approval pending:' in cell.text)
+        self.assertEqual(cell.vertical_alignment, 0)  # Word TOP alignment.
+        self.assertIn('Not yet approved', cell.text)

@@ -595,9 +595,9 @@ def _main_pdf(order):
         Spacer(1, 1 * mm), details, Spacer(1, 1 * mm), commercial, Spacer(1, 2 * mm),
         summary_table, Spacer(1, 2 * mm),
     ]
-    # Fill the remaining cover height, leaving "Approved by" at the top and
-    # placing the approver identity/date at the bottom-left above the footer.
-    # Measure all text first; the panel must never be shorter than its content.
+    # Keep the confirmation panel's height, but bring the approver identity/date
+    # into the signing area rather than anchoring them just above the footer.
+    # Measure actual text/signature flow so dense covers never overlap.
     cover_width = 176 * mm
     frame_width, frame_height = document.width - 12, document.height - 12
     width_scale = max(1, cover_width / frame_width)
@@ -609,14 +609,18 @@ def _main_pdf(order):
     natural_height = approval_table.wrap(cover_width, 1e6)[1]
     panel_height = max(natural_height, frame_height * width_scale - preceding_height)
     identity_height = approval_identity.wrap(79 * mm, 1e6)[1]
+    column_style = TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    ])
+    approved_height = Table([[approved]], colWidths=[79 * mm], style=column_style).wrap(79 * mm, 1e6)[1]
+    panel_height = max(panel_height, approved_height + identity_height + 6)
+    identity_top = max(approved_height, panel_height - 6 - identity_height - 40 * mm * width_scale)
+    lower_space = max(0, panel_height - 6 - identity_top - identity_height)
     approved_column = Table(
-        [[approved], [approval_identity]], colWidths=[79 * mm],
-        rowHeights=[panel_height - 6 - identity_height, identity_height],
-        style=TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-            ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ]),
+        [[approved], [approval_identity], ['']], colWidths=[79 * mm],
+        rowHeights=[identity_top, identity_height, lower_space], style=column_style,
     )
     cover.append(Table(
         [[approved_column, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm],
@@ -1009,6 +1013,9 @@ def build_purchase_order_docx(order):
     approval = document.add_table(rows=1, cols=2)
     _docx_no_borders(approval)
     approval_cell = approval.cell(0, 0)
+    # Word already flows the signing block directly below the cover summary;
+    # make that upper placement explicit even when confirmation is taller.
+    approval_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
     approval_display = _approval_display(order)
     _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}\n{approval_display["heading"]}', size=7, bold=True)
     signature_issue = purchase_order_signature_issue(order)
