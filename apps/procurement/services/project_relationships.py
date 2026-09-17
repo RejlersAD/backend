@@ -2,8 +2,8 @@
 
 The enterprise project in ``apps.core`` is authoritative.  Procurement's
 legacy project registry and text/JSON references remain available during the
-migration, but are never fuzzy-matched: only exact, case-insensitive project
-codes are linked automatically.
+migration. Only exact, case-insensitive project codes are linked automatically;
+review suggestions can explain weaker evidence without changing any link.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Iterable
 from uuid import UUID
 
@@ -26,6 +27,104 @@ from apps.procurement.models import (
     PurchaseOrder,
     PurchaseRequisition,
 )
+
+
+EXPECTED_PROJECT_UNSET = object()
+
+
+def _project_brief(project):
+    return {'id': str(project.pk), 'code': project.code, 'name': project.name} if project else None
+
+
+def _project_choice(project):
+    return {
+        **_project_brief(project), 'status': project.status,
+        'client_name': project.client_name, 'currency': project.currency,
+    }
+
+
+def _identifier(record_type, row):
+    return str(getattr(row, {
+        'procurement_project': 'project_number', 'purchase_requisition': 'pr_number',
+        'purchase_order': 'po_number', 'invoice': 'invoice_number',
+    }[record_type], '') or row.pk)
+
+
+def _reason(value, *, required=False):
+    reason = str(value or '').strip()
+    if required and not reason:
+        raise ValidationError({'reason': 'Explain why this record is being saved as an exception.'})
+    if len(reason) > 500:
+        raise ValidationError({'reason': 'Reason cannot exceed 500 characters.'})
+    return reason
+
+
+def _suggest_projects(record_type, row, projects, masters, orders_by_number):
+    """Explain real reference evidence without auto-linking or invented confidence."""
+    evidence = {}
+    strengths = {'high': 3, 'medium': 2, 'low': 1}
+
+    def add(project, strength, reason):
+        if project is None or project.is_deleted:
+            return
+        item = evidence.setdefault(str(project.pk), {
+            **_project_choice(project), 'match_strength': strength, 'reasons': [],
+        })
+        if strengths[strength] > strengths[item['match_strength']]:
+            item['match_strength'] = strength
+        if reason not in item['reasons']:
+            item['reasons'].append(reason)
+
+    codes, names, text = [], [], ''
+    if record_type == 'procurement_project':
+        codes, names = [row.project_number], [row.project_name]
+        text = f'{row.project_number} {row.project_name}'
+    elif record_type == 'purchase_requisition':
+        codes = extract_requisition_project_codes(row.project, row.project_details)
+        text = f'{row.project} {row.project_department} {row.title} {row.product_service}'
+        names = [row.project_department]
+        for detail in row.project_details if isinstance(row.project_details, list) else []:
+            if not isinstance(detail, dict):
+                continue
+            names.append(detail.get('project_name') or '')
+            master = masters.get(str(detail.get('project_id') or ''))
+            if master and master.enterprise_project_id:
+                add(master.enterprise_project, 'high', f'Referenced procurement project {master.project_number} is linked here.')
+    elif record_type == 'purchase_order':
+        codes = [row.project_number]
+        text = f'{row.project_number} {row.title}'
+        if row.project_id:
+            names.append(row.project.project_name)
+            if row.project.enterprise_project_id:
+                add(row.project.enterprise_project, 'high', f'Linked procurement project {row.project.project_number}.')
+        if row.pr_reference_id and row.pr_reference.enterprise_project_id:
+            add(row.pr_reference.enterprise_project, 'high', f'Originating recommendation {row.pr_reference.pr_number} is linked here.')
+    elif record_type == 'invoice':
+        for allocation in row.po_allocations.all():
+            order = allocation.purchase_order
+            if order.enterprise_project_id:
+                add(order.enterprise_project, 'high', f'Existing PO allocation references {order.po_number}; invoice matching still requires review.')
+        for order in orders_by_number.get(normalize_project_code(row.po_reference_text), []):
+            add(order.enterprise_project, 'high', f'Exact invoice PO reference: {order.po_number}. Match the invoice to this PO before project reconciliation.')
+
+    normalized_codes = {normalize_project_code(code) for code in codes if code}
+    normalized_names = {normalize_project_code(name) for name in names if name}
+    for project in projects:
+        if normalize_project_code(project.code) in normalized_codes:
+            add(project, 'high', f'Exact project code reference: {project.code}.')
+        elif text and re.search(r'(?<![\w-])' + re.escape(project.code) + r'(?![\w-])', text, re.IGNORECASE):
+            add(project, 'medium', f'Project code {project.code} appears in the record description.')
+        if normalize_project_code(project.name) in normalized_names:
+            add(project, 'medium', f'Exact project name reference: {project.name}.')
+        elif text:
+            ignored = {'project', 'general', 'internal', 'services', 'service', 'engineering', 'the', 'and', 'for'}
+            project_words = set(re.findall(r'[a-z0-9]{3,}', project.name.lower())) - ignored
+            matching = project_words & set(re.findall(r'[a-z0-9]{3,}', text.lower()))
+            if len(matching) >= 2:
+                add(project, 'low', f'Shared project-name words: {", ".join(sorted(matching))}. Confirm against source documents.')
+    return sorted(evidence.values(), key=lambda item: (
+        -strengths[item['match_strength']], -len(item['reasons']), item['code'], item['id'],
+    ))[:3]
 
 
 def normalize_project_code(value) -> str:
@@ -235,15 +334,17 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
     report = build_project_relationship_report(apply=False, sample_limit=sample_limit)
     master_by_id = {
         str(row.pk): row
-        for row in Project.objects.filter(enterprise_project__isnull=True)
+        for row in Project.objects.select_related('enterprise_project')
     }
     pr_by_id = {
         str(row.pk): row
-        for row in PurchaseRequisition.objects.filter(enterprise_project__isnull=True)
+        for row in PurchaseRequisition.objects.select_related('enterprise_project')
     }
     po_by_id = {
         str(row.pk): row
-        for row in PurchaseOrder.objects.filter(enterprise_project__isnull=True)
+        for row in PurchaseOrder.objects.select_related(
+            'enterprise_project', 'project__enterprise_project', 'pr_reference__enterprise_project',
+        )
     }
 
     rows = []
@@ -280,6 +381,8 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
             'title': title,
             'amount': amount,
             'currency': currency,
+            'created_at': row.created_at.isoformat(),
+            'current_project': _project_brief(row.enterprise_project),
         })
 
     # Finance invoices cannot be safely connected to a Project directly.  They
@@ -287,10 +390,11 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
     # retained for the three-way check.
     invoice_summary = {'total': 0, 'linked_before': 0, 'resolvable': 0, 'unresolved': 0}
     purchase_order_choices = []
+    invoice_by_id = {}
     try:
         from apps.finance.models import Invoice, InvoiceMatchStatus
 
-        invoices = Invoice.objects.prefetch_related('po_allocations__purchase_order')
+        invoices = Invoice.objects.prefetch_related('po_allocations__purchase_order__enterprise_project')
         invoice_summary['total'] = invoices.count()
         verified_ids = invoices.filter(
             po_allocations__match_status=InvoiceMatchStatus.VERIFIED,
@@ -299,6 +403,7 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
         unresolved_invoices = invoices.exclude(pk__in=verified_ids)
         invoice_summary['unresolved'] = unresolved_invoices.count()
         for invoice in unresolved_invoices[:sample_limit]:
+            invoice_by_id[str(invoice.pk)] = invoice
             allocations = list(invoice.po_allocations.all())
             invoice_total = invoice.total_amount or invoice.amount or Decimal('0')
             allocated_total = sum((allocation.allocated_amount for allocation in allocations), Decimal('0'))
@@ -311,6 +416,8 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
                 'title': invoice.vendor_name or 'Unknown vendor',
                 'amount': float(invoice.total_amount or invoice.amount or 0),
                 'currency': invoice.currency,
+                'created_at': invoice.created_at.isoformat(),
+                'current_project': None,
                 'allocation': None,
                 'invoice_match': {
                     'status': invoice.match_status,
@@ -347,17 +454,41 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
     except (DatabaseError, ImportError, RuntimeError):
         pass
 
-    canonical_projects = [
-        {
-            'id': str(row.pk),
-            'code': row.code,
-            'name': row.name,
-            'status': row.status,
-            'client_name': row.client_name,
-            'currency': row.currency,
-        }
-        for row in EnterpriseProject.objects.filter(is_deleted=False).order_by('code')
-    ]
+    projects = list(EnterpriseProject.objects.filter(is_deleted=False).order_by('code'))
+    canonical_projects = [_project_choice(project) for project in projects]
+    record_maps = {
+        'procurement_project': master_by_id, 'purchase_requisition': pr_by_id,
+        'purchase_order': po_by_id, 'invoice': invoice_by_id,
+    }
+    orders_by_number = defaultdict(list)
+    for order in po_by_id.values():
+        if order.enterprise_project_id and order.status != 'cancelled':
+            orders_by_number[normalize_project_code(order.po_number)].append(order)
+    latest_audit = {}
+    for audit in ProjectRelationshipResolution.objects.filter(
+        record_id__in=[row['id'] for row in rows],
+    ).select_related('resolved_by').order_by('-created_at', '-id'):
+        latest_audit.setdefault((audit.record_type, str(audit.record_id)), audit)
+    currency_totals = defaultdict(lambda: {'amount': Decimal('0'), 'record_count': 0})
+    for item in rows:
+        source = record_maps[item['record_type']][item['id']]
+        item['suggested_projects'] = _suggest_projects(
+            item['record_type'], source, projects, master_by_id, orders_by_number,
+        )
+        audit = latest_audit.get((item['record_type'], item['id']))
+        item['exception'] = {
+            'reason': audit.reason, 'created_at': audit.created_at.isoformat(),
+            'resolved_by': audit.resolved_by.get_full_name() if audit.resolved_by else None,
+        } if audit and audit.resolution == 'exception' else None
+        if item['amount'] is not None:
+            totals = currency_totals[str(item['currency'] or '').strip().upper() or 'UNKNOWN']
+            source_amount = (
+                source.total_price or source.estimated_budget or Decimal('0')
+                if item['record_type'] == 'purchase_requisition' else
+                source.total_amount or (source.amount if item['record_type'] == 'invoice' else Decimal('0')) or Decimal('0')
+            )
+            totals['amount'] += source_amount
+            totals['record_count'] += 1
     try:
         from apps.project_control.models import CostAllocation
         allocation_index = {}
@@ -387,23 +518,36 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
     except (DatabaseError, ImportError, RuntimeError):
         for row in rows:
             row['allocation'] = None
+    recent_audits = list(ProjectRelationshipResolution.objects.select_related(
+        'enterprise_project', 'previous_enterprise_project', 'resolved_by',
+    )[:20])
+    # Resolved invoices have left the queue but still need readable audit labels.
+    if any(audit.record_type == 'invoice' for audit in recent_audits):
+        from apps.finance.models import Invoice
+        invoice_by_id.update({str(invoice.pk): invoice for invoice in Invoice.objects.filter(
+            pk__in=[audit.record_id for audit in recent_audits
+                    if audit.record_type == 'invoice' and str(audit.record_id).isdigit()],
+        )})
     recent_resolutions = [
         {
             'id': str(row.pk),
             'record_type': row.record_type,
             'record_id': str(row.record_id),
+            'record_identifier': _identifier(row.record_type, record_maps[row.record_type][str(row.record_id)])
+                if str(row.record_id) in record_maps.get(row.record_type, {}) else str(row.record_id),
             'enterprise_project_id': str(row.enterprise_project_id) if row.enterprise_project_id else None,
             'enterprise_project_code': row.enterprise_project.code if row.enterprise_project else None,
+            'previous_enterprise_project_code': row.previous_enterprise_project.code
+                if row.previous_enterprise_project else None,
             'resolution': row.resolution,
             'reason': row.reason,
             'resolved_by': row.resolved_by.get_full_name() if row.resolved_by else None,
-            'created_at': row.created_at,
+            'created_at': row.created_at.isoformat(),
         }
-        for row in ProjectRelationshipResolution.objects.select_related(
-            'enterprise_project', 'resolved_by'
-        )[:20]
+        for row in recent_audits
     ]
     return {
+        'generated_at': timezone.now().isoformat(),
         'matching_rule': report['matching_rule'],
         'summary': {
             'enterprise_projects': report['enterprise_projects'],
@@ -415,6 +559,19 @@ def build_project_reconciliation_payload(*, sample_limit=1000):
                 report[key]['unresolved']
                 for key in ('procurement_projects', 'purchase_requisitions', 'purchase_orders')
             ) + invoice_summary['unresolved'],
+            'sample_count': len(rows),
+            'sample_limit_per_source': sample_limit,
+            'sample_complete': len(rows) == sum(
+                report[key]['unresolved']
+                for key in ('procurement_projects', 'purchase_requisitions', 'purchase_orders')
+            ) + invoice_summary['unresolved'],
+            'suggested_record_count': sum(bool(row['suggested_projects']) for row in rows),
+            'suggestion_scope': 'returned_records',
+            'amount_totals_scope': 'returned_records',
+            'unresolved_amounts_by_currency': [
+                {'currency': currency, 'amount': float(totals['amount']), 'record_count': totals['record_count']}
+                for currency, totals in sorted(currency_totals.items())
+            ],
         },
         'unresolved': rows,
         'canonical_projects': canonical_projects,
@@ -434,6 +591,7 @@ def resolve_invoice_purchase_order(*, invoice_id, purchase_order_id, allocated_a
         InvoicePurchaseOrderAllocation,
     )
     from apps.finance.services.payables import evaluate_three_way_match
+    reason = _reason(reason)
 
     try:
         invoice = Invoice.objects.select_for_update().get(pk=invoice_id)
@@ -518,14 +676,16 @@ def _record_resolution(*, record_type, row, enterprise_project, user, reason, re
 
 
 @transaction.atomic
-def resolve_project_relationship(*, record_type, record_id, enterprise_project_id, user, reason=''):
+def resolve_project_relationship(*, record_type, record_id, enterprise_project_id, user, reason='',
+                                 expected_project_id=EXPECTED_PROJECT_UNSET):
     """Assign one canonical project and safely propagate through explicit links."""
+    reason = _reason(reason)
     model_map = {
         'procurement_project': Project,
         'purchase_requisition': PurchaseRequisition,
         'purchase_order': PurchaseOrder,
     }
-    model = model_map.get(record_type)
+    model = model_map.get(record_type) if isinstance(record_type, str) else None
     if model is None:
         raise ValidationError({'record_type': 'Unsupported record type.'})
     try:
@@ -537,6 +697,17 @@ def resolve_project_relationship(*, record_type, record_id, enterprise_project_i
         raise ValidationError({'enterprise_project_id': 'Canonical project was not found.'}) from exc
     except (model.DoesNotExist, ValueError) as exc:
         raise ValidationError({'record_id': 'Procurement record was not found.'}) from exc
+
+    if expected_project_id is not EXPECTED_PROJECT_UNSET:
+        try:
+            expected = str(EnterpriseProject._meta.pk.to_python(expected_project_id)) if expected_project_id else None
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise ValidationError({'expected_project_id': 'Expected project is invalid.'}) from exc
+        current = str(row.enterprise_project_id) if row.enterprise_project_id else None
+        if current not in {expected, str(enterprise_project.pk)}:
+            raise ValidationError({
+                'expected_project_id': 'This record was linked to a different project while you were reviewing it. Refresh before saving.',
+            })
 
     if record_type == 'procurement_project':
         conflict = Project.objects.filter(enterprise_project=enterprise_project).exclude(pk=row.pk).first()
@@ -601,5 +772,38 @@ def resolve_project_relationship(*, record_type, record_id, enterprise_project_i
             'id': str(enterprise_project.pk),
             'code': enterprise_project.code,
             'name': enterprise_project.name,
+        },
+    }
+
+
+@transaction.atomic
+def save_project_relationship_exception(*, record_type, record_id, user, reason):
+    """Record a reviewed exception without altering links, allocations or amounts."""
+    from apps.finance.models import Invoice
+
+    reason = _reason(reason, required=True)
+    model = {
+        'procurement_project': Project, 'purchase_requisition': PurchaseRequisition,
+        'purchase_order': PurchaseOrder, 'invoice': Invoice,
+    }.get(record_type) if isinstance(record_type, str) else None
+    if model is None:
+        raise ValidationError({'record_type': 'Unsupported record type.'})
+    try:
+        row = model.objects.select_for_update().get(pk=record_id)
+    except (model.DoesNotExist, ValidationError, ValueError, TypeError) as exc:
+        raise ValidationError({'record_id': 'Reconciliation record was not found.'}) from exc
+    project_id = getattr(row, 'enterprise_project_id', None)
+    audit = ProjectRelationshipResolution.objects.create(
+        record_type=record_type, record_id=str(row.pk),
+        previous_enterprise_project_id=project_id, enterprise_project_id=project_id,
+        resolution='exception', reason=reason,
+        resolved_by=user if getattr(user, 'is_authenticated', False) else None,
+    )
+    return {
+        'id': str(audit.pk), 'record_type': record_type, 'record_id': str(row.pk),
+        'record_identifier': _identifier(record_type, row),
+        'exception': {
+            'reason': audit.reason, 'created_at': audit.created_at.isoformat(),
+            'resolved_by': audit.resolved_by.get_full_name() if audit.resolved_by else None,
         },
     }

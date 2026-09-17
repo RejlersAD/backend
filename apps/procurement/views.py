@@ -103,6 +103,7 @@ from .services.project_relationships import (
     build_project_reconciliation_payload,
     resolve_invoice_purchase_order,
     resolve_project_relationship,
+    save_project_relationship_exception,
 )
 from .services.governed_dashboard import build_dashboard, create_snapshot
 from apps.project_control.access import CommercialModulePermission
@@ -3040,17 +3041,34 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'detail': 'record_type, record_id, and enterprise_project_id are required.'
             })
         try:
+            expected = {'expected_project_id': request.data['expected_project_id']} if 'expected_project_id' in request.data else {}
             result = resolve_project_relationship(
                 record_type=record_type,
                 record_id=record_id,
                 enterprise_project_id=enterprise_project_id,
                 user=request.user,
                 reason=str(request.data.get('reason') or ''),
+                **expected,
             )
         except DjangoValidationError as exc:
             detail = getattr(exc, 'message_dict', None) or getattr(exc, 'messages', None)
             raise ValidationError(detail) from exc
         return Response(result)
+
+    @action(
+        detail=False, methods=['post'], url_path='relationship-exception',
+        permission_classes=[IsAuthenticated, CommercialModulePermission],
+    )
+    def save_relationship_exception(self, request):
+        """Retain an operator's exception without changing the commercial record."""
+        try:
+            result = save_project_relationship_exception(
+                record_type=request.data.get('record_type'), record_id=request.data.get('record_id'),
+                user=request.user, reason=request.data.get('reason'),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(getattr(exc, 'message_dict', None) or exc.messages) from exc
+        return Response(result, status=status.HTTP_201_CREATED)
 
     @action(
         detail=False, methods=['post'], url_path='resolve-invoice-po',

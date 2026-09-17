@@ -912,15 +912,17 @@ class ProjectRelationshipResolution(models.Model):
         ('procurement_project', 'Procurement Project'),
         ('purchase_requisition', 'Purchase Requisition'),
         ('purchase_order', 'Purchase Order'),
+        ('invoice', 'Invoice'),
     ]
     RESOLUTION_CHOICES = [
         ('manual', 'Manual'),
         ('propagated', 'Propagated'),
+        ('exception', 'Exception'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     record_type = models.CharField(max_length=30, choices=RECORD_TYPE_CHOICES, db_index=True)
-    record_id = models.UUIDField(db_index=True)
+    record_id = models.CharField(max_length=64, db_index=True)
     previous_enterprise_project = models.ForeignKey(
         'core.Project', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='+',
