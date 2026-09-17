@@ -448,7 +448,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         # serializer still protects workflow decisions and other audit fields.
 
     def update(self, request, *args, **kwargs):
-        self._enforce_owner_mutation(self.get_object())
+        # A module-wide update grant includes correcting pending assignments.
+        # Owner-only source-evidence review/deletion use their separate guards.
+        from apps.rbac.action_policy import request_action_allowed
+        if not request_action_allowed(request, 'procurement_requisitions', 'update'):
+            self._enforce_owner_mutation(self.get_object())
         return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'], url_path='source-approvals')

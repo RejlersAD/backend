@@ -372,6 +372,22 @@ def additional_actions(request):
         # it never accepts its status as a proposed decision. Continue scanning
         # every other payload field and every other endpoint normally.
         data = {key: value for key, value in data.items() if key != 'expected_row'}
+    if (
+        view is not None
+        and (view.__class__.__module__, view.__class__.__name__)
+        == ('apps.procurement.views', 'PurchaseRequisitionViewSet')
+        and getattr(view, 'action', '') in {'update', 'partial_update'}
+        and isinstance(data, dict)
+    ):
+        # The PR serializer keeps saved decisions under a row lock and strips
+        # incoming workflow state. Repeating that history in an edit is not an
+        # approval command. Direct decision fields and explicit commands still
+        # pass through the normal checks below.
+        data = {key: value for key, value in data.items() if key != 'approval_workflow_config'}
+        metadata = data.get('price_remarks_data')
+        if isinstance(metadata, dict):
+            protected = set(view.get_serializer_class().SOURCE_METADATA_FIELDS)
+            data['price_remarks_data'] = {key: value for key, value in metadata.items() if key not in protected}
     def inspect(value):
         if isinstance(value, dict):
             for key, item in value.items():
