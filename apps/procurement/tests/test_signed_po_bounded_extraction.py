@@ -25,6 +25,68 @@ def document_bytes(pages=27, *, blank=False):
 
 
 class SignedPOBoundedExtractionTests(SimpleTestCase):
+    def test_followup_range_renders_only_requested_pages_with_original_page_numbers(self):
+        images = [Mock(), Mock()]
+        with (
+            patch('pdf2image.pdfinfo_from_bytes', return_value={'Pages': 160}),
+            patch('pdf2image.convert_from_bytes', side_effect=[[images[0]], [images[1]]]) as render,
+            patch('pytesseract.image_to_string', side_effect=['First supplier page', 'Supplier contact']),
+        ):
+            text = extract_text_from_pdf_tesseract(b'%PDF-test', first_page=5, max_pages=2,
+                                                  ocr_config='--psm 6', max_image_dimension=2400)
+        self.assertEqual([call.kwargs['first_page'] for call in render.call_args_list], [5, 6])
+        self.assertEqual([call.kwargs['last_page'] for call in render.call_args_list], [5, 6])
+        self.assertTrue(all(call.kwargs['size'] == 2400 for call in render.call_args_list))
+        self.assertIn('--- Page 5 ---', text)
+        self.assertIn('--- Page 6 ---', text)
+        for image in images:
+            image.close.assert_called_once()
+
+    def test_followup_native_fallback_keeps_entire_requested_range_after_partial_ocr_failure(self):
+        images = [Mock(), Mock()]
+        with (
+            patch('pdf2image.pdfinfo_from_bytes', return_value={'Pages': 27}),
+            patch('pdf2image.convert_from_bytes', side_effect=[[images[0]], [images[1]]]),
+            patch('pytesseract.image_to_string', side_effect=['First OCR page', RuntimeError('OCR timed out')]),
+        ):
+            text = extract_text_from_pdf_tesseract(document_bytes(), first_page=5, max_pages=2)
+        self.assertIn('--- Page 5 ---\nContract page 5', text)
+        self.assertIn('--- Page 6 ---\nContract page 6', text)
+        self.assertNotIn('Contract page 4', text)
+        self.assertNotIn('Contract page 7', text)
+        for image in images:
+            image.close.assert_called_once()
+
+    def test_followup_last_resort_reader_obeys_start_and_count(self):
+        with (
+            patch('pdf2image.pdfinfo_from_bytes', side_effect=RuntimeError('renderer unavailable')),
+            patch('fitz.open', side_effect=RuntimeError('native reader unavailable')),
+        ):
+            text = extract_text_from_pdf_tesseract(document_bytes(), first_page=5, max_pages=2)
+        self.assertIn('Contract page 5', text)
+        self.assertIn('Contract page 6', text)
+        self.assertNotIn('Contract page 4', text)
+        self.assertNotIn('Contract page 7', text)
+
+    def test_followup_range_stops_at_last_available_page(self):
+        image = Mock()
+        with (
+            patch('pdf2image.pdfinfo_from_bytes', return_value={'Pages': 6}),
+            patch('pdf2image.convert_from_bytes', return_value=[image]) as render,
+            patch('pytesseract.image_to_string', return_value='Final page'),
+        ):
+            text = extract_text_from_pdf_tesseract(b'%PDF-test', first_page=6, max_pages=4)
+        render.assert_called_once()
+        self.assertEqual(render.call_args.kwargs['first_page'], 6)
+        self.assertIn('--- Page 6 ---', text)
+
+    def test_invalid_start_page_is_rejected_before_rendering(self):
+        with patch('pdf2image.convert_from_bytes') as render:
+            for first_page in (0, -1, '5'):
+                with self.subTest(first_page=first_page), self.assertRaises(ValueError):
+                    extract_text_from_pdf_tesseract(b'%PDF-test', first_page=first_page, max_pages=1)
+        render.assert_not_called()
+
     def test_long_scan_renders_only_first_four_pages_and_releases_each_before_next(self):
         source = document_bytes()
         images = []

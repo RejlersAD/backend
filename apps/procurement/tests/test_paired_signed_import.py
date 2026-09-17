@@ -183,6 +183,30 @@ class PairedSignedImportTests(TestCase):
         self.assertEqual(response.status_code, 400, response.data)
         self.assert_no_pair()
 
+    def test_unread_po_amount_can_be_corrected_and_saved_with_both_original_pdfs(self):
+        self.fields.update(total_amount=Decimal('0.00'), tax_amount=Decimal('0.00'),
+                           gross_amount=Decimal('0.00'))
+        response = self.upload()
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('purchase amount could not be confirmed', str(response.data))
+        self.assert_no_pair()
+
+        reviewed = {**self.po_reviewed, 'entered_amount': '210.00', 'vat_basis': 'inclusive'}
+        response = self.upload(po_reviewed_fields=json.dumps(reviewed))
+        self.assertEqual(response.status_code, 201, response.data)
+        po, pr, source = PurchaseOrder.objects.get(), PurchaseRequisition.objects.get(), PODocument.objects.get()
+        self.assertEqual(po.pr_reference_id, pr.pk)
+        self.assertEqual((po.net_amount, po.tax_amount, po.total_amount),
+                         (Decimal('200.00'), Decimal('10.00'), Decimal('210.00')))
+        self.assertEqual(pr.total_price, Decimal('100.00'))
+        self.assertFalse(any('purchase amount' in issue for issue in
+                             response.data['purchase_order']['reconciliation_issues']))
+        self.assertEqual(source.extracted_data['source_extracted_data']['total_amount'], '0.00')
+        with default_storage.open(pr.attachments[0]['storage_key'], 'rb') as saved:
+            self.assertEqual(saved.read(), self.pr_content)
+        with default_storage.open(source.s3_key, 'rb') as saved:
+            self.assertEqual(saved.read(), self.content)
+
     def test_pending_po_is_not_returned_as_success_and_both_new_sources_are_removed(self):
         self.fields['vendor_name'] = ''
         self.po_reviewed['vendor_name'] = ''
