@@ -25,6 +25,7 @@ from .enterprise_views import (
 )
 from .proposal_views import ProposalExportRecordViewSet, TechnicalProposalViewSet
 from .project_setup_views import ProjectSetupAISettingsView, ProjectSetupCreateView, ProjectSetupOptionsView, ProjectSetupPreviewView
+from .simple_planning_views import SimplePlanningView
 from .workflow_views import (
     EngineeringDependencyTemplateViewSet, ProjectScheduleConfigurationViewSet,
     ScheduleDefaultProposalViewSet, WorkflowTemplateOverrideViewSet, WorkflowTemplateViewSet,
@@ -73,6 +74,10 @@ router.register(r'workflow-overrides', WorkflowTemplateOverrideViewSet, basename
 app_name = 'planning_intelligence'
 
 urlpatterns = [
+    path('projects/<int:project_id>/simple-plan/', SimplePlanningView.as_view(), name='simple-plan'),
+    *[path(f'projects/<int:project_id>/simple-plan/{operation}/',
+           SimplePlanningView.as_view(operation=operation), name=f'simple-plan-{operation}')
+      for operation in ('analyse', 'submit', 'approve-publish', 'reopen', 'propose-schedule', 'apply-schedule')],
     path('project-setup/ai-settings/', ProjectSetupAISettingsView.as_view(), name='project-setup-ai-settings'),
     path('project-setup/options/', ProjectSetupOptionsView.as_view(), name='project-setup-options'),
     path('project-setup/preview/', ProjectSetupPreviewView.as_view(), name='project-setup-preview'),

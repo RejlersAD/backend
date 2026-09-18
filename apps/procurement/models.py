@@ -608,7 +608,7 @@ class PurchaseOrder(TimeStampedModel):
     approved_date = models.DateField(null=True, blank=True, help_text='Date when PO was approved')
     approved_at = models.DateTimeField(null=True, blank=True, help_text='Exact timestamp when final PO approval was recorded')
     approval_signature = models.TextField(blank=True, help_text='Digital signature image snapshot (data URL or S3 URL)')
-    approval_stamp = models.CharField(max_length=500, blank=True, help_text='Company stamp image (S3 URL)')
+    approval_stamp = models.TextField(blank=True, help_text='Company stamp image (S3 URL)')
 
     # ═══ MULTI-STAGE APPROVAL WORKFLOW (Form Section: Approval Status Log) ═══
     technical_approver = models.CharField(max_length=200, blank=True, help_text='Assigned technical approver name or identifier')
@@ -878,7 +878,7 @@ class PODocument(TimeStampedModel):
     # Source file
     original_filename = models.CharField(max_length=300)
     s3_key = models.CharField(max_length=500, blank=True)
-    s3_url = models.URLField(max_length=1000, blank=True)
+    s3_url = models.TextField(blank=True)
     file_size_bytes = models.PositiveIntegerField(default=0)
 
     # Detection

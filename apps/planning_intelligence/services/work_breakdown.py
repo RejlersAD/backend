@@ -5,9 +5,10 @@ Reading never creates records. Advancing materializes a separate editable
 schedule version and does not calculate, approve, or publish a baseline.
 """
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import NAMESPACE_URL, uuid5
 
+from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
 
@@ -45,6 +46,8 @@ def _initial_tasks(run, preview):
         if row.get('excluded') or not row.get('confirmed'):
             continue
         key = f"{run.pk}:{row['discipline']}:{row['canonical_name']}:{row['document_number']}"
+        if row.get('source_identity'):
+            key += f":{row['source_identity']}"
         tasks.append({
             'id': f'task-{uuid5(NAMESPACE_URL, key).hex}',
             'discipline': row['discipline'] or 'general',
@@ -76,11 +79,13 @@ def work_breakdown_state(run, *, actor=None):
     codes = list(dict.fromkeys([
         *DISCIPLINE_NAME_BY_CODE, *(task['discipline'] for task in draft['tasks']),
     ]))
+    source_disciplines = ((run.summary or {}).get('base_intelligence') or {}).get('disciplines') or {}
     return {
         **draft, 'planning_mode': 'document', 'intelligence_run_id': run.pk, 'preview_confirmed_at': token,
         'tasks': hydrate_assignments(run.project, draft['tasks'], token),
         'permissions': {'can_assign': manages_project_tasks(actor, run.project.enterprise_project)},
-        'disciplines': [{'code': code, 'name': DISCIPLINE_NAME_BY_CODE.get(code, code.replace('_', ' ').title())}
+        'disciplines': [{'code': code, 'name': source_disciplines.get(code, {}).get('name')
+                        or DISCIPLINE_NAME_BY_CODE.get(code, code.replace('_', ' ').title())}
                         for code in codes],
         'source_documents': [{
             'id': source.pk, 'name': source.original_filename, 'category': source.category, 'status': 'reviewed',
@@ -113,6 +118,7 @@ def save_work_breakdown(run, data, *, actor):
     changed = tasks != previous_tasks
     draft = {
         'tasks': tasks,
+        'disciplines': current['disciplines'],
         'revision': current['revision'] + int(changed or not current['saved_at']),
         'saved_at': timezone.now().isoformat(), 'saved_by': actor.pk,
         'schedule_id': None if changed else current.get('schedule_id'),
@@ -144,6 +150,39 @@ def _materialize(run, draft, *, actor):
     )
 
 
+def _workflow_relationships(tasks):
+    """Validate typed links before creating any expanded schedule records."""
+    ids = {task['id'] for task in tasks}
+    if len(ids) != len(tasks):
+        raise WorkBreakdownConflict('Expanded activities need unique IDs.', 'workflow_activity_ids_invalid')
+    result = []
+    for task in tasks:
+        details = task.get('dependency_details') or []
+        predecessors = list(dict.fromkeys([*(task.get('depends_on') or []), *(row.get('task_id') for row in details)]))
+        for predecessor in predecessors:
+            if predecessor not in ids or predecessor == task['id']:
+                raise WorkBreakdownConflict('Workflow dependencies must connect distinct activities in this plan.', 'workflow_dependencies_invalid')
+            rows = [row for row in details if row.get('task_id') == predecessor] or [{'type': 'FS', 'lag_days': 0}]
+            seen = set()
+            for detail in rows:
+                kind = str(detail.get('type') or 'FS').upper()
+                try:
+                    lag = Decimal(str(detail.get('lag_days', 0)))
+                except (InvalidOperation, TypeError, ValueError):
+                    raise WorkBreakdownConflict('Workflow relationship lag must be numeric.', 'workflow_dependencies_invalid') from None
+                if kind not in {'FS', 'SS', 'FF', 'SF'} or not lag.is_finite() or abs(lag) > 365:
+                    raise WorkBreakdownConflict('Workflow relationship type or lag is invalid.', 'workflow_dependencies_invalid')
+                if kind in seen:
+                    raise WorkBreakdownConflict('Workflow relationships must not be duplicated.', 'workflow_dependencies_invalid')
+                seen.add(kind)
+                rationale = (task.get('dependency_rationales') or {}).get(predecessor) or {}
+                metadata = deepcopy(rationale) if isinstance(rationale, dict) else {'rationale': str(rationale)}
+                metadata.update({key: deepcopy(value) for key, value in detail.items() if key not in {'task_id', 'type', 'lag_days'}})
+                result.append((predecessor, task['id'], kind, lag, metadata))
+    return result
+
+
+@transaction.atomic
 def materialize_work_breakdown(project, draft, *, actor, start, token, intelligence_run_id=None):
     existing = ScheduleVersion.objects.filter(
         pk=draft.get('schedule_version_id'), is_deleted=False, schedule__is_deleted=False,
@@ -153,6 +192,31 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
         return existing
     if not start:
         raise WorkBreakdownConflict('Set and confirm the project start date before continuing to schedule.', 'work_breakdown_start_required')
+    source_parents = {row['id']: deepcopy(row) for row in draft.get('deliverables') or []}
+    expanded = bool(source_parents)
+    parent_tasks = {key: [] for key in source_parents}
+    typed_links = _workflow_relationships(draft['tasks']) if expanded else []
+    if expanded:
+        if len(source_parents) != len(draft['deliverables']):
+            raise WorkBreakdownConflict('Source deliverables need unique IDs.', 'workflow_parent_ids_invalid')
+        for task in draft['tasks']:
+            parent_id = task.get('parent_deliverable_id')
+            if parent_id is not None:
+                if parent_id not in source_parents:
+                    raise WorkBreakdownConflict('A workflow activity has no source deliverable.', 'workflow_parent_missing')
+                parent_tasks[parent_id].append(task)
+            activity_type = task.get('activity_type') or 'task'
+            if activity_type not in {'task', 'level_of_effort', 'start_milestone', 'finish_milestone'}:
+                raise WorkBreakdownConflict('Workflow activity type is invalid.', 'workflow_activity_type_invalid')
+            try:
+                duration = Decimal(str(task.get('duration_days')))
+            except (InvalidOperation, TypeError, ValueError):
+                raise WorkBreakdownConflict('Set a valid duration for each workflow activity.', 'workflow_duration_invalid') from None
+            milestone = activity_type in {'start_milestone', 'finish_milestone'}
+            if not duration.is_finite() or duration < 0 or (milestone and duration != 0) or (not milestone and duration == 0):
+                raise WorkBreakdownConflict('Milestones require zero duration; other workflow activities require a positive duration.', 'workflow_duration_invalid')
+        if any(not rows for rows in parent_tasks.values()):
+            raise WorkBreakdownConflict('Every source deliverable must retain its workflow activities.', 'workflow_parent_missing_tasks')
     schedule, _ = Schedule.objects.get_or_create(
         project=project, code='MASTER',
         defaults={'name': f'{project.name} Master Schedule'[:255], 'planned_start': start, 'created_by': actor},
@@ -183,6 +247,8 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
     source = 'confirmed_work_breakdown' if intelligence_run_id is not None else 'manual_work_breakdown'
     discipline_names = {row['code']: row['name'] for row in draft.get('disciplines', [])}
     nodes = {}
+    deliverable_nodes = {}
+    parent_counts = {}
     activities = {}
     resources = {}
     for index, task in enumerate(draft['tasks']):
@@ -193,10 +259,46 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 name=discipline_names.get(discipline, DISCIPLINE_NAME_BY_CODE.get(discipline, discipline.replace('_', ' ').title()))[:255],
                 discipline=discipline, sort_order=len(nodes),
             )
+        node = nodes[discipline]
+        source_parent = source_parents.get(task.get('parent_deliverable_id'))
+        if source_parent is not None:
+            parent_id = source_parent['id']
+            if parent_id not in deliverable_nodes:
+                if source_parent.get('discipline') and source_parent['discipline'] != discipline:
+                    raise WorkBreakdownConflict('Workflow stages must retain their source deliverable discipline.', 'workflow_discipline_mismatch')
+                parent_counts[discipline] = parent_counts.get(discipline, 0) + 1
+                deliverable_node = ScheduleWBSNode.objects.create(
+                    version=version, parent=node, code=f'{node.code.rsplit(".", 1)[0]}.{parent_counts[discipline]}',
+                    name=source_parent['title'][:255], discipline=discipline,
+                    level=node.level + 1, sort_order=index,
+                )
+                deliverable_nodes[parent_id] = deliverable_node
+                source_parent.update(
+                    wbs_node_id=deliverable_node.pk, parent_wbs_node_id=node.pk, wbs_code=deliverable_node.code,
+                    workflow_task_ids=[row['id'] for row in sorted(parent_tasks[parent_id], key=lambda row: row.get('workflow_stage_sequence', 0))],
+                )
+            node = deliverable_nodes[parent_id]
+            if node.discipline != discipline:
+                raise WorkBreakdownConflict('Workflow stages must retain their source deliverable discipline.', 'workflow_discipline_mismatch')
+        expansion_metadata = {
+            key: deepcopy(value) for key, value in task.items()
+            if key.startswith('workflow_') or key in {
+                'parent_deliverable_id', 'deliverable', 'source_title', 'source_parent_values',
+                'responsible_role', 'duration_source', 'due_date_source', 'schedule_rationale',
+                'schedule_phase', 'schedule_generated_fields', 'dependency_rationales',
+                'activity_type', 'is_milestone',
+            }
+        } if expanded else {}
+        if expanded:
+            expansion_metadata['owner'] = task['owner']
+        if source_parent is not None:
+            expansion_metadata['source_deliverable'] = deepcopy(source_parent)
         activity = ScheduleActivity.objects.create(
-            version=version, wbs_node=nodes[discipline], external_id=task['id'],
-            name=task['title'], discipline=discipline, responsible_role=task['owner'],
-            duration_days=task.get('duration_days') or 0, activity_type='task', calendar=schedule.default_calendar,
+            version=version, wbs_node=node, external_id=task['id'],
+            name=task['title'], discipline=discipline,
+            responsible_role=(task.get('responsible_role') or '') if source_parent is not None else task['owner'],
+            duration_days=task.get('duration_days') or 0,
+            activity_type=(task.get('activity_type') or 'task') if expanded else 'task', calendar=schedule.default_calendar,
             constraint_type='start_no_earlier' if task.get('planned_start_date') else 'none',
             constraint_date=task.get('planned_start_date') or None,
             sort_order=index, metadata={
@@ -210,6 +312,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'priority': task.get('priority', 'medium'),
                 'source_references': task['source_references'],
                 'document_number': task['document_number'], 'document_revision': task['document_revision'],
+                **expansion_metadata,
             },
         )
         activities[task['id']] = activity
@@ -227,12 +330,20 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 activity=activity, resource=resource, planned_units=hours, budgeted_hours=hours,
                 budgeted_cost=hours * resource.unit_cost,
             )
-    ActivityRelationship.objects.bulk_create([
-        ActivityRelationship(
-            version=version, predecessor=activities[predecessor], successor=activities[task['id']],
-            relationship_type='FS', metadata={'source': source},
-        ) for task in draft['tasks'] for predecessor in task['depends_on']
-    ])
+    if expanded:
+        ActivityRelationship.objects.bulk_create([
+            ActivityRelationship(
+                version=version, predecessor=activities[predecessor], successor=activities[successor],
+                relationship_type=kind, lag_days=lag, metadata={'source': source, **metadata},
+            ) for predecessor, successor, kind, lag, metadata in typed_links
+        ], batch_size=500)
+    else:
+        ActivityRelationship.objects.bulk_create([
+            ActivityRelationship(
+                version=version, predecessor=activities[predecessor], successor=activities[task['id']],
+                relationship_type='FS', metadata={'source': source},
+            ) for task in draft['tasks'] for predecessor in task['depends_on']
+        ])
     record_event(
         project=project, actor=actor, action='work_breakdown.schedule_created', entity=version,
         after={'schedule_id': schedule.pk, 'schedule_version_id': version.pk, 'task_count': len(draft['tasks'])},

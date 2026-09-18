@@ -9,6 +9,9 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.core.project_models import Project, ProjectMember
+from apps.rbac.models import (
+    Module, Organization, Permission, Role, RoleModule, RolePermission, UserProfile, UserRole,
+)
 from apps.users.models import User
 
 from ..models import (
@@ -20,6 +23,34 @@ from ..models import (
 from ..services.cpm import SchedulingError, calculate_schedule_version
 from ..services.schedule_materializer import materialize_generation
 from ..services.trustworthy_scheduling import approve_schedule_assurance, run_schedule_assurance
+
+
+def grant_planning_test_actions(users, actions):
+    """Give fixture users explicit module actions without project membership."""
+    actions = sorted(set(actions))
+    module, _ = Module.objects.get_or_create(code='planning_package', defaults={'name': 'Planning'})
+    role, _ = Role.objects.get_or_create(
+        code='planning_fixture_' + ''.join(action[0] for action in actions),
+        defaults={'name': 'Planning fixture: ' + ', '.join(actions)},
+    )
+    RoleModule.objects.get_or_create(role=role, module=module)
+    for action in actions:
+        Permission.objects.get_or_create(
+            code=f'planning_fixture_{action}',
+            defaults={'module': module, 'name': f'Planning fixture {action}', 'action': action},
+        )
+    # An action cell requires every active definition, including definitions
+    # installed by normal migrations rather than only this fixture's fallback.
+    for permission in Permission.objects.filter(module=module, action__in=actions, is_active=True):
+        RolePermission.objects.get_or_create(role=role, permission=permission)
+    organization, _ = Organization.objects.get_or_create(
+        code='PLANNING-FIXTURE', defaults={'name': 'Planning fixture organization'},
+    )
+    for user in users:
+        profile, _ = UserProfile.objects.get_or_create(
+            user=user, defaults={'status': 'active', 'organization': organization},
+        )
+        UserRole.objects.get_or_create(user_profile=profile, role=role)
 
 
 class ScheduleFixture(TestCase):
@@ -49,6 +80,19 @@ class ScheduleFixture(TestCase):
             version=self.version, predecessor=predecessor, successor=successor,
             relationship_type=kind, lag_days=lag,
         )
+
+
+class ScheduleAPIFixture(ScheduleFixture):
+    """API access and accountable project authority are independent fixtures."""
+    def setUp(self):
+        super().setUp()
+        grant_planning_test_actions((self.owner,), ('read', 'create', 'update', 'delete', 'export', 'approve'))
+        # The outsider can reach the module so object-scope assertions exercise
+        # project isolation rather than failing at the outer module gate.
+        grant_planning_test_actions((self.outsider,), ('read', 'create', 'update'))
+        enterprise = Project.objects.create(code='SCHEDULE-API', name='Schedule API project', owner=self.owner)
+        self.project.enterprise_project = enterprise
+        self.project.save(update_fields=['enterprise_project', 'updated_at'])
 
 
 class CalendarAwareCPMTests(ScheduleFixture):
@@ -154,7 +198,7 @@ class CalendarAwareCPMTests(ScheduleFixture):
         self.assertEqual(overrun['variance_working_days'], 1)
 
 
-class MaterializationAndAPITests(ScheduleFixture):
+class MaterializationAndAPITests(ScheduleAPIFixture):
     def test_generation_materializes_wbs_logic_resources_and_is_idempotent(self):
         # Use a separate workspace because this fixture already owns MASTER.
         project = PlanningProject.objects.create(
@@ -467,7 +511,7 @@ class MaterializationAndAPITests(ScheduleFixture):
         self.assertEqual(response.status_code, 400)
 
 
-class DailyFieldUpdateAPITests(ScheduleFixture):
+class DailyFieldUpdateAPITests(ScheduleAPIFixture):
     def test_approved_field_update_posts_progress_snapshot_and_constraint(self):
         activity = self.activity('FIELD-100', 5)
         calculate_schedule_version(self.version, requested_by=self.owner)
@@ -566,12 +610,13 @@ class DailyFieldUpdateAPITests(ScheduleFixture):
         self.assertIn(f'record #{first.data["id"]}', duplicate.data['non_field_errors'][0])
 
 
-class GovernanceAPITests(ScheduleFixture):
+class GovernanceAPITests(ScheduleAPIFixture):
     def setUp(self):
         super().setUp()
         self.reviewer = User.objects.create_user(
             username='reviewer', email='reviewer@example.com', password='test',
         )
+        grant_planning_test_actions((self.reviewer,), ('read', 'create', 'update', 'approve'))
         enterprise = Project.objects.create(name='Governed Project', code='GOV-001', owner=self.owner)
         ProjectMember.objects.create(project=enterprise, user=self.reviewer, role='reviewer')
         self.project.enterprise_project = enterprise
@@ -662,7 +707,7 @@ class GovernanceAPITests(ScheduleFixture):
         self.assertEqual(outsider_response.status_code, 404)
 
 
-class IntegrationAndEnterpriseAPITests(ScheduleFixture):
+class IntegrationAndEnterpriseAPITests(ScheduleAPIFixture):
     def setUp(self):
         super().setUp()
         self.activity_row = self.activity('EXP-A', 2)

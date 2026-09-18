@@ -44,11 +44,16 @@ def operation_fingerprint(project, job_type, request_data):
     if job_type in {'generate', 'preview'}:
         return generation_fingerprint(project, request_data)
     if job_type == 'analyze':
+        # A completed job from an older extractor must not hide corrected
+        # evidence when the planner runs Document Intelligence again.
+        from .document_intelligence import ENGINE_VERSION
+
         files = list(project.files.filter(is_deleted=False, parse_status='done').order_by('id').values(
             'id', 'updated_at', 'size_bytes', 'confidence_score',
         ))
         return canonical_fingerprint({
             'operation': 'analyze-v4', 'project_id': project.id,
+            'engine_version': ENGINE_VERSION,
             'project_updated_at': project.updated_at, 'files': files,
         })
     return canonical_fingerprint({

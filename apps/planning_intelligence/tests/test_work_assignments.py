@@ -121,6 +121,9 @@ class WorkAssignmentTests(WorkAssignmentFixture):
         self.assertFalse(ProjectTask.objects.exists())
 
     def test_save_immediately_publishes_once_without_granting_project_or_module_access(self):
+        existing_roles = set(UserRole.objects.filter(
+            user_profile=self.worker.user.rbac_profile,
+        ).values_list('pk', 'role_id'))
         data = self.assign()
         first = ProjectTask.objects.get()
         stamp = first.updated_at
@@ -130,7 +133,9 @@ class WorkAssignmentTests(WorkAssignmentFixture):
         self.assertEqual(first.status, 'todo')
         self.assertEqual(self.my_tasks(self.worker_client)[0]['id'], first.pk)
         self.assertFalse(ProjectMember.objects.filter(user=self.worker.user).exists())
-        self.assertFalse(UserRole.objects.filter(user_profile=self.worker.user.rbac_profile).exists())
+        self.assertEqual(set(UserRole.objects.filter(
+            user_profile=self.worker.user.rbac_profile,
+        ).values_list('pk', 'role_id')), existing_roles)
         repeated = self.save(data)
         self.assertEqual(repeated.status_code, 200, repeated.data)
         self.assertEqual(ProjectTask.objects.count(), 1)

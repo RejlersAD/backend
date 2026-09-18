@@ -5,6 +5,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.utils import timezone
 
+from apps.core.project_models import Project
+
+from .test_business_approval_gates import grant_test_approval
 from ..models import (
     DocumentAuthorityRule, DocumentIntelligenceRun, IntelligenceConflict,
     IntelligenceFact, PlanningFile, PlanningProject,
@@ -18,11 +21,15 @@ from ..services.schedule_basis import (
 
 class TrustworthyInputsTests(TestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username='basis-planner', password='test')
+        self.user = get_user_model().objects.create_user(
+            username='basis-planner', email='basis-planner@example.test', password='test',
+        )
+        grant_test_approval((self.user,))
+        enterprise = Project.objects.create(code='BASIS-TEST', name='Evidence Project', owner=self.user)
         self.project = PlanningProject.objects.create(
             name='Evidence Project', effective_date=datetime.date(2026, 1, 1),
             planned_end_date=datetime.date(2026, 5, 1), duration_months=4,
-            created_by=self.user,
+            created_by=self.user, enterprise_project=enterprise,
         )
         DocumentAuthorityRule.objects.update_or_create(
             information_type='deliverables', document_category='mdr', defaults={'priority': 100},

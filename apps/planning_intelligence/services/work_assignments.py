@@ -66,11 +66,14 @@ def sync_assignments(run, tasks, *, actor):
     )
 
 
-def sync_workspace_assignments(workspace, tasks, *, actor, token, intelligence_run_id=None):
+def sync_workspace_assignments(workspace, tasks, *, actor, token, intelligence_run_id=None, managed_task_ids=None):
     """One transaction and stable key make repeated saves/reassignments idempotent."""
-    existing = {task.source_key: task for task in ProjectTask.objects.select_for_update().filter(
+    existing_rows = ProjectTask.objects.select_for_update().filter(
         source_key__startswith=f'wbs:{workspace.pk}:',
-    )}
+    )
+    if managed_task_ids is not None:
+        existing_rows = existing_rows.filter(source_key__in=[source_key(workspace, value) for value in managed_task_ids])
+    existing = {task.source_key: task for task in existing_rows}
     selected_ids = {task[field] for task in tasks for field in ('assignee_id', 'reviewer_id') if task[field]}
     if not selected_ids and not any(not task.is_deleted for task in existing.values()):
         return
@@ -118,6 +121,8 @@ def sync_workspace_assignments(workspace, tasks, *, actor, token, intelligence_r
             'reviewer_name': employee_payload(reviewer)['name'] if reviewer else '',
         }
         metadata.pop('withdrawn_at', None)
+        if 'due_date_source' in task:
+            metadata['due_date_source'] = task['due_date_source']
         values = {
             'project_id': workspace.enterprise_project_id, 'title': task['title'],
             'assigned_to_id': assignee.user_id, 'reviewer_id': reviewer.user_id if reviewer else None,

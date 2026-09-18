@@ -451,6 +451,43 @@ def _serializable_fields(fields):
             for key, value in fields.items()}
 
 
+def _validate_extracted_order_fields(fields):
+    """Validate source text before vendor, order, or source-file persistence."""
+    from rest_framework.exceptions import ValidationError
+
+    targets = {
+        'po_number': ('po_number',),
+        'currency': ('currency',),
+        'payment_terms': ('payment_terms',),
+        'payment_mode': ('payment_mode',),
+        'delivery_terms': ('delivery_terms',),
+        'project_number': ('project_number', 'rad_project_no'),
+        'seller_reference': ('seller_reference',),
+        'quote_ref': ('quote_ref',),
+        'vendor_license_no': ('seller_license_no',),
+    }
+    errors = {}
+    for source_name, model_names in targets.items():
+        value = fields.get(source_name, '')
+        if source_name == 'payment_mode':
+            value = value or 'Bank Transfer'
+        for model_name in model_names:
+            model_field = PurchaseOrder._meta.get_field(model_name)
+            try:
+                # Empty/incomplete extraction may still be retained for review.
+                # Apply storage limits without adding required-field rules to
+                # that established deferred-import workflow.
+                model_field.run_validators(model_field.to_python(value))
+            except DjangoValidationError as error:
+                errors[source_name] = [
+                    f'Review the extracted {source_name.replace("_", " ")}. {message}'
+                    for message in error.messages
+                ]
+                break
+    if errors:
+        raise ValidationError(errors)
+
+
 def _extraction_review_issues(fields):
     issues = []
     if not fields.get('extraction_reviewed') and (
@@ -711,6 +748,13 @@ def _import_signed_po_pdf(
             mapping_issues.append(
                 "The two-column scan caused OCR summary spillover; purchase summary was mapped from the uniquely linked authoritative PR."
             )
+
+    if not po:
+        # Review serializers cover submitted corrections, but omitted fields
+        # still come directly from OCR. PostgreSQL enforces their column limits.
+        # Existing-order uploads retain this text as evidence without replacing
+        # the saved commercial fields, so those attachments are not rejected.
+        _validate_extracted_order_fields(fields)
 
     vendors = list(Vendor.objects.all().only("id", "vendor_code", "name"))
     if po:

@@ -10,6 +10,7 @@ from apps.users.models import User
 
 from ..models import PlanningGeneration, PlanningProject
 from ..serializers import PlanningProjectSerializer
+from .test_scheduling_engine import grant_planning_test_actions
 
 
 class PlanningProjectDateRangeTests(TestCase):
@@ -57,6 +58,7 @@ class PlanningProjectListQueryTests(TestCase):
             username='planning-list-owner', email='planning-list@example.com', password='test',
             is_staff=True,
         )
+        grant_planning_test_actions((user,), ('read',))
         project = PlanningProject.objects.create(name='Lean Project List', created_by=user)
         PlanningGeneration.objects.create(
             project=project, version=7,

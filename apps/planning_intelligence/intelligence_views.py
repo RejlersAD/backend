@@ -94,7 +94,8 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
                     'excluded_deliverables': list(info.get('excluded_deliverables') or []),
                 })
                 choices.setdefault('deliverables', list(info.get('deliverables') or []))
-                choices['deliverables'] = list(dict.fromkeys(choices['deliverables']))
+                if intelligence.get('deliverable_source') != 'register':
+                    choices['deliverables'] = list(dict.fromkeys(choices['deliverables']))
                 choices['excluded_deliverables'] = list(dict.fromkeys(choices['excluded_deliverables']))
                 if set(choices['excluded_deliverables']) - set(choices['deliverables']):
                     return Response({'preview': {'disciplines': {

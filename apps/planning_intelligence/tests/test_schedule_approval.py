@@ -128,6 +128,8 @@ class ScheduleApprovalTests(ScheduleFixture):
 
     def test_unassigned_staff_cannot_record_another_reviewers_vote(self):
         staff = User.objects.create_user(username='approval-admin', email='approval-admin@example.com', is_staff=True)
+        # Module approval access does not assign this user to the review.
+        grant_test_approval((staff,))
         review = self.review(self.owner)
         response = self.vote(review, user=staff)
         self.assertEqual(response.status_code, 403)

@@ -9,6 +9,8 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.core.project_models import Project
+from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, RolePermission, UserProfile, UserRole
+from apps.rbac.module_actions import ensure_module_actions
 from apps.users.models import User
 
 from ..models import PlanningFile, PlanningProject
@@ -20,6 +22,19 @@ class PlanningFileUploadDispatchTests(TransactionTestCase):
         self.owner = User.objects.create_user(
             username='upload-owner', email='upload-owner@example.com', password='test',
         )
+        module, _ = Module.objects.get_or_create(code='planning_package', defaults={'name': 'Planning'})
+        ensure_module_actions(Module, Permission, module_ids=[module.pk])
+        role = Role.objects.create(code='reference_upload_test', name='Reference upload test')
+        RoleModule.objects.create(role=role, module=module)
+        for permission in module.permissions.filter(action='create', is_active=True):
+            RolePermission.objects.create(role=role, permission=permission)
+        organization, _ = Organization.objects.get_or_create(
+            code='UPLOAD-TEST', defaults={'name': 'Upload test organization'},
+        )
+        profile, _ = UserProfile.objects.get_or_create(
+            user=self.owner, defaults={'organization': organization},
+        )
+        UserRole.objects.create(user_profile=profile, role=role)
         enterprise = Project.objects.create(code='UPLOAD-001', name='Upload project', owner=self.owner)
         self.workspace = PlanningProject.objects.create(
             enterprise_project=enterprise, name='Upload planning', created_by=self.owner,

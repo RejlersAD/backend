@@ -88,6 +88,8 @@ class PlanningProject(BaseModel):
     )
     # Server-owned draft; direct planning must not fabricate document evidence.
     manual_work_breakdown = models.JSONField(default=dict, blank=True)
+    # Independent revision-guarded planning canvas; legacy drafts remain intact.
+    simple_planning_state = models.JSONField(default=dict, blank=True)
 
     scope_summary = models.TextField(blank=True, default='')
     exclusions = models.TextField(blank=True, default='')

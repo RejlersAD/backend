@@ -122,6 +122,33 @@ def _constraint_bound(calendar, activity, duration):
     return point, point
 
 
+def calculate_backward_pass(order, durations, early, outgoing, finish_index, upper_bounds=None):
+    """Return late-start and free-float indices without mutating the network.
+
+    ``finish_index`` is the inclusive working-day index of the target finish
+    date. A positive-duration activity finishes at start + duration - 1;
+    a zero-duration milestone finishes on its start date. Using the same date
+    convention here prevents giving milestones an extra day beyond a deadline.
+    Relationship weights retain the existing FS/SS/FF/SF and lag semantics.
+    """
+    finish_offsets = {key: max(durations[key] - 1, 0) for key in order}
+    late = {key: finish_index - finish_offsets[key] for key in order}
+    for key, upper in (upper_bounds or {}).items():
+        late[key] = min(late[key], upper)
+    for key in reversed(order):
+        for successor, weight in outgoing.get(key, []):
+            late[key] = min(late[key], late[successor] - weight)
+    free_float = {
+        key: min(
+            (early[successor] - (early[key] + weight)
+             for successor, weight in outgoing.get(key, [])),
+            default=finish_index - (early[key] + finish_offsets[key]),
+        )
+        for key in order
+    }
+    return late, free_float
+
+
 def calculate_schedule_version(version, *, requested_by=None):
     """Run CPM, persist calculated dates/float, and return its durable run record."""
     run = ScheduleCalculationRun.objects.create(
@@ -208,15 +235,13 @@ def calculate_schedule_version(version, *, requested_by=None):
                         })
                 early[pk] = start
 
-            network_finish = max(early[pk] + nodes[pk].duration for pk in order)
+            finish_index = max(early[pk] + max(nodes[pk].duration - 1, 0) for pk in order)
             contractual_finish = schedule.project.planned_end_date
             contractual_finish_index = None
             contractual_variance = None
             if contractual_finish:
-                contractual_finish_index = (
-                    calendar.index_of(calendar.on_or_before(contractual_finish)) + 1
-                )
-                contractual_variance = network_finish - contractual_finish_index
+                contractual_finish_index = calendar.index_of(calendar.on_or_before(contractual_finish))
+                contractual_variance = finish_index - contractual_finish_index
 
             # Use the contractual finish for the backward pass. A network that
             # cannot meet it now exposes negative float instead of silently
@@ -224,14 +249,12 @@ def calculate_schedule_version(version, *, requested_by=None):
             project_finish = (
                 contractual_finish_index
                 if contractual_finish_index is not None
-                else network_finish
+                else finish_index
             )
-            late = {pk: project_finish - nodes[pk].duration for pk in order}
-            for pk, upper in upper_bounds.items():
-                late[pk] = min(late[pk], upper)
-            for pk in reversed(order):
-                for successor_id, weight in outgoing[pk]:
-                    late[pk] = min(late[pk], late[successor_id] - weight)
+            late, free_floats = calculate_backward_pass(
+                order, {pk: nodes[pk].duration for pk in order}, early, outgoing,
+                project_finish, upper_bounds,
+            )
 
             updates = []
             critical_count = 0
@@ -239,16 +262,12 @@ def calculate_schedule_version(version, *, requested_by=None):
                 item = nodes[pk]
                 activity = item.model
                 total_float = late[pk] - early[pk]
-                free_float = min(
-                    (early[successor_id] - (early[pk] + weight) for successor_id, weight in outgoing[pk]),
-                    default=project_finish - (early[pk] + item.duration),
-                )
                 activity.early_start = activity.planned_start = calendar.date_at(early[pk])
                 activity.early_finish = activity.planned_finish = _finish_date(calendar, early[pk], item.duration)
                 activity.late_start = calendar.date_at(late[pk])
                 activity.late_finish = _finish_date(calendar, late[pk], item.duration)
                 activity.total_float_days = total_float
-                activity.free_float_days = free_float
+                activity.free_float_days = free_floats[pk]
                 activity.is_critical = total_float <= 0
                 critical_count += int(activity.is_critical)
                 updates.append(activity)
@@ -258,7 +277,6 @@ def calculate_schedule_version(version, *, requested_by=None):
                 'is_critical', 'updated_at',
             ])
 
-            finish_index = max(early[pk] + max(nodes[pk].duration - 1, 0) for pk in order)
             finish_date = calendar.date_at(finish_index)
             if contractual_variance is not None and contractual_variance > 0:
                 issues.append({

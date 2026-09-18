@@ -15,9 +15,10 @@ import re
 from ..config import (
     CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS, CLAUDE_SCOPE_MAX_TOKENS,
     DISCIPLINE_DEFAULT_DELIVERABLES, DEFAULT_HSE_STUDIES, DISCIPLINE_NAME_BY_CODE,
-    DELIVERABLE_ALIASES,
 )
 from . import claude_client
+from .deliverable_matching import find_deliverable_match
+from .register_rows import extract_legacy_register_rows, extract_register_rows
 
 # Categories that materially describe project scope; when the planner has
 # uploaded *only* SOW (no MDR/EDDR/WBS), we flag `sow_only_mode = True` so the
@@ -53,13 +54,11 @@ def _detect_disciplines_and_deliverables(all_text: str) -> dict:
     mentioned in the source text (via canonical name OR any soft-coded alias);
     always keep the full default list as the generation fallback (per MVP:
     never block generation on imperfect NLP)."""
-    lower = all_text.lower()
     result = {}
     for discipline, deliverables in DISCIPLINE_DEFAULT_DELIVERABLES.items():
         detected = []
         for canonical in deliverables:
-            terms = [canonical.lower(), *[a.lower() for a in DELIVERABLE_ALIASES.get(canonical, [])]]
-            if any(term in lower for term in terms):
+            if find_deliverable_match(all_text, canonical):
                 detected.append(canonical)
         result[discipline] = {
             'mentioned_in_source': detected,
@@ -309,7 +308,7 @@ def _augment_with_claude_scope(intelligence: dict, combined_text: str, project, 
     }
 
 
-def analyze_project(files_qs, project=None, user=None) -> dict:
+def analyze_project(files_qs, project=None, user=None, *, allow_ai=True) -> dict:
     """
     files_qs: iterable of PlanningFile instances (already parsed).
     project: optional PlanningProject — when it has BYOK/Claude configured,
@@ -319,6 +318,13 @@ def analyze_project(files_qs, project=None, user=None) -> dict:
     """
     files_list = list(files_qs)
     combined_text = '\n'.join(f.extracted_text or '' for f in files_list)
+    register_sources = [(source, extract_register_rows(source.extracted_text or ''))
+                        for source in files_list if source.category in {'mdr', 'eddr'}]
+    register_rows = [
+        {**row, 'source_file_id': source.pk, 'filename': source.original_filename}
+        for source, source_rows in register_sources
+        for row in (source_rows or extract_legacy_register_rows(source.extracted_text or ''))
+    ] if any(source_rows for _source, source_rows in register_sources) else []
 
     project_name_match = _PROJECT_NAME_RE.search(combined_text)
     effective_date_match = _EFFECTIVE_DATE_RE.search(combined_text)
@@ -348,8 +354,39 @@ def analyze_project(files_qs, project=None, user=None) -> dict:
         ],
     }
 
-    _augment_with_claude(intelligence, combined_text, project, user)
-    _augment_with_claude_scope(intelligence, combined_text, project, user)
+    if allow_ai:
+        _augment_with_claude(intelligence, combined_text, project, user)
+    else:
+        intelligence.update(ai_augmented=False, ai_provider_used=None)
+    if register_rows:
+        # An explicit register supplies the deliverable list. A catalogue or
+        # model summary must not replace its titles or invent additional work.
+        disciplines = {}
+        for row in register_rows:
+            info = disciplines.setdefault(row['discipline'], {
+                'name': row['discipline_label'], 'in_scope': True,
+                'deliverables': [], 'mentioned_in_source': [], 'ai_discovered': [],
+                'excluded_deliverables': [], 'register_rows': [],
+            })
+            info['deliverables'].append(row['original_title'])
+            info['mentioned_in_source'].append(row['original_title'])
+            info['register_rows'].append({
+                'title': row['original_title'], 'register_item': row.get('register_item'),
+                'source_file_id': row['source_file_id'], 'filename': row['filename'],
+                'sheet': row.get('sheet', ''), 'line': row.get('source_line'),
+            })
+        intelligence.update({
+            'deliverable_source': 'register', 'disciplines': disciplines,
+            'register_summary': {
+                'row_count': len(register_rows),
+                'source_file_count': len({row['source_file_id'] for row in register_rows}),
+            },
+            'hse_studies': [], 'available_hse_studies': [],
+        })
+        intelligence['notes'].append('Deliverable titles and disciplines are taken directly from the uploaded register.')
+    else:
+        if allow_ai:
+            _augment_with_claude_scope(intelligence, combined_text, project, user)
 
     # The baseline note above assumes no AI ran — correct it now that we
     # actually know whether Claude augmented this analysis, so the UI never

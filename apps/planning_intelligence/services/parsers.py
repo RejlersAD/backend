@@ -88,14 +88,20 @@ def _extract_xlsx(file_obj) -> str:
     try:
         import openpyxl
         wb = openpyxl.load_workbook(file_obj, data_only=True, read_only=True)
-        lines = []
-        for ws in wb.worksheets:
-            lines.append(f'--- Sheet: {ws.title} ---')
-            for row in ws.iter_rows(values_only=True):
-                cells = [str(c) for c in row if c is not None]
-                if cells:
-                    lines.append(' | '.join(cells))
-        return '\n'.join(lines)
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter='|', lineterminator='\n')
+        try:
+            for ws in wb.worksheets:
+                writer.writerow([f'--- Sheet: {ws.title} ---'])
+                for row in ws.iter_rows(values_only=True):
+                    if any(cell is not None for cell in row):
+                        # Empty document-number/revision cells still occupy a
+                        # column. CSV quoting also preserves literal pipes,
+                        # quotes and newlines within a deliverable title.
+                        writer.writerow(['' if cell is None else str(cell) for cell in row])
+        finally:
+            wb.close()
+        return output.getvalue().rstrip('\n')
     except Exception as exc:  # noqa: BLE001
         logger.warning('openpyxl extraction failed: %s', exc)
         return ''

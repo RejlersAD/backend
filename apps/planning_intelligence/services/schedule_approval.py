@@ -7,6 +7,7 @@ from apps.rbac.approval_eligibility import active_approval_user, approval_access
 from ..models import ScheduleReview, ScheduleVersion
 from .audit import record_event
 from .trustworthy_scheduling import current_assurance
+from .source_schedule_verification import reference_schedule_blocker
 
 
 class ScheduleApprovalError(ValueError):
@@ -37,6 +38,29 @@ def current_schedule_version(version):
                 and not version.schedule.versions.filter(is_deleted=False, version__gt=version.version).exists())
 
 
+def _simple_plan_source_blocker(version):
+    """Keep the simple-plan import guard on alternate approval routes too.
+
+    A separately authored schedule is not a simple-plan reference import.
+    Explicit provenance survives reopening/editing a draft; the active-version
+    check also covers existing simple plans created before that marker existed.
+    """
+    project = version.schedule.project
+    state = project.simple_planning_state or {}
+    active_simple = not state.get('legacy_version_import') and str(state.get('version_id')) == str(version.pk)
+    if not active_simple and not version.activities.filter(
+        is_deleted=False, metadata__planning_workflow='simple_planning',
+    ).exists():
+        return None
+    return reference_schedule_blocker(project.files.filter(is_deleted=False))
+
+
+def require_simple_plan_source_import(version):
+    source_blocker = _simple_plan_source_blocker(version)
+    if source_blocker:
+        raise ScheduleApprovalError(source_blocker['message'], code=source_blocker['code'], files=source_blocker['files'])
+
+
 def can_decide_schedule_review(review, user, *, decision='approved'):
     if not active_approval_user(user) or not approval_access(user, 'planning_package'):
         return False
@@ -62,6 +86,8 @@ def can_approve_schedule(version, user, *, allow_unapproved_assurance=False):
             or not version.calculated_at
             or version.governance_reviews.filter(is_deleted=False, status='pending').exists()):
         return False
+    if _simple_plan_source_blocker(version):
+        return False
     assurance = current_assurance(version)
     return bool(assurance and not assurance.is_deleted and not assurance.blockers
                 and assurance.status in ({'ready', 'approved'} if allow_unapproved_assurance else {'approved'}))
@@ -74,6 +100,8 @@ def can_baseline_schedule(version, user):
             or version.governance_items.filter(priority='critical', is_deleted=False)
             .exclude(status__in=['closed', 'implemented', 'rejected']).exists()):
         return False
+    if _simple_plan_source_blocker(version):
+        return False
     assurance = current_assurance(version)
     return bool(assurance and not assurance.is_deleted and assurance.status == 'approved' and not assurance.blockers)
 
@@ -82,6 +110,7 @@ def can_baseline_schedule(version, user):
 def approve_schedule_version(version, user, *, route='direct', review_id=None):
     version = lock_schedule_version(version)
     require_schedule_authority(version, user)
+    require_simple_plan_source_import(version)
     if version.schedule.is_deleted or version.schedule.project.is_deleted:
         raise ScheduleApprovalError('This schedule is archived.', code='schedule_archived')
     if version.status != 'calculated' or not version.calculated_at:

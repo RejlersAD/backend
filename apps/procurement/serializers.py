@@ -1593,6 +1593,10 @@ class PODocumentReviewSerializer(serializers.Serializer):
     vat_basis = serializers.ChoiceField(choices=['unconfirmed', 'exclusive', 'inclusive', 'none'], required=False)
     po_date = serializers.DateField(required=False, allow_null=True)
     expected_delivery = serializers.DateField(required=False, allow_null=True)
+    project_number = serializers.CharField(
+        max_length=min(PurchaseOrder._meta.get_field(name).max_length for name in ('project_number', 'rad_project_no')),
+        required=False, allow_blank=True,
+    )
     pr_id = serializers.PrimaryKeyRelatedField(queryset=PurchaseRequisition.objects.all(), required=False, allow_null=True)
 
     def validate_currency(self, value):
