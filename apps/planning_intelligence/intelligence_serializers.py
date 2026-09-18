@@ -6,6 +6,7 @@ from .models import (
     IntelligenceConflict, IntelligenceFact, PlanDeliverable, ScheduleBasis,
 )
 from .services.document_intelligence import compile_run_intelligence
+from .services.preview_confirmation import confirmation_metadata
 
 
 class DocumentProfileSerializer(serializers.ModelSerializer):
@@ -53,18 +54,50 @@ class IntelligenceConflictSerializer(serializers.ModelSerializer):
 
 class DocumentIntelligenceRunSerializer(serializers.ModelSerializer):
     intelligence = serializers.SerializerMethodField()
+    preview_confirmation = serializers.SerializerMethodField()
 
     class Meta:
         model = DocumentIntelligenceRun
         fields = [
             'id', 'project', 'status', 'engine_version', 'source_file_ids', 'fact_count',
             'conflict_count', 'intelligence', 'started_at', 'finished_at', 'error_message',
-            'requested_by', 'created_at', 'updated_at',
+            'requested_by', 'created_at', 'updated_at', 'preview_confirmation',
         ]
         read_only_fields = fields
 
     def get_intelligence(self, obj):
         return compile_run_intelligence(obj) if obj.status == 'succeeded' else None
+
+    def get_preview_confirmation(self, obj):
+        return confirmation_metadata(obj)
+
+
+class PreviewDisciplineSelectionSerializer(serializers.Serializer):
+    in_scope = serializers.BooleanField()
+    deliverables = serializers.ListField(
+        child=serializers.CharField(max_length=500), max_length=10000, required=False,
+    )
+    excluded_deliverables = serializers.ListField(
+        child=serializers.CharField(max_length=500), max_length=10000, default=list,
+    )
+
+
+class IntelligencePreviewSelectionSerializer(serializers.Serializer):
+    detected_project_name = serializers.CharField(max_length=255, allow_blank=True, allow_null=True)
+    detected_effective_date_text = serializers.CharField(max_length=200, allow_blank=True, allow_null=True)
+    detected_duration_months = serializers.FloatField(min_value=0.0001, max_value=1200, allow_null=True)
+    disciplines = serializers.DictField(child=PreviewDisciplineSelectionSerializer())
+    hse_studies = serializers.ListField(child=serializers.CharField(max_length=500), max_length=1000)
+
+    def validate_detected_duration_months(self, value):
+        import math
+        if value is not None and not math.isfinite(value):
+            raise serializers.ValidationError('Enter a finite project duration.')
+        return value
+
+
+class ConfirmIntelligencePreviewSerializer(serializers.Serializer):
+    preview = IntelligencePreviewSelectionSerializer()
 
 
 class ManualIntelligenceFactSerializer(serializers.Serializer):

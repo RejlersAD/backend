@@ -182,6 +182,8 @@ test_*.py
 !apps/planning_intelligence/tests/test_schedule_approval.py
 !apps/planning_intelligence/tests/test_business_approval_gates.py
 !apps/planning_intelligence/tests/test_control_observation_history.py
+!apps/planning_intelligence/tests/test_preview_confirmation.py
+!apps/planning_intelligence/tests/test_preview_basis.py
 !apps/project_control/tests/test_portfolio_exceptions.py
 !apps/hr_core/tests/test_graph_assistant_governance.py
 !apps/hr_core/tests/test_business_approval_gates.py
@@ -260,4 +262,7 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_trustworthy_inputs.py
 !apps/planning_intelligence/tests/test_operational_reliability.py
 !apps/planning_intelligence/tests/test_document_intelligence.py
+!apps/planning_intelligence/tests/test_planning_scope_inputs.py
+!apps/planning_intelligence/tests/test_file_upload_dispatch.py
+!apps/planning_intelligence/tests/test_work_breakdown.py
 !apps/project_control/tests/test_epc_*.py

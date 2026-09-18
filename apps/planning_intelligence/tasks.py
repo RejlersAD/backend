@@ -10,8 +10,8 @@ from apps.rbac.ai_telemetry import tracked_planning_job
 logger = logging.getLogger(__name__)
 
 
-@shared_task(name='apps.planning_intelligence.tasks.parse_uploaded_planning_file')
-def parse_uploaded_planning_file(file_id):
+@shared_task(bind=True, max_retries=3, name='apps.planning_intelligence.tasks.parse_uploaded_planning_file')
+def parse_uploaded_planning_file(self, file_id):
     """Extracts text from an uploaded PlanningFile in the background so the
     upload request never blocks on PDF/Excel parsing (RADAI global rule)."""
     from .models import PlanningFile
@@ -19,9 +19,11 @@ def parse_uploaded_planning_file(file_id):
 
     try:
         planning_file = PlanningFile.objects.get(pk=file_id)
-    except PlanningFile.DoesNotExist:
-        logger.warning('parse_uploaded_planning_file: file %s not found', file_id)
-        return {'file_id': file_id, 'error': 'not_found'}
+    except PlanningFile.DoesNotExist as exc:
+        # A worker may briefly see an older database snapshot. Retry this narrow
+        # visibility failure instead of acknowledging a permanently queued file.
+        logger.warning('parse_uploaded_planning_file: file %s not yet visible', file_id)
+        raise self.retry(exc=exc, countdown=1)
 
     planning_file.parse_status = 'processing'
     planning_file.parse_error = ''

@@ -15,8 +15,10 @@ features' storage folders.
 """
 import os
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 
 from apps.core.models import BaseModel
@@ -66,6 +68,14 @@ class PlanningProject(BaseModel):
     location = models.CharField(max_length=255, blank=True)
     phase = models.CharField(max_length=100, blank=True, help_text='e.g. FEED / DEFINE')
 
+    scope_summary = models.TextField(blank=True, default='')
+    exclusions = models.TextField(blank=True, default='')
+    budgeted_effort_hours = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0'))],
+        help_text='Draft planning effort in hours; does not establish an approved control budget.',
+    )
+
     effective_date = models.DateField(null=True, blank=True)
     planned_end_date = models.DateField(null=True, blank=True)
     duration_months = models.DecimalField(max_digits=8, decimal_places=4, default=10)
@@ -89,6 +99,12 @@ class PlanningProject(BaseModel):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
+                name='plan_project_effort_nonnegative',
+            ),
+        ]
 
     def __str__(self):
         return self.name

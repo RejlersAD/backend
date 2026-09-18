@@ -7,6 +7,7 @@ Use --dry-run --root <path> --include <project-folder> before connecting a sourc
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import logging
@@ -216,54 +217,25 @@ class Inventory:
         return result
 
     def entries(self) -> Iterator[dict[str, Any]]:
-        emitted: dict[str, bool] = {}
-        expanded: set[str] = set()
-
-        def children_of(name: str, path: Path):
-            try:
-                with os.scandir(path) as children:
-                    for child in children:
-                        try:
-                            yield relative_path(name + "/" + child.name), True
-                        except ReplicaError:
-                            # An unsupported name must not hide valid siblings.
-                            self.problem(f"{name}: Skipped an unsupported source filename")
-            except OSError:
-                self.problem(f"{name}: Cannot enumerate path")
+        emitted_directories: set[str] = set()
+        pending_directories: deque[str] = deque()
 
         def visit(name: str, recurse: bool) -> Iterator[dict[str, Any]]:
-            # Explicit iterators keep deeply nested shares off Python's call stack
-            # while retaining streaming enumeration and the existing path checks.
-            pending = [iter([(name, recurse)])]
+            if self.config.excluded(name) or name.casefold() in emitted_directories:
+                return
             try:
-                while pending:
-                    try:
-                        current, recursive = next(pending[-1])
-                    except StopIteration:
-                        pending.pop()
-                        continue
-                    if self.config.excluded(current):
-                        continue
-                    key = current.casefold()
-                    try:
-                        if key not in emitted:
-                            item = self.entry(current)
-                            emitted[key] = item["is_directory"]
-                            yield item
-                        if emitted[key] and recursive and key not in expanded:
-                            expanded.add(key)
-                            path, _ = self.safe_path(current)
-                            pending.append(children_of(current, path))
-                    except (OSError, ReplicaError) as exc:
-                        detail = str(exc) if isinstance(exc, ReplicaError) else "Cannot enumerate path"
-                        self.problem(f"{current}: {detail}")
-            finally:
-                for iterator in reversed(pending):
-                    close = getattr(iterator, 'close', None)
-                    if close:
-                        close()
+                item = self.entry(name)
+                if item["is_directory"]:
+                    emitted_directories.add(name.casefold())
+                    if recurse:
+                        pending_directories.append(name)
+                yield item
+            except (OSError, ReplicaError) as exc:
+                detail = str(exc) if isinstance(exc, ReplicaError) else "Cannot enumerate path"
+                self.problem(f"{name}: {detail}")
 
         if self.config.included_paths:
+            selected: dict[str, str] = {}
             for name in self.config.included_paths:
                 if self.config.excluded(name):
                     continue
@@ -275,12 +247,45 @@ class Inventory:
                     detail = str(exc) if isinstance(exc, ReplicaError) else "Included folder is unavailable"
                     self.problem(f"{name}: {detail}")
                     continue
+                selected.setdefault(name.casefold(), name)
+            # An ancestor selection already covers its descendants. Removing
+            # overlapping roots means each file is streamed only once without
+            # retaining a set of every filename encountered on a large share.
+            roots = [name for key, name in selected.items() if not any(
+                "/".join(key.split("/")[:depth]) in selected
+                for depth in range(1, len(key.split("/")))
+            )]
+            for name in roots:
                 # Preserve navigation ancestors without reading their unselected
                 # sibling subdirectories or files.
                 components = name.split("/")
                 for depth in range(1, len(components)):
                     yield from visit("/".join(components[:depth]), False)
                 yield from visit(name, True)
+            # Seed every selected project before expanding any of them. FIFO
+            # expansion exposes their immediate children before deeper folders
+            # in a large earlier project. Only directory paths are queued; one
+            # scandir iterator and one metadata record are live at a time.
+            while pending_directories:
+                name = pending_directories.popleft()
+                try:
+                    path, _ = self.safe_path(name)
+                    with os.scandir(path) as children:
+                        sibling_keys: set[str] = set()
+                        for child in children:
+                            try:
+                                child_name = relative_path(name + "/" + child.name)
+                            except ReplicaError:
+                                self.problem(f"{name}: Skipped an unsupported source filename")
+                                continue
+                            child_key = child_name.casefold()
+                            if child_key in sibling_keys:
+                                continue
+                            sibling_keys.add(child_key)
+                            yield from visit(child_name, True)
+                except (OSError, ReplicaError) as exc:
+                    detail = str(exc) if isinstance(exc, ReplicaError) else "Cannot enumerate path"
+                    self.problem(f"{name}: {detail}")
         else:
             try:
                 with os.scandir(self.root) as children:

@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.text import slugify
 
-from ..config import DELIVERABLE_ALIASES
+from ..config import DELIVERABLE_ALIASES, DISCIPLINE_NAME_BY_CODE
 from ..models import BasisDeliverable, DocumentAuthorityRule, ScheduleBasis
 
 
@@ -96,17 +96,17 @@ def _source_reference(fact):
     }
 
 
-def _deliverable_rows(run):
+def _deliverable_rows(run, preview=None):
     aliases = _alias_map()
     groups = []
     facts = run.facts.filter(
-        is_deleted=False, fact_type='deliverable',
+        is_deleted=False, fact_type__in=['deliverable', 'hse_study'] if preview is not None else ['deliverable'],
     ).exclude(status__in=['rejected', 'superseded', 'conflicted']).select_related('source_file').order_by('-confidence', 'id')
     for fact in facts:
         value = fact.value if isinstance(fact.value, dict) else {'name': str(fact.value)}
         original = value.get('original_title') or value.get('name') or ''
         canonical = _canonical_name(value.get('name') or original, aliases)
-        discipline = value.get('discipline') or ''
+        discipline = 'hse' if fact.fact_type == 'hse_study' else value.get('discipline') or ''
         incoming_number = value.get('document_number') or ''
         group = next((item for item in groups if (
             item['discipline'] == discipline
@@ -151,6 +151,40 @@ def _deliverable_rows(run):
                     'category': 'ai', 'locator': {}, 'excerpt': '',
                 }], 'aliases': [], 'confirmed': False,
             })
+    if preview is None:
+        return groups
+
+    # Keep the evidence rows (including document numbers and revisions), while
+    # applying the planner's saved inclusion choices to the new basis only.
+    selected = {}
+    for discipline, info in (preview.get('disciplines') or {}).items():
+        excluded = {_name_key(name) for name in info.get('excluded_deliverables') or []}
+        selected[discipline] = [
+            name for name in info.get('deliverables') or []
+            if info.get('in_scope') is not False and _name_key(name) not in excluded
+        ]
+    hse_in_scope = (preview.get('disciplines') or {}).get('hse', {}).get('in_scope') is not False
+    selected['hse'] = list(preview.get('hse_studies') or []) if hse_in_scope else []
+    for row in groups:
+        row['confirmed'] = any(
+            _same_deliverable(row['canonical_name'], _canonical_name(name, aliases))
+            for name in selected.get(row['discipline'], [])
+        )
+        row['excluded'] = not row['confirmed']
+    for discipline, names in selected.items():
+        for name in names:
+            canonical = _canonical_name(name, aliases)
+            if any(row['discipline'] == discipline and _same_deliverable(row['canonical_name'], canonical)
+                   for row in groups):
+                continue
+            groups.append({
+                'discipline': discipline, 'canonical_name': canonical, 'original_title': name,
+                'document_number': '', 'document_revision': '', 'confidence': 1.0,
+                'fact_ids': [], 'references': [{
+                    'fact_id': None, 'file_id': None, 'filename': 'Confirmed Document Intelligence Preview',
+                    'category': 'planner', 'locator': {'intelligence_run_id': run.id}, 'excerpt': '',
+                }], 'aliases': [], 'confirmed': True, 'excluded': False,
+            })
     return groups
 
 
@@ -187,26 +221,42 @@ def refresh_basis_readiness(basis, *, save=True):
 
 @transaction.atomic
 def build_schedule_basis(run):
+    from .preview_confirmation import current_confirmed_preview
+
     project = run.project
     project = type(project).objects.select_for_update().get(pk=project.pk)
+    run.project = project
+    preview = current_confirmed_preview(run)
+    confirmation = (run.summary or {}).get('preview_confirmation') or {}
+    if confirmation and preview is None:
+        raise ValueError('Confirm and save the current Document Intelligence Preview before building the schedule basis.')
     authority = _authority_lookup()
+    authority_snapshot = {
+        info: [
+            {'category': rule.document_category, 'priority': rule.priority, 'rationale': rule.rationale}
+            for rule in DocumentAuthorityRule.objects.filter(is_deleted=False, information_type=info)
+        ]
+        for info, _label in DocumentAuthorityRule.INFORMATION_CHOICES
+    }
+    if preview is not None:
+        authority_snapshot['preview_confirmation'] = {
+            'confirmed_at': confirmation.get('confirmed_at'),
+            'confirmed_by': confirmation.get('confirmed_by'), 'selections': preview,
+        }
+    def selected_scalar(key, fact_type, fallback):
+        return preview[key] if preview is not None and key in preview else _scalar(run, fact_type, fallback, authority)
+
     next_version = (project.schedule_bases.aggregate(value=Max('version'))['value'] or 0) + 1
     basis = ScheduleBasis.objects.create(
         project=project, source_run=run, version=next_version,
-        project_name=str(_scalar(run, 'project_name', project.name, authority) or '')[:255],
+        project_name=str(selected_scalar('detected_project_name', 'project_name', project.name) or '')[:255],
         client=str(_scalar(run, 'client', project.client, authority) or '')[:255],
         location=str(_scalar(run, 'location', project.location, authority) or '')[:255],
-        effective_date=_as_date(_scalar(run, 'effective_date', project.effective_date, authority)),
+        effective_date=_as_date(selected_scalar('detected_effective_date_text', 'effective_date', project.effective_date)),
         contractual_finish=project.planned_end_date,
-        duration_months=_scalar(run, 'duration_months', project.duration_months, authority),
+        duration_months=selected_scalar('detected_duration_months', 'duration_months', project.duration_months),
         calendar=dict(project.calendar_overrides or {}),
-        authority_snapshot={
-            info: [
-                {'category': rule.document_category, 'priority': rule.priority, 'rationale': rule.rationale}
-                for rule in DocumentAuthorityRule.objects.filter(is_deleted=False, information_type=info)
-            ]
-            for info, _label in DocumentAuthorityRule.INFORMATION_CHOICES
-        },
+        authority_snapshot=authority_snapshot,
     )
     BasisDeliverable.objects.bulk_create([
         BasisDeliverable(
@@ -217,9 +267,10 @@ def build_schedule_basis(run):
             )[:320], canonical_name=row['canonical_name'],
             original_title=row['original_title'], document_number=row['document_number'],
             document_revision=row['document_revision'],
-            status='confirmed' if row['confirmed'] else 'needs_review', confidence=row['confidence'],
+            status='excluded' if row.get('excluded') else 'confirmed' if row['confirmed'] else 'needs_review',
+            confidence=row['confidence'],
             source_fact_ids=row['fact_ids'], source_references=row['references'], aliases=row['aliases'],
-        ) for row in _deliverable_rows(run)
+        ) for row in _deliverable_rows(run, preview)
     ])
     refresh_basis_readiness(basis)
     return basis
@@ -247,6 +298,16 @@ def apply_approved_basis(project, intelligence):
     basis = project.schedule_bases.filter(is_deleted=False, status='approved').prefetch_related('deliverables').first()
     if not basis:
         return intelligence
+    run = project.intelligence_runs.filter(is_deleted=False, status='succeeded').first()
+    confirmation = ((run.summary or {}).get('preview_confirmation') or {}) if run else {}
+    basis_confirmation = (basis.authority_snapshot or {}).get('preview_confirmation') or {}
+    if confirmation or basis_confirmation:
+        from .preview_confirmation import current_confirmed_preview
+
+        if not run or current_confirmed_preview(run) is None:
+            raise ValueError('Confirm and save the current Document Intelligence Preview before generating a schedule.')
+        if basis.source_run_id != run.id or basis_confirmation.get('confirmed_at') != confirmation.get('confirmed_at'):
+            raise ValueError('Build the schedule basis from the confirmed Document Intelligence Preview before generating a schedule.')
     result = dict(intelligence)
     disciplines = {}
     for item in basis.deliverables.filter(is_deleted=False, status='confirmed'):
@@ -264,4 +325,10 @@ def apply_approved_basis(project, intelligence):
         'schedule_basis_version': basis.version,
         'schedule_basis_status': basis.status,
     })
+    if (basis.authority_snapshot or {}).get('preview_confirmation'):
+        # WBS construction treats an absent discipline as in scope. Preserve the
+        # confirmed exclusions explicitly rather than allowing empty branches.
+        for code in DISCIPLINE_NAME_BY_CODE:
+            disciplines.setdefault(code, {'in_scope': False, 'deliverables': [], 'mentioned_in_source': []})
+        result['hse_studies'] = list(disciplines.get('hse', {}).get('deliverables') or [])
     return result
