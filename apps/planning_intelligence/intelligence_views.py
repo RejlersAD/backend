@@ -9,7 +9,7 @@ from .access import PlanningObjectPermission, accessible_projects
 from .intelligence_serializers import (
     AddGenerationDependencySerializer, BasisDeliverableReviewSerializer, BasisDeliverableSerializer,
     BulkBasisDeliverableReviewSerializer,
-    ConflictResolutionSerializer,
+    ConflictResolutionSerializer, ConfirmIntelligencePreviewSerializer,
     DocumentAuthorityRuleSerializer, DocumentIntelligenceRunSerializer, DocumentProfileSerializer,
     FactReviewSerializer, IntelligenceConflictSerializer, IntelligenceFactSerializer,
     GenerationDependencyReviewSerializer, GenerationDependencySerializer,
@@ -19,9 +19,11 @@ from .intelligence_serializers import (
 from .models import (
     BasisDeliverable, DocumentAuthorityRule, DocumentIntelligenceRun, DocumentProfile,
     GenerationDependency, GenerationPlan, IntelligenceConflict, IntelligenceFact,
-    PlanDeliverable, ScheduleBasis,
+    PlanDeliverable, PlanningProject, ScheduleBasis,
 )
 from .services.audit import record_event
+from .services.document_intelligence import compile_run_intelligence
+from .services.preview_confirmation import review_fingerprint, source_error, source_fingerprint
 from .services.schedule_basis import approve_schedule_basis, build_schedule_basis, refresh_basis_readiness
 from .services.generation_plan import (
     approve_generation_plan, refresh_generation_plan_readiness,
@@ -49,6 +51,7 @@ class DocumentProfileViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_action = None
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
     serializer_class = DocumentIntelligenceRunSerializer
     queryset = DocumentIntelligenceRun.objects.filter(is_deleted=False).select_related('project', 'requested_by')
@@ -57,6 +60,68 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = super().get_queryset().filter(project__in=accessible_projects(self.request.user))
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
+
+    @action(detail=True, methods=['post'], url_path='confirm-preview', permission_action='update')
+    def confirm_preview(self, request, pk=None):
+        """Confirm the full preview, preserving both raw evidence and edits."""
+        run = self.get_object()
+        serializer = ConfirmIntelligencePreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        selection = serializer.validated_data['preview']
+        with transaction.atomic():
+            project = PlanningProject.objects.select_for_update().get(pk=run.project_id)
+            run = DocumentIntelligenceRun.objects.select_for_update().get(pk=run.pk)
+            run.project = project
+            invalid = source_error(run)
+            if invalid:
+                code, message = invalid
+                return Response({'error': message, 'code': code}, status=status.HTTP_409_CONFLICT)
+            if run.conflicts.filter(is_deleted=False, status__in=['open', 'ignored']).exists():
+                return Response({
+                    'error': 'Resolve the conflicting source values before confirming this preview.',
+                    'code': 'intelligence_conflicts_unresolved',
+                }, status=status.HTTP_409_CONFLICT)
+
+            intelligence = compile_run_intelligence(run, include_confirmation=False)
+            catalogue = intelligence.get('disciplines') or {}
+            if set(selection['disciplines']) - set(catalogue):
+                return Response({'preview': {'disciplines': 'Select disciplines from this preview.'}}, status=400)
+            # Preserve the complete catalogue for edits and reload; generation
+            # consumes exclusions independently of the extracted source facts.
+            for code, info in catalogue.items():
+                choices = selection['disciplines'].setdefault(code, {
+                    'in_scope': info.get('in_scope') is not False,
+                    'excluded_deliverables': list(info.get('excluded_deliverables') or []),
+                })
+                choices.setdefault('deliverables', list(info.get('deliverables') or []))
+                choices['deliverables'] = list(dict.fromkeys(choices['deliverables']))
+                choices['excluded_deliverables'] = list(dict.fromkeys(choices['excluded_deliverables']))
+                if set(choices['excluded_deliverables']) - set(choices['deliverables']):
+                    return Response({'preview': {'disciplines': {
+                        code: 'Excluded deliverables must belong to the discipline catalogue.',
+                    }}}, status=400)
+            available_hse = set(intelligence.get('available_hse_studies') or intelligence.get('hse_studies') or [])
+            if set(selection['hse_studies']) - available_hse:
+                return Response({'preview': {'hse_studies': 'Select studies from this preview.'}}, status=400)
+            selection['hse_studies'] = list(dict.fromkeys(selection['hse_studies']))
+
+            now = timezone.now()
+            before = (run.summary or {}).get('preview_confirmation') or {}
+            run.facts.filter(is_deleted=False, status='detected').update(
+                status='confirmed', reviewed_by=request.user, reviewed_at=now, updated_at=now,
+            )
+            confirmation = {
+                'preview': selection, 'confirmed_at': now.isoformat(), 'confirmed_by': request.user.pk,
+                'source_fingerprint': source_fingerprint(project),
+                'review_fingerprint': review_fingerprint(run),
+            }
+            run.summary = {**(run.summary or {}), 'preview_confirmation': confirmation}
+            run.save(update_fields=['summary', 'updated_at'])
+            record_event(
+                project=project, actor=request.user, action='intelligence.preview_confirmed', entity=run,
+                before=before, after=confirmation,
+            )
+        return Response(self.get_serializer(run).data)
 
     @action(detail=True, methods=['post'], url_path='add-fact')
     def add_fact(self, request, pk=None):
@@ -81,7 +146,10 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
         run = self.get_object()
         if run.status != 'succeeded':
             return Response({'error': 'Only a successful intelligence run can build a Schedule Basis.'}, status=status.HTTP_409_CONFLICT)
-        basis = build_schedule_basis(run)
+        try:
+            basis = build_schedule_basis(run)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
         record_event(
             project=run.project, actor=request.user, action='schedule_basis.created', entity=basis,
             after={'version': basis.version, 'readiness': basis.readiness},

@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 from collections import defaultdict
+from copy import deepcopy
 
 from django.db import transaction
 from django.utils import timezone
@@ -18,6 +19,7 @@ from ..models import (
     DocumentIntelligenceRun, DocumentProfile, IntelligenceConflict, IntelligenceFact,
 )
 from .intelligence import analyze_project
+from .preview_confirmation import apply_confirmed_preview, source_fingerprint
 
 ENGINE_VERSION = '3.1'
 
@@ -340,9 +342,9 @@ def _create_conflicts(run):
     return conflicts
 
 
-def compile_run_intelligence(run):
+def compile_run_intelligence(run, *, include_confirmation=True):
     """Compile current reviewed facts over the legacy-compatible intelligence payload."""
-    intelligence = dict((run.summary or {}).get('base_intelligence') or {})
+    intelligence = deepcopy((run.summary or {}).get('base_intelligence') or {})
     facts = run.facts.filter(is_deleted=False).exclude(status__in=['rejected', 'superseded', 'conflicted'])
     scalar_output = {
         'project_name': 'detected_project_name', 'effective_date': 'detected_effective_date_text',
@@ -381,7 +383,7 @@ def compile_run_intelligence(run):
         },
         'open_conflicts': list(run.conflicts.filter(is_deleted=False, status='open').values('id', 'key', 'description')),
     })
-    return intelligence
+    return apply_confirmed_preview(run, intelligence) if include_confirmation else intelligence
 
 
 from apps.rbac.ai_telemetry import tracked_planning
@@ -395,6 +397,7 @@ def run_document_intelligence(project, *, user=None, files=None):
     run = DocumentIntelligenceRun.objects.create(
         project=project, status='running', engine_version=ENGINE_VERSION,
         source_file_ids=sorted(file_obj.id for file_obj in files), started_at=timezone.now(), requested_by=user,
+        summary={'source_fingerprint': source_fingerprint(project)},
     )
     try:
         with transaction.atomic():
@@ -412,7 +415,7 @@ def run_document_intelligence(project, *, user=None, files=None):
             run.conflict_count = len(conflicts)
             run.status = 'succeeded'
             run.finished_at = timezone.now()
-            run.summary = {'base_intelligence': legacy}
+            run.summary = {**run.summary, 'base_intelligence': legacy}
             run.save(update_fields=['fact_count', 'conflict_count', 'status', 'finished_at', 'summary', 'updated_at'])
         return run, compile_run_intelligence(run)
     except Exception as exc:

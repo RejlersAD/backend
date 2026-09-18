@@ -124,6 +124,7 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'enterprise_project', 'name', 'client', 'location', 'phase', 'effective_date',
             'planned_end_date', 'duration_days', 'duration_months',
+            'scope_summary', 'exclusions', 'budgeted_effort_hours',
             'calendar_overrides', 'review_cycle_overrides',
             'created_by', 'file_count', 'latest_generation_version',
             'ai_enabled', 'ai_provider', 'ai_model', 'ai_key_configured',
@@ -137,6 +138,21 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if self.instance:
+            changed_dates = {
+                field for field in ('effective_date', 'planned_end_date')
+                if field in attrs and attrs[field] != getattr(self.instance, field)
+            }
+            if changed_dates:
+                from .models import ScheduleBaseline
+
+                if ScheduleBaseline.objects.filter(
+                    schedule__project=self.instance, is_deleted=False,
+                ).exists():
+                    raise serializers.ValidationError({
+                        field: 'Project dates are locked by the published schedule baseline.'
+                        for field in sorted(changed_dates)
+                    })
         start = attrs.get('effective_date', getattr(self.instance, 'effective_date', None))
         end = attrs.get('planned_end_date', getattr(self.instance, 'planned_end_date', None))
         if end and not start:

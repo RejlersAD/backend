@@ -93,6 +93,51 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(set(paths)), 5)
         self.assertIn("5900738 Project/Private/payroll.txt", paths)
 
+    def test_all_project_roots_and_children_precede_deeper_descendants(self):
+        later = self.root / "Another project"
+        (later / "first-level.txt").write_text("later project is ready to browse")
+        (later / "Drawings").mkdir()
+        (later / "Drawings" / "drawing.dwg").write_text("synthetic")
+        inventory = self.inventory(included_paths=("5900738 Project", "Another project"))
+        paths = [item["relative_path"] for item in inventory.entries()]
+        self.assertEqual(paths[:2], ["5900738 Project", "Another project"])
+        immediate = [index for index, path in enumerate(paths) if path.count("/") == 1]
+        deeper = [index for index, path in enumerate(paths) if path.count("/") > 1]
+        self.assertLess(max(immediate), min(deeper))
+        self.assertIn("Another project/first-level.txt", paths)
+        self.assertIn("Another project/Drawings/drawing.dwg", paths)
+        self.assertEqual(inventory.errors, [])
+
+    def test_nested_overlapping_includes_are_streamed_once_across_projects(self):
+        (self.root / "Another project" / "visible.txt").write_text("synthetic")
+        inventory = self.inventory(included_paths=(
+            "5900738 Project/Documents", "5900738 Project", "Another project",
+            "5900738 Project/Documents", "Another project",
+        ))
+        with patch.object(inventory, "entry", wraps=inventory.entry) as read_entry:
+            stream = inventory.entries()
+            roots = [next(stream)["relative_path"], next(stream)["relative_path"]]
+            self.assertEqual(roots, ["5900738 Project", "Another project"])
+            self.assertEqual(read_entry.call_count, 2)
+            paths = roots + [item["relative_path"] for item in stream]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(read_entry.call_count, len(paths))
+        self.assertLess(paths.index("Another project/visible.txt"), paths.index("5900738 Project/Documents/progress.txt"))
+        self.assertEqual(inventory.errors, [])
+
+    def test_unreadable_project_does_not_prevent_later_project_inventory(self):
+        (self.root / "Another project" / "visible.txt").write_text("synthetic")
+        inventory = self.inventory(included_paths=("5900738 Project", "Another project"))
+        original = agent.os.scandir
+        def scan(path):
+            if Path(path) == self.root / "5900738 Project":
+                raise PermissionError("synthetic inaccessible directory")
+            return original(path)
+        with patch.object(agent.os, "scandir", side_effect=scan):
+            paths = [item["relative_path"] for item in inventory.entries()]
+        self.assertEqual(paths, ["5900738 Project", "Another project", "Another project/visible.txt"])
+        self.assertTrue(inventory.errors)
+
     def test_symlink_cannot_escape_scope(self):
         target = self.root / "5900738 Project" / "Documents" / "link"
         try:

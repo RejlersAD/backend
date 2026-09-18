@@ -105,14 +105,25 @@ def _apply_decisions(basis, decisions, user):
 
 def build_workable_plan(project, user, request_data, progress):
     """Run all intermediate planning phases, pausing only for exceptions."""
+    from .preview_confirmation import current_confirmed_preview
+
     run = project.intelligence_runs.filter(is_deleted=False, status='succeeded').first()
     if not run:
         raise ValueError('Run Document Intelligence successfully before building a workable project plan.')
+    preview = current_confirmed_preview(run)
+    confirmation = (run.summary or {}).get('preview_confirmation') or {}
+    if confirmation and preview is None:
+        raise ValueError('Confirm and save the current Document Intelligence Preview before building a workable project plan.')
     progress(8, 'Documents reviewed', 'documents', {
         'document_count': len(run.source_file_ids or []),
     })
     progress(12, 'Identifying scope and deliverables', 'schedule_basis')
-    basis = project.schedule_bases.filter(is_deleted=False, source_run=run).exclude(status='superseded').first()
+    confirmation_time = confirmation.get('confirmed_at') if preview is not None else None
+    basis = next((candidate for candidate in project.schedule_bases.filter(
+        is_deleted=False, source_run=run,
+    ).exclude(status='superseded') if (
+        (candidate.authority_snapshot or {}).get('preview_confirmation') or {}
+    ).get('confirmed_at') == confirmation_time), None)
     if not basis:
         basis = build_schedule_basis(run)
     deliverable_count = basis.deliverables.filter(is_deleted=False).count()
@@ -131,17 +142,20 @@ def build_workable_plan(project, user, request_data, progress):
         or (len(sheet['scenario_options']) > 1 and not selected_scenario)
     )
     if requires_decisions and not decisions.get('confirmed'):
-        return {'state': 'needs_decisions', 'decision_sheet': sheet, 'basis_id': basis.id}
+        return {'state': 'needs_decisions', 'decision_sheet': sheet, 'basis_id': basis.id,
+                'preview_confirmation_at': confirmation_time}
     if decisions.get('confirmed'):
         _apply_decisions(basis, decisions, user)
         sheet = _decision_sheet(basis)
         unresolved = bool(sheet['deliverables'] or sheet['conflicts'] or sheet['missing_fields'])
         if unresolved:
-            return {'state': 'needs_decisions', 'decision_sheet': sheet, 'basis_id': basis.id}
+            return {'state': 'needs_decisions', 'decision_sheet': sheet, 'basis_id': basis.id,
+                    'preview_confirmation_at': confirmation_time}
 
     refresh_basis_readiness(basis)
     if not basis.readiness.get('ready'):
-        return {'state': 'needs_decisions', 'decision_sheet': _decision_sheet(basis), 'basis_id': basis.id}
+        return {'state': 'needs_decisions', 'decision_sheet': _decision_sheet(basis), 'basis_id': basis.id,
+                'preview_confirmation_at': confirmation_time}
     if basis.status != 'approved':
         basis = approve_schedule_basis(basis, user)
 
@@ -157,7 +171,7 @@ def build_workable_plan(project, user, request_data, progress):
         if scenarios and selected not in scenarios:
             return {
                 'state': 'needs_decisions', 'decision_sheet': {**sheet, 'scenario_options': scenarios},
-                'basis_id': basis.id, 'generation_plan_id': plan.id,
+                'basis_id': basis.id, 'generation_plan_id': plan.id, 'preview_confirmation_at': confirmation_time,
             }
         plan.selected_scenario = selected
         plan.save(update_fields=['selected_scenario', 'updated_at'])
@@ -199,7 +213,7 @@ def build_workable_plan(project, user, request_data, progress):
     return {
         'state': 'needs_decisions' if review.blockers else 'ready_for_approval',
         'decision_sheet': {'schedule_blockers': review.blockers, 'schedule_warnings': review.warnings},
-        'summary': summary,
+        'summary': summary, 'preview_confirmation_at': confirmation_time,
     }
 
 
@@ -218,9 +232,14 @@ def approve_workable_baseline(project, user, version_id, name, progress):
         pk=version_id, schedule__project=project, is_deleted=False,
     )
     require_schedule_authority(version, user)
+    generation = version.source_generation
+    basis_id = (generation.intelligence or {}).get('schedule_basis_id') if generation else None
+    basis = project.schedule_bases.filter(pk=basis_id, is_deleted=False).first() if basis_id else None
+    confirmation_time = ((basis.authority_snapshot or {}).get('preview_confirmation') or {}).get('confirmed_at') if basis else None
     existing = version.baselines.filter(is_deleted=False).first()
     if version.status == 'baselined' and existing:
-        return {'state': 'baselined', 'baseline': ScheduleBaselineSerializer(existing).data}
+        return {'state': 'baselined', 'baseline': ScheduleBaselineSerializer(existing).data,
+                'preview_confirmation_at': confirmation_time}
     assurance = current_assurance(version)
     if not assurance or assurance.is_deleted or assurance.blockers:
         raise ValueError('Resolve the consolidated critical exceptions before baseline approval.')
@@ -255,4 +274,5 @@ def approve_workable_baseline(project, user, version_id, name, progress):
             project=project, actor=user, action='schedule.baselined', entity=baseline,
             after={'version': version.version},
         )
-    return {'state': 'baselined', 'baseline': ScheduleBaselineSerializer(baseline).data}
+    return {'state': 'baselined', 'baseline': ScheduleBaselineSerializer(baseline).data,
+            'preview_confirmation_at': confirmation_time}

@@ -152,6 +152,38 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         project = serializer.save()
         record_event(project=project, actor=self.request.user, action='project.updated', entity=project, before=before, after=serializer.data)
 
+    @action(detail=True, methods=['get', 'put'], url_path='work-breakdown')
+    def work_breakdown(self, request, pk=None):
+        """Read/save a preview-bound WBS draft; advancing creates only a draft schedule."""
+        from .models import DocumentIntelligenceRun
+        from .services.work_breakdown import WorkBreakdownConflict, save_work_breakdown, work_breakdown_state
+        from .work_breakdown_serializers import WorkBreakdownSaveSerializer
+
+        project = self.get_object()
+        data = None
+        if request.method == 'PUT':
+            serializer = WorkBreakdownSaveSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            data = serializer.validated_data
+        run_id = data['intelligence_run_id'] if data else request.query_params.get('intelligence_run_id')
+        if run_id is not None and not str(run_id).isdigit():
+            return Response({'error': 'intelligence_run_id must identify an intelligence run.'}, status=400)
+        try:
+            with transaction.atomic():
+                if data is not None:
+                    project = PlanningProject.objects.select_for_update().get(pk=project.pk)
+                runs = DocumentIntelligenceRun.objects.filter(project=project, is_deleted=False)
+                if data is not None:
+                    runs = runs.select_for_update()
+                run = (runs.filter(pk=run_id) if run_id is not None else runs.filter(status='succeeded')).order_by('-created_at', '-pk').first()
+                if run_id is not None and run is None:
+                    raise Http404
+                if run is not None:
+                    run.project = project
+                return Response(save_work_breakdown(run, data, actor=request.user) if data is not None else work_breakdown_state(run))
+        except WorkBreakdownConflict as exc:
+            return Response({'error': str(exc), 'code': exc.code}, status=status.HTTP_409_CONFLICT)
+
     @action(detail=True, methods=['get'], url_path='enterprise-contract')
     def enterprise_contract(self, request, pk=None):
         """Return the authoritative link, drift, lifecycle, and baseline lock state."""
@@ -557,14 +589,19 @@ class PlanningFileViewSet(viewsets.ModelViewSet):
             project=planning_file.project, actor=self.request.user, action='file.uploaded',
             entity=planning_file, after={'filename': planning_file.original_filename, 'category': planning_file.category},
         )
-        try:
-            parse_uploaded_planning_file.delay(planning_file.id)
-        except Exception as exc:  # noqa: BLE001
-            logger.info('parse_uploaded_planning_file.delay failed (%s); running inline', exc)
+        def dispatch_parse():
             try:
-                parse_uploaded_planning_file(planning_file.id)
-            except Exception as inner:  # noqa: BLE001
-                logger.warning('inline parse_uploaded_planning_file failed: %s', inner)
+                parse_uploaded_planning_file.delay(planning_file.id)
+            except Exception as exc:  # noqa: BLE001
+                logger.info('parse_uploaded_planning_file.delay failed (%s); running inline', exc)
+                try:
+                    parse_uploaded_planning_file(planning_file.id)
+                except Exception as inner:  # noqa: BLE001
+                    logger.warning('inline parse_uploaded_planning_file failed: %s', inner)
+
+        # A fast worker can otherwise receive the task before the upload's row
+        # commits, return not_found, and leave the document permanently queued.
+        transaction.on_commit(dispatch_parse, using=planning_file._state.db)
 
     def perform_destroy(self, instance):
         instance.soft_delete()

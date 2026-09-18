@@ -2273,7 +2273,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             'id', 'pr_number', 'status', 'supplier_name', 'vendor_id', 'vendor__name',
             'project_department', 'product_service', 'title', 'total_price', 'net_total_excl_vat',
             'estimated_budget', 'currency', 'description_reason', 'category', 'required_date',
-            'items', 'purchase_recommendation', 'project_details', 'project', 'created_at',
+            'items', 'purchase_recommendation', 'project_details', 'project', 'enterprise_project_id', 'created_at',
             'issued_by__first_name', 'issued_by__last_name', 'issued_by__email',
             'requested_by__first_name', 'requested_by__last_name', 'requested_by__email',
         ).order_by('-created_at')
@@ -2328,6 +2328,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 'purchase_recommendation': requisition.purchase_recommendation,
                 'project_details': requisition.project_details,
                 'project': requisition.project,
+                'enterprise_project': requisition.enterprise_project_id,
                 'created_at': requisition.created_at,
             })
 
@@ -3083,6 +3084,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement'
+    permission_action = None
     filterset_fields = ['status', 'project_type', 'is_active', 'is_billable', 'health_status']
     search_fields = ['project_number', 'project_name', 'client_name', 'description']
     ordering_fields = ['project_number', 'project_name', 'start_date', 'created_at', 'status']
@@ -3121,6 +3123,55 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def relationship_report(self, request):
         """Preview unresolved canonical links without mutating project data."""
         return Response(build_project_reconciliation_payload())
+
+    @action(
+        detail=False, methods=['get'], url_path='link-workspace',
+        permission_classes=[IsAuthenticated, CommercialModulePermission, HasModuleAccess],
+    )
+    def link_workspace(self, request):
+        """List project choices and all saved POs for an explicit connection."""
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.project_link_workspace import build_project_link_workspace
+
+        payload = build_project_link_workspace(request.query_params, request.user)
+        payload['permissions'] = {
+            'can_connect': request_action_allowed(request, 'procurement', 'update'),
+            'can_create_po': (
+                request_action_allowed(request, 'procurement', 'update')
+                and request_action_allowed(request, 'procurement_orders', 'create')
+            ),
+        }
+        return Response(payload)
+
+    @action(
+        detail=False, methods=['post'], url_path='prepare-folder-project', permission_action='update',
+        permission_classes=[IsAuthenticated, CommercialModulePermission, HasModuleAccess],
+    )
+    def prepare_folder_project(self, request):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.project_link_workspace import (
+            FolderProjectSerializer, canonical_project_payload, prepare_folder_project,
+        )
+        if not request_action_allowed(request, 'procurement_orders', 'create'):
+            raise PermissionDenied('Purchase Order create permission is required.')
+        payload = FolderProjectSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        project = prepare_folder_project(user=request.user, **payload.validated_data)
+        return Response(canonical_project_payload(project))
+
+    @action(
+        detail=False, methods=['post'], url_path='connect-folder-order', permission_action='update',
+        permission_classes=[IsAuthenticated, CommercialModulePermission, HasModuleAccess],
+    )
+    def connect_folder_order(self, request):
+        from .services.project_link_workspace import FolderOrderSerializer, connect_folder_order
+        payload = FolderOrderSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            result = connect_folder_order(user=request.user, **payload.validated_data)
+        except DjangoValidationError as exc:
+            raise ValidationError(getattr(exc, 'message_dict', None) or exc.messages) from exc
+        return Response(result)
 
     @action(
         detail=False, methods=['post'], url_path='resolve-relationship',

@@ -28,11 +28,49 @@ share automatically.
 | 5. Verification | Exercise permissions, synchronization, and the interface | 47 backend tests passed; connector suite has 23 passes and one Windows symlink privilege skip; six browser interaction tests and accessibility checks passed; production frontend build passed |
 | 6. Local connection | Apply the migration and discover the actual server root | Local PostgreSQL migration applied; local RADAI catalogued 54 folders, with 10 matched project codes; no file contents copied and no project scopes published |
 
-The local development source now selects the 54 existing project directories for
-recursive **catalogue** inventory. It preserves existing exclusions and project
-access settings; no document contents are copied by this scan. Newly created
-top-level project folders must be added to the included paths. The local
-interface is `/admin/file-server-replica`.
+On 18 September 2026, the local development source first resumed folder-name
+discovery at 09:07 Dubai time. After the user requested the contents of project
+folders, recursive catalogue scanning was restored for all 54 immediate folders
+then present on the share. The source now has explicit included paths; an empty
+include list had both prevented recursive scanning and hidden cached nested
+entries. Existing exclusions, project mappings and access settings are preserved.
+The initial recursive inventory runs in the background, and each acknowledged
+batch becomes browsable immediately. Subsequent scans start 300 seconds after
+the previous scan finishes. Newly created top-level projects must be added to
+the included paths. Catalogue scans index folders and file details without
+copying document contents. The local administration interface is
+`/admin/file-server-replica`.
+
+The 08:35 scan was deliberately stopped during the Project Links redesign;
+its failed record remains in scan history. The resumed scan records the current
+successful connection separately.
+
+### Active Project names and codes
+
+Project Control's **Active Project** selector lists registered RADAI projects.
+It shows the project code and full name, sorts by code, and searches combined
+code/name/client terms. Selecting a project retains its canonical identity in
+**Schedule > Planner**. A planning workspace is created explicitly when needed.
+
+On 18 September 2026 the local server catalogue supplied 51 valid project codes:
+49 projects were registered and mapped, and the two existing projects were reused.
+Three general-purpose folders and one historical missing folder were skipped.
+Existing project details and folder publication settings were preserved. Newly
+registered identities start in Planning with operational status unconfirmed;
+dates, client, budgets, and team assignments still require normal project setup.
+
+For a later reviewed registration, use the intended backend/database environment:
+
+```powershell
+python manage.py register_server_projects --source <source-uuid> --actor <admin-user-id>
+python manage.py register_server_projects --source <source-uuid> --actor <admin-user-id> --apply
+```
+
+The first command is a read-only preview. Applying is idempotent and requires
+file-server administrator and Project Control create access. Only current,
+included root folders with valid numeric codes are eligible. Duplicate codes,
+deleted projects, and conflicting mappings are reported for review rather than
+overwritten. Folder discovery alone does not register later projects automatically.
 
 The initial Offline condition had two causes: discovery had run once without a
 background connector, and the saved connector credential no longer matched the
@@ -107,10 +145,15 @@ from the catalogue. A type label comes from the filename; it does not establish
 that RADAI can preview or extract that format. File bytes are not read or copied
 in catalogue mode.
 
-Traversal streams nested directories without using Python recursion, preserves
-the existing root/path/junction checks and continues with valid siblings when
-one filename is unsupported. An unreadable or unsupported path still makes the
-scan incomplete; partial scans never mark unseen existing records missing.
+Traversal visits included projects breadth-first: all project roots and their
+immediate contents are indexed before deeper folders. This prevents a large
+earlier project's directory tree from leaving later projects blank. The queue
+contains directory paths only; files stream one metadata record at a time.
+Overlapping selections are deduplicated, existing root/path/junction checks
+remain in force, and unsupported names do not block valid siblings. An unreadable
+or unsupported path still makes the scan incomplete; partial scans never mark
+unseen existing records missing. Empty folder browser views refresh every ten
+seconds while the connector is syncing and stop after results or an error.
 Inventory batches use bulk database writes, and completed scans mark missing
 entries with a scope-filtered database update.
 
