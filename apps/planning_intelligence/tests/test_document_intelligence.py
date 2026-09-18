@@ -1,6 +1,8 @@
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, RolePermission, UserProfile, UserRole
+from apps.rbac.module_actions import ensure_module_actions
 from apps.users.models import User
 
 from ..models import PlanningFile, PlanningProject
@@ -120,6 +122,18 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
 class ConflictReviewWorkflowTests(DocumentIntelligenceFixture):
     def setUp(self):
         super().setUp()
+        organization = Organization.objects.create(name='Intelligence review tests', code='intel-review-test')
+        role = Role.objects.create(name='Intelligence reviewer', code='intel-reviewer', level=4)
+        module, _ = Module.objects.get_or_create(code='planning_package', defaults={'name': 'Planning'})
+        ensure_module_actions(Module, Permission, module_ids=[module.pk])
+        RoleModule.objects.create(role=role, module=module)
+        for permission in module.permissions.filter(action__in=['read', 'update', 'create'], is_active=True):
+            RolePermission.objects.create(role=role, permission=permission)
+        # Both users can access the module; project ownership must still
+        # prevent the outsider from reading or reviewing another user's facts.
+        for user in (self.owner, self.outsider):
+            profile, _ = UserProfile.objects.get_or_create(user=user, defaults={'organization': organization})
+            UserRole.objects.create(user_profile=profile, role=role)
         self.source('sow.txt', 'sow', 'Project Name: Alpha Development\nDuration: 12 months')
         self.source('requirements.txt', 'schedule_requirements', 'Project Name: Beta Development\nDuration: 10 months')
         self.run, self.intelligence = run_document_intelligence(self.project, user=self.owner)

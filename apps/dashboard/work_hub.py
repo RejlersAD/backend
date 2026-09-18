@@ -69,12 +69,30 @@ def _tasks(user, today):
                     rows=[], total_rows=None, returned_rows=0, truncated=False)
 
     def build():
-        if not module_action_allowed(user, 'project_control', 'read'):
+        from apps.core.task_assignment_policy import may_use_assigned_work
+        from apps.rbac.approval_eligibility import active_approval_user
+        from apps.rbac.action_policy import record_workflow_not_denied
+        broad_read = module_action_allowed(user, 'project_control', 'read')
+        personal_read = may_use_assigned_work(user)
+        manager_read = (active_approval_user(user) and module_action_allowed(user, 'planning_package', 'update')
+                        and record_workflow_not_denied(user, 'project_control', 'read'))
+        if not broad_read and not personal_read and not manager_read:
             raise SourceUnavailable('Project Control read access is required for assigned project tasks.')
         from apps.project_control.access import accessible_enterprise_projects
         Task = _model('core', 'ProjectTask')
-        rows = Task.objects.filter(assigned_to=user, is_deleted=False,
-                                   project__in=accessible_enterprise_projects(user)).exclude(status='completed')
+        eligible = Q(pk__in=[])
+        if broad_read:
+            eligible |= Q(source_key__isnull=True, assigned_to=user, project__in=accessible_enterprise_projects(user))
+        if personal_read:
+            eligible |= (Q(source_key__startswith='wbs:', metadata__source='work_breakdown',
+                           metadata__organization_id=str(user.rbac_profile.organization_id))
+                         & (Q(assigned_to=user) | Q(reviewer=user, status='review')))
+        if manager_read:
+            eligible |= (Q(source_key__startswith='wbs:', metadata__source='work_breakdown', status='review',
+                           reviewer__isnull=True, task_type='deliverable')
+                         & (Q(project__owner=user) | Q(project__memberships__user=user,
+                            project__memberships__is_active=True, project__memberships__role='project_manager')))
+        rows = Task.objects.filter(eligible, is_deleted=False, project__is_deleted=False).exclude(status='completed').distinct()
         counts = rows.aggregate(open=Count('id'), due_today=Count('id', filter=Q(due_date=today)),
                                 overdue=Count('id', filter=Q(due_date__lt=today)))
         counts['due'] = counts['due_today'] + counts['overdue']
@@ -84,6 +102,8 @@ def _tasks(user, today):
                 'rows': [{'id': task.pk, 'title': task.title, 'project_id': task.project_id,
                           'project_code': task.project.code, 'project_name': task.project.name,
                           'status': task.status, 'priority': task.priority,
+                          'task_type': task.task_type, 'progress_percent': task.progress_percent,
+                          'role': 'assignee' if task.assigned_to_id == user.pk else 'reviewer' if task.reviewer_id == user.pk else 'manager',
                           'due_date': task.due_date.isoformat() if task.due_date else None,
                           'route': f'/projects?project={task.project_id}'} for task in preview]}
     return _read(base, build)

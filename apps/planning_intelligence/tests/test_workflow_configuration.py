@@ -3,6 +3,9 @@ from rest_framework.test import APIClient
 from unittest.mock import patch
 
 from apps.users.models import User
+from apps.core.project_models import Project
+
+from .test_business_approval_gates import grant_test_approval
 
 from ..models import (
     EngineeringDependencyRule, EngineeringDependencyTemplate, PlanningProject,
@@ -36,16 +39,25 @@ class WorkflowConfigurationTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='workflow-owner', email='workflow@example.com', password='test')
         self.outsider = User.objects.create_user(username='workflow-outsider', email='outside@example.com', password='test')
-        self.project = PlanningProject.objects.create(name='Workflow Project', created_by=self.owner)
-        self.standard = WorkflowTemplate.objects.create(
-            code='STANDARD_5_STAGE', name='Standard Five Stage', version=1,
-            status='active', is_system=True, is_default=True,
+        grant_test_approval((self.owner, self.outsider))
+        enterprise = Project.objects.create(code='WORKFLOW-TEST', name='Workflow Project', owner=self.owner)
+        self.project = PlanningProject.objects.create(
+            name='Workflow Project', created_by=self.owner, enterprise_project=enterprise,
         )
+        # Data migrations may already supply these corporate defaults. Replace
+        # their test-local children so assertions use the same deterministic fixture.
+        self.standard, _ = WorkflowTemplate.objects.update_or_create(
+            project=None, code='STANDARD_5_STAGE', version=1,
+            defaults={'name': 'Standard Five Stage', 'status': 'active', 'is_system': True, 'is_default': True},
+        )
+        self.standard.stages.all().delete()
         add_five_stages(self.standard)
-        self.dependencies = EngineeringDependencyTemplate.objects.create(
-            code='PROCESS_ENGINEERING_V1', name='Process Network', discipline='process',
-            version=1, status='active', is_system=True, is_default=True,
+        self.dependencies, _ = EngineeringDependencyTemplate.objects.update_or_create(
+            project=None, code='PROCESS_ENGINEERING_V1', version=1,
+            defaults={'name': 'Process Network', 'discipline': 'process',
+                      'status': 'active', 'is_system': True, 'is_default': True},
         )
+        self.dependencies.rules.all().delete()
         EngineeringDependencyRule.objects.create(
             template=self.dependencies, sequence=1,
             predecessor_code='HEAT_MASS_BALANCE', predecessor_name='Heat and Mass Balance',

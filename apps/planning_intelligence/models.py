@@ -46,8 +46,22 @@ def get_planning_file_storage():
     return FileSystemStorage(location=str(getattr(settings, 'MEDIA_ROOT', 'media')) + '/planning_intelligence')
 
 
+class ProjectSetupAISettings(models.Model):
+    """Personal credentials for generating new project drafts; never project data."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='project_setup_ai_settings',
+    )
+    provider = models.CharField(max_length=20, default='openai', editable=False)
+    model = models.CharField(max_length=128, default='gpt-4o')
+    api_key_encrypted = models.TextField(editable=False)
+    last_tested_at = models.DateTimeField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class PlanningProject(BaseModel):
-    """A single planning workspace — one FEED/DEFINE project being planned."""
+    """A planning workspace for document-led or directly entered project work."""
 
     enterprise_project = models.OneToOneField(
         'core.Project',
@@ -67,6 +81,15 @@ class PlanningProject(BaseModel):
     client = models.CharField(max_length=255, blank=True)
     location = models.CharField(max_length=255, blank=True)
     phase = models.CharField(max_length=100, blank=True, help_text='e.g. FEED / DEFINE')
+
+    planning_mode = models.CharField(
+        max_length=16, choices=[('document', 'Document-led'), ('manual', 'Direct planning')],
+        default='document',
+    )
+    # Server-owned draft; direct planning must not fabricate document evidence.
+    manual_work_breakdown = models.JSONField(default=dict, blank=True)
+    # Independent revision-guarded planning canvas; legacy drafts remain intact.
+    simple_planning_state = models.JSONField(default=dict, blank=True)
 
     scope_summary = models.TextField(blank=True, default='')
     exclusions = models.TextField(blank=True, default='')

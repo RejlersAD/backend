@@ -1748,7 +1748,8 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         ]))
         story.append(approval_table)
 
-        doc.build(story)
+        from .services.requisition_pdf_layout import build_single_page_requisition
+        build_single_page_requisition(doc, story)
         buffer.seek(0)
         response.write(buffer.read())
         return response
@@ -2920,6 +2921,7 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     def import_signed_pdf(self, request):
         """Import, reconcile, persist, and verify a signed Purchase Order PDF."""
         import logging
+        from pathlib import Path
         from uuid import uuid4
 
         from apps.rbac.action_policy import request_action_allowed
@@ -2964,11 +2966,23 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except APIException:
             raise
-        except Exception:
+        except Exception as exc:
             error_reference = uuid4().hex
+            error_location = 'unknown'
+            error_traceback = exc.__traceback__
+            while error_traceback is not None:
+                frame = error_traceback.tb_frame
+                if frame.f_globals.get('__name__', '').startswith(('apps.', 'config.')):
+                    error_location = (
+                        f'{Path(frame.f_code.co_filename).name}:'
+                        f'{frame.f_code.co_name}:{error_traceback.tb_lineno}'
+                    )
+                error_traceback = error_traceback.tb_next
+            # This header can be shared without the exception message, source
+            # contents, storage URLs, or credentials in the private traceback.
             logging.getLogger(__name__).exception(
-                'Signed PO PDF import failed (reference=%s, user=%s)',
-                error_reference, request.user.pk,
+                'Signed PO PDF import failed (reference=%s, user=%s, exception_type=%s, location=%s)',
+                error_reference, request.user.pk, type(exc).__name__, error_location,
             )
             return Response({
                 'error': (

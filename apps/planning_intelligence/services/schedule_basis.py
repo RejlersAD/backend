@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import re
 from collections import defaultdict
 from difflib import SequenceMatcher
@@ -96,7 +97,57 @@ def _source_reference(fact):
     }
 
 
+def _register_deliverable_rows(run, preview=None):
+    """Keep register rows distinct; a shared title fragment is not identity."""
+    groups = []
+    facts = run.facts.filter(
+        is_deleted=False, fact_type='deliverable', value__source_register=True,
+    ).exclude(status__in=['rejected', 'superseded', 'conflicted']).select_related('source_file').order_by('id')
+    for fact in facts:
+        value = fact.value
+        title = value.get('original_title') or value['name']
+        locator = fact.source_locator or {}
+        identity = f"{fact.source_file_id}:{locator.get('sheet', '')}:{fact.key}"
+        groups.append({
+            'discipline': value['discipline'], 'canonical_name': title, 'original_title': title,
+            'document_number': value.get('document_number') or '',
+            'document_revision': value.get('document_revision') or '',
+            'confidence': fact.confidence, 'fact_ids': [fact.id],
+            'references': [_source_reference(fact)], 'aliases': [],
+            'confirmed': fact.status == 'confirmed', 'source_identity': identity,
+        })
+    if preview is None:
+        return groups
+
+    selected = {}
+    for discipline, info in (preview.get('disciplines') or {}).items():
+        excluded = set(info.get('excluded_deliverables') or [])
+        selected[discipline] = [name for name in info.get('deliverables') or []
+                                if info.get('in_scope') is not False and name not in excluded]
+    # HSE register deliverables are complete document titles, not study acronyms.
+    if (preview.get('disciplines') or {}).get('hse', {}).get('in_scope') is not False:
+        selected.setdefault('hse', []).extend(preview.get('hse_studies') or [])
+    for row in groups:
+        row['confirmed'] = row['canonical_name'] in selected.get(row['discipline'], [])
+        row['excluded'] = not row['confirmed']
+    for discipline, names in selected.items():
+        for name in names:
+            if any(row['discipline'] == discipline and row['canonical_name'] == name for row in groups):
+                continue
+            groups.append({
+                'discipline': discipline, 'canonical_name': name, 'original_title': name,
+                'document_number': '', 'document_revision': '', 'confidence': 1.0,
+                'fact_ids': [], 'references': [{
+                    'fact_id': None, 'file_id': None, 'filename': 'Confirmed Document Intelligence Preview',
+                    'category': 'planner', 'locator': {'intelligence_run_id': run.id}, 'excerpt': '',
+                }], 'aliases': [], 'confirmed': True, 'excluded': False,
+            })
+    return groups
+
+
 def _deliverable_rows(run, preview=None):
+    if ((run.summary or {}).get('base_intelligence') or {}).get('deliverable_source') == 'register':
+        return _register_deliverable_rows(run, preview)
     aliases = _alias_map()
     groups = []
     facts = run.facts.filter(
@@ -262,6 +313,8 @@ def build_schedule_basis(run):
         BasisDeliverable(
             basis=basis, discipline=row['discipline'],
             canonical_key=(
+                'register-' + hashlib.sha256(row['source_identity'].encode()).hexdigest()
+                if row.get('source_identity') else
                 f"{_name_key(row['canonical_name'])}--{_name_key(row['document_number'])}"
                 if row['document_number'] else _name_key(row['canonical_name'])
             )[:320], canonical_name=row['canonical_name'],

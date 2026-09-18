@@ -1,6 +1,7 @@
 import datetime as dt
 import os
 import time
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import connection
@@ -40,6 +41,24 @@ class OperationalJobTests(TestCase):
         self.assertEqual(job.progress, 35)
         self.assertEqual(job.progress_log[-1]['phase'], 'cpm')
         self.assertIsNotNone(job.heartbeat_at)
+
+    def test_new_extractor_version_does_not_replay_old_analysis_job(self):
+        with patch('apps.planning_intelligence.services.document_intelligence.ENGINE_VERSION', '3.1'):
+            previous, _ = get_or_create_job(self.project, 'analyze', {}, self.user)
+        previous.status = 'succeeded'
+        previous.result_data = {'intelligence_run_id': 99}
+        previous.save(update_fields=['status', 'result_data'])
+
+        current, created = get_or_create_job(self.project, 'analyze', {}, self.user)
+        replay, replay_created = get_or_create_job(self.project, 'analyze', {}, self.user)
+
+        self.assertTrue(created)
+        self.assertNotEqual(current.pk, previous.pk)
+        self.assertFalse(replay_created)
+        self.assertEqual(replay.pk, current.pk)
+        previous.refresh_from_db()
+        self.assertEqual(previous.status, 'succeeded')
+        self.assertEqual(previous.result_data, {'intelligence_run_id': 99})
 
     def test_generation_plan_job_is_idempotent_for_unchanged_basis(self):
         from ..models import DocumentIntelligenceRun, ScheduleBasis

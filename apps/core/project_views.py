@@ -233,6 +233,27 @@ class ProjectTaskViewSet(viewsets.ModelViewSet):
         """Create task with project association"""
         serializer.save()
 
+    def perform_update(self, serializer):
+        from .task_assignment_policy import is_wbs_task
+        from rest_framework.exceptions import ValidationError
+        if is_wbs_task(serializer.instance):
+            raise ValidationError('Manage this assignment in Work breakdown; update status and progress in My Work.')
+        from apps.project_control.access import can_write_enterprise_project
+        if not can_write_enterprise_project(self.request.user, serializer.instance.project):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('You cannot manage tasks for this project.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        from .task_assignment_policy import is_wbs_task
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from apps.project_control.access import can_write_enterprise_project
+        if is_wbs_task(instance):
+            raise ValidationError('Remove this assignment in Work breakdown.')
+        if not can_write_enterprise_project(self.request.user, instance.project):
+            raise PermissionDenied('You cannot manage tasks for this project.')
+        instance.soft_delete()
+
 
 class ProjectMilestoneViewSet(viewsets.ModelViewSet):
     """

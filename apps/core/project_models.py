@@ -3,6 +3,7 @@ Project Management Models
 """
 from django.db import models
 from django.conf import settings
+from django.core.validators import MaxValueValidator
 from apps.core.models import BaseModel
 
 
@@ -198,7 +199,7 @@ class ProjectTask(BaseModel):
     ]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='tasks')
-    title = models.CharField(max_length=255)
+    title = models.CharField(max_length=500)
     description = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='todo')
     
@@ -209,14 +210,28 @@ class ProjectTask(BaseModel):
         blank=True,
         related_name='assigned_tasks'
     )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='project_tasks_to_review',
+    )
+    task_type = models.CharField(
+        max_length=20, choices=[('task', 'Task'), ('deliverable', 'Deliverable')], default='task',
+    )
+    progress_percent = models.PositiveSmallIntegerField(default=0, validators=[MaxValueValidator(100)])
+    source_key = models.CharField(max_length=160, unique=True, null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
     
     due_date = models.DateField(null=True, blank=True)
     priority = models.CharField(max_length=20, choices=Project.PRIORITY_CHOICES, default='medium')
-    estimated_hours = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    estimated_hours = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     actual_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     
     class Meta:
         ordering = ['due_date', '-created_at']
+        constraints = [models.CheckConstraint(
+            check=models.Q(progress_percent__gte=0, progress_percent__lte=100),
+            name='core_project_task_progress_range',
+        )]
 
     def __str__(self):
         return f"{self.project.code} - {self.title}"

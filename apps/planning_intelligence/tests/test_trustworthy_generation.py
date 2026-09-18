@@ -7,6 +7,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.utils import timezone
 
+from apps.core.project_models import Project
+
+from .test_business_approval_gates import grant_test_approval
 from ..models import BasisDeliverable, DocumentIntelligenceRun, PlanningFile, PlanningProject, ScheduleBasis
 from ..services.activity_generator import build_activities
 from ..services.generation_plan import (
@@ -24,10 +27,15 @@ class TrustworthyGenerationTests(TestCase):
         # The isolated test settings sync model tables without data migrations.
         # Load the same workflow definitions supplied to a migrated installation.
         import_module('apps.planning_intelligence.migrations.0021_trustworthy_generation').seed_workflow_families(apps, None)
-        self.user = get_user_model().objects.create_user(username='generation-planner', password='test')
+        self.user = get_user_model().objects.create_user(
+            username='generation-planner', email='generation-planner@example.test', password='test',
+        )
+        grant_test_approval((self.user,))
+        enterprise = Project.objects.create(code='GENERATION-TEST', name='Generation Project', owner=self.user)
         self.project = PlanningProject.objects.create(
             name='Generation Project', effective_date=datetime.date(2026, 1, 1),
             planned_end_date=datetime.date(2026, 5, 1), duration_months=4, created_by=self.user,
+            enterprise_project=enterprise,
         )
         source = PlanningFile.objects.create(
             project=self.project, category='sow',

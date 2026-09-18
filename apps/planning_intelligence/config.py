@@ -170,7 +170,7 @@ DELIVERABLE_ALIASES = {
     'Equipment List': ['equipment list', 'equipment register'],
     'Line List': ['line list', 'pipe line list'],
     'Hydraulic Analysis Report': ['hydraulic analysis', 'hydraulic calculations'],
-    'Piping Material Specification': ['pms', 'piping material spec', 'material specification'],
+    'Piping Material Specification': ['pms', 'piping material spec'],
     'MTO / Bill of Materials': ['mto', 'bill of materials', 'bom'],
     'Piping Stress Analysis Report': ['stress analysis', 'pipe stress analysis'],
     'Piping General Arrangement Drawings': ['piping ga', 'ga drawings', 'general arrangement drawings'],

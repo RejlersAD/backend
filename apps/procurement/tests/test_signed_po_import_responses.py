@@ -51,8 +51,44 @@ class SignedPOImportResponseTests(SimpleTestCase):
         self.assertIn(payload['error_reference'], payload['error'])
         self.assertIn('contact support', payload['error'])
         self.assertNotIn(str(internal_error), response.content.decode())
-        self.assertIn(payload['error_reference'], logs.records[0].getMessage())
+        self.assertEqual(len(logs.records), 1)
+        header = logs.records[0].getMessage()
+        self.assertIn(payload['error_reference'], header)
+        self.assertIn('exception_type=RuntimeError', header)
+        self.assertRegex(header, r'location=views\.py:import_signed_pdf:\d+')
+        self.assertNotIn(str(internal_error), header)
+        self.assertNotIn('\n', header)
         self.assertIs(logs.records[0].exc_info[1], internal_error)
+
+    def test_failure_header_identifies_deepest_application_frame_without_private_details(self):
+        internal_error = RuntimeError(
+            'Private document contents\nhttps://private-storage.invalid/source.pdf?token=secret'
+        )
+
+        def fail_source_save(*args, **kwargs):
+            raise internal_error
+
+        self.importer.side_effect = fail_source_save
+        with self.assertLogs('apps.procurement.views', level='ERROR') as logs:
+            response, payload = self.upload()
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(len(logs.records), 1)
+        header = logs.records[0].getMessage()
+        expected_location = (
+            'location=test_signed_po_import_responses.py:fail_source_save:'
+            f'{fail_source_save.__code__.co_firstlineno + 1}'
+        )
+        self.assertIn(payload['error_reference'], header)
+        self.assertIn('exception_type=RuntimeError', header)
+        self.assertIn(expected_location, header)
+        self.assertNotIn('unittest', header)
+        self.assertNotIn('\n', header)
+        for private_value in ('Private document contents', 'private-storage.invalid', 'token=secret'):
+            self.assertNotIn(private_value, header)
+            self.assertNotIn(private_value, response.content.decode())
+        self.assertIs(logs.records[0].exc_info[1], internal_error)
+        self.assertIsNotNone(logs.records[0].exc_info[2])
 
     def test_source_validation_failure_remains_a_useful_bad_request(self):
         message = 'The uploaded file is not a valid PDF.'

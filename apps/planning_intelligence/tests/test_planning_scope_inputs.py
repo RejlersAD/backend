@@ -7,11 +7,15 @@ from rest_framework.test import APIClient
 
 from ..models import PlanningAuditEvent, PlanningProject, Schedule, ScheduleBaseline, ScheduleVersion
 from .test_phase0_foundation import Phase0Fixture
+from .test_scheduling_engine import grant_planning_test_actions
 
 
 class PlanningScopeInputTests(Phase0Fixture):
     def setUp(self):
         super().setUp()
+        grant_planning_test_actions((self.owner,), ('read', 'create', 'update'))
+        # Keep the denial test at the project-write gate, after module access.
+        grant_planning_test_actions((self.viewer,), ('read', 'update'))
         self.client = APIClient()
         self.client.force_authenticate(self.owner)
         self.url = f'/api/v1/planning-intelligence/projects/{self.workspace.pk}/'

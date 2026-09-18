@@ -12,16 +12,18 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from ..config import (
-    DEFAULT_HSE_STUDIES, DELIVERABLE_ALIASES, DISCIPLINE_DEFAULT_DELIVERABLES,
+    DEFAULT_HSE_STUDIES, DISCIPLINE_DEFAULT_DELIVERABLES,
     DISCIPLINE_NAME_BY_CODE,
 )
 from ..models import (
     DocumentIntelligenceRun, DocumentProfile, IntelligenceConflict, IntelligenceFact,
 )
 from .intelligence import analyze_project
+from .deliverable_matching import find_deliverable_match
 from .preview_confirmation import apply_confirmed_preview, source_fingerprint
+from .register_rows import extract_legacy_register_rows, extract_register_rows
 
-ENGINE_VERSION = '3.1'
+ENGINE_VERSION = '3.3'
 
 _DOCUMENT_NUMBER_RE = re.compile(
     r'\b(?=[A-Z0-9./_~\-]{6,100}\b)(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,}\b',
@@ -164,9 +166,30 @@ def _register_discipline(value):
     return next((code for term, code in mappings if term in normalized), slugify(normalized)[:64] or 'general')
 
 
-def _extract_register_rows(rows, file_obj, text):
+def _extract_register_rows(rows, file_obj, text, *, register_mode=False):
     """Extract collapsed PDF/Excel register rows, preserving number/revision/title."""
     if file_obj.category not in {'mdr', 'eddr'}:
+        return
+    structured = extract_register_rows(text)
+    if not structured and register_mode:
+        structured = extract_legacy_register_rows(text)
+    if structured:
+        for index, row in enumerate(structured):
+            _add_fact(
+                rows, file_obj, 'deliverable', f"{row['discipline']}:register:{index + 1}",
+                {
+                    'source_register': True, 'discipline': row['discipline'],
+                    'discipline_label': row['discipline_label'],
+                    'name': row['original_title'], 'original_title': row['original_title'],
+                    'document_number': row.get('document_number', ''),
+                    'document_revision': row.get('document_revision', ''),
+                    'register_item': row.get('register_item'),
+                }, .99, text, row['start'], row['end'], matched=row['original_title'],
+            )
+            locator = rows['facts'][-1].source_locator
+            if row.get('sheet'):
+                locator['sheet'] = row['sheet']
+            locator['register_item'] = row.get('register_item')
         return
     matches = []
     for line_match in re.finditer(r'^.*$', text, re.M):
@@ -210,10 +233,10 @@ def _extract_register_rows(rows, file_obj, text):
         )
 
 
-def _extract_file_facts(rows, file_obj):
+def _extract_file_facts(rows, file_obj, *, include_catalogue_deliverables=True):
     text = file_obj.extracted_text or ''
     lower = text.casefold()
-    _extract_register_rows(rows, file_obj, text)
+    _extract_register_rows(rows, file_obj, text, register_mode=not include_catalogue_deliverables)
     for fact_type, key, pattern, group, confidence in _SCALAR_PATTERNS:
         for match in pattern.finditer(text):
             value = match.group(group).strip(' :-|')
@@ -228,12 +251,12 @@ def _extract_file_facts(rows, file_obj):
             start = lower.find(found)
             _add_fact(rows, file_obj, 'discipline', code, {'code': code, 'name': name}, .80, text, start, start + len(found), matched=found)
 
-    for discipline, deliverables in DISCIPLINE_DEFAULT_DELIVERABLES.items():
+    catalogue = DISCIPLINE_DEFAULT_DELIVERABLES if include_catalogue_deliverables else {}
+    for discipline, deliverables in catalogue.items():
         for deliverable in deliverables:
-            terms = [deliverable, *(DELIVERABLE_ALIASES.get(deliverable) or [])]
-            hits = [(lower.find(term.casefold()), term) for term in terms if lower.find(term.casefold()) >= 0]
-            if hits:
-                start, term = min(hits)
+            match = find_deliverable_match(text, deliverable)
+            if match:
+                start, term = match.start(), match.group(0)
                 line_start = text.rfind('\n', 0, start) + 1
                 line_end = text.find('\n', start)
                 line_end = len(text) if line_end < 0 else line_end
@@ -248,10 +271,10 @@ def _extract_file_facts(rows, file_obj):
                         'document_number': document_number_match.group(0) if document_number_match else '',
                         'document_revision': revision_match.group('revision') if revision_match else '',
                     }, .88, text, start,
-                    start + len(term), matched=term,
+                    match.end(), matched=term,
                 )
 
-    for study in DEFAULT_HSE_STUDIES:
+    for study in DEFAULT_HSE_STUDIES if include_catalogue_deliverables else []:
         start = lower.find(study.casefold())
         if start >= 0:
             _add_fact(rows, file_obj, 'hse_study', slugify(study), study, .88, text, start, start + len(study), matched=study)
@@ -390,7 +413,7 @@ from apps.rbac.ai_telemetry import tracked_planning
 
 
 @tracked_planning('document_intelligence')
-def run_document_intelligence(project, *, user=None, files=None):
+def run_document_intelligence(project, *, user=None, files=None, allow_ai=True):
     files = list(files if files is not None else project.files.filter(is_deleted=False, parse_status='done'))
     if not files:
         raise ValueError('No successfully parsed files are available.')
@@ -403,10 +426,10 @@ def run_document_intelligence(project, *, user=None, files=None):
         with transaction.atomic():
             for file_obj in files:
                 profile_document(file_obj)
-            legacy = analyze_project(files, project=project, user=user)
+            legacy = analyze_project(files, project=project, user=user, allow_ai=allow_ai)
             rows = {'run': run, 'facts': [], '_seen': set()}
             for file_obj in files:
-                _extract_file_facts(rows, file_obj)
+                _extract_file_facts(rows, file_obj, include_catalogue_deliverables=legacy.get('deliverable_source') != 'register')
             _persist_project_record_facts(rows, project)
             _persist_ai_facts(rows, legacy)
             IntelligenceFact.objects.bulk_create(rows['facts'])

@@ -50,7 +50,7 @@ from .services.operational_jobs import (
 from .services.trustworthy_scheduling import approve_schedule_assurance, current_assurance
 from .services.schedule_approval import (
     ScheduleApprovalError, approve_schedule_version, decide_schedule_review, lock_schedule_version,
-    current_schedule_version,
+    current_schedule_version, require_simple_plan_source_import,
 )
 
 
@@ -951,6 +951,10 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
             if version.status != 'approved' or not current_schedule_version(version):
                 return Response({'error': 'The version is no longer available for baselining.'}, status=status.HTTP_409_CONFLICT)
+            try:
+                require_simple_plan_source_import(version)
+            except ScheduleApprovalError as exc:
+                return Response(exc.payload, status=exc.status_code)
             assurance = current_assurance(version)
             if not assurance or assurance.is_deleted or assurance.status != 'approved' or assurance.blockers:
                 return Response({'error': 'An approved Phase 3 assurance review is required for this exact calculated state.'}, status=status.HTTP_409_CONFLICT)
