@@ -17,7 +17,18 @@ class WorkBreakdownTaskSerializer(serializers.Serializer):
     )
     acceptance_criteria = serializers.CharField(max_length=10000, allow_blank=True, default='')
     reviewer = serializers.CharField(max_length=120, allow_blank=True, default='')
+    assignee_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
+    reviewer_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
+    task_type = serializers.ChoiceField(choices=['task', 'deliverable'], required=False)
+    due_date = serializers.DateField(allow_null=True, required=False)
+    priority = serializers.ChoiceField(choices=['low', 'medium', 'high', 'critical'], required=False)
+    status = serializers.CharField(read_only=True)
+    progress_percent = serializers.IntegerField(read_only=True)
     source_references = serializers.ListField(read_only=True)
+    duration_days = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=0, allow_null=True, required=False,
+    )
+    planned_start_date = serializers.DateField(allow_null=True, required=False)
 
 
 class WorkBreakdownSaveSerializer(serializers.Serializer):
@@ -47,6 +58,10 @@ class WorkBreakdownSaveSerializer(serializers.Serializer):
                 successors[predecessor].append(task['id'])
             if task['effort_hours'] is not None:
                 task['effort_hours'] = float(task['effort_hours'])
+            if task.get('duration_days') is not None:
+                task['duration_days'] = float(task['duration_days'])
+            if task.get('planned_start_date') is not None:
+                task['planned_start_date'] = task['planned_start_date'].isoformat()
         queue = deque(key for key in ids if incoming[key] == 0)
         visited = 0
         while queue:
@@ -59,3 +74,20 @@ class WorkBreakdownSaveSerializer(serializers.Serializer):
         if visited != len(ids):
             raise serializers.ValidationError('Dependencies must not form a circular chain.')
         return tasks
+
+
+class WorkBreakdownDisciplineSerializer(serializers.Serializer):
+    code = serializers.RegexField(r'^[A-Za-z0-9_-]+$', max_length=64)
+    name = serializers.CharField(max_length=120)
+
+
+class ManualWorkBreakdownSaveSerializer(WorkBreakdownSaveSerializer):
+    intelligence_run_id = None
+    preview_confirmed_at = None
+    disciplines = WorkBreakdownDisciplineSerializer(many=True, max_length=100, required=False)
+
+    def validate_disciplines(self, values):
+        codes = [value['code'] for value in values]
+        if len(codes) != len(set(codes)):
+            raise serializers.ValidationError('Each workstream must have a unique code.')
+        return values

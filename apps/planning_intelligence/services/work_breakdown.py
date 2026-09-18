@@ -14,11 +14,14 @@ from django.utils import timezone
 from ..config import DISCIPLINE_NAME_BY_CODE
 from ..models import (
     ActivityAssignment, ActivityRelationship, Schedule, ScheduleActivity,
-    ScheduleResource, ScheduleVersion, ScheduleWBSNode,
+    ScheduleResource, ScheduleVersion, ScheduleWBSNode, WorkCalendar,
 )
 from .audit import record_event
 from .preview_confirmation import current_confirmed_preview
 from .schedule_basis import _as_date, _deliverable_rows
+from .work_assignments import (
+    hydrate_assignments, normalize_assignment_fields, sync_assignments, sync_workspace_assignments,
+)
 
 
 class WorkBreakdownConflict(ValueError):
@@ -46,6 +49,7 @@ def _initial_tasks(run, preview):
             'id': f'task-{uuid5(NAMESPACE_URL, key).hex}',
             'discipline': row['discipline'] or 'general',
             'title': row['original_title'] or row['canonical_name'],
+            'task_type': 'deliverable',
             'owner': '', 'effort_hours': None, 'depends_on': [],
             'acceptance_criteria': '', 'reviewer': '',
             'source_references': deepcopy(row['references']),
@@ -54,7 +58,13 @@ def _initial_tasks(run, preview):
     return tasks
 
 
-def work_breakdown_state(run):
+def work_breakdown_state(run, *, actor=None):
+    from apps.core.task_assignment_policy import manages_project_tasks
+    if run is not None and run.project.planning_mode != 'document':
+        raise WorkBreakdownConflict(
+            'This project uses direct planning. Open its direct work breakdown to preserve assigned work.',
+            'work_breakdown_mode_required',
+        )
     preview = require_current_preview(run)
     token = run.summary['preview_confirmation']['confirmed_at']
     saved = (run.summary.get('work_breakdown_drafts') or {}).get(token)
@@ -67,7 +77,9 @@ def work_breakdown_state(run):
         *DISCIPLINE_NAME_BY_CODE, *(task['discipline'] for task in draft['tasks']),
     ]))
     return {
-        **draft, 'intelligence_run_id': run.pk, 'preview_confirmed_at': token,
+        **draft, 'planning_mode': 'document', 'intelligence_run_id': run.pk, 'preview_confirmed_at': token,
+        'tasks': hydrate_assignments(run.project, draft['tasks'], token),
+        'permissions': {'can_assign': manages_project_tasks(actor, run.project.enterprise_project)},
         'disciplines': [{'code': code, 'name': DISCIPLINE_NAME_BY_CODE.get(code, code.replace('_', ' ').title())}
                         for code in codes],
         'source_documents': [{
@@ -78,7 +90,7 @@ def work_breakdown_state(run):
 
 def save_work_breakdown(run, data, *, actor):
     """Caller holds project and run row locks in one atomic transaction."""
-    current = work_breakdown_state(run)
+    current = work_breakdown_state(run, actor=actor)
     if data['preview_confirmed_at'] != current['preview_confirmed_at']:
         raise WorkBreakdownConflict('The confirmed preview has changed. Reopen work breakdown before saving.')
     if data['revision'] != current['revision']:
@@ -88,13 +100,17 @@ def save_work_breakdown(run, data, *, actor):
         )
     known = {task['id']: task for task in current['tasks']}
     tasks = deepcopy(data['tasks'])
+    normalize_assignment_fields(tasks, known)
     for task in tasks:
         # Provenance belongs to server-held evidence, never client-supplied text.
         original = known.get(task['id']) or {}
         task['source_references'] = deepcopy(original.get('source_references') or [])
         task['document_number'] = original.get('document_number', '')
         task['document_revision'] = original.get('document_revision', '')
-    changed = tasks != current['tasks']
+    sync_assignments(run, tasks, actor=actor)
+    previous_tasks = deepcopy(current['tasks'])
+    normalize_assignment_fields(previous_tasks, known)
+    changed = tasks != previous_tasks
     draft = {
         'tasks': tasks,
         'revision': current['revision'] + int(changed or not current['saved_at']),
@@ -114,34 +130,58 @@ def save_work_breakdown(run, data, *, actor):
     record_event(
         project=run.project, actor=actor, action='work_breakdown.saved', entity=run,
         before={'revision': current['revision'], 'tasks': current['tasks']}, after=draft,
-        metadata={'preview_confirmed_at': current['preview_confirmed_at'], 'advanced': data['advance']},
+        metadata={'preview_confirmed_at': current['preview_confirmed_at'], 'advanced': data['advance'], 'task_audit_version': 1},
     )
-    return work_breakdown_state(run)
+    return work_breakdown_state(run, actor=actor)
 
 
 def _materialize(run, draft, *, actor):
+    preview = run.summary['preview_confirmation']['preview']
+    start = _as_date(preview.get('detected_effective_date_text')) or run.project.effective_date
+    return materialize_work_breakdown(
+        run.project, draft, actor=actor, start=start,
+        token=run.summary['preview_confirmation']['confirmed_at'], intelligence_run_id=run.pk,
+    )
+
+
+def materialize_work_breakdown(project, draft, *, actor, start, token, intelligence_run_id=None):
     existing = ScheduleVersion.objects.filter(
         pk=draft.get('schedule_version_id'), is_deleted=False, schedule__is_deleted=False,
-        schedule__project=run.project, status__in=['draft', 'calculated'],
+        schedule__project=project, status__in=['draft', 'calculated'],
     ).first()
     if existing:
         return existing
-    preview = run.summary['preview_confirmation']['preview']
-    start = _as_date(preview.get('detected_effective_date_text')) or run.project.effective_date
     if not start:
         raise WorkBreakdownConflict('Set and confirm the project start date before continuing to schedule.', 'work_breakdown_start_required')
     schedule, _ = Schedule.objects.get_or_create(
-        project=run.project, code='MASTER',
-        defaults={'name': f'{run.project.name} Master Schedule'[:255], 'planned_start': start, 'created_by': actor},
+        project=project, code='MASTER',
+        defaults={'name': f'{project.name} Master Schedule'[:255], 'planned_start': start, 'created_by': actor},
     )
     if schedule.is_deleted:
         raise WorkBreakdownConflict('The master schedule is archived. Restore it before continuing.', 'work_breakdown_schedule_archived')
+    if intelligence_run_id is None and schedule.planned_start != start:
+        schedule.planned_start = start
+        schedule.save(update_fields=['planned_start', 'updated_at'])
+    if intelligence_run_id is None and schedule.default_calendar_id is None:
+        calendar = project.work_calendars.filter(is_deleted=False, is_default=True).first()
+        if calendar is None:
+            calendar, _ = WorkCalendar.objects.get_or_create(
+                project=project, name='Project working calendar',
+                defaults={'working_weekdays': [0, 1, 2, 3, 4], 'hours_per_day': 8, 'is_default': True},
+            )
+            if calendar.is_deleted:
+                raise WorkBreakdownConflict('Restore the project working calendar before continuing.', 'work_breakdown_calendar_archived')
+        schedule.default_calendar = calendar
+        schedule.save(update_fields=['default_calendar', 'updated_at'])
     parent = schedule.versions.filter(is_deleted=False).order_by('-version').first()
     version = ScheduleVersion.objects.create(
         schedule=schedule, version=(schedule.versions.aggregate(value=Max('version'))['value'] or 0) + 1,
         parent_version=parent, created_by=actor,
-        change_summary=f'Work breakdown draft {draft["revision"]} from confirmed intelligence {run.pk}',
+        change_summary=(f'Work breakdown draft {draft["revision"]} from confirmed intelligence {intelligence_run_id}'
+                        if intelligence_run_id is not None else f'Direct work breakdown draft {draft["revision"]}'),
     )
+    source = 'confirmed_work_breakdown' if intelligence_run_id is not None else 'manual_work_breakdown'
+    discipline_names = {row['code']: row['name'] for row in draft.get('disciplines', [])}
     nodes = {}
     activities = {}
     resources = {}
@@ -150,19 +190,24 @@ def _materialize(run, draft, *, actor):
         if discipline not in nodes:
             nodes[discipline] = ScheduleWBSNode.objects.create(
                 version=version, code=f'{len(nodes) + 1}.0',
-                name=DISCIPLINE_NAME_BY_CODE.get(discipline, discipline.replace('_', ' ').title())[:255],
+                name=discipline_names.get(discipline, DISCIPLINE_NAME_BY_CODE.get(discipline, discipline.replace('_', ' ').title()))[:255],
                 discipline=discipline, sort_order=len(nodes),
             )
         activity = ScheduleActivity.objects.create(
             version=version, wbs_node=nodes[discipline], external_id=task['id'],
             name=task['title'], discipline=discipline, responsible_role=task['owner'],
-            duration_days=0, activity_type='task', calendar=schedule.default_calendar,
+            duration_days=task.get('duration_days') or 0, activity_type='task', calendar=schedule.default_calendar,
+            constraint_type='start_no_earlier' if task.get('planned_start_date') else 'none',
+            constraint_date=task.get('planned_start_date') or None,
             sort_order=index, metadata={
-                'source': 'confirmed_work_breakdown', 'work_breakdown_revision': draft['revision'],
-                'intelligence_run_id': run.pk,
-                'preview_confirmation_at': run.summary['preview_confirmation']['confirmed_at'],
-                'duration_pending': True, 'planned_effort_hours': task['effort_hours'],
+                'source': source, 'work_breakdown_revision': draft['revision'],
+                'intelligence_run_id': intelligence_run_id,
+                'preview_confirmation_at': token if intelligence_run_id is not None else None,
+                'duration_pending': task.get('duration_days') is None, 'planned_effort_hours': task['effort_hours'],
                 'acceptance_criteria': task['acceptance_criteria'], 'reviewer': task['reviewer'],
+                'assignee_id': task.get('assignee_id'), 'reviewer_id': task.get('reviewer_id'),
+                'task_type': task.get('task_type', 'task'), 'due_date': task.get('due_date'),
+                'priority': task.get('priority', 'medium'),
                 'source_references': task['source_references'],
                 'document_number': task['document_number'], 'document_revision': task['document_revision'],
             },
@@ -173,7 +218,7 @@ def _materialize(run, draft, *, actor):
             if resource is None:
                 code = f'WBS-{uuid5(NAMESPACE_URL, task["owner"]).hex}'
                 resource, _ = ScheduleResource.objects.get_or_create(
-                    project=run.project, code=code,
+                    project=project, code=code,
                     defaults={'name': task['owner'], 'role': task['owner'], 'resource_type': 'labor'},
                 )
                 resources[task['owner']] = resource
@@ -185,11 +230,112 @@ def _materialize(run, draft, *, actor):
     ActivityRelationship.objects.bulk_create([
         ActivityRelationship(
             version=version, predecessor=activities[predecessor], successor=activities[task['id']],
-            relationship_type='FS', metadata={'source': 'confirmed_work_breakdown'},
+            relationship_type='FS', metadata={'source': source},
         ) for task in draft['tasks'] for predecessor in task['depends_on']
     ])
     record_event(
-        project=run.project, actor=actor, action='work_breakdown.schedule_created', entity=version,
+        project=project, actor=actor, action='work_breakdown.schedule_created', entity=version,
         after={'schedule_id': schedule.pk, 'schedule_version_id': version.pk, 'task_count': len(draft['tasks'])},
     )
     return version
+
+
+MANUAL_WORKSTREAMS = [
+    {'code': 'general', 'name': 'General'},
+    {'code': 'project_management', 'name': 'Project management'},
+    {'code': 'development', 'name': 'Development'},
+    {'code': 'testing', 'name': 'Testing'},
+    {'code': 'operations', 'name': 'Operations'},
+    {'code': 'launch', 'name': 'Launch'},
+]
+
+
+def manual_work_breakdown_state(project, *, actor=None):
+    """Direct plans contain planner inputs, never claimed document findings."""
+    from apps.core.task_assignment_policy import manages_project_tasks
+
+    if project.planning_mode != 'manual':
+        raise WorkBreakdownConflict(
+            'Select direct planning in Scope & inputs before creating work without documents.',
+            'work_breakdown_mode_required',
+        )
+    draft = deepcopy(project.manual_work_breakdown) or {
+        'revision': 0, 'saved_at': None, 'saved_by': None, 'tasks': [],
+        'schedule_id': None, 'schedule_version_id': None,
+    }
+    disciplines = deepcopy(draft.get('disciplines', MANUAL_WORKSTREAMS))
+    existing_codes = {row['code'] for row in disciplines}
+    for task in draft['tasks']:
+        if task['discipline'] not in existing_codes:
+            disciplines.append({'code': task['discipline'], 'name': task['discipline'].replace('_', ' ').title()})
+            existing_codes.add(task['discipline'])
+    token = f'manual:{project.pk}'
+    return {
+        **draft, 'planning_mode': 'manual', 'intelligence_run_id': None,
+        'preview_confirmed_at': token, 'disciplines': disciplines,
+        'tasks': hydrate_assignments(project, draft['tasks'], token),
+        'permissions': {'can_assign': manages_project_tasks(actor, project.enterprise_project)},
+        'source_documents': [{
+            'id': source.pk, 'name': source.original_filename,
+            'category': source.category, 'status': 'reference',
+        } for source in project.files.filter(is_deleted=False).order_by('id')],
+    }
+
+
+def save_manual_work_breakdown(project, data, *, actor):
+    """Caller holds the workspace row lock in an atomic transaction."""
+    current = manual_work_breakdown_state(project, actor=actor)
+    if data['revision'] != current['revision']:
+        raise WorkBreakdownConflict(
+            'This work breakdown was updated by another session. Refresh it before saving.',
+            'work_breakdown_revision_conflict',
+        )
+    if data.get('advance'):
+        missing = [name for name in ('scope_summary', 'phase', 'effective_date', 'planned_end_date')
+                   if not getattr(project, name)]
+        if missing:
+            raise WorkBreakdownConflict(
+                'Complete the project scope, phase, start date and end date before continuing to schedule.',
+                'work_breakdown_inputs_required',
+            )
+        if project.planned_end_date <= project.effective_date:
+            raise WorkBreakdownConflict('Project end date must be after its start date.', 'work_breakdown_dates_invalid')
+        if not data['tasks']:
+            raise WorkBreakdownConflict('Add at least one task before continuing to schedule.', 'work_breakdown_empty')
+    known = {task['id']: task for task in current['tasks']}
+    tasks = deepcopy(data['tasks'])
+    normalize_assignment_fields(tasks, known)
+    for task in tasks:
+        task.update(source_references=[], document_number='', document_revision='')
+    sync_workspace_assignments(project, tasks, actor=actor, token=current['preview_confirmed_at'])
+    previous_tasks = deepcopy(current['tasks'])
+    normalize_assignment_fields(previous_tasks, known)
+    disciplines = deepcopy(data.get('disciplines', current['disciplines']))
+    scope_inputs = {
+        'scope_summary': project.scope_summary, 'phase': project.phase,
+        'effective_date': project.effective_date.isoformat() if project.effective_date else None,
+        'planned_end_date': project.planned_end_date.isoformat() if project.planned_end_date else None,
+    }
+    changed = (tasks != previous_tasks or disciplines != current['disciplines']
+               or scope_inputs != current.get('scope_inputs'))
+    draft = {
+        'tasks': tasks, 'disciplines': disciplines, 'scope_inputs': scope_inputs,
+        'revision': current['revision'] + int(changed or not current['saved_at']),
+        'saved_at': timezone.now().isoformat(), 'saved_by': actor.pk,
+        'schedule_id': None if changed else current.get('schedule_id'),
+        'schedule_version_id': None if changed else current.get('schedule_version_id'),
+    }
+    if data.get('advance'):
+        version = materialize_work_breakdown(
+            project, draft, actor=actor, start=project.effective_date,
+            token=current['preview_confirmed_at'],
+        )
+        draft.update(schedule_id=version.schedule_id, schedule_version_id=version.pk)
+    project.manual_work_breakdown = draft
+    project.save(update_fields=['manual_work_breakdown', 'updated_at'])
+    record_event(
+        project=project, actor=actor, action='work_breakdown.saved', entity=project,
+        before={'revision': current['revision'], 'tasks': current['tasks']}, after=draft,
+        metadata={'planning_mode': 'manual', 'advanced': data.get('advance', False), 'task_audit_version': 1},
+    )
+    return manual_work_breakdown_state(project, actor=actor)

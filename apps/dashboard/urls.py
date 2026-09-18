@@ -7,9 +7,11 @@ from .views import (
 from apps.api.views import aws_status, aws_report
 from .executive_views import ExecutiveDashboardView
 from .work_hub import WorkHubView
+from .work_hub_tasks import WorkHubTaskView
 
 urlpatterns = [
     path('work-hub/', WorkHubView.as_view(), name='work-hub'),
+    path('work-hub/tasks/<int:task_id>/', WorkHubTaskView.as_view(), name='work-hub-task'),
     path('executive/', ExecutiveDashboardView.as_view(), name='executive-dashboard'),
     path('personal/', PersonalDashboardView.as_view(), name='personal-dashboard'),
     path('personal/insights/', PersonalInsightsView.as_view(), name='personal-insights'),

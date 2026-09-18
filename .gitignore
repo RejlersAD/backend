@@ -265,4 +265,9 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_planning_scope_inputs.py
 !apps/planning_intelligence/tests/test_file_upload_dispatch.py
 !apps/planning_intelligence/tests/test_work_breakdown.py
+!apps/planning_intelligence/tests/test_work_assignments.py
+!apps/planning_intelligence/tests/test_work_assignment_history.py
+!apps/planning_intelligence/tests/test_manual_work_breakdown.py
+!apps/planning_intelligence/tests/test_project_setup.py
+!apps/planning_intelligence/tests/test_project_setup_byok.py
 !apps/project_control/tests/test_epc_*.py

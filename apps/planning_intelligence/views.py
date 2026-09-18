@@ -104,7 +104,7 @@ def _enterprise_contract_state(project):
         'baseline_locked': bool(baseline),
         'lifecycle': lifecycle,
         'latest_schedule_version': {
-            'id': version.id, 'version': version.version, 'status': version.status,
+            'id': version.id, 'schedule_id': version.schedule_id, 'version': version.version, 'status': version.status,
         } if version else None,
         'baseline': {
             'id': baseline.id,
@@ -148,9 +148,13 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         record_event(project=project, actor=self.request.user, action='project.created', entity=project, after=serializer.data)
 
     def perform_update(self, serializer):
-        before = PlanningProjectSerializer(serializer.instance).data
-        project = serializer.save()
-        record_event(project=project, actor=self.request.user, action='project.updated', entity=project, before=before, after=serializer.data)
+        with transaction.atomic():
+            serializer.instance = PlanningProject.objects.select_for_update().get(pk=serializer.instance.pk)
+            # Recheck mode/date protection after a concurrent WBS save or baseline.
+            serializer._validated_data = serializer.validate(serializer.validated_data)
+            before = PlanningProjectSerializer(serializer.instance).data
+            project = serializer.save()
+            record_event(project=project, actor=self.request.user, action='project.updated', entity=project, before=before, after=serializer.data)
 
     @action(detail=True, methods=['get', 'put'], url_path='work-breakdown')
     def work_breakdown(self, request, pk=None):
@@ -180,9 +184,57 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
                     raise Http404
                 if run is not None:
                     run.project = project
-                return Response(save_work_breakdown(run, data, actor=request.user) if data is not None else work_breakdown_state(run))
+                return Response(save_work_breakdown(run, data, actor=request.user) if data is not None else work_breakdown_state(run, actor=request.user))
         except WorkBreakdownConflict as exc:
             return Response({'error': str(exc), 'code': exc.code}, status=status.HTTP_409_CONFLICT)
+
+    @action(detail=True, methods=['get', 'put'], url_path='manual-work-breakdown')
+    def manual_work_breakdown(self, request, pk=None):
+        from .services.work_breakdown import (
+            WorkBreakdownConflict, manual_work_breakdown_state, save_manual_work_breakdown,
+        )
+        from .work_breakdown_serializers import ManualWorkBreakdownSaveSerializer
+
+        project = self.get_object()
+        try:
+            if request.method == 'GET':
+                return Response(manual_work_breakdown_state(project, actor=request.user))
+            serializer = ManualWorkBreakdownSaveSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            with transaction.atomic():
+                project = PlanningProject.objects.select_for_update().get(pk=project.pk)
+                return Response(save_manual_work_breakdown(project, serializer.validated_data, actor=request.user))
+        except WorkBreakdownConflict as exc:
+            return Response({'error': str(exc), 'code': exc.code}, status=status.HTTP_409_CONFLICT)
+
+    @action(detail=True, methods=['get'], url_path='eligible-employees')
+    def eligible_employees(self, request, pk=None):
+        from django.db.models import Q
+        from rest_framework.exceptions import ValidationError
+        from apps.core.task_assignment_policy import eligible_employees, employee_payload, require_task_manager
+
+        workspace = self.get_object()
+        require_task_manager(request.user, workspace.enterprise_project)
+        search = request.query_params.get('search', '').strip()
+        if len(search) > 200:
+            raise ValidationError({'search': 'Use at most 200 characters.'})
+        people = eligible_employees(workspace.enterprise_project, request.user)
+        for term in search.split():
+            people = people.filter(Q(first_name__icontains=term) | Q(last_name__icontains=term)
+                                   | Q(email__icontains=term) | Q(employee_code__icontains=term)
+                                   | Q(employee_number__icontains=term) | Q(department__icontains=term))
+        return Response({'results': [employee_payload(person) for person in people[:50]], 'count': people.count()})
+
+    @action(detail=True, methods=['get'], url_path='employee-activity')
+    def employee_activity(self, request, pk=None):
+        from rest_framework.exceptions import ValidationError
+        from .services.work_assignment_history import employee_activity
+
+        workspace = self.get_object()
+        user_id = request.query_params.get('user_id', '')
+        if not user_id.isdigit() or len(user_id) > 18 or int(user_id) < 1:
+            raise ValidationError({'user_id': 'Select a real employee account.'})
+        return Response(employee_activity(workspace, int(user_id)))
 
     @action(detail=True, methods=['get'], url_path='enterprise-contract')
     def enterprise_contract(self, request, pk=None):

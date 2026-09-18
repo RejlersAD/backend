@@ -16,7 +16,7 @@ from ..services.preview_confirmation import confirmation_is_current, source_fing
 from .test_document_intelligence import DocumentIntelligenceFixture
 
 
-class WorkBreakdownTests(DocumentIntelligenceFixture):
+class WorkBreakdownFixture(DocumentIntelligenceFixture):
     def setUp(self):
         super().setUp()
         organization = Organization.objects.create(name='WBS tests', code='wbs-test')
@@ -69,6 +69,8 @@ class WorkBreakdownTests(DocumentIntelligenceFixture):
     def save(self, draft, *, advance=False):
         return self.client.put(self.url, {**draft, 'advance': advance}, format='json')
 
+
+class WorkBreakdownTests(WorkBreakdownFixture):
     def test_read_initializes_selected_deliverables_without_writes(self):
         draft = self.read()
         self.assertEqual({task['title'] for task in draft['tasks']}, {'Single line diagram', 'Design basis', 'HAZOP'})

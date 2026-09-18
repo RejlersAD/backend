@@ -122,7 +122,7 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = PlanningProject
         fields = [
-            'id', 'enterprise_project', 'name', 'client', 'location', 'phase', 'effective_date',
+            'id', 'enterprise_project', 'name', 'client', 'location', 'phase', 'planning_mode', 'effective_date',
             'planned_end_date', 'duration_days', 'duration_months',
             'scope_summary', 'exclusions', 'budgeted_effort_hours',
             'calendar_overrides', 'review_cycle_overrides',
@@ -139,6 +139,19 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         if self.instance:
+            if attrs.get('planning_mode', self.instance.planning_mode) != self.instance.planning_mode:
+                from .models import DocumentIntelligenceRun
+
+                has_document_draft = any(
+                    summary.get('work_breakdown_drafts')
+                    for summary in DocumentIntelligenceRun.objects.filter(
+                        project=self.instance, is_deleted=False,
+                    ).values_list('summary', flat=True)
+                )
+                if self.instance.manual_work_breakdown or has_document_draft:
+                    raise serializers.ValidationError({
+                        'planning_mode': 'This project already has saved work breakdown. Keep its planning method to preserve assigned work.',
+                    })
             changed_dates = {
                 field for field in ('effective_date', 'planned_end_date')
                 if field in attrs and attrs[field] != getattr(self.instance, field)
