@@ -9,6 +9,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import ScheduleAssuranceReview
+from .cpm import WorkdayCalendar
+from .schedule_check_details import activity_check_rows, enrich_schedule_findings, relationship_check_rows
 
 
 def _finding(code, severity, message, **details):
@@ -35,7 +37,9 @@ def _network_validation(version, activities, relationships):
         incoming[link.successor_id].append(link.predecessor_id)
         indegree[link.successor_id] += 1
     if duplicates:
-        findings.append(_finding('duplicate_relationships', 'critical', f'{len(duplicates)} duplicate relationship keys were detected.'))
+        affected = {key for predecessor, successor, _ in duplicates for key in (predecessor, successor)}
+        findings.append(_finding('duplicate_relationships', 'critical', f'{len(duplicates)} duplicate relationship keys were detected.',
+                                 activities=[row.external_id for row in activities if row.pk in affected]))
 
     queue = deque(key for key, degree in indegree.items() if degree == 0)
     visited = 0
@@ -48,7 +52,7 @@ def _network_validation(version, activities, relationships):
                 queue.append(successor)
     if visited != len(activities):
         cyclic = [next(row.external_id for row in activities if row.id == key) for key, degree in indegree.items() if degree]
-        findings.append(_finding('dependency_cycle', 'critical', 'The network contains a dependency cycle.', activities=cyclic[:25]))
+        findings.append(_finding('dependency_cycle', 'critical', 'The network contains a dependency cycle.', activities=cyclic))
 
     starts = [row for row in activities if not incoming[row.id]]
     finishes = [row for row in activities if not outgoing[row.id]]
@@ -60,7 +64,7 @@ def _network_validation(version, activities, relationships):
     sf = [link.id for link in relationships if link.relationship_type == 'SF']
     negative_lag = [link.id for link in relationships if link.lag_days < 0]
     if sf:
-        findings.append(_finding('start_to_finish', 'critical', f'{len(sf)} Start-to-Finish relationships require correction.', relationship_ids=sf[:25]))
+        findings.append(_finding('start_to_finish', 'critical', f'{len(sf)} Start-to-Finish relationships require correction.', relationship_ids=sf))
     if negative_lag:
         findings.append(_finding('negative_lag', 'warning', f'{len(negative_lag)} relationships use negative lag.', relationship_ids=negative_lag[:25]))
 
@@ -72,13 +76,13 @@ def _network_validation(version, activities, relationships):
     if long_rows:
         findings.append(_finding('long_activities', 'warning', f'{len(long_rows)} activities exceed 20 working days.', activities=long_rows[:25]))
     if zero_rows:
-        findings.append(_finding('zero_duration_tasks', 'critical', f'{len(zero_rows)} non-milestone activities have zero duration.', activities=zero_rows[:25]))
+        findings.append(_finding('zero_duration_tasks', 'critical', f'{len(zero_rows)} non-milestone activities have zero duration.', activities=zero_rows))
     if hard_constraints:
         findings.append(_finding('hard_constraints', 'warning', f'{len(hard_constraints)} activities use hard constraints.', activities=hard_constraints[:25]))
     if missing_evidence:
         findings.append(_finding('missing_activity_evidence', 'warning', f'{len(missing_evidence)} activities have no source-reference metadata.', activities=missing_evidence[:25]))
     if negative_float:
-        findings.append(_finding('negative_float', 'critical', f'{len(negative_float)} activities have negative float against the contractual finish.', activities=negative_float[:25]))
+        findings.append(_finding('negative_float', 'critical', f'{len(negative_float)} activities have negative float against the contractual finish.', activities=negative_float))
     if not findings:
         findings.append(_finding('network_integrity', 'pass', 'Network integrity checks passed.'))
     return {
@@ -139,6 +143,7 @@ def _working_dates(activity):
 
 def _resource_validation(version, activities):
     loads = defaultdict(lambda: defaultdict(Decimal))
+    demand_tasks = defaultdict(lambda: defaultdict(set))
     resource_by_id = {}
     assigned_activity_ids = set()
     for activity in activities:
@@ -154,6 +159,8 @@ def _resource_validation(version, activities):
             daily = Decimal(total) / Decimal(len(dates)) if total else Decimal('0')
             for date in dates:
                 loads[assignment.resource_id][date] += daily
+                if daily > 0:
+                    demand_tasks[assignment.resource_id][date].add(activity.external_id)
     overloads = []
     for resource_id, daily_load in loads.items():
         resource = resource_by_id[resource_id]
@@ -165,6 +172,7 @@ def _resource_validation(version, activities):
                 'resource_id': resource.id, 'resource_code': resource.code, 'resource_name': resource.name,
                 'capacity_per_day': float(capacity), 'overloaded_day_count': len(overloaded),
                 'peak_date': peak_date.isoformat(), 'peak_demand': round(float(peak), 2),
+                'task_ids': sorted({key for date, _ in overloaded for key in demand_tasks[resource_id][date]}),
             })
     unassigned = [row.external_id for row in activities if not row.is_milestone and row.id not in assigned_activity_ids]
     findings = []
@@ -241,6 +249,16 @@ def run_schedule_assurance(version, *, requested_by=None):
     findings = network['findings'] + resources['findings']
     if contract.get('available') and not contract.get('fits_contract'):
         findings.append(_finding('contract_finish_overrun', 'critical', f"Forecast exceeds contractual finish by {contract['variance_calendar_days']} calendar days."))
+    tasks = activity_check_rows(activities)
+    links = relationship_check_rows(relationships)
+    calendar = WorkdayCalendar(version.schedule.default_calendar, version.schedule.planned_start)
+    findings = enrich_schedule_findings(findings, tasks, links, version.schedule.project.planned_end_date, calendar)
+    # Persist the same actionable findings exposed by submission, so the
+    # assurance tab and the rejected command describe the same corrections.
+    network_count = len(network['findings'])
+    resource_count = len(resources['findings'])
+    network['findings'] = findings[:network_count]
+    resources['findings'] = findings[network_count:network_count + resource_count]
     blockers = [row for row in findings if row['severity'] == 'critical']
     warnings = [row for row in findings if row['severity'] == 'warning']
     version.assurance_reviews.filter(status__in=['draft', 'ready', 'approved']).update(status='superseded')

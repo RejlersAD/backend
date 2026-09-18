@@ -35,6 +35,7 @@ from .simple_schedule_proposal import build_proposed_tasks, proposal_context, sc
 from .simple_workflow_expansion import expand_workflow_deliverables
 from .workflow_sequence_proposal import sequence_workflow_deliverables
 from .source_schedule_verification import reference_schedule_blocker, verify_plan_sources
+from .schedule_check_details import schedule_timing_blockers
 
 
 WORKFLOW_FIELDS = ('parent_deliverable_id', 'deliverable', 'workflow_stage_code', 'workflow_stage_name',
@@ -419,7 +420,9 @@ def _blockers(project, state):
         blockers.append({'code': 'documents_processing', 'message': 'Wait for uploaded documents to finish processing, or remove failed uploads.'})
     for task in state['tasks']:
         if task.get('duration_days') is None or (float(task['duration_days']) <= 0 and not _milestone(task)):
-            blockers.append({'code': 'duration_required', 'message': f"Set a duration for {task['title']}.", 'task_id': task['id'], 'field': 'duration_days'})
+            blockers.append({'code': 'duration_required', 'message': f"Set a duration for {task['title']}.",
+                             'task_id': task['id'], 'task_ids': [task['id']], 'field': 'duration_days',
+                             'resolution': 'Enter the planned duration in working days, then save the activity.'})
     return blockers
 
 
@@ -544,6 +547,11 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
             codes.add(task['discipline'])
     _canvas_metadata(project, state, version, activities)
     blockers = _blockers(project, state)
+    # These checks use the exact dates and float shown on the canvas. Reading a
+    # draft never materializes a schedule or persists an assurance review.
+    check_calendar = (WorkdayCalendar(version.schedule.default_calendar, version.schedule.planned_start)
+                      if version and version.schedule.planned_start else _calendar(project))
+    blockers.extend(schedule_timing_blockers(state['tasks'], project.planned_end_date, check_calendar))
     review = ScheduleReview.objects.filter(pk=state.get('review_id'), is_deleted=False).first()
     approvers = list(proposal_approver_users(project))
     edit = not viewing_history and can_write_project(actor, project) and module_action_allowed(actor, 'planning_package', 'update')
@@ -953,6 +961,9 @@ def submit_plan(project, actor, *, revision, approver_id=None):
     blockers = _blockers(project, state)
     if blockers:
         _error('Complete the plan before submitting.', 'simple_plan_incomplete', blockers=blockers)
+    timing_blockers = schedule_timing_blockers(_dated_tasks(project, state['tasks']), project.planned_end_date, _calendar(project))
+    if timing_blockers:
+        _error('Resolve the schedule checks before submitting.', 'simple_plan_schedule_blocked', blockers=timing_blockers)
     approvers = list(proposal_approver_users(project))
     approver = next((user for user in approvers if user.pk == approver_id), None) if approver_id else next(iter(approvers), None)
     if not approver:

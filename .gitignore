@@ -276,6 +276,7 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_simple_workflow_expansion.py
 !apps/planning_intelligence/tests/test_workflow_materialization.py
 !apps/planning_intelligence/tests/test_simple_draft_float.py
+!apps/planning_intelligence/tests/test_simple_schedule_checks.py
 !apps/planning_intelligence/tests/test_workflow_sequence_proposal_api.py
 !apps/planning_intelligence/tests/test_workflow_sequence_proposal.py
 !apps/planning_intelligence/tests/test_reference_schedule_text.py
