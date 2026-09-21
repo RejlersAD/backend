@@ -14,7 +14,9 @@ APPROVAL_ROLES = {'project_manager'}
 def accessible_projects(user):
     if not user or not user.is_authenticated:
         return PlanningProject.objects.none()
-    queryset = PlanningProject.objects.filter(is_deleted=False)
+    queryset = PlanningProject.objects.filter(is_deleted=False).filter(
+        Q(enterprise_project__isnull=True) | Q(enterprise_project__is_deleted=False)
+    )
     if user.is_staff or user.is_superuser:
         return queryset
     return queryset.filter(
@@ -28,6 +30,8 @@ def accessible_projects(user):
 def can_access_enterprise_project(user, enterprise_project, *, write=False):
     if enterprise_project is None:
         return True
+    if enterprise_project.is_deleted or not user or not user.is_authenticated or not user.is_active:
+        return False
     if user.is_staff or user.is_superuser or enterprise_project.owner_id == user.id:
         return True
     memberships = enterprise_project.memberships.filter(user=user, is_active=True)
@@ -35,6 +39,9 @@ def can_access_enterprise_project(user, enterprise_project, *, write=False):
 
 
 def can_write_project(user, project):
+    if (not project or project.is_deleted or not user or not user.is_authenticated or not user.is_active
+            or project.enterprise_project_id and project.enterprise_project.is_deleted):
+        return False
     if user.is_staff or user.is_superuser:
         return True
     if project.enterprise_project_id:
@@ -45,6 +52,7 @@ def can_write_project(user, project):
 def can_final_approve_defaults(user, project):
     """Limit effective default changes to accountable project authorities."""
     return bool(project and not project.is_deleted and project.enterprise_project_id
+                and not project.enterprise_project.is_deleted
                 and project_approval_assignment(user, project.enterprise_project)
                 and approval_access(user, 'planning_package'))
 
@@ -52,6 +60,7 @@ def can_final_approve_defaults(user, project):
 def require_planning_approval(user, project, *, current):
     require_approval(user, 'planning_package',
                      assigned=bool(project and not project.is_deleted and project.enterprise_project_id
+                                   and not project.enterprise_project.is_deleted
                                    and project_approval_assignment(user, project.enterprise_project)),
                      current=current)
 

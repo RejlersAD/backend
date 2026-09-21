@@ -22,6 +22,7 @@ class DocumentProfile(BaseModel):
     checksum_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
     extraction_method = models.CharField(max_length=64, blank=True)
     quality_flags = models.JSONField(default=list, blank=True)
+    extraction_coverage = models.JSONField(default=dict, blank=True)
     classified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -62,6 +63,9 @@ class IntelligenceFact(BaseModel):
         ('milestone', 'Milestone'), ('calendar', 'Calendar'),
         ('review_cycle', 'Review Cycle'), ('requirement', 'Requirement'),
         ('exclusion', 'Exclusion'),
+        ('constraint', 'Constraint'), ('package', 'Work Package'),
+        ('responsibility', 'Responsibility'), ('resource_requirement', 'Resource Requirement'),
+        ('dependency', 'Dependency Statement'), ('risk', 'Risk'),
     ]
     METHOD_CHOICES = [('deterministic', 'Deterministic'), ('ai', 'AI'), ('manual', 'Manual')]
     STATUS_CHOICES = [
@@ -239,6 +243,7 @@ class GenerationPlan(BaseModel):
 
 class PlanDeliverable(BaseModel):
     WORKFLOW_FAMILY_CHOICES = [
+        ('not_specified', 'Not Specified'),
         ('engineering_document', 'Engineering Document'),
         ('inspection_report', 'Inspection Report'), ('technical_study', 'Technical Study'),
         ('drawing', 'Drawing'), ('plan_procedure', 'Plan / Procedure'),

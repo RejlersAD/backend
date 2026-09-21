@@ -26,6 +26,11 @@ from .enterprise_views import (
 from .proposal_views import ProposalExportRecordViewSet, TechnicalProposalViewSet
 from .project_setup_views import ProjectSetupAISettingsView, ProjectSetupCreateView, ProjectSetupOptionsView, ProjectSetupPreviewView
 from .simple_planning_views import SimplePlanningView
+from .evidence_views import EvidenceReviewView
+from .planning_profile_views import PlanningProfileView
+from .planning_build_views import PlanningBuildView, PlanningRiskView
+from .operational_control_views import OperationalControlsView
+from .delay_views import DelayAnalysisView, DelayCaseExportView
 from .workflow_views import (
     EngineeringDependencyTemplateViewSet, ProjectScheduleConfigurationViewSet,
     ScheduleDefaultProposalViewSet, WorkflowTemplateOverrideViewSet, WorkflowTemplateViewSet,
@@ -74,10 +79,27 @@ router.register(r'workflow-overrides', WorkflowTemplateOverrideViewSet, basename
 app_name = 'planning_intelligence'
 
 urlpatterns = [
+    path('projects/<int:project_id>/delay-analysis/', DelayAnalysisView.as_view(), name='delay-analysis'),
+    path('projects/<int:project_id>/delay-analysis/cases/<int:case_id>/export/', DelayCaseExportView.as_view(), name='delay-case-export'),
+    path('projects/<int:project_id>/operational-controls/', OperationalControlsView.as_view(), name='operational-controls'),
+    path('projects/<int:project_id>/planning-builds/', PlanningBuildView.as_view(), name='planning-builds'),
+    path('projects/<int:project_id>/planning-builds/<uuid:build_id>/', PlanningBuildView.as_view(), name='planning-build-detail'),
+    path('projects/<int:project_id>/planning-builds/<uuid:build_id>/apply/', PlanningBuildView.as_view(operation='apply'), name='planning-build-apply'),
+    path('projects/<int:project_id>/risk-register/', PlanningRiskView.as_view(), name='planning-risk-register'),
+    path('projects/<int:project_id>/planning-profiles/', PlanningProfileView.as_view(), name='planning-profiles'),
+    path('projects/<int:project_id>/planning-profiles/select/', PlanningProfileView.as_view(operation='select'), name='planning-profile-select'),
+    path('projects/<int:project_id>/planning-profiles/<int:profile_id>/', PlanningProfileView.as_view(), name='planning-profile-detail'),
+    *[path(f'projects/<int:project_id>/planning-profiles/<int:profile_id>/{operation}/',
+           PlanningProfileView.as_view(operation=operation), name=f'planning-profile-{operation}')
+      for operation in ('propose', 'approve', 'reject', 'revise')],
+    path('projects/<int:project_id>/evidence-review/', EvidenceReviewView.as_view(), name='evidence-review'),
+    *[path(f'projects/<int:project_id>/evidence-review/{operation}/',
+           EvidenceReviewView.as_view(operation=operation), name=f'evidence-review-{operation}')
+      for operation in ('refresh', 'decisions', 'accepted-plan', 'materialize')],
     path('projects/<int:project_id>/simple-plan/', SimplePlanningView.as_view(), name='simple-plan'),
     *[path(f'projects/<int:project_id>/simple-plan/{operation}/',
            SimplePlanningView.as_view(operation=operation), name=f'simple-plan-{operation}')
-      for operation in ('analyse', 'submit', 'approve-publish', 'reopen', 'propose-schedule', 'apply-schedule')],
+      for operation in ('analyse', 'submit', 'approve-publish', 'reopen', 'propose-schedule', 'apply-schedule', 'select-version', 'calculate', 'validate', 'source-preview', 'preview-source-import', 'apply-source-import', 'propose-intelligent-sequence', 'apply-intelligent-sequence')],
     path('project-setup/ai-settings/', ProjectSetupAISettingsView.as_view(), name='project-setup-ai-settings'),
     path('project-setup/options/', ProjectSetupOptionsView.as_view(), name='project-setup-options'),
     path('project-setup/preview/', ProjectSetupPreviewView.as_view(), name='project-setup-preview'),

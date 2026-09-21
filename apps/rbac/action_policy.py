@@ -191,6 +191,33 @@ def route_module(path):
                  if path.startswith(prefix)), None)
 
 
+def is_onboarding_request(request, view):
+    """Recognize onboarding routes without widening shared offboarding access."""
+    if view is None or view.__class__.__module__ != 'apps.onboarding.views':
+        return False
+    if view.__class__.__name__ == 'OnboardingRecordViewSet':
+        return True
+    if view.__class__.__name__ != 'ChecklistViewSet':
+        return False
+    operation = getattr(view, 'action', '')
+    if operation == 'list':
+        return bool((request.query_params.get('onboarding_record') or request.query_params.get('workflow') == 'onboarding')
+                    and not request.query_params.get('offboarding_record'))
+    if operation == 'create':
+        return bool(request.data.get('onboarding_record') and not request.data.get('offboarding_record'))
+    identifier = getattr(view, 'kwargs', {}).get('pk')
+    if not identifier:
+        return False
+    # The saved parent, never a PATCH payload, selects the workflow policy.
+    from apps.onboarding.models import Checklist
+    try:
+        return Checklist.objects.filter(
+            pk=identifier, onboarding_record__isnull=False, offboarding_record__isnull=True,
+        ).exists()
+    except (TypeError, ValueError):
+        return False
+
+
 def operation_action(request, view):
     """Custom operation semantics take precedence over the HTTP method."""
     method = getattr(request, 'method', 'GET')
@@ -200,6 +227,13 @@ def operation_action(request, view):
     if explicit:
         return explicit
     operation = getattr(view, 'action', '') or view.__class__.__name__
+    if is_onboarding_request(request, view):
+        if operation in {'employee_identity_preview', 'employee_manager_options'}:
+            return 'create'
+        if operation == 'owner_options':
+            return 'update'
+        if operation in {'start_checklist_stage', 'start_it_checklist', 'mark_completed', 'update', 'partial_update'}:
+            return 'update'
     if (view.__class__.__module__ == 'apps.sales.intake_views'
             and view.__class__.__name__ == 'SalesEmailIntakeViewSet' and operation == 'reject'):
         # Inbox triage records why an email will not become a Sales request.
@@ -303,7 +337,18 @@ def request_action_allowed(request, module, action):
         request._module_action_decisions = {}
     key = (request.user.pk, module, action)
     if key not in request._module_action_decisions:
-        request._module_action_decisions[key] = module_action_allowed(request.user, module, action)
+        view = (getattr(request, 'parser_context', None) or {}).get('view')
+        offboarding_case_delete = bool(
+            action == 'delete' and view is not None
+            and view.__class__.__module__ == 'apps.onboarding.views'
+            and view.__class__.__name__ == 'OffboardingRecordViewSet'
+            and getattr(view, 'action', '') == 'destroy'
+        )
+        if module == 'hr_onboarding' and (is_onboarding_request(request, view) or offboarding_case_delete):
+            from apps.onboarding.rbac import onboarding_action_allowed
+            request._module_action_decisions[key] = onboarding_action_allowed(request.user, action)
+        else:
+            request._module_action_decisions[key] = module_action_allowed(request.user, module, action)
     return request._module_action_decisions[key]
 
 

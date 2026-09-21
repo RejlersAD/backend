@@ -14,8 +14,9 @@ from django.db.models import Q
 from ..models import ProjectScheduleConfiguration, WorkflowTemplate
 from .generation_plan import FAMILY_TEMPLATE_CODES, classify_deliverable
 from .operational_jobs import canonical_fingerprint
+from .fixed_horizon_proposal import protected_work_ids
 
-ALGORITHM_VERSION = '1'
+ALGORITHM_VERSION = '4-generic-document-evidence'
 _WINDOWS = {
     'mobilization': (0, .08), 'survey': (.05, .18), 'basis': (.12, .28),
     'study': (.25, .55), 'engineering': (.40, .75), 'review': (.68, .85),
@@ -68,46 +69,56 @@ def proposal_context(project, state, calendar_record):
         'calendar': calendar, 'files': files, 'templates': templates, 'overrides': overrides,
         'default_template_id': configuration.workflow_template_id if configuration else None,
         'configuration_settings': configuration.settings if configuration else {},
+        'dependency_policy': 'source_or_planner',
+        'duration_policy': 'source_only',
     }
     return values, canonical_fingerprint(values)
 
 
 def source_constraints(files):
+    """Quote explicit requirements without turning nearby numbers into logic."""
     constraints, seen = [], set()
     for source in files:
-        if source['category'] not in {'sow', 'schedule_requirements', 'project_control_procedure', 'timeline'}:
+        if (source.get('is_deleted') or source.get('parse_status', 'done') != 'done'
+                or source.get('category') == 'output_schedule_sample'):
             continue
-        lines = source['text'].splitlines()
+        text = source.get('text') or ''
 
-        def add(kind, value, message, index, excerpt):
-            identity = (source['id'], kind, value)
+        def add(kind, value, message, start, end, **details):
+            identity = (source['id'], kind, value, start)
             if identity in seen:
                 return
             seen.add(identity)
             constraints.append({'kind': kind, 'value': value, 'message': message,
+                                'status': 'requires_review', 'executable': False,
+                                'applicability_verified': False, **details,
                                 'anchor_status': 'unconfirmed' if kind == 'relative_weeks' else None,
                                 'source_references': [{'file_id': source['id'], 'filename': source['filename'],
-                                    'category': source['category'], 'locator': {'line': index + 1},
-                                    'excerpt': excerpt[:650]}]})
+                                    'category': source.get('category', 'other'),
+                                    'locator': {'line': text[:start].count('\n') + 1,
+                                                'character_start': start, 'character_end': end},
+                                    'excerpt': text[start:end][:650]}]})
 
-        for index, line in enumerate(lines):
-            nearby = ' '.join(lines[max(0, index - 1):index + 4])
-            for match in re.finditer(r'\b(\d{1,3})\s*working\s+days?\b', line, re.I):
-                if re.search(r'\breview\b', nearby, re.I):
-                    days = int(match.group(1))
-                    add('review_days', days, f'Source requires {days} working days for review; applicability must be checked for each deliverable.', index, nearby)
-            for match in re.finditer(r'\b(\d{1,3})\s*weeks?\b', line, re.I):
-                if re.search(r'award|effective date|completion', nearby, re.I):
-                    weeks = int(match.group(1))
-                    add('relative_weeks', weeks, f'Source states {weeks} weeks relative to award/effective date. The contract-award date is unconfirmed; the project start has not been substituted.', index, nearby)
-            # PDF table rows can put the week value between wrapped descriptions.
-            if re.search(r'weeks?\s+from', ' '.join(lines[max(0, index - 12):index]), re.I) and re.match(r'^\s*\d{1,2}[.)]\s+', line):
-                values = re.findall(r'\b\d{1,3}\b', line)
-                if len(values) > 1 and 1 <= int(values[-1]) <= 104:
-                    weeks = int(values[-1])
-                    add('relative_weeks', weeks, f'Source milestone at week {weeks} after award/effective date; award date remains unconfirmed. Review the cited milestone description.', index, nearby)
-            if re.search(r'prior to commencement of.*design', nearby, re.I) and re.search(r'site survey', nearby, re.I):
-                add('sequence', 'survey_before_design', 'Source requires review of site-survey documents before design. Exact activity links remain proposed until reviewed.', index, nearby)
+        # Literal grammatical expressions may wrap across lines. No neighboring
+        # row or section heading supplies a missing subject, unit or anchor.
+        review_patterns = (
+            r'\breview(?:[ \t]+(?:period|cycle))?[ \t]*[:=]?[ \t]+(?P<days>\d{1,3})[ \t]+working[ \t]+days?\b',
+            r'\breview(?:\s+(?:period|cycle))?(?:\s+(?:shall|must|will|be|is|of|take|takes|require|requires|within|allow|allowed)){1,6}\s+(?P<days>\d{1,3})\s+working\s+days?\b',
+            r'\b(?P<days>\d{1,3})\s+working\s+days?\)?(?:\s+(?:time|duration|required|by|company|client|allowed)){0,8}\s+for(?:\s+(?:the|company|client)){0,2}\s+review\b',
+        )
+        for pattern in review_patterns:
+            for match in re.finditer(pattern, text, re.I):
+                days = int(match.group('days'))
+                add('review_days', days, f'Source states a review requirement of {days} working days. This is not an individual activity planned duration.', match.start(), match.end())
+        for match in re.finditer(r'\b(?P<weeks>\d{1,3})\s+weeks?\)?\s+(?:after|from|following|of)\s+(?P<anchor>[^.!?\f|;]+)', text, re.I):
+            anchor = re.sub(r'\s+', ' ', match.group('anchor')).strip()
+            if not anchor or len(anchor) > 180:
+                continue
+            weeks = int(match.group('weeks'))
+            add('relative_weeks', weeks, f'Source states {weeks} weeks relative to the cited event. The anchor date and applicability remain unconfirmed.', match.start(), match.end(), anchor_text=anchor)
+        for match in re.finditer(r'^[^\n\f]*(?:\bshall\b|\bmust\b|\bbefore\b|\bafter\b|\bprior to\b|\bconstraint\b|\bno later than\b|\bdepends on\b)[^\n\f]*$', text, re.I | re.M):
+            quote = match.group(0).strip()
+            add('constraint_candidate', quote, 'Review this quoted requirement. No activity relationship has been inferred.', match.start(), match.end())
     return constraints
 
 
@@ -198,15 +209,54 @@ def _validate_network(tasks):
         raise ValueError('Existing dependencies contain a cycle. Correct the links before building a schedule.')
 
 
+def retain_supported_dependencies(tasks):
+    """Remove only unconfirmed generated cross-deliverable guesses in a new preview.
+
+The user's five-stage workflow and planner/source relationships are retained.
+Title similarity or a citation to a deliverable name is not predecessor evidence.
+"""
+    tasks, removed = deepcopy(tasks), 0
+    by_id = {task['id']: task for task in tasks}
+    protected = protected_work_ids(tasks)
+    for task in tasks:
+        if task['id'] in protected or 'depends_on' not in (task.get('schedule_generated_fields') or []):
+            continue
+        keep = []
+        for predecessor in task.get('depends_on') or []:
+            other = by_id.get(predecessor, {})
+            internal = (task.get('parent_deliverable_id') is not None
+                        and task.get('parent_deliverable_id') == other.get('parent_deliverable_id'))
+            details = [link for link in task.get('dependency_details') or [] if link.get('task_id') == predecessor]
+            rationale = (task.get('dependency_rationales') or {}).get(predecessor) or {}
+            evidence = details or ([rationale] if rationale else [])
+            inferred = evidence and all(link.get('status') == 'proposed'
+                                        and link.get('evidence_type') == 'planning_inference'
+                                        and link.get('source') != 'workflow_template' for link in evidence)
+            if inferred and not internal:
+                removed += 1
+            else:
+                keep.append(predecessor)
+        task['depends_on'] = keep
+        task['dependency_details'] = [link for link in task.get('dependency_details') or [] if link.get('task_id') in keep]
+        task['dependency_rationales'] = {key: value for key, value in (task.get('dependency_rationales') or {}).items() if key in keep}
+    return tasks, removed
+
+
 def build_proposed_tasks(tasks, context, calendar):
     """Propose phase windows and a sparse technical network; never row-order logic."""
-    _validate_network(tasks)
-    proposed = deepcopy(tasks)
+    source_only = context.get('dependency_policy') == 'source_or_planner'
+    proposed, removed = retain_supported_dependencies(tasks) if source_only else (deepcopy(tasks), 0)
+    _validate_network(proposed)
     classified = {task['id']: _classification(task) for task in proposed}
+    protected = protected_work_ids(proposed)
     constraints = source_constraints(context['files'])
     review_values = {row['value'] for row in constraints if row['kind'] == 'review_days'}
     review_days = next(iter(review_values)) if len(review_values) == 1 else None
     warnings = []
+    if source_only:
+        warnings.append('MDR titles alone do not define predecessor links. Only existing source/planner links and the selected workflow are retained; missing cross-deliverable logic needs review.')
+        if removed:
+            warnings.append(f'{removed} unconfirmed inferred predecessor links were removed from this proposal because the documents do not establish those relationships.')
     if len(review_values) > 1:
         warnings.append('Sources contain different review periods; no single period has been applied automatically.')
     if any(row['kind'] == 'relative_weeks' for row in constraints):
@@ -223,6 +273,10 @@ def build_proposed_tasks(tasks, context, calendar):
     ]
     for task in proposed:
         phase, family, percentage = classified[task['id']]
+        if task['id'] in protected:
+            task['schedule_phase'] = phase
+            task['schedule_rationale'] = 'Work already started and its upstream schedule are retained.'
+            continue
         generated = set(task.get('schedule_generated_fields') or [])
         rationale = []
         duration, duration_reason = _template_estimate(task, phase, family, context, review_days)
@@ -261,8 +315,8 @@ def build_proposed_tasks(tasks, context, calendar):
 
     # Only unambiguous same-discipline technical gates are proposed. Multiple
     # drawings/studies are peers: do not chain them by spreadsheet position.
-    for task in proposed:
-        if task.get('depends_on'):
+    for task in ([] if source_only else proposed):
+        if task['id'] in protected or task.get('depends_on'):
             continue
         phase = classified[task['id']][0]
         prerequisite = {'study': 'basis', 'engineering': 'basis', 'basis': 'survey', 'package': 'review', 'closeout': 'package'}.get(phase)

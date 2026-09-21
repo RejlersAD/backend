@@ -93,6 +93,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
             serializer.save()
 
     @transaction.atomic
+    def perform_destroy(self, instance):
+        # DRF's default hard delete traverses protected schedule-basis records.
+        from .project_archival import archive_project
+        archive_project(instance.pk, self.request.user)
+
+    @transaction.atomic
     def update(self, request, *args, **kwargs):
         # Serialize scope edits with integrated-baseline capture and acceptance.
         Project.objects.select_for_update(no_key=True).get(pk=self.get_object().pk)

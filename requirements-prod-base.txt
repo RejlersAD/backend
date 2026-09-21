@@ -1,4 +1,5 @@
 # =============================================================================
+lxml>=5.3,<7  # Planning XML supported-subset schema validation
 # STABLE HEAVY ML/OCR BASE PACKAGES
 # =============================================================================
 # PURPOSE: These packages are installed in a SEPARATE Docker layer BEFORE the

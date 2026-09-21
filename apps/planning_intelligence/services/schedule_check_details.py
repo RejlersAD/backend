@@ -3,6 +3,21 @@ from copy import deepcopy
 from datetime import date
 
 
+TIMING_WARNING_CODES = frozenset({'negative_float', 'contract_finish_overrun', 'contractual_finish_overrun'})
+
+
+def apply_timing_warning_policy(finding):
+    """Timing feasibility is advisory, including findings saved by older code."""
+    result = deepcopy(finding)
+    if (result.get('code') or result.get('rule')) in TIMING_WARNING_CODES and result.get('severity') != 'pass':
+        result.update(severity='warning', blocking=False)
+        result['resolution'] = (
+            'Keep the registered project dates. Review source durations, calendars and dependency links with Project Control. '
+            'This timing warning does not prevent submission, approval or baseline publication.'
+        )
+    return result
+
+
 def activity_check_rows(activities):
     """Keep external IDs usable after a rejected submission rolls back its rows."""
     return [{
@@ -32,13 +47,17 @@ def _affected(tasks, task_ids):
 
 
 def schedule_timing_blockers(tasks, target_finish, calendar, *, relationships=None):
-    """Report current CPM results without changing dates, logic or database rows."""
+    """Report CPM findings; timing is advisory and integrity errors still block.
+
+    The historical function name is retained for callers. Classify by severity,
+    rather than treating every returned finding as a submission blocker.
+    """
     findings = []
     negative = [task for task in tasks if task.get('total_float_days') is not None and task['total_float_days'] < 0]
     if negative:
         minimum = min(task['total_float_days'] for task in negative)
         findings.append({
-            'code': 'negative_float', 'severity': 'critical',
+            'code': 'negative_float', 'severity': 'warning',
             'message': f'{len(negative)} activities have negative float against the project finish date.',
             'task_ids': [task['id'] for task in negative], 'minimum_float_days': minimum,
             'field': 'duration_days',
@@ -52,7 +71,7 @@ def schedule_timing_blockers(tasks, target_finish, calendar, *, relationships=No
         working_variance = (max(0, calendar.index_of(date.fromisoformat(forecast))
                                 - calendar.index_of(calendar.on_or_before(target_finish))) if calendar else None)
         findings.append({
-            'code': 'contract_finish_overrun', 'severity': 'critical',
+            'code': 'contract_finish_overrun', 'severity': 'warning',
             'message': f'Forecast finish {forecast} exceeds the project finish {target} by {variance} calendar days.',
             'task_ids': [task['id'] for task in beyond], 'field': 'planned_start_date',
             'target_finish_date': target, 'forecast_finish_date': forecast,
@@ -78,7 +97,7 @@ def schedule_timing_blockers(tasks, target_finish, calendar, *, relationships=No
         finding['task_count'] = len(finding['task_ids'])
         finding['activities'] = list(finding['task_ids'])
         finding['affected_activities'] = _affected(tasks, finding['task_ids'])
-    return findings
+    return [apply_timing_warning_policy(finding) for finding in findings]
 
 
 def enrich_schedule_findings(findings, tasks, relationships, target_finish, calendar):
@@ -88,7 +107,7 @@ def enrich_schedule_findings(findings, tasks, relationships, target_finish, cale
     )}
     result = []
     for original in findings:
-        finding = deepcopy(original)
+        finding = apply_timing_warning_policy(original)
         code = finding['code']
         if code in timing:
             finding.update(timing[code])

@@ -172,7 +172,8 @@ class PlanningValidationTests(Phase0Fixture):
             byok_crypto.encrypt_api_key('sk-ant-test-key-with-enough-characters')
 
     @patch('apps.planning_intelligence.services.document_intelligence.profile_document')
-    @patch('apps.planning_intelligence.services.parsers.extract_text', return_value=('parsed scope', 0.95))
+    @patch('apps.planning_intelligence.services.parsers.extract_text_with_coverage',
+           return_value=('parsed scope', 0.95, {'status': 'complete', 'complete': True}))
     def test_successful_parse_clears_a_previous_error(self, _extract, _profile):
         with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
             planning_file = PlanningFile.objects.create(
@@ -264,12 +265,11 @@ class GenerationRevisionTests(Phase0Fixture):
 
         self.assertEqual(response.status_code, 404)
 
-    @patch('apps.planning_intelligence.services.pipeline.build_narrative', return_value='Narrative')
-    @patch('apps.planning_intelligence.services.pipeline.validate', return_value=[])
-    @patch('apps.planning_intelligence.services.pipeline.build_manhours', return_value={})
-    @patch('apps.planning_intelligence.services.pipeline.build_eddr', return_value=[])
-    @patch('apps.planning_intelligence.services.pipeline.build_activities', return_value={'activities': [], 'logic_matrix': []})
-    @patch('apps.planning_intelligence.services.pipeline.build_wbs', return_value=[])
+    @patch('apps.planning_intelligence.services.pipeline._document_payload', return_value={
+        'intelligence': {'schedule_engine': {'policy': 'document_driven', 'ready_for_calculation': False}},
+        'wbs': [], 'activities': [], 'logic_matrix': [], 'eddr': [], 'milestones': [],
+        'manhours': {'grand_total_man_hours': None}, 'validation': [], 'narrative': 'Evidence review',
+    })
     @patch('apps.planning_intelligence.services.pipeline.analyze_documents', return_value={})
     def test_generation_versions_are_allocated_from_locked_project(self, *_mocks):
         second = generate_schedule(self.workspace, user=self.owner)

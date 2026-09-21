@@ -112,6 +112,7 @@ def save_work_breakdown(run, data, *, actor):
         task['source_references'] = deepcopy(original.get('source_references') or [])
         task['document_number'] = original.get('document_number', '')
         task['document_revision'] = original.get('document_revision', '')
+        task['evidence_entity_id'] = original.get('evidence_entity_id')
     sync_assignments(run, tasks, actor=actor)
     previous_tasks = deepcopy(current['tasks'])
     normalize_assignment_fields(previous_tasks, known)
@@ -286,6 +287,9 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'parent_deliverable_id', 'deliverable', 'source_title', 'source_parent_values',
                 'responsible_role', 'duration_source', 'due_date_source', 'schedule_rationale',
                 'schedule_phase', 'schedule_generated_fields', 'dependency_rationales',
+                'duration_evidence', 'duration_comparison_evidence', 'duration_review_status', 'duration_review_reason', 'duration_calendar_verified',
+                'source_activity_id', 'source_evidence', 'dependency_status', 'source_missing_fields', 'duration_unit',
+                'evidence_policy', 'duration_policy',
                 'activity_type', 'is_milestone',
             }
         } if expanded else {}
@@ -311,6 +315,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'task_type': task.get('task_type', 'task'), 'due_date': task.get('due_date'),
                 'priority': task.get('priority', 'medium'),
                 'source_references': task['source_references'],
+                'evidence_entity_id': task.get('evidence_entity_id') or ('task:' + str(task['id'])),
                 'document_number': task['document_number'], 'document_revision': task['document_revision'],
                 **expansion_metadata,
             },

@@ -15,7 +15,7 @@ def parse_uploaded_planning_file(self, file_id):
     """Extracts text from an uploaded PlanningFile in the background so the
     upload request never blocks on PDF/Excel parsing (RADAI global rule)."""
     from .models import PlanningFile
-    from .services.parsers import extract_text
+    from .services.parsers import extract_text_with_coverage
 
     try:
         planning_file = PlanningFile.objects.get(pk=file_id)
@@ -31,7 +31,7 @@ def parse_uploaded_planning_file(self, file_id):
 
     try:
         planning_file.file.open('rb')
-        text, confidence = extract_text(planning_file.file, planning_file.original_filename)
+        text, confidence, coverage = extract_text_with_coverage(planning_file.file, planning_file.original_filename)
         planning_file.extracted_text = text
         planning_file.confidence_score = confidence
         planning_file.parse_status = 'done' if text else 'failed'
@@ -41,12 +41,11 @@ def parse_uploaded_planning_file(self, file_id):
         planning_file.save(update_fields=[
             'extracted_text', 'confidence_score', 'parse_status', 'parse_error', 'updated_at',
         ])
-        if planning_file.parse_status == 'done':
-            try:
-                from .services.document_intelligence import profile_document
-                profile_document(planning_file)
-            except Exception:  # noqa: BLE001
-                logger.exception('Document classification failed for parsed file %s', file_id)
+        try:
+            from .services.document_intelligence import profile_document
+            profile_document(planning_file, extraction_coverage=coverage)
+        except Exception:  # noqa: BLE001
+            logger.exception('Document classification failed for parsed file %s', file_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning('parse_uploaded_planning_file failed for %s: %s', file_id, exc)
         planning_file.parse_status = 'failed'
@@ -93,8 +92,14 @@ def run_planning_job(self, job_id):
     try:
         if job.job_type == 'analyze':
             update_job_progress(job, 15, 'Reading parsed project documents', phase='documents')
-            intelligence = analyze_documents(job.project, user=job.requested_by, force=True)
             from .models import DocumentIntelligenceRun
+            resume_id = (job.request_data or {}).get('resume_run_id')
+            if resume_id:
+                from .services.document_intelligence import get_or_run_document_intelligence
+                previous = DocumentIntelligenceRun.objects.get(pk=resume_id, project=job.project, is_deleted=False)
+                _resumed, intelligence = get_or_run_document_intelligence(job.project, user=job.requested_by, resume_run=previous)
+            else:
+                intelligence = analyze_documents(job.project, user=job.requested_by, force=True)
             from .services.schedule_basis import build_schedule_basis
             run = DocumentIntelligenceRun.objects.get(pk=intelligence['document_intelligence_run_id'])
             basis = run.schedule_bases.filter(is_deleted=False).first() or build_schedule_basis(run)
@@ -104,7 +109,8 @@ def run_planning_job(self, job_id):
                 'schedule_basis_version': basis.version,
                 'schedule_basis_readiness': basis.readiness,
             }
-            job.message = 'Document intelligence completed'
+            coverage = intelligence.get('extraction_summary') or {}
+            job.message = 'Document analysis saved; extraction remains partial' if coverage.get('status') == 'partial' else 'Document intelligence completed; review extracted facts'
             record_event(
                 project=job.project, actor=job.requested_by, action='intelligence.completed', entity=job,
                 after={
@@ -139,12 +145,13 @@ def run_planning_job(self, job_id):
             job.result_data = {
                 'generation_id': generation.id,
                 'version': generation.version,
-                'schedule_id': schedule_version.schedule_id,
-                'schedule_version_id': schedule_version.id,
+                'schedule_id': schedule_version.schedule_id if schedule_version else None,
+                'schedule_version_id': schedule_version.id if schedule_version else None,
                 'calculation_run_id': calculation_run.id if calculation_run else None,
                 'materialization_issues': materialization_issues,
+                'state': 'calculated' if schedule_version else 'needs_evidence_review',
             }
-            job.message = f'Schedule version {generation.version} completed'
+            job.message = f'Schedule version {generation.version} completed' if schedule_version else 'Source evidence extracted; review Not Specified fields.'
             record_event(
                 project=job.project, actor=job.requested_by, action='generation.created',
                 entity=generation, after={'version': generation.version}, metadata={'job_id': job.id},
@@ -260,10 +267,11 @@ def run_planning_job(self, job_id):
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception('Planning job %s failed', job_id)
+        from .services.document_intelligence import ResumeSourceChanged
         job.status = 'failed'
-        job.error_code = 'planning_job_failed'
-        job.error_message = f'Planning job failed. Contact support with job id {job.id}.'
-        job.message = 'Planning job failed'
+        job.error_code = 'intelligence_resume_sources_changed' if isinstance(exc, ResumeSourceChanged) else 'planning_job_failed'
+        job.error_message = str(exc) if isinstance(exc, ResumeSourceChanged) else f'Planning job failed. Contact support with job id {job.id}.'
+        job.message = 'Source documents changed; start a new analysis' if isinstance(exc, ResumeSourceChanged) else 'Planning job failed'
         job.finished_at = timezone.now()
         job.heartbeat_at = job.finished_at
         job.progress_log = [*(job.progress_log or []), {

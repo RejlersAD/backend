@@ -67,7 +67,8 @@ class IntegrationDelivery(BaseModel):
 
 
 class ScheduleExportRecord(BaseModel):
-    FORMAT_CHOICES = [('json', 'JSON'), ('csv', 'CSV'), ('xlsx', 'Excel'), ('xer', 'Primavera XER')]
+    FORMAT_CHOICES = [('json', 'JSON'), ('csv', 'CSV'), ('xlsx', 'Excel'), ('xer', 'Primavera XER'),
+                      ('mspdi', 'Microsoft Project XML'), ('mspdi_zip', 'Microsoft Project XML and provenance')]
 
     version = models.ForeignKey(ScheduleVersion, on_delete=models.CASCADE, related_name='export_records')
     export_format = models.CharField(max_length=12, choices=FORMAT_CHOICES)

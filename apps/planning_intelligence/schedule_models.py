@@ -1,6 +1,7 @@
 """Relational scheduling domain for CPM calculation and controlled baselines."""
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from apps.core.models import BaseModel
@@ -13,6 +14,7 @@ class WorkCalendar(BaseModel):
     name = models.CharField(max_length=120)
     working_weekdays = models.JSONField(default=list, help_text='ISO weekdays: Monday=0 through Sunday=6.')
     hours_per_day = models.DecimalField(max_digits=4, decimal_places=2, default=8)
+    working_times = models.JSONField(default=dict, blank=True, help_text='Explicit weekday shifts; empty means not specified.')
     timezone = models.CharField(max_length=64, default='Asia/Dubai')
     is_default = models.BooleanField(default=False)
 
@@ -29,6 +31,7 @@ class CalendarException(BaseModel):
     date = models.DateField()
     is_working = models.BooleanField(default=False)
     working_hours = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    working_times = models.JSONField(default=list, blank=True)
     name = models.CharField(max_length=120, blank=True)
 
     class Meta:
@@ -81,6 +84,10 @@ class ScheduleVersion(BaseModel):
         related_name='schedule_version',
     )
     change_summary = models.CharField(max_length=255, blank=True)
+    evidence_graph = models.ForeignKey('EvidenceGraph', on_delete=models.PROTECT, null=True, blank=True, related_name='schedule_projections')
+    evidence_graph_revision = models.PositiveIntegerField(null=True, blank=True)
+    evidence_input_snapshot = models.JSONField(default=dict, blank=True)
+    planning_build = models.ForeignKey('PlanningBuild', on_delete=models.PROTECT, null=True, blank=True, related_name='schedule_versions')
     calculated_at = models.DateTimeField(null=True, blank=True)
     calculated_finish = models.DateField(null=True, blank=True)
     created_by = models.ForeignKey(
@@ -216,6 +223,14 @@ class ScheduleBaseline(BaseModel):
         related_name='schedule_baselines_approved',
     )
     approved_at = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if self.pk and not self._state.adding:
+            previous = type(self).objects.filter(pk=self.pk).first()
+            fields = ('schedule_id', 'source_version_id', 'name', 'data_date', 'snapshot', 'approved_by_id', 'approved_at')
+            if previous and previous.approved_at and any(getattr(previous, field) != getattr(self, field) for field in fields):
+                raise ValidationError('Approved baselines are immutable. Create a new version and baseline.')
+        return super().save(*args, **kwargs)
 
     class Meta:
         ordering = ['-created_at']

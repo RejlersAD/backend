@@ -9,7 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from django.db.models import Q, Count, Prefetch
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -21,7 +21,7 @@ import re
 
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment, ProbationPerformanceReport,
-    Document, AccessProvisioning, Checklist, ExitApproval,
+    Document, AccessProvisioning, Checklist, ExitApproval, LifecycleCaseDeletion,
     ONBOARDING_ACTIVE_STATUSES, OFFBOARDING_ACTIVE_STATUSES,
     CHECKLIST_STAGE_PRE_HIRE, CHECKLIST_STAGE_IT_PROVISIONING,
     CHECKLIST_STAGE_FIRST_DAY, CHECKLIST_STAGE_FINAL_VALIDATION,
@@ -42,13 +42,15 @@ from apps.notifications.models import Notification
 
 # Employee management - using new EmployeeMaster system
 from apps.hr_core.models import EmployeeMaster
-from apps.hr_core.services import EmployeeService
+from apps.hr_core.services import EmployeeService, calculate_probation_end_date
 from apps.rbac.models import UserProfile as RBACUserProfile, Organization
 from apps.rbac.approval_eligibility import approval_access, require_approval
 from .rbac import (
     can_manage_offboarding, can_manage_onboarding_stage,
     can_start_onboarding_stage, can_manage_offboarding_stage,
     can_start_offboarding_stage, can_manage_probation_report, can_decide_exit_project,
+    onboarding_action_allowed, lifecycle_case_delete_allowed,
+    ONBOARDING_MANAGEMENT_MODULES,
 )
 from .project_assignments import get_active_project_assignments, get_profile_project_manager
 from .performance_insights import build_probation_report_insights
@@ -56,6 +58,13 @@ from .performance_insights import build_probation_report_insights
 User = get_user_model()
 
 EMPLOYEE_ID_PREFIX = '2302'
+
+
+def _employee_manager_candidates():
+    return EmployeeMaster.objects.filter(
+        user__is_active=True,
+        employment_status__in=('active', 'probation', 'notice_period'),
+    )
 
 
 class ProbationPerformanceReportViewSet(viewsets.ModelViewSet):
@@ -336,6 +345,16 @@ def ensure_onboarding_record(employee, created_by=None):
     if existing:
         return existing, False
 
+    deleted_identity = Q(canonical_employee=employee)
+    if employee.user_id:
+        deleted_identity |= Q(user_id=employee.user_id)
+    if employee.email:
+        deleted_identity |= Q(employee_email__iexact=employee.email.strip())
+    if employee.employee_number:
+        deleted_identity |= Q(employee_number=employee.employee_number)
+    if LifecycleCaseDeletion.objects.filter(workflow='onboarding').filter(deleted_identity).exists():
+        return None, False
+
     joining_date = employee.join_date or date.today()
     employee_name = (
         employee.get_full_name()
@@ -369,7 +388,31 @@ def ensure_onboarding_record(employee, created_by=None):
     )
 
 
-class OnboardingRecordViewSet(viewsets.ModelViewSet):
+class LifecycleCaseDeletionMixin:
+    """Delete only workflow-owned data and retain an automatic-sync tombstone."""
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        if not lifecycle_case_delete_allowed(request.user):
+            raise PermissionDenied('HR Delete permission is required to delete an employee lifecycle case.')
+        record = self.get_object()
+        try:
+            record = type(record).objects.select_for_update().get(pk=record.pk)
+        except type(record).DoesNotExist:
+            raise NotFound('This employee lifecycle case has already been deleted.')
+        self.check_object_permissions(request, record)
+        workflow = 'onboarding' if isinstance(record, OnboardingRecord) else 'offboarding'
+        LifecycleCaseDeletion.objects.create(
+            workflow=workflow, record_id=record.pk,
+            canonical_employee_id=record.canonical_employee_id, user_id=record.user_id,
+            employee_email=(record.employee_email or '').strip().lower(),
+            employee_number=record.employee_id or '', deleted_by=request.user,
+        )
+        record.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet):
     business_approval_actions = {'mark_completed'}
     """
     API endpoint for onboarding records
@@ -472,6 +515,11 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
             )
 
         record, created = ensure_onboarding_record(employee, request.user)
+        if record is None:
+            return Response(
+                {'detail': 'This onboarding case was deleted. Automatic recreation is disabled; create a new case explicitly if needed.'},
+                status=status.HTTP_410_GONE,
+            )
         return Response(
             OnboardingRecordSerializer(record, context={'request': request}).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -671,6 +719,52 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
             CHECKLIST_STAGE_IT_PROVISIONING,
         )
     
+    @action(detail=False, methods=['get'])
+    def employee_identity_preview(self, request):
+        """Preview an employee identity without creating an account or a draft."""
+        if not onboarding_action_allowed(request.user, 'create'):
+            raise PermissionDenied('HR Create permission is required to check a new employee identity.')
+        from .employee_identity import build_employee_identity_preview
+        return Response(build_employee_identity_preview(
+            request.query_params.get('first_name', ''),
+            request.query_params.get('surname', ''),
+            request.query_params.get('email', ''),
+        ))
+
+    @action(detail=False, methods=['get'])
+    def employee_manager_options(self, request):
+        """Provide only the manager identity fields needed for employee creation."""
+        if not onboarding_action_allowed(request.user, 'create'):
+            raise PermissionDenied('HR Create permission is required to select an employee manager.')
+        candidates = _employee_manager_candidates().order_by('first_name', 'last_name', 'employee_number')
+        return Response({'results': list(candidates.values(
+            'user_id', 'first_name', 'last_name', 'email', 'employee_number',
+        ))})
+
+    @action(detail=False, methods=['get'])
+    def owner_options(self, request):
+        """List active HR operators eligible to own an onboarding case."""
+        if not onboarding_action_allowed(request.user, 'update'):
+            raise PermissionDenied('HR Edit permission is required to assign an onboarding owner.')
+        candidates = list(User.objects.filter(
+            is_active=True, rbac_profile__status='active', rbac_profile__is_deleted=False,
+        ).filter(
+            Q(is_superuser=True) | Q(rbac_profile__roles__is_active=True, rbac_profile__roles__code='super_admin') | Q(
+                rbac_profile__roles__is_active=True,
+                rbac_profile__roles__modules__code__in=ONBOARDING_MANAGEMENT_MODULES,
+            ),
+        ).distinct().order_by('first_name', 'last_name', 'email'))
+        employee_numbers = dict(EmployeeMaster.objects.filter(
+            user_id__in=[user.pk for user in candidates],
+        ).values_list('user_id', 'employee_number'))
+        return Response({'results': [{
+            'user_id': user.pk,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'email': user.email,
+            'employee_number': employee_numbers.get(user.pk),
+        } for user in candidates if onboarding_action_allowed(user, 'update')]})
+
     @action(detail=False, methods=['post'])
     def create_employee(self, request):
         """
@@ -680,6 +774,9 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
         
         ✅ MIGRATED: Now uses EmployeeService instead of UserProfile
         """
+        if not onboarding_action_allowed(request.user, 'create'):
+            raise PermissionDenied('HR Create permission is required to create an employee.')
+        from .employee_identity import validate_employee_creation_identity
         with transaction.atomic():
             try:
                 # Extract data from request
@@ -688,17 +785,11 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                 # Required fields
                 first_name = data.get('first_name', '').strip()
                 last_name = data.get('surname', '').strip()
-                email = data.get('email', '').strip().lower()
-                
-                if not all([first_name, last_name, email]):
+                identity = validate_employee_creation_identity(first_name, last_name, data.get('email', ''))
+                email = identity['email']
+                if identity['errors']:
                     return Response(
-                        {'error': 'First name, surname, and email are required'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-                if not re.fullmatch(r'[^@\s]+@rejlers\.ae', email):
-                    return Response(
-                        {'error': 'Email address must use the @rejlers.ae domain'},
+                        {'error': next(iter(identity['errors'].values())), 'errors': identity['errors']},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -709,12 +800,33 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
-                # Check if user already exists
-                if User.objects.filter(email=email).exists():
-                    return Response(
-                        {'error': f'User with email {email} already exists'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                # Validate inputs before creating any part of the employee identity.
+                photo = request.FILES.get('photo')
+                if photo:
+                    if photo.content_type not in {'image/jpeg', 'image/jpg', 'image/png'}:
+                        return Response({'error': 'Invalid photo format. Only JPG and PNG are allowed.'}, status=400)
+                    if photo.size > 5 * 1024 * 1024:
+                        return Response({'error': 'Photo size exceeds 5MB limit.'}, status=400)
+                joining_date = data.get('joining_date') or date.today()
+                if isinstance(joining_date, str):
+                    from datetime import datetime
+                    joining_date = datetime.strptime(joining_date, '%Y-%m-%d').date()
+                if data.get('branch', 'RAD') not in {'RAD', 'RIN'}:
+                    return Response({'error': 'Select a valid branch.'}, status=400)
+                manager_id = data.get('manager_id')
+                manager_employee = None
+                if manager_id not in (None, ''):
+                    try:
+                        if not str(manager_id).isdigit():
+                            raise ValueError('Invalid manager ID')
+                        manager_employee = _employee_manager_candidates().select_related('user').select_for_update().filter(
+                            user_id=int(manager_id),
+                        ).first()
+                    except (TypeError, ValueError, OverflowError):
+                        manager_employee = None
+                    if manager_employee is None:
+                        message = 'Select an active employee as the reporting manager.'
+                        return Response({'error': message, 'errors': {'manager_id': message}}, status=400)
                 
                 # Generate username from email
                 username = email.split('@')[0]
@@ -756,26 +868,8 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                 )
                 print(f"[Onboarding] ✅ Created RBAC UserProfile for {email} — Default role will be auto-assigned")
                 
-                # Create EmployeeMaster record with all Sympa HR fields
-                manager_id = data.get('manager_id')
-                manager_employee = None
-                if manager_id:
-                    try:
-                        # Find EmployeeMaster record for manager
-                        manager_employee = EmployeeMaster.objects.get(user_id=manager_id)
-                    except EmployeeMaster.DoesNotExist:
-                        # Fallback: manager might not have EmployeeMaster yet
-                        pass
-                
+                # Create EmployeeMaster record with the validated manager.
                 generated_employee_id = _next_onboarding_employee_identifier()
-
-                joining_date = data.get('joining_date')
-                if joining_date:
-                    from datetime import datetime
-                    if isinstance(joining_date, str):
-                        joining_date = datetime.strptime(joining_date, '%Y-%m-%d').date()
-                else:
-                    joining_date = date.today()
 
                 # Use EmployeeService to create employee record
                 employee = EmployeeService.create_employee(
@@ -799,14 +893,14 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     business_area=data.get('business_area', ''),
                     office=data.get('office', ''),
                     designation=data.get('job_title_uae') or data.get('job_title_finland', ''),
+                    job_title_uae=data.get('job_title_uae', ''),
+                    job_title_finland=data.get('job_title_finland', ''),
                     branch=data.get('branch', 'RAD'),  # RAD or RIN
-                    # Note: company, job_title_finland, job_title_uae, protected_identity, etc.
-                    # are in old UserProfile but not in EmployeeMaster schema
-                    # These fields are being phased out or will be added if needed
                 )
                 
                 # Create OnboardingRecord
                 onboarding_record = OnboardingRecord.objects.create(
+                    canonical_employee=employee,
                     employee_name=f"{first_name} {last_name}",
                     employee_email=email,
                     employee_id=employee.employee_number,  # Use generated employee_number from EmployeeMaster
@@ -838,25 +932,10 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                         pass  # non-fatal — manager field is still on EmployeeMaster
                 
                 # Handle passport photo upload to S3
-                photo = request.FILES.get('photo')
+                photo_warning = None
                 if photo:
                     try:
-                        # Validate file type (only images)
-                        allowed_types = ['image/jpeg', 'image/jpg', 'image/png']
                         content_type = photo.content_type
-                        if content_type not in allowed_types:
-                            return Response(
-                                {'error': 'Invalid photo format. Only JPG and PNG are allowed.'},
-                                status=status.HTTP_400_BAD_REQUEST
-                            )
-                        
-                        # Validate file size (max 5MB)
-                        max_size = 5 * 1024 * 1024  # 5MB
-                        if photo.size > max_size:
-                            return Response(
-                                {'error': 'Photo size exceeds 5MB limit.'},
-                                status=status.HTTP_400_BAD_REQUEST
-                            )
                         
                         # Generate unique filename
                         file_extension = photo.name.split('.')[-1] if '.' in photo.name else 'jpg'
@@ -890,6 +969,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     except Exception as e:
                         # Log error but don't fail the whole request
                         print(f"Error uploading photo: {str(e)}")
+                        photo_warning = 'Employee created, but the photo could not be uploaded. Upload the photo from the employee profile.'
                 
                 return Response({
                     'success': True,
@@ -903,27 +983,55 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     'emp_code': employee.emp_code,  # Biometric system code
                     'email': email,
                     'reporting_manager': employee.manager.get_full_name() if employee.manager else None,
-                    'branch': employee.branch
+                    'branch': employee.branch,
+                    'photo_uploaded': bool(onboarding_record.photo_file_path),
+                    'warnings': [photo_warning] if photo_warning else [],
                 }, status=status.HTTP_201_CREATED)
                 
             except Exception as e:
+                transaction.set_rollback(True)
                 return Response(
                     {'error': str(e)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
     
+    @transaction.atomic
     def update(self, request, *args, **kwargs):
         """
         Override update to sync changes to EmployeeMaster
         Ensures bidirectional data synchronization
         """
         partial = kwargs.pop('partial', False)
-        instance = self.get_object()
+        instance = OnboardingRecord.objects.select_for_update().get(pk=self.get_object().pk)
+        if not onboarding_action_allowed(request.user, 'update'):
+            raise PermissionDenied('HR Edit permission is required to update an onboarding case.')
+        if instance.status in {'completed', 'cancelled', 'rejected'} and {'assigned_to', 'joining_date'}.intersection(request.data):
+            raise PermissionDenied('Closed onboarding cases cannot change owner or joining date.')
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
+        owner = serializer.validated_data.get('assigned_to')
+        if owner is not None and not onboarding_action_allowed(owner, 'update'):
+            raise ValidationError({'assigned_to': 'Select an active user with HR Edit permission as the case owner.'})
         
         # Save onboarding record
         self.perform_update(serializer)
+
+        # Keep the canonical joining date aligned, while retaining explicitly
+        # customized probation dates and the existing case/task deadlines.
+        if 'joining_date' in serializer.validated_data:
+            employee = None
+            if instance.canonical_employee_id:
+                employee = EmployeeMaster.objects.select_for_update().filter(pk=instance.canonical_employee_id).first()
+            elif instance.user_id:
+                employee = EmployeeMaster.objects.select_for_update().filter(user_id=instance.user_id).first()
+            if employee and employee.join_date != instance.joining_date:
+                fields = ['join_date']
+                if (employee.probation_end_date is None or (employee.join_date and
+                        employee.probation_end_date == calculate_probation_end_date(employee.join_date))):
+                    employee.probation_end_date = calculate_probation_end_date(instance.joining_date)
+                    fields.append('probation_end_date')
+                employee.join_date = instance.joining_date
+                employee.save(update_fields=fields)
         
         # ✅ SYNC: Update EmployeeMaster if employee data changed
         try:
@@ -977,7 +1085,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs)
 
 
-class OffboardingRecordViewSet(viewsets.ModelViewSet):
+class OffboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet):
     business_approval_actions = {'project_manager_decision', 'reject', 'mark_completed'}
     """
     API endpoint for offboarding records
@@ -1151,12 +1259,6 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         if request.data.get('status') == 'rejected':
             raise ValidationError({'detail': 'Use the Reject action to validate active project assignments.'})
         return super().update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        """Only lifecycle HR/admin users may permanently delete an offboarding."""
-        if not can_manage_offboarding(request.user):
-            raise PermissionDenied('Only HR or an administrator may delete an offboarding process.')
-        return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     @transaction.atomic
@@ -1688,6 +1790,8 @@ class ChecklistViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.request.query_params.get('workflow') == 'onboarding':
+            queryset = queryset.filter(onboarding_record__isnull=False, offboarding_record__isnull=True)
         
         # Filter by onboarding record
         onboarding_id = self.request.query_params.get('onboarding_record')

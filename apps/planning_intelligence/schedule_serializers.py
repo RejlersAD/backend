@@ -25,6 +25,21 @@ def _validate_version_access(serializer, version):
 
 
 class CalendarExceptionSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        from .services.calendar_intervals import interval_error
+        value = lambda key, default=None: attrs.get(key, getattr(self.instance, key, default))
+        intervals = value('working_times', [])
+        if intervals and not value('is_working', False):
+            raise serializers.ValidationError({'working_times': 'Nonworking exceptions cannot contain working intervals.'})
+        hours = value('working_hours')
+        if hours is not None and (hours < 0 or hours > 24 or (not value('is_working', False) and hours != 0)):
+            raise serializers.ValidationError({'working_hours': 'Supply hours from 0 to 24; nonworking exceptions must have zero hours.'})
+        calendar = value('calendar')
+        error = interval_error(intervals, value('working_hours') or (calendar.hours_per_day if calendar else None))
+        if error:
+            raise serializers.ValidationError({'working_times': error})
+        return attrs
+
     class Meta:
         model = CalendarException
         fields = '__all__'
@@ -44,7 +59,7 @@ class WorkCalendarSerializer(serializers.ModelSerializer):
         model = WorkCalendar
         fields = [
             'id', 'project', 'name', 'working_weekdays', 'hours_per_day', 'timezone',
-            'is_default', 'exceptions', 'created_at', 'updated_at',
+            'is_default', 'working_times', 'exceptions', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -54,6 +69,15 @@ class WorkCalendarSerializer(serializers.ModelSerializer):
         if len(value) != len(set(value)):
             raise serializers.ValidationError('Working weekdays must be unique.')
         return sorted(value)
+
+    def validate(self, attrs):
+        from .services.calendar_intervals import calendar_intervals_error
+        calendar = {key: attrs.get(key, getattr(self.instance, key, default)) for key, default in
+                    [('working_weekdays', []), ('hours_per_day', 8), ('working_times', {})]}
+        error = calendar_intervals_error(calendar)
+        if error:
+            raise serializers.ValidationError({'working_times': error})
+        return attrs
 
     def get_exceptions(self, obj):
         return CalendarExceptionSerializer(obj.exceptions.filter(is_deleted=False), many=True).data
@@ -372,6 +396,10 @@ class DailyFieldUpdateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         instance = self.instance
         activity = attrs.get('activity') or (instance.activity if instance else None)
+        if instance and activity and (activity.pk != instance.activity_id or activity.version_id != instance.version_id):
+            raise serializers.ValidationError({'activity': 'A field report cannot be moved to another activity or schedule version. Create a new report for that activity.'})
+        if activity:
+            _validate_version_access(self, activity.version)
         report_date = attrs.get('report_date') or (instance.report_date if instance else None)
         actual_start = attrs.get('actual_start', instance.actual_start if instance else None)
         actual_finish = attrs.get('actual_finish', instance.actual_finish if instance else None)

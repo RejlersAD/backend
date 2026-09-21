@@ -50,6 +50,8 @@ class CollectionsTests(TestCase):
     def invoice(self, number, balance='100', **values):
         defaults = {'invoice_number': number, 'currency': 'AED', 'due_date': TODAY - timedelta(days=1),
                     'invoice_date': TODAY, 'grand_total': Decimal('100'), 'payment_status': 'pending',
+                    'invoice_amount': (Decimal(balance) + Decimal(values.get('actual_payment_received') or 0)
+                                       if balance is not None else None),
                     'balance_to_be_received': Decimal(balance) if balance is not None else None}
         defaults.update(values)
         item = CustomerInvoice(**defaults)
@@ -128,7 +130,7 @@ class CollectionsTests(TestCase):
         self.invoice('PARTIAL-STATUS', payment_status='partial')
         self.invoice('PARTIAL-PAYMENT', actual_payment_received=Decimal('10'))
         self.invoice('PARTIAL-UNKNOWN', None, payment_status='partial')
-        self.invoice('ZERO-KNOWN', '0')
+        self.invoice('ZERO-KNOWN', '0', invoice_amount=Decimal('100'), actual_payment_received=Decimal('100'))
         self.invoice('PAID-STATUS', None, payment_status='paid')
         self.invoice('ZERO-TOTAL', '0', grand_total=Decimal('0'))
         self.invoice('CANCELLED', '0', payment_status='cancelled')
@@ -161,6 +163,21 @@ class CollectionsTests(TestCase):
             with self.subTest(age=age):
                 self.assertEqual(self.get({'ageing': age}, summary=False)['count'], count)
                 self.assertEqual(self.get({'ageing': age})['counts']['all'], count)
+
+    def test_dashboard_company_drilldown_matches_trimmed_import_values_exactly(self):
+        self.grant()
+        padded = self.invoice('PADDED-COMPANY', company='  Entity A  ', pm='PM one')
+        self.invoice('NORMAL-COMPANY', company='Entity A', pm='PM one')
+        self.invoice('DIFFERENT-COMPANY', company='Entity A branch', pm='PM one')
+        self.invoice('DIFFERENT-PM', company='Entity A', pm=' PM one ')
+        for company in ['Entity A', '  Entity A  ']:
+            with self.subTest(company=company):
+                filters = {'company': company, 'pm': 'PM one', 'queue': 'open'}
+                self.assertEqual(self.get(filters)['filtered_count'], 2)
+                self.assertEqual({row['invoice_number'] for row in self.get(filters, summary=False)['results']},
+                                 {'PADDED-COMPANY', 'NORMAL-COMPANY'})
+        padded.refresh_from_db()
+        self.assertEqual(padded.company, '  Entity A  ')
 
     def test_invalid_filters_are_400_and_do_not_silently_broaden_scope(self):
         self.grant()
@@ -266,12 +283,14 @@ class CollectionsTests(TestCase):
         response = self.client.post(BASE, {
             'invoice_number': 'GROSS-AMOUNT-CHECK', 'category': 'external', 'currency': 'AED',
             'invoice_amount': '105.00', 'grand_total': '105.00', 'actual_payment_received': '0.00',
+            'calculated_receivable_balance': '9999.00',
             'payment_status': 'pending', 'invoice_date': '2026-09-14', 'due_date': '2026-10-14',
         }, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(Decimal(response.data['invoice_amount']), Decimal('105.00'))
         self.assertEqual(Decimal(response.data['grand_total']), Decimal('105.00'))
         self.assertEqual(Decimal(response.data['balance_to_be_received']), Decimal('105.00'))
+        self.assertEqual(response.data['calculated_receivable_balance'], '105.00')
         self.assertEqual(Decimal(response.data['amount_excl_vat']), Decimal('100.00'))
 
     def test_read_only_capabilities_do_not_offer_create_import_or_export(self):
@@ -292,6 +311,43 @@ class CollectionsTests(TestCase):
         response = self.client.post(BASE + 'import-excel/', {}, format='json')
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data['error'], "No 'file' provided")
+
+    def test_formula_drives_queues_drilldown_and_summary_while_preserving_stored_balance(self):
+        self.grant()
+        known = self.invoice('REDUCED', invoice_amount=Decimal('100'), actual_payment_received=Decimal('80'),
+                             balance_to_be_received=Decimal('900'), company='Target')
+        self.invoice('STORED-ZERO', invoice_amount=Decimal('50'), actual_payment_received=Decimal('10'),
+                     balance_to_be_received=Decimal('0'), company='Target')
+        self.invoice('SETTLED', invoice_amount=Decimal('30'), actual_payment_received=Decimal('30'),
+                     balance_to_be_received=Decimal('999'), company='Target')
+        self.invoice('OVERPAID', invoice_amount=Decimal('20'), actual_payment_received=Decimal('25'),
+                     balance_to_be_received=Decimal('999'), company='Target')
+        self.invoice('UNKNOWN-L', invoice_amount=None, actual_payment_received=Decimal('1'),
+                     balance_to_be_received=Decimal('60'), grand_total=Decimal('100'), currency='USD')
+        self.invoice('BLANK-RECEIPT', invoice_amount=Decimal('10'), actual_payment_received=None,
+                     balance_to_be_received=Decimal('700'), company='Other')
+        params = {'company': 'Target', 'currency': 'AED', 'queue': 'overdue', 'ordering': 'balance_to_be_received'}
+        with CaptureQueriesContext(connection) as queries:
+            summary = self.get(params)
+            register = self.get(params, summary=False)
+        self.assertEqual(summary['counts']['open'], 2)
+        self.assertEqual(summary['counts']['paid'], 1)
+        self.assertEqual(summary['filtered_count'], register['count'])
+        self.assertEqual(summary['collection_health']['by_currency'][0]['outstanding'], '60.00')
+        self.assertEqual(summary['collection_health']['by_currency'][0]['overdue'], '60.00')
+        self.assertEqual([row['invoice_number'] for row in register['results']], ['REDUCED', 'STORED-ZERO'])
+        self.assertEqual([row['calculated_receivable_balance'] for row in register['results']], ['20.00', '40.00'])
+        self.assertEqual(Decimal(register['results'][0]['balance_to_be_received']), Decimal('900'))
+        reverse = self.get({**params, 'ordering': '-calculated_receivable_balance'}, summary=False)
+        self.assertEqual([row['invoice_number'] for row in reverse['results']], ['STORED-ZERO', 'REDUCED'])
+        all_rows = {row['invoice_number']: row for row in self.get(summary=False)['results']}
+        self.assertIsNone(all_rows['UNKNOWN-L']['calculated_receivable_balance'])
+        self.assertEqual(all_rows['BLANK-RECEIPT']['calculated_receivable_balance'], '10.00')
+        self.assertEqual(all_rows['OVERPAID']['calculated_receivable_balance'], '-5.00')
+        self.assertEqual(self.get({'currency': 'USD', 'queue': 'overdue'}, summary=False)['count'], 1)
+        known.refresh_from_db()
+        self.assertEqual(known.balance_to_be_received, Decimal('900'))
+        self.assertEqual([q['sql'] for q in queries if q['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))], [])
 
     def test_capabilities_keep_create_import_and_export_denies_even_for_superuser(self):
         self.grant()

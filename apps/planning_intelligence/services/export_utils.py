@@ -715,21 +715,27 @@ def _xer_add_working_days(iso_date: str, days: int, end_time: str = XER_WORK_END
 
 def generation_to_xer_bytes(generation) -> bytes:
     """
-    Exports this generation's WBS + Activities + Logic Matrix as a
-    Primavera P6-compatible .xer schedule file.
+    Retained legacy XER subset for existing integrations.
 
-    Layout mirrors a native P6-exported schedule (Documents/Project Control/
-    Planning Package/Sample.txt): every mandatory section — ERMHDR, CURRTYPE,
-    FINTMPL, OBS, PROJECT, CALENDAR, SCHEDOPTIONS, PROJWBS, TASK, TASKPRED —
-    is emitted with the full column set P6 expects, so File > Import >
-    Primavera PM (XER) succeeds and the imported project retains WBS
-    hierarchy, activity dates, constraint types, GUIDs and full FS/SS/FF/SF
-    predecessor logic.
+    This writer has not passed a validated P6 round trip. It omits resources,
+    source traceability, calendar exceptions and activity constraints. It is
+    not the evidence-driven export adapter and rejects document-driven plans.
+    New integrations must inspect the export-capabilities API and prefer the
+    lossless RADAI JSON / Excel representation until a native adapter exists.
 
     Returns bytes encoded as Windows-1252 (P6's native XER encoding) with
     UTF-8 as a defensive fallback for characters that don't map (e.g.
     non-Latin project names).
     """
+    engine = (getattr(generation, 'intelligence', None) or {}).get('schedule_engine') or {}
+    if engine.get('policy') == 'document_driven' or any(
+        row.get('evidence_policy') == 'document_driven' for row in generation.activities or []
+    ):
+        from .schedule_export_contract import ScheduleExportError
+        raise ScheduleExportError(
+            'The legacy XER serializer cannot preserve document-driven evidence and calendar semantics. Use JSON or Excel.',
+            code='xer_adapter_not_validated',
+        )
     project = generation.project
     wbs_nodes = generation.wbs or []
     activities = generation.activities or []

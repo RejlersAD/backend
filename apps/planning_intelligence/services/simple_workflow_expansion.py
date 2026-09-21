@@ -22,6 +22,8 @@ _EDITABLE_FIELDS = {
     'is_milestone', 'depends_on', 'dependency_details', 'dependency_rationales',
     'schedule_generated_fields', 'schedule_rationale', 'status', 'progress_percent',
     'project_task_id', 'assignee', 'reviewer_user',
+    'duration_evidence', 'duration_comparison_evidence', 'duration_review_status', 'duration_review_reason',
+    'duration_calendar_verified',
 }
 
 
@@ -107,9 +109,10 @@ def _validate_network(tasks):
         raise WorkflowExpansionError('Expanded activities must have distinct IDs.')
     incoming, outgoing = {}, {key: [] for key in by_id}
     for task in tasks:
-        duration = _number(task.get('duration_days'), 'Stage duration', minimum=0)
+        missing = task.get('duration_days') is None and task.get('duration_source') in {'missing_source', 'source_requirement'}
+        duration = None if missing else _number(task.get('duration_days'), 'Stage duration', minimum=0)
         milestone = task.get('activity_type') in _MILESTONES
-        if (milestone and duration != 0) or (not milestone and duration <= 0):
+        if (milestone and duration != 0) or (not milestone and duration is not None and duration <= 0):
             raise WorkflowExpansionError('Milestones require zero duration; other workflow tasks require positive durations.')
         dependencies = list(dict.fromkeys(task.get('depends_on') or []))
         if any(key not in by_id for key in dependencies):
@@ -173,6 +176,7 @@ def expand_workflow_deliverables(parents, context, previous_tasks=None):
     Explicitly configured workflows must contain exactly five stages.
     """
     parents = deepcopy(parents)
+    source_only = context.get('duration_policy') == 'source_only'
     if len(parents) * 5 > MAX_WORKFLOW_ACTIVITIES:
         raise WorkflowExpansionError('The expanded workflow would exceed 2,000 activities.', code='workflow_activity_limit')
     if len({parent.get('id') for parent in parents}) != len(parents) or any(not parent.get('id') for parent in parents):
@@ -198,9 +202,16 @@ def expand_workflow_deliverables(parents, context, previous_tasks=None):
             completed_count += 1
             blockers.append({'code': 'workflow_completed_parent', 'task_id': parent_id,
                              'message': f"Completed deliverable {parent['title']} must be reviewed before converting its existing task into the first workflow stage."})
+        elif not already_expanded and (original.get('status') in {'in_progress', 'in_review', 'review'}
+                                       or float(original.get('progress_percent') or 0) > 0
+                                       or original.get('actual_start') or original.get('actual_finish')):
+            blockers.append({'code': 'workflow_started_parent', 'task_id': parent_id,
+                             'message': f"Started deliverable {parent['title']} must retain its existing timing and work history. Review its stage conversion before applying."})
         if not already_expanded and (original.get('assignee_id') or original.get('project_task_id')
                                      or original.get('effort_hours') is not None or original.get('due_date')):
             assignment_count += 1
+        if not already_expanded and original.get('duration_days') is not None and original.get('duration_source') == 'planner':
+            warnings.append(f"The existing duration for {parent['title']} describes the whole deliverable. It is retained on the source parent and has not been assigned to IFR or divided between stages.")
         source_values = {key: deepcopy(value) for key, value in parent.items()
                          if key.startswith('source_') or key in {'id', 'title', 'discipline', 'document_number', 'document_revision'}}
         chain = []
@@ -233,7 +244,8 @@ def expand_workflow_deliverables(parents, context, previous_tasks=None):
                 'effort_hours': None, 'due_date': None, 'due_date_source': 'schedule',
                 'priority': parent.get('priority') or 'medium', 'task_type': 'task',
                 'acceptance_criteria': '', 'planned_start_date': parent.get('planned_start_date') if index == 0 else None,
-                'duration_days': duration, 'duration_source': 'proposed',
+                'duration_days': None if source_only and activity_type not in _MILESTONES else duration,
+                'duration_source': 'missing_source' if source_only and activity_type not in _MILESTONES else 'proposed',
                 'activity_type': activity_type, 'is_milestone': activity_type in _MILESTONES,
                 'depends_on': [], 'dependency_details': [], 'dependency_rationales': {},
                 'parent_deliverable_id': parent_id, 'deliverable': parent['title'],
@@ -248,7 +260,7 @@ def expand_workflow_deliverables(parents, context, previous_tasks=None):
                 'source_parent_values': deepcopy(source_values),
                 'document_number': parent.get('document_number') or '',
                 'document_revision': parent.get('document_revision') or '',
-                'schedule_rationale': f"Proposed stage from {template['code']} v{template.get('version')}; template timings are not verified original schedule values.",
+                'schedule_rationale': 'Requested workflow stage; planned duration requires an uploaded source.' if source_only else f"Proposed stage from {template['code']} v{template.get('version')}; template timings are not verified original schedule values.",
                 'schedule_generated_fields': ['duration_days', 'depends_on'],
             }
             if index == 0:
@@ -319,7 +331,7 @@ def expand_workflow_deliverables(parents, context, previous_tasks=None):
             task['is_milestone'] = task['activity_type'] in _MILESTONES
     _validate_network(tasks)
     if tasks:
-        warnings.append('Workflow stages, durations and internal links are configured planning proposals; they do not reproduce or verify an uploaded original schedule.')
+        warnings.append('The five internal workflow links follow the selected configuration, not detected predecessor evidence. Activity durations require uploaded source values.' if source_only else 'Workflow stages, durations and internal links are configured planning proposals; they do not reproduce or verify an uploaded original schedule.')
     if assignment_count:
         warnings.append(f'{assignment_count} existing deliverable assignment(s), effort estimates or due dates will belong to the first stage only. Review stage responsibility before applying.')
     if completed_count:

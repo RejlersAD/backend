@@ -159,13 +159,12 @@ def build_workable_plan(project, user, request_data, progress):
     if basis.status != 'approved':
         basis = approve_schedule_basis(basis, user)
 
-    progress(30, 'Assigning deliverable-specific workflows', 'generation_plan')
+    progress(30, 'Preparing source deliverables for review', 'generation_plan')
     plan = approved_plan
     if not plan:
         plan = build_generation_plan(basis)
-        plan.dependencies.filter(is_deleted=False, status='proposed').update(
-            status='confirmed', reviewed_by=user, reviewed_at=timezone.now(), updated_at=timezone.now(),
-        )
+        # A build request is not evidence that a proposed relationship is true.
+        # Explicit review decisions remain separate from document extraction.
         scenarios = plan.readiness.get('available_scenarios') or sheet['scenario_options']
         selected = decisions.get('selected_scenario') or (scenarios[0] if len(scenarios) == 1 else '')
         if scenarios and selected not in scenarios:
@@ -178,20 +177,26 @@ def build_workable_plan(project, user, request_data, progress):
         refresh_generation_plan_readiness(plan)
         plan = approve_generation_plan(plan, user)
 
-    progress(42, 'Workflows assigned', 'workflows', {
+    progress(42, 'Source deliverables prepared', 'workflows', {
         'deliverable_count': plan.deliverables.filter(is_deleted=False).count(),
         'confirmed_logic_count': plan.dependencies.filter(is_deleted=False, status='confirmed').count(),
     })
 
-    progress(50, 'Building activity logic', 'activity_logic')
+    progress(50, 'Extracting source activities and relationships', 'activity_logic')
     generation = generate_schedule(project, user=user, input_fingerprint=request_data.get('output_fingerprint'))
-    progress(64, 'Building activity logic', 'activity_logic', {
+    progress(64, 'Source activities extracted', 'activity_logic', {
         'deliverable_count': deliverable_count,
         'activity_count': len(generation.activities or []),
         'relationship_count': len(generation.logic_matrix or []),
     })
-    progress(70, 'Calculating relational CPM', 'cpm')
+    progress(70, 'Checking calculation evidence', 'cpm')
     version, calculation_run, materialization_issues = materialize_generation(generation, requested_by=user)
+    if version is None:
+        return {'state': 'needs_decisions', 'generation_id': generation.id,
+                'decision_sheet': {'schedule_warnings': materialization_issues,
+                                   'missing_information': (generation.intelligence.get('schedule_engine') or {}).get('missing_information') or []},
+                'message': 'Document evidence is ready for review. Unspecified values remain Not Specified.',
+                'preview_confirmation_at': confirmation_time}
     progress(86, 'CPM calculated; running final checks', 'final_checks', {
         'deliverable_count': deliverable_count,
         'activity_count': version.activities.filter(is_deleted=False).count(),
@@ -262,6 +267,8 @@ def approve_workable_baseline(project, user, version_id, name, progress):
             'relationships': ActivityRelationshipSerializer(version.relationships.filter(is_deleted=False), many=True).data,
             'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance).data,
         }
+        from .planning_boundaries import freeze_schedule_inputs
+        snapshot['accepted_inputs'] = freeze_schedule_inputs(version)
         baseline = ScheduleBaseline.objects.create(
             schedule=version.schedule, source_version=version,
             name=str(name or f'Approved Workable Plan v{version.version}')[:255],

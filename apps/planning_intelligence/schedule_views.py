@@ -1,5 +1,6 @@
 """Secured REST endpoints for calendars, CPM schedules, resources, and baselines."""
 import hashlib
+from copy import deepcopy
 from django.db import transaction
 from django.http import Http404, HttpResponse
 from django.db.models import Count, IntegerField, Max, OuterRef, Q, Subquery, Value
@@ -44,14 +45,16 @@ from .services.audit import record_event
 from .services.activity_generator import build_activities
 from .services.project_controls import build_control_dashboard, capture_control_snapshot
 from .services.schedule_exports import generate_schedule_export
+from .services.schedule_export_contract import ScheduleExportError, export_capabilities
 from .services.operational_jobs import (
     assurance_state_fingerprint, dispatch_job, get_or_create_job, schedule_state_fingerprint,
 )
 from .services.trustworthy_scheduling import approve_schedule_assurance, current_assurance
 from .services.schedule_approval import (
     ScheduleApprovalError, approve_schedule_version, decide_schedule_review, lock_schedule_version,
-    current_schedule_version, require_simple_plan_source_import,
+    current_schedule_version, require_simple_plan_source_import, require_accepted_schedule_inputs,
 )
+from .services.planning_boundaries import freeze_schedule_inputs
 
 
 def _governance_audit_state(item):
@@ -200,6 +203,10 @@ class ScheduleViewSet(SoftDeleteViewSet):
             version = ScheduleVersion.objects.create(
                 schedule=schedule, version=next_number, parent_version=source,
                 change_summary=summary, created_by=request.user,
+                planning_build_id=source.planning_build_id if source else None,
+                evidence_graph_id=source.evidence_graph_id if source else None,
+                evidence_graph_revision=source.evidence_graph_revision if source else None,
+                evidence_input_snapshot=deepcopy(source.evidence_input_snapshot) if source else {},
             )
             if source:
                 source_nodes = list(
@@ -245,6 +252,7 @@ class ScheduleViewSet(SoftDeleteViewSet):
                             version=version, predecessor=activity_map[link.predecessor_id],
                             successor=activity_map[link.successor_id],
                             relationship_type=link.relationship_type, lag_days=link.lag_days,
+                            metadata=deepcopy(link.metadata),
                         ))
                 ActivityRelationship.objects.bulk_create(relationship_rows, batch_size=500)
 
@@ -260,6 +268,8 @@ class ScheduleViewSet(SoftDeleteViewSet):
                             budgeted_cost=assignment.budgeted_cost,
                         ))
                 ActivityAssignment.objects.bulk_create(assignment_rows, batch_size=500)
+                from .services.planning_registers import clone_risks
+                clone_risks(source, version)
         record_event(project=schedule.project, actor=request.user, action='schedule.version_created', entity=version, after={'version': version.version})
         return Response(ScheduleVersionSerializer(version).data, status=status.HTTP_201_CREATED)
 
@@ -387,8 +397,11 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
     def export(self, request, pk=None):
         version = self.get_object()
         export_format = str(request.query_params.get('export_format') or 'xlsx').lower()
+        export_format = {'ms_project_xml': 'mspdi'}.get(export_format, export_format)
         try:
             content, content_type, filename = generate_schedule_export(version, export_format)
+        except ScheduleExportError as exc:
+            return Response(exc.payload, status=exc.status_code)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         digest = hashlib.sha256(content).hexdigest()
@@ -403,7 +416,18 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         response = HttpResponse(content, content_type=content_type)
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         response['X-Content-SHA256'] = digest
+        response['X-RADAI-Export-State'] = 'approved_baseline' if version.status == 'baselined' else 'structured_draft'
+        if export_format == 'xer':
+            response['X-RADAI-Adapter-Status'] = 'legacy_unvalidated'
+        elif export_format in {'mspdi', 'mspdi_zip'}:
+            response['X-RADAI-Adapter-Status'] = 'implemented_subset'
+            response['X-RADAI-Vendor-Roundtrip'] = 'not_tested'
         return response
+
+    @action(detail=True, methods=['get'], url_path='export-capabilities')
+    def export_capabilities(self, request, pk=None):
+        self.get_object()  # Apply the same project access boundary as export.
+        return Response({'schema_version': '1.0', 'adapters': export_capabilities()})
 
     @action(detail=True, methods=['patch'], url_path='bulk-activities')
     def bulk_activities(self, request, pk=None):
@@ -953,6 +977,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'The version is no longer available for baselining.'}, status=status.HTTP_409_CONFLICT)
             try:
                 require_simple_plan_source_import(version)
+                require_accepted_schedule_inputs(version)
             except ScheduleApprovalError as exc:
                 return Response(exc.payload, status=exc.status_code)
             assurance = current_assurance(version)
@@ -960,12 +985,15 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'An approved Phase 3 assurance review is required for this exact calculated state.'}, status=status.HTTP_409_CONFLICT)
             if version.governance_items.filter(priority='critical', is_deleted=False).exclude(status__in=['closed', 'implemented', 'rejected']).exists():
                 return Response({'error': 'Resolve open critical governance items before baselining.'}, status=status.HTTP_409_CONFLICT)
+            from .services.planning_registers import risk_snapshot
             snapshot = {
                 'version': ScheduleVersionSerializer(version).data,
                 'wbs': ScheduleWBSNodeSerializer(version.wbs_nodes.filter(is_deleted=False), many=True).data,
                 'activities': ScheduleActivitySerializer(version.activities.filter(is_deleted=False), many=True).data,
                 'relationships': ActivityRelationshipSerializer(version.relationships.filter(is_deleted=False), many=True).data,
                 'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance).data,
+                'accepted_inputs': freeze_schedule_inputs(version),
+                'risk_register': risk_snapshot(version),
             }
             baseline = ScheduleBaseline.objects.create(
                 schedule=version.schedule, source_version=version, name=name,

@@ -266,7 +266,10 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                     return manager, project
             return None, None
         workflow_by_user = {}
+        onboarding_can_delete = False
         if active_workflows is not None:
+            from apps.onboarding.rbac import lifecycle_case_delete_allowed
+            onboarding_can_delete = lifecycle_case_delete_allowed(request.user)
             for workflow in active_workflows.select_related('assigned_to').order_by('-created_at'):
                 workflow_by_user.setdefault(workflow.user_id, workflow)
 
@@ -307,6 +310,7 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             if workflow:
                 employee_dict.update({
                     'onboarding_record_id': workflow.id,
+                    'onboarding_can_delete': onboarding_can_delete,
                     'onboarding_status': workflow.status,
                     'onboarding_progress': workflow.progress_percentage,
                     'onboarding_joining_date': workflow.joining_date.isoformat(),
