@@ -8,7 +8,10 @@
     "last_row": 4409,
     "snapshot_at": "2026-09-21T13:50:49.630323+00:00",
     "sha256": "308a453a0bf71490174f6699760cfb670186e1731adf8f3843eff55b12840e43",
-    "scope": "full_workbook"
+    "scope": "full_workbook",
+    "currency_column": "AE",
+    "currency_header": "Inv. CUR",
+    "currency_method": "strict_agreement_or_single_source"
   },
   "invoice_count": 4404,
   "totals": {
@@ -37,33 +40,248 @@
       "error_count": 0
     }
   },
+  "currency_breakdown": [
+    {
+      "currency": "AED",
+      "currency_status": "recorded",
+      "row_counts": {
+        "invoice_amount": 2023,
+        "actual_payment_received": 1994
+      },
+      "coverage": {
+        "invoice_amount": {
+          "numeric_count": 2020,
+          "blank_count": 3,
+          "text_count": 0,
+          "error_count": 0
+        },
+        "actual_payment_received": {
+          "numeric_count": 1829,
+          "blank_count": 163,
+          "text_count": 2,
+          "error_count": 0
+        }
+      },
+      "invoice_amount": "256727607.14",
+      "actual_payment_received": "236869176.92",
+      "exact_amounts": {
+        "invoice_amount": "256727607.137",
+        "actual_payment_received": "236869176.920999999976"
+      }
+    },
+    {
+      "currency": "EUR",
+      "currency_status": "recorded",
+      "row_counts": {
+        "invoice_amount": 1708,
+        "actual_payment_received": 1534
+      },
+      "coverage": {
+        "invoice_amount": {
+          "numeric_count": 1707,
+          "blank_count": 1,
+          "text_count": 0,
+          "error_count": 0
+        },
+        "actual_payment_received": {
+          "numeric_count": 1462,
+          "blank_count": 72,
+          "text_count": 0,
+          "error_count": 0
+        }
+      },
+      "invoice_amount": "13008426.71",
+      "actual_payment_received": "9592153.57",
+      "exact_amounts": {
+        "invoice_amount": "13008426.713",
+        "actual_payment_received": "9592153.5730000000002"
+      }
+    },
+    {
+      "currency": "SEK",
+      "currency_status": "recorded",
+      "row_counts": {
+        "invoice_amount": 1,
+        "actual_payment_received": 1
+      },
+      "coverage": {
+        "invoice_amount": {
+          "numeric_count": 1,
+          "blank_count": 0,
+          "text_count": 0,
+          "error_count": 0
+        },
+        "actual_payment_received": {
+          "numeric_count": 1,
+          "blank_count": 0,
+          "text_count": 0,
+          "error_count": 0
+        }
+      },
+      "invoice_amount": "219000.00",
+      "actual_payment_received": "219000.00",
+      "exact_amounts": {
+        "invoice_amount": "219000",
+        "actual_payment_received": "219000"
+      }
+    },
+    {
+      "currency": "USD",
+      "currency_status": "recorded",
+      "row_counts": {
+        "invoice_amount": 639,
+        "actual_payment_received": 557
+      },
+      "coverage": {
+        "invoice_amount": {
+          "numeric_count": 639,
+          "blank_count": 0,
+          "text_count": 0,
+          "error_count": 0
+        },
+        "actual_payment_received": {
+          "numeric_count": 549,
+          "blank_count": 8,
+          "text_count": 0,
+          "error_count": 0
+        }
+      },
+      "invoice_amount": "41706207.76",
+      "actual_payment_received": "36175812.14",
+      "exact_amounts": {
+        "invoice_amount": "41706207.7593623978312",
+        "actual_payment_received": "36175812.1393623978312"
+      }
+    },
+    {
+      "currency": null,
+      "currency_status": "conflict",
+      "row_counts": {
+        "invoice_amount": 11,
+        "actual_payment_received": 24
+      },
+      "coverage": {
+        "invoice_amount": {
+          "numeric_count": 11,
+          "blank_count": 0,
+          "text_count": 0,
+          "error_count": 0
+        },
+        "actual_payment_received": {
+          "numeric_count": 10,
+          "blank_count": 14,
+          "text_count": 0,
+          "error_count": 0
+        }
+      },
+      "invoice_amount": "674340.40",
+      "actual_payment_received": "475467.22",
+      "exact_amounts": {
+        "invoice_amount": "674340.40",
+        "actual_payment_received": "475467.22"
+      }
+    },
+    {
+      "currency": null,
+      "currency_status": "not_recorded",
+      "row_counts": {
+        "invoice_amount": 22,
+        "actual_payment_received": 294
+      },
+      "coverage": {
+        "invoice_amount": {
+          "numeric_count": 19,
+          "blank_count": 1,
+          "text_count": 2,
+          "error_count": 0
+        },
+        "actual_payment_received": {
+          "numeric_count": 14,
+          "blank_count": 270,
+          "text_count": 10,
+          "error_count": 0
+        }
+      },
+      "invoice_amount": "3146096.40",
+      "actual_payment_received": "2428132.15",
+      "exact_amounts": {
+        "invoice_amount": "3146096.4",
+        "actual_payment_received": "2428132.15"
+      }
+    }
+  ],
+  "currency_rounding_adjustment": {
+    "invoice_amount": "0.00",
+    "actual_payment_received": "0.00"
+  },
   "payment_status": [
     {
       "id": "paid",
       "label": "Paid",
-      "count": 3895
+      "count": 3895,
+      "amount_aed": "412405138.81",
+      "exact_amount_aed": "412405138.8099599987141",
+      "amount_coverage": {
+        "numeric_count": 3893,
+        "blank_count": 0,
+        "text_count": 0,
+        "error_count": 2
+      }
     },
     {
       "id": "cancelled",
       "label": "Cancelled",
-      "count": 368
+      "count": 368,
+      "amount_aed": "39497085.61",
+      "exact_amount_aed": "39497085.6130999998818",
+      "amount_coverage": {
+        "numeric_count": 363,
+        "blank_count": 5,
+        "text_count": 0,
+        "error_count": 0
+      }
     },
     {
       "id": "pending",
       "label": "Pending",
-      "count": 58
+      "count": 58,
+      "amount_aed": "6401792.89",
+      "exact_amount_aed": "6401792.894475000144",
+      "amount_coverage": {
+        "numeric_count": 58,
+        "blank_count": 0,
+        "text_count": 0,
+        "error_count": 0
+      }
     },
     {
       "id": "new",
       "label": "New",
-      "count": 34
+      "count": 34,
+      "amount_aed": "2257559.79",
+      "exact_amount_aed": "2257559.7854749999",
+      "amount_coverage": {
+        "numeric_count": 34,
+        "blank_count": 0,
+        "text_count": 0,
+        "error_count": 0
+      }
     },
     {
       "id": "other",
       "label": "Other statuses",
-      "count": 49
+      "count": 49,
+      "amount_aed": "5589813.06",
+      "exact_amount_aed": "5589813.0577",
+      "amount_coverage": {
+        "numeric_count": 49,
+        "blank_count": 0,
+        "text_count": 0,
+        "error_count": 0
+      }
     }
   ],
+  "payment_status_rounding_adjustment": "0.00",
   "other_statuses": [
     {
       "label": "#VALUE!",
