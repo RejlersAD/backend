@@ -8,6 +8,7 @@ from .hmb_master_template_parser import (
     _canonical_case_name,
     analyze_hmb_master_template,
     parse_hmb_case_workbook,
+    parse_hmb_csv_file,
 )
 
 
@@ -45,7 +46,40 @@ class HMBWorkbookParserTests(TestCase):
     def test_canonical_case_names(self):
         self.assertEqual(_canonical_case_name('Case_1B_Stream_Summary.xlsx'), 'CASE A (1b)')
         self.assertEqual(_canonical_case_name('CASE C (2a)'), 'CASE C (2a)')
+        self.assertEqual(_canonical_case_name('CASE-A-1a-SUM-MAX OIL-GAS-REV D'), 'CASE A (1a)')
         self.assertEqual(_canonical_case_name('Relief scenario.xlsx'), 'Relief scenario')
+
+    def test_csv_long_layout_maps_to_template(self):
+        path = self.root / 'Case_A_1b.csv'
+        path.write_text(
+            'Case,Stream ID,Phase,Parameter,UOM,Result\n'
+            'CASE A (1b),1048,Overall,Temperature,F,64.61\n'
+            'CASE A (1b),1048,Composition,H2S,mol frac.,0.0012\n',
+            encoding='utf-8',
+        )
+
+        parsed = parse_hmb_csv_file(str(path), path.name, self.template)
+
+        self.assertEqual(parsed['detected_format'], 'csv_long')
+        self.assertEqual(parsed['case_name'], 'CASE A (1b)')
+        self.assertEqual(parsed['record_count'], 2)
+        self.assertEqual({row['property_name'] for row in parsed['records']}, {'Temperature', 'H2S'})
+
+    def test_csv_wide_layout_maps_stream_columns(self):
+        path = self.root / 'CASE B (1a).csv'
+        path.write_text(
+            'Section,Property,Unit,1048\n'
+            'General,Temperature,F,71.2\n'
+            'Composition,H2S,mol frac.,0.002\n',
+            encoding='utf-8',
+        )
+
+        parsed = parse_hmb_csv_file(str(path), path.name, self.template)
+
+        self.assertEqual(parsed['detected_format'], 'csv_wide')
+        self.assertEqual(parsed['case_name'], 'CASE B (1a)')
+        self.assertEqual(parsed['stream_count'], 1)
+        self.assertEqual(parsed['record_count'], 2)
 
     def test_normalized_summary_maps_to_master(self):
         path = self.root / 'Case_1B_Stream_Summary.xlsx'

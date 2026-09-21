@@ -11,10 +11,12 @@ Does not modify any existing view, service or pipeline.
 import base64
 import hashlib
 import io
+import json
 import logging
 import os
 import re
 import tempfile
+import uuid
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -22,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.http import HttpResponse, JsonResponse
 from django.db import transaction
+from django.core.cache import cache
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -30,9 +33,12 @@ from .models import HMBMasterTemplateProfile, HMBCaseImportBatch, HMBCaseRecord
 from .hmb_master_template_parser import (
     analyze_hmb_master_template,
     parse_hmb_case_workbook,
+    parse_hmb_csv_file,
     HMB_MASTER_TEMPLATE_CONFIG,
     HMB_MASTER_TEMPLATE_ANALYSIS_VERSION,
     HMB_FIXED_CASE_LABELS,
+    canonical_hmb_case_name,
+    hmb_property_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,23 @@ _MASTER_TEMPLATE_MAX_SIZE_BYTES = 20 * 1024 * 1024
 _MASTER_TEMPLATE_ALLOWED_EXTS = ('.xlsx', '.xlsm')
 _CASE_TEMPLATE_MAX_SIZE_BYTES = 25 * 1024 * 1024
 _CASE_TEMPLATE_ALLOWED_EXTS = ('.xlsx', '.xlsm')
+
+HMB_IMPORT_PREVIEW_CONFIG = {
+    'cache_prefix': 'hmb-import-preview:',
+    'ttl_seconds': 30 * 60,
+    'max_files': 12,
+    'max_size_bytes': 50 * 1024 * 1024,
+    'allowed_extensions': ('.xlsx', '.xlsm', '.csv', '.pdf'),
+    'sample_record_limit': 24,
+    'high_confidence': 0.85,
+}
+
+HMB_PDF_PROPERTY_FIELDS = {
+    'temperature': ('temp_normal', 'temp_unit'),
+    'pressure': ('pressure_normal', 'pressure_unit'),
+    'mass flow': ('mass_flow', 'mass_flow_unit'),
+    'molecular weight': ('molecular_weight', None),
+}
 
 
 def _serialize_template_profile(profile: HMBMasterTemplateProfile) -> dict:
@@ -155,26 +178,48 @@ def _build_hmb_stream_comparison(project, template_profile, stream_id: str) -> d
             project=project,
             template_profile=template_profile,
             stream_id=stream_id,
-        ).values('case_name', 'row_index', 'value_text')
+        ).values(
+            'case_name', 'section_key', 'property_name', 'unit',
+            'row_index', 'value_text',
+        )
     )
-    available_cases = sorted({record['case_name'] for record in records})
+    available_cases = sorted({canonical_hmb_case_name(record['case_name']) for record in records})
     case_names = list(HMB_FIXED_CASE_LABELS)
     case_names.extend(name for name in available_cases if name not in HMB_FIXED_CASE_LABELS)
-    values = {
-        (record['case_name'], record['row_index']): record['value_text']
-        for record in records
-    }
+    values = {}
+    conflicts = []
+    for record in records:
+        identity = hmb_property_identity(
+            record.get('section_key'),
+            record.get('property_name'),
+            record.get('unit'),
+        )
+        key = (canonical_hmb_case_name(record['case_name']), identity)
+        if key in values and values[key] != record['value_text']:
+            conflicts.append({
+                'case_name': key[0],
+                'section_key': identity[0],
+                'property_key': identity[1],
+                'unit_key': identity[2],
+            })
+            continue
+        values[key] = record['value_text']
     rows = []
     for section in sections:
         for prop in section.get('properties', []) or []:
             row_index = int(prop.get('row') or 0)
+            identity = hmb_property_identity(
+                section.get('key', ''),
+                prop.get('property', ''),
+                prop.get('unit', ''),
+            )
             rows.append({
                 'section_key': section.get('key', ''),
                 'section': section.get('label', ''),
                 'row_index': row_index,
                 'property': prop.get('property', ''),
                 'unit': prop.get('unit', ''),
-                'values': {case: values.get((case, row_index), '') for case in case_names},
+                'values': {case: values.get((case, identity), '') for case in case_names},
             })
     return {
         'project_id': str(project.project_id),
@@ -183,6 +228,116 @@ def _build_hmb_stream_comparison(project, template_profile, stream_id: str) -> d
         'fixed_case_slots': HMB_FIXED_CASE_LABELS,
         'case_names': case_names,
         'rows': rows,
+        'conflicts': conflicts,
+    }
+
+
+def _normalise_pdf_hmb(streams, source_filename: str, template_payload: dict) -> dict:
+    template_streams = {
+        str(stream.get('stream_id', '')).strip(): stream
+        for stream in template_payload.get('stream_columns', []) or []
+        if str(stream.get('stream_id', '')).strip()
+    }
+    general_section = next(
+        (
+            section for section in template_payload.get('sections', []) or []
+            if str(section.get('key', '')).lower() == 'general'
+        ),
+        None,
+    )
+    properties = general_section.get('properties', []) if general_section else []
+    records = []
+    ignored_streams = []
+    unresolved = []
+    for stream in streams:
+        stream_id = str(stream.get('stream_id', '') or '').strip()
+        if stream_id not in template_streams:
+            if stream_id:
+                ignored_streams.append(stream_id)
+            continue
+        for prop in properties:
+            property_key = hmb_property_identity('general', prop.get('property'), prop.get('unit'))[1]
+            field_config = HMB_PDF_PROPERTY_FIELDS.get(property_key)
+            if not field_config:
+                continue
+            value_field, unit_field = field_config
+            value = stream.get(value_field)
+            if value in (None, '', '---'):
+                continue
+            source_unit = str(stream.get(unit_field, '') or '') if unit_field else ''
+            template_unit = str(prop.get('unit', '') or '')
+            if source_unit and template_unit and source_unit.lower() != template_unit.lower():
+                unresolved.append({
+                    'stream_id': stream_id,
+                    'property': prop.get('property'),
+                    'source_unit': source_unit,
+                    'template_unit': template_unit,
+                })
+            records.append({
+                'case_name': canonical_hmb_case_name(source_filename),
+                'source_filename': source_filename,
+                'sheet_name': 'PDF',
+                'section_key': 'general',
+                'section_label': general_section.get('label', 'General') if general_section else 'General',
+                'row_index': int(prop.get('row') or 0),
+                'property_name': str(prop.get('property', '') or ''),
+                'unit': template_unit,
+                'stream_id': stream_id,
+                'source_stream_id': stream_id,
+                'stream_description': str(template_streams[stream_id].get('description', '') or ''),
+                'value_text': str(value),
+            })
+    mapped_streams = {record['stream_id'] for record in records}
+    return {
+        'case_name': canonical_hmb_case_name(source_filename),
+        'sheet_name': 'PDF',
+        'detected_format': 'pdf_vision',
+        'stream_count': len(mapped_streams),
+        'record_count': len(records),
+        'records': records,
+        'exceptions': {
+            'unresolved_mappings': unresolved[:120],
+            'unresolved_mappings_count': len(unresolved),
+        },
+        'stream_mapping': {
+            'source_stream_count': len(streams),
+            'mapped_source_stream_count': len(mapped_streams),
+            'ignored_source_stream_count': len(set(ignored_streams)),
+            'ignored_source_streams': sorted(set(ignored_streams))[:120],
+            'template_stream_count': len(template_streams),
+        },
+    }
+
+
+def _hmb_preview_file_summary(parsed: dict) -> dict:
+    mapping = parsed.get('stream_mapping', {}) or {}
+    source_stream_count = int(mapping.get('source_stream_count') or 0)
+    mapped_stream_count = int(mapping.get('mapped_source_stream_count') or parsed.get('stream_count') or 0)
+    template_stream_count = int(mapping.get('template_stream_count') or 0)
+    exceptions = parsed.get('exceptions', {}) or {}
+    unresolved_count = sum(int(exceptions.get(key) or 0) for key in (
+        'unresolved_mappings_count',
+        'unit_mismatches_count',
+        'unmatched_streams_count',
+        'duplicate_stream_matches_count',
+    ))
+    source_ratio = mapped_stream_count / source_stream_count if source_stream_count else 0
+    template_ratio = mapped_stream_count / template_stream_count if template_stream_count else 0
+    stream_ratio = max(source_ratio, template_ratio)
+    confidence = max(0.0, min(1.0, stream_ratio - min(0.35, unresolved_count * 0.001)))
+    if parsed.get('record_count', 0) and mapped_stream_count and source_stream_count == mapped_stream_count:
+        confidence = max(confidence, 0.9)
+    return {
+        'filename': parsed.get('source_filename', ''),
+        'case_name': parsed.get('case_name', ''),
+        'detected_format': parsed.get('detected_format', ''),
+        'stream_count': parsed.get('stream_count', 0),
+        'record_count': parsed.get('record_count', 0),
+        'confidence': round(confidence, 3),
+        'requires_mapping': confidence < HMB_IMPORT_PREVIEW_CONFIG['high_confidence'] or not parsed.get('record_count'),
+        'stream_mapping': mapping,
+        'exceptions': exceptions,
+        'sample_records': (parsed.get('records') or [])[:HMB_IMPORT_PREVIEW_CONFIG['sample_record_limit']],
     }
 
 
@@ -425,6 +580,211 @@ def retrieve_hmb_master_template_view(request, profile_id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def preview_hmb_case_files_view(request):
+    project_id = request.data.get('project_id')
+    template_profile_id = request.data.get('template_profile_id')
+    if not project_id or not template_profile_id:
+        return Response(
+            {'error': 'project_id and template_profile_id are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    project, project_err = _get_accessible_project(request.user, project_id)
+    if project_err:
+        return project_err
+    try:
+        template_profile = HMBMasterTemplateProfile.objects.get(id=template_profile_id, is_active=True)
+    except (HMBMasterTemplateProfile.DoesNotExist, ValueError):
+        return Response({'error': 'Template profile not found'}, status=status.HTTP_404_NOT_FOUND)
+    if template_profile.project_id and template_profile.project_id != project.project_id:
+        return Response({'error': 'Template profile does not belong to this project'}, status=status.HTTP_400_BAD_REQUEST)
+
+    files = request.FILES.getlist('case_files')
+    if not files:
+        return Response({'error': 'At least one case file is required'}, status=status.HTTP_400_BAD_REQUEST)
+    if len(files) > HMB_IMPORT_PREVIEW_CONFIG['max_files']:
+        return Response(
+            {'error': f'Maximum {HMB_IMPORT_PREVIEW_CONFIG["max_files"]} files per preview.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    parsed_files = []
+    failures = []
+    template_payload = template_profile.analysis_payload or {}
+    for file_obj in files:
+        filename = file_obj.name or 'HMB input'
+        extension = os.path.splitext(filename.lower())[1]
+        if extension not in HMB_IMPORT_PREVIEW_CONFIG['allowed_extensions']:
+            failures.append({'filename': filename, 'error': f'Unsupported extension: {extension or "none"}'})
+            continue
+        if file_obj.size > HMB_IMPORT_PREVIEW_CONFIG['max_size_bytes']:
+            failures.append({'filename': filename, 'error': 'File exceeds 50MB limit'})
+            continue
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+                for chunk in file_obj.chunks():
+                    temp_file.write(chunk)
+                temp_path = temp_file.name
+            if extension == '.csv':
+                parsed = parse_hmb_csv_file(temp_path, filename, template_payload)
+            elif extension == '.pdf':
+                from apps.process_datasheet.hmb_vision_extractor import HMBVisionExtractor
+                extracted = HMBVisionExtractor().extract_from_pdf(temp_path)
+                parsed = _normalise_pdf_hmb(extracted.get('streams', []), filename, template_payload)
+            else:
+                parsed = parse_hmb_case_workbook(temp_path, filename, template_payload)
+            parsed['source_filename'] = filename
+            parsed_files.append(parsed)
+        except Exception as exc:
+            logger.warning('[HMB Preview] %s failed: %s', filename, exc, exc_info=True)
+            failures.append({'filename': filename, 'error': str(exc)})
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    logger.warning('[HMB Preview] Could not remove temporary file %s', temp_path)
+
+    if not parsed_files:
+        return Response(
+            {'error': 'No files could be analyzed', 'failures': failures},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    duplicate_cases = {
+        case_name
+        for case_name in {parsed.get('case_name', '') for parsed in parsed_files}
+        if sum(1 for parsed in parsed_files if parsed.get('case_name', '') == case_name) > 1
+    }
+    token = str(uuid.uuid4())
+    cache_key = f'{HMB_IMPORT_PREVIEW_CONFIG["cache_prefix"]}{token}'
+    cache.set(cache_key, {
+        'user_id': getattr(request.user, 'id', None),
+        'project_id': str(project.project_id),
+        'template_profile_id': str(template_profile.id),
+        'files': parsed_files,
+    }, timeout=HMB_IMPORT_PREVIEW_CONFIG['ttl_seconds'])
+    summaries = []
+    for parsed in parsed_files:
+        summary = _hmb_preview_file_summary(parsed)
+        if parsed.get('case_name') in duplicate_cases:
+            summary['requires_mapping'] = True
+            summary['assignment_error'] = 'Duplicate suggested case slot; choose a unique slot before execution.'
+        summaries.append(summary)
+    return Response({
+        'success': True,
+        'preview_token': token,
+        'expires_in_seconds': HMB_IMPORT_PREVIEW_CONFIG['ttl_seconds'],
+        'files': summaries,
+        'failures': failures,
+        'can_execute': not duplicate_cases and all(not item['requires_mapping'] for item in summaries),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def execute_hmb_case_preview_view(request):
+    token = (request.data.get('preview_token') or '').strip()
+    if not token:
+        return Response({'error': 'preview_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+    cache_key = f'{HMB_IMPORT_PREVIEW_CONFIG["cache_prefix"]}{token}'
+    preview = cache.get(cache_key)
+    if not preview:
+        return Response({'error': 'Preview expired or was not found. Analyze the files again.'}, status=status.HTTP_410_GONE)
+    if str(preview.get('user_id')) != str(getattr(request.user, 'id', None)):
+        return Response({'error': 'Preview belongs to another user.'}, status=status.HTTP_403_FORBIDDEN)
+    project, project_err = _get_accessible_project(request.user, preview['project_id'])
+    if project_err:
+        return project_err
+    try:
+        template_profile = HMBMasterTemplateProfile.objects.get(id=preview['template_profile_id'], is_active=True)
+    except HMBMasterTemplateProfile.DoesNotExist:
+        return Response({'error': 'Template profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    assignments = request.data.get('case_assignments') or {}
+    if isinstance(assignments, str):
+        try:
+            assignments = json.loads(assignments)
+        except json.JSONDecodeError:
+            return Response({'error': 'case_assignments must be valid JSON'}, status=status.HTTP_400_BAD_REQUEST)
+    resolved_files = []
+    case_names = set()
+    for parsed in preview['files']:
+        filename = parsed.get('source_filename', '')
+        case_name = canonical_hmb_case_name(assignments.get(filename) or parsed.get('case_name'))
+        if case_name in case_names:
+            return Response({'error': f'Duplicate case assignment: {case_name}'}, status=status.HTTP_400_BAD_REQUEST)
+        case_names.add(case_name)
+        if not parsed.get('records'):
+            return Response({'error': f'{filename} has no mapped records.'}, status=status.HTTP_400_BAD_REQUEST)
+        resolved_files.append((parsed, case_name))
+
+    with transaction.atomic():
+        batch = HMBCaseImportBatch.objects.create(
+            project=project,
+            template_profile=template_profile,
+            imported_by=request.user,
+            source_file_count=len(resolved_files),
+            status='completed',
+        )
+        total_records = 0
+        file_summaries = []
+        for parsed, case_name in resolved_files:
+            existing_case_names = HMBCaseRecord.objects.filter(
+                project=project,
+                template_profile=template_profile,
+            ).values_list('case_name', flat=True).distinct()
+            replace_names = [name for name in existing_case_names if canonical_hmb_case_name(name) == case_name]
+            HMBCaseRecord.objects.filter(
+                project=project,
+                template_profile=template_profile,
+                case_name__in=replace_names,
+            ).delete()
+            rows = [
+                HMBCaseRecord(
+                    batch=batch,
+                    project=project,
+                    template_profile=template_profile,
+                    case_name=case_name,
+                    source_filename=record.get('source_filename', parsed.get('source_filename', '')),
+                    stream_id=record.get('stream_id', ''),
+                    source_stream_id=record.get('source_stream_id', record.get('stream_id', '')),
+                    stream_description=record.get('stream_description', ''),
+                    section_key=record.get('section_key', ''),
+                    section_label=record.get('section_label', ''),
+                    property_name=record.get('property_name', ''),
+                    unit=record.get('unit', ''),
+                    value_text=record.get('value_text', ''),
+                    row_index=record.get('row_index', 0),
+                )
+                for record in parsed['records']
+            ]
+            HMBCaseRecord.objects.bulk_create(rows, batch_size=2000)
+            total_records += len(rows)
+            file_summaries.append({
+                'filename': parsed.get('source_filename', ''),
+                'case_name': case_name,
+                'detected_format': parsed.get('detected_format', ''),
+                'record_count': len(rows),
+            })
+        batch.total_records = total_records
+        batch.metadata = {'files': file_summaries, 'preview_token': token}
+        batch.save(update_fields=['total_records', 'metadata'])
+    cache.delete(cache_key)
+    return Response({
+        'success': True,
+        'batch_id': str(batch.id),
+        'project_id': str(project.project_id),
+        'template_profile_id': str(template_profile.id),
+        'template_profile_name': template_profile.template_name or template_profile.source_filename,
+        'source_file_count': len(resolved_files),
+        'imported_file_count': len(file_summaries),
+        'total_records': total_records,
+        'files': file_summaries,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def import_hmb_case_files_view(request):
     """
     Import multiple HMB case workbook files, normalize them, and persist rows.
@@ -636,7 +996,7 @@ def hmb_project_consolidated_summary_view(request, project_id):
         qs = qs.filter(template_profile_id=template_profile_id)
 
     total_records = qs.count()
-    case_names = sorted(set(qs.values_list('case_name', flat=True)))
+    case_names = sorted({canonical_hmb_case_name(name) for name in qs.values_list('case_name', flat=True)})
     stream_ids = sorted(set(qs.values_list('stream_id', flat=True)))
 
     section_counts = {}
@@ -693,11 +1053,16 @@ def hmb_project_records_preview_view(request, project_id):
             qs = qs_all
             template_filter_relaxed = True
     if case_name:
-        qs = qs.filter(case_name=case_name)
+        matching_names = [
+            name for name in qs.values_list('case_name', flat=True).distinct()
+            if canonical_hmb_case_name(name) == canonical_hmb_case_name(case_name)
+        ]
+        qs = qs.filter(case_name__in=matching_names)
 
-    latest_case = qs.order_by('-id').values_list('case_name', flat=True).first() or ''
-    if latest_case and not case_name and not all_cases:
-        qs = qs.filter(case_name=latest_case)
+    latest_case_raw = qs.order_by('-id').values_list('case_name', flat=True).first() or ''
+    if latest_case_raw and not case_name and not all_cases:
+        qs = qs.filter(case_name=latest_case_raw)
+    latest_case = canonical_hmb_case_name(latest_case_raw) if latest_case_raw else ''
 
     records = list(
         qs.order_by('section_label', 'row_index', 'stream_id').values(
@@ -713,11 +1078,13 @@ def hmb_project_records_preview_view(request, project_id):
             'value_text',
         )[:limit]
     )
+    for record in records:
+        record['case_name'] = canonical_hmb_case_name(record['case_name'])
 
-    available_cases = sorted(set(
-        HMBCaseRecord.objects.filter(project=project)
-        .values_list('case_name', flat=True)
-    ))
+    available_cases = sorted({
+        canonical_hmb_case_name(name)
+        for name in HMBCaseRecord.objects.filter(project=project).values_list('case_name', flat=True)
+    })
     available_case_files = sorted(set(
         HMBCaseRecord.objects.filter(project=project)
         .values_list('source_filename', flat=True)

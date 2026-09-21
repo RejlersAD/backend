@@ -12,6 +12,7 @@ Phase 1 scope:
 
 from __future__ import annotations
 
+import csv
 from io import BytesIO
 from typing import Dict, List, Any
 import re
@@ -47,6 +48,20 @@ HMB_FIXED_CASE_LABELS = [
     for number in (1, 2)
     for variant in ('a', 'b')
 ]
+
+HMB_CASE_LABEL_PATTERNS = [
+    re.compile(r'case\s*[-_ ]*([abc])\s*[-_ (]*([12])\s*([ab])', re.IGNORECASE),
+    re.compile(r'case\s*[-_ ]*([12])\s*([ab])', re.IGNORECASE),
+]
+
+HMB_TABULAR_COLUMN_ALIASES = {
+    'stream': {'stream', 'stream id', 'stream_id', 'stream no', 'stream number'},
+    'case': {'case', 'case name', 'case_name', 'scenario'},
+    'section': {'section', 'phase', 'phase name', 'category'},
+    'property': {'property', 'property name', 'attribute', 'parameter'},
+    'unit': {'unit', 'units', 'uom'},
+    'value': {'value', 'property value', 'result'},
+}
 
 
 HMB_CASE_PARSER_CONFIG: Dict[str, Any] = {
@@ -360,11 +375,11 @@ def _canonical_case_name(value: Any) -> str:
     stem = re.sub(r'\.(xlsx|xlsm|hsc)$', '', text, flags=re.IGNORECASE)
     compact = re.sub(r'[^a-z0-9]+', '', stem.lower())
 
-    explicit = re.search(r'case\s*([abc])\s*\(?\s*([12])\s*([ab])\s*\)?', stem, re.IGNORECASE)
+    explicit = HMB_CASE_LABEL_PATTERNS[0].search(stem)
     if explicit:
         return f'CASE {explicit.group(1).upper()} ({explicit.group(2)}{explicit.group(3).lower()})'
 
-    legacy = re.search(r'case\s*[_-]?\s*([12])\s*([ab])', stem, re.IGNORECASE)
+    legacy = HMB_CASE_LABEL_PATTERNS[1].search(stem)
     if legacy:
         return f'CASE A ({legacy.group(1)}{legacy.group(2).lower()})'
 
@@ -372,6 +387,18 @@ def _canonical_case_name(value: Any) -> str:
         if compact == re.sub(r'[^a-z0-9]+', '', label.lower()):
             return label
     return stem or 'Case'
+
+
+def canonical_hmb_case_name(value: Any) -> str:
+    return _canonical_case_name(value)
+
+
+def hmb_property_identity(section_key: Any, property_name: Any, unit: Any) -> tuple[str, str, str]:
+    return (
+        _normalise_key(section_key).replace(' ', '_'),
+        re.sub(r'[^a-z0-9]+', ' ', _normalise_key(property_name)).strip(),
+        _normalise_unit(unit),
+    )
 
 
 def _is_normalized_summary_workbook(wb) -> bool:
@@ -517,6 +544,180 @@ def _parse_master_case_workbook(wb, source_filename: str, template_profile_paylo
             'mapped_source_stream_count': len(matched),
             'ignored_source_stream_count': len(source_columns) - len(matched),
             'ignored_source_streams': [],
+            'template_stream_count': len(template_streams),
+        },
+    }
+
+
+def _tabular_column(headers: List[str], alias_key: str):
+    aliases = HMB_TABULAR_COLUMN_ALIASES[alias_key]
+    for index, header in enumerate(headers):
+        if _normalise_key(header) in aliases:
+            return index
+    return None
+
+
+def _template_property_lookup(template_profile_payload: Dict[str, Any]):
+    lookup = {}
+    for section in template_profile_payload.get('sections', []) or []:
+        section_key = _normalise_key(section.get('key') or section.get('label')).replace(' ', '_')
+        for prop in section.get('properties', []) or []:
+            property_name = _normalise_text(prop.get('property'))
+            for candidate in _property_candidates(section_key, property_name):
+                lookup[(section_key, _normalise_key(candidate))] = (section, prop)
+    return lookup
+
+
+def _normalise_section_key(value: Any) -> str:
+    key = _normalise_key(value).replace(' ', '_')
+    return {
+        'overall': 'general',
+        'conditions': 'general',
+        'vapor': 'vapour',
+        'vapor_phase': 'vapour',
+        'vapour_phase': 'vapour',
+        'liquid': 'light_liquid',
+        'liquid_phase': 'light_liquid',
+        'aqueous': 'heavy_liquid',
+        'aqueous_phase': 'heavy_liquid',
+    }.get(key, key or 'general')
+
+
+def parse_hmb_csv_file(csv_path: str, source_filename: str, template_profile_payload: Dict[str, Any]) -> Dict[str, Any]:
+    with open(csv_path, 'r', encoding='utf-8-sig', newline='') as csv_file:
+        sample = csv_file.read(8192)
+        csv_file.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=',;\t|')
+        except csv.Error:
+            dialect = csv.excel
+        rows = list(csv.reader(csv_file, dialect))
+    if not rows:
+        raise ValueError('CSV file is empty.')
+
+    headers = [_normalise_text(value) for value in rows[0]]
+    property_col = _tabular_column(headers, 'property')
+    unit_col = _tabular_column(headers, 'unit')
+    section_col = _tabular_column(headers, 'section')
+    stream_col = _tabular_column(headers, 'stream')
+    value_col = _tabular_column(headers, 'value')
+    case_col = _tabular_column(headers, 'case')
+    property_lookup = _template_property_lookup(template_profile_payload)
+    template_streams = {
+        _normalise_text(stream.get('stream_id')): stream
+        for stream in template_profile_payload.get('stream_columns', []) or []
+        if _normalise_text(stream.get('stream_id'))
+    }
+    if property_col is None:
+        raise ValueError('CSV requires a Property/Parameter column.')
+
+    case_name = _canonical_case_name(source_filename)
+    records = []
+    ignored_streams = set()
+    unresolved = []
+
+    def append_record(source_row, source_stream_id, raw_section, raw_property, source_unit, raw_value):
+        nonlocal case_name
+        if raw_value in (None, '', '---'):
+            return
+        stream_id = _normalise_text(source_stream_id)
+        if stream_id not in template_streams:
+            if stream_id:
+                ignored_streams.add(stream_id)
+            return
+        section_key = _normalise_section_key(raw_section)
+        property_key = _normalise_key(raw_property)
+        matched = None
+        for candidate in _property_candidates(section_key, property_key):
+            matched = property_lookup.get((section_key, _normalise_key(candidate)))
+            if matched:
+                break
+        if not matched:
+            unresolved.append({'row': source_row, 'section': raw_section, 'property': raw_property})
+            return
+        section, prop = matched
+        template_unit = _normalise_text(prop.get('unit'))
+        value = raw_value
+        if source_unit and not _unit_compatible(template_unit, source_unit):
+            converted = _try_convert_unit(raw_value, source_unit, template_unit)
+            if converted is None:
+                unresolved.append({
+                    'row': source_row,
+                    'section': raw_section,
+                    'property': raw_property,
+                    'source_unit': source_unit,
+                    'template_unit': template_unit,
+                })
+                return
+            value = converted
+        records.append({
+            'case_name': case_name,
+            'source_filename': source_filename,
+            'sheet_name': 'CSV',
+            'section_key': _normalise_key(section.get('key') or section.get('label')).replace(' ', '_'),
+            'section_label': _normalise_text(section.get('label')),
+            'row_index': int(prop.get('row') or 0),
+            'property_name': _normalise_text(prop.get('property')),
+            'unit': template_unit,
+            'stream_id': stream_id,
+            'source_stream_id': stream_id,
+            'stream_description': _normalise_text(template_streams[stream_id].get('description')),
+            'value_text': str(value),
+        })
+
+    if stream_col is not None and value_col is not None:
+        detected_format = 'csv_long'
+        for row_number, row in enumerate(rows[1:], start=2):
+            padded = row + [''] * (len(headers) - len(row))
+            if case_col is not None and _normalise_text(padded[case_col]):
+                case_name = _canonical_case_name(padded[case_col])
+            append_record(
+                row_number,
+                padded[stream_col],
+                padded[section_col] if section_col is not None else 'General',
+                padded[property_col],
+                padded[unit_col] if unit_col is not None else '',
+                padded[value_col],
+            )
+    else:
+        detected_format = 'csv_wide'
+        metadata_cols = {index for index in (property_col, unit_col, section_col, case_col) if index is not None}
+        stream_columns = [
+            (index, header) for index, header in enumerate(headers)
+            if index not in metadata_cols and header in template_streams
+        ]
+        if not stream_columns:
+            raise ValueError('CSV wide format requires stream IDs as column headers.')
+        for row_number, row in enumerate(rows[1:], start=2):
+            padded = row + [''] * (len(headers) - len(row))
+            if case_col is not None and _normalise_text(padded[case_col]):
+                case_name = _canonical_case_name(padded[case_col])
+            for column_index, stream_id in stream_columns:
+                append_record(
+                    row_number,
+                    stream_id,
+                    padded[section_col] if section_col is not None else 'General',
+                    padded[property_col],
+                    padded[unit_col] if unit_col is not None else '',
+                    padded[column_index],
+                )
+
+    return {
+        'case_name': case_name,
+        'sheet_name': 'CSV',
+        'detected_format': detected_format,
+        'stream_count': len({record['stream_id'] for record in records}),
+        'record_count': len(records),
+        'records': records,
+        'exceptions': {
+            'unresolved_mappings': unresolved[:120],
+            'unresolved_mappings_count': len(unresolved),
+        },
+        'stream_mapping': {
+            'source_stream_count': len({record['source_stream_id'] for record in records}) + len(ignored_streams),
+            'mapped_source_stream_count': len({record['source_stream_id'] for record in records}),
+            'ignored_source_stream_count': len(ignored_streams),
+            'ignored_source_streams': sorted(ignored_streams)[:120],
             'template_stream_count': len(template_streams),
         },
     }
@@ -890,6 +1091,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
         'heavy_liquid': 'Aqueous Phase',
     }
 
+    detected_format = 'normalized_summary' if normalized_summary else 'phase_workbook'
     if normalized_summary:
         phase_data = {
             key: {'layout': {'header_row': 1}, 'stream_ids': [], 'rows': {}}
@@ -913,6 +1115,14 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
             else:
                 phase_data[key] = {'stream_ids': [], 'rows': {}, 'layout': None}
         source_stream_ids = phase_data['general']['stream_ids'] or phase_data['vapour']['stream_ids'] or phase_data['light_liquid']['stream_ids']
+        if not source_stream_ids:
+            adaptive_sheet = _pick_case_sheet(wb, HMB_CASE_PARSER_CONFIG['preferred_sheet_names'])
+            adaptive_data = _parse_phase_property_sheet(adaptive_sheet)
+            if adaptive_data.get('stream_ids'):
+                detected_format = 'adaptive_excel_matrix'
+                source_stream_ids = adaptive_data['stream_ids']
+                phase_data = {key: adaptive_data for key in sheet_map}
+                sheet_map = {key: adaptive_sheet.title for key in sheet_map}
 
     template_sections = (template_profile_payload or {}).get('sections', [])
     template_streams = (template_profile_payload or {}).get('stream_columns', [])
@@ -1131,7 +1341,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
     return {
         'case_name': case_name,
         'sheet_name': 'Conditions' if normalized_summary else 'Overall',
-        'detected_format': 'normalized_summary' if normalized_summary else 'phase_workbook',
+        'detected_format': detected_format,
         'stream_count': len(mapped_source_stream_ids),
         'record_count': len(records),
         'records': records,
