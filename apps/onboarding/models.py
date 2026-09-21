@@ -438,6 +438,26 @@ class OffboardingRecord(models.Model):
         return f"{self.employee_name} - Exit on {self.last_working_day} ({self.status})"
 
 
+class LifecycleCaseDeletion(models.Model):
+    """Deletion audit and identity marker preventing automatic case recreation."""
+
+    workflow = models.CharField(max_length=20, choices=[('onboarding', 'Onboarding'), ('offboarding', 'Offboarding')])
+    record_id = models.PositiveBigIntegerField()
+    canonical_employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='lifecycle_case_deletions',
+    )
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='lifecycle_case_deletions')
+    employee_email = models.EmailField(blank=True, db_index=True)
+    employee_number = models.CharField(max_length=100, blank=True, db_index=True)
+    deleted_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='deleted_lifecycle_cases')
+    deleted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'onboarding_lifecycle_case_deletion'
+        constraints = [models.UniqueConstraint(fields=['workflow', 'record_id'], name='unique_lifecycle_case_deletion')]
+
+
 class Equipment(models.Model):
     """
     Equipment assigned to employees (onboarding) or returned (offboarding)

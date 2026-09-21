@@ -188,7 +188,20 @@ class ChecklistSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class OnboardingRecordSerializer(serializers.ModelSerializer):
+class LifecycleCaseSerializer(serializers.ModelSerializer):
+    can_delete = serializers.SerializerMethodField(read_only=True)
+
+    def get_can_delete(self, obj):
+        from .rbac import lifecycle_case_delete_allowed
+        request = self.context.get('request')
+        if request is None:
+            return False
+        if not hasattr(request, '_lifecycle_case_can_delete'):
+            request._lifecycle_case_can_delete = lifecycle_case_delete_allowed(request.user)
+        return request._lifecycle_case_can_delete
+
+
+class OnboardingRecordSerializer(LifecycleCaseSerializer):
     """
     Onboarding record with nested equipment, documents, access, and checklist
     Includes passport photo upload support
@@ -223,7 +236,7 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
             'equipment', 'documents', 'access_records', 'checklist_items',
             'days_until_joining', 'days_since_initiated',
             'photo', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename',
-            'engineer_profile', 'checklist_stage_permissions'
+            'engineer_profile', 'checklist_stage_permissions', 'can_delete'
         ]
         read_only_fields = ['status', 'progress_percentage', 'actual_completion_date', 'canonical_employee', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename']
     
@@ -257,7 +270,7 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
         return onboarding_stage_permissions(getattr(request, 'user', None), obj)
 
 
-class OnboardingRecordListSerializer(serializers.ModelSerializer):
+class OnboardingRecordListSerializer(LifecycleCaseSerializer):
     """
     Lightweight serializer for list views (no nested data)
     """
@@ -284,7 +297,7 @@ class OnboardingRecordListSerializer(serializers.ModelSerializer):
             'days_until_joining',
             'equipment_count', 'documents_count', 'access_count',
             'checklist_count', 'checklist_completed_count',
-            'photo_url', 'photo_original_filename'
+            'photo_url', 'photo_original_filename', 'can_delete'
         ]
     
     def get_days_until_joining(self, obj):
@@ -293,7 +306,7 @@ class OnboardingRecordListSerializer(serializers.ModelSerializer):
         return delta.days
 
 
-class OffboardingRecordSerializer(serializers.ModelSerializer):
+class OffboardingRecordSerializer(LifecycleCaseSerializer):
     """
     Offboarding record with nested equipment, documents, access, and checklist
     """
@@ -348,7 +361,7 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
             # Nested data
             'equipment', 'documents', 'access_records', 'checklist_items',
             'days_until_exit', 'days_since_initiated', 'checklist_stage_permissions',
-            'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions', 'can_project_manager_decide'
+            'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions', 'can_project_manager_decide', 'can_delete'
         ]
         read_only_fields = [
             'canonical_employee', 'status', 'progress_percentage', 'actual_completion_date',
@@ -453,7 +466,7 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
         return delta.days
 
 
-class OffboardingRecordListSerializer(serializers.ModelSerializer):
+class OffboardingRecordListSerializer(LifecycleCaseSerializer):
     """
     Lightweight serializer for list views (no nested data)
     """
@@ -486,7 +499,7 @@ class OffboardingRecordListSerializer(serializers.ModelSerializer):
             'days_until_exit',
             'equipment_count', 'documents_count', 'access_count',
             'checklist_count', 'checklist_completed_count',
-            'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions'
+            'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions', 'can_delete'
         ]
 
     def get_ongoing_projects(self, obj):
