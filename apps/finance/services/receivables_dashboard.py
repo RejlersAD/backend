@@ -14,6 +14,7 @@ from django.db.models.functions import Trim, Upper
 from django.utils import timezone
 
 from apps.rbac.action_policy import module_action_allowed
+from apps.invoice_tracker.services.receivable_balance import receivable_balance
 from .command_center import ROUTES, _payable_queryset
 
 
@@ -114,7 +115,7 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
     exclusions = {'overdue_outside_window': 0, 'invoice_date_unknown': 0,
                   'invoice_date_outside_window': 0}
     fields = ['id', 'invoice_number', 'invoice_date', 'due_date', 'payment_status']
-    fields += (['account', 'company', 'pm', 'balance_to_be_received', 'actual_payment_received'] if ar
+    fields += (['account', 'company', 'pm', 'invoice_amount', 'actual_payment_received'] if ar
                else ['total_amount', 'paid_amount', 'procurement_status'])
     metadata = queryset.aggregate(invoice_count=Count('pk'), updated=Max('updated_at'))
     for row in queryset.order_by().values(*fields).iterator(chunk_size=1000):
@@ -123,7 +124,7 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
         if not ar and row['procurement_status'] in ('rejected', 'closed'):
             continue
         if ar:
-            balance = row['balance_to_be_received']
+            balance = receivable_balance(row['invoice_amount'], row['actual_payment_received'])
         else:
             balance = (row['total_amount'] - row['paid_amount']
                        if row['total_amount'] is not None and row['paid_amount'] is not None else None)
@@ -132,7 +133,7 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
         invoice_month = invoice_date.strftime('%Y-%m') if invoice_date else None
         if ar:
             if invoice_month in cohorts and invoice_date <= as_of:
-                cohorts[invoice_month]['paid'].add(row['actual_payment_received'])
+                cohorts[invoice_month]['paid'].add(row['actual_payment_received'] or Decimal('0'))
                 if is_open:
                     cohorts[invoice_month]['unpaid'].add(balance)
             elif invoice_date is None:
@@ -265,16 +266,16 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
         })} for month in month_keys],
         'chart_exclusions': {kind: value['chart_exclusions'] for kind, value in summaries.items()},
         'definitions': {
-            'balance_basis': 'Current recorded invoice balances aged against the selected reference date; this is not a historical balance sheet.',
+            'balance_basis': 'Current invoice balances are Invoice Amount (L) minus Actual Payment Received (AA), aged against the selected reference date. Blank receipts count as zero; a missing invoice amount remains unknown. This is not a historical balance sheet.',
             'currency': 'Amounts remain in their original invoice currency. No currency conversion is applied.',
             'company': 'Customer identity and grouping use the recorded COMPANY column, trimmed of surrounding spaces. Account is retained separately and is never a fallback customer name. This is not a verified legal-entity consolidation.',
             'period': 'The period limits chart months only. KPI cards and customer ageing include all current open balances.',
-            'unpaid': 'Positive or unknown balances on unsettled customer invoices; paid, cancelled and credit-note records are excluded.',
+            'unpaid': 'Positive or unknown calculated balances on unsettled customer invoices; paid, cancelled and credit-note records are excluded. The stored Balance to be received (Y) is not used.',
             'ageing': 'Due today and future due dates are current. Overdue thresholds are strictly more than 0, 30 and 90 days. Unknown due dates remain separate.',
             'known_amount': 'Subtotal of recorded balances; missing amounts remain unknown. An empty eligible group is zero.',
             'shares': 'Customer shares use the recorded unpaid subtotal; they are partial when balances are missing.',
             'overdue_by_month': 'Current overdue balances grouped by contractual due month within the selected window; not historical monthly balances.',
-            'paid_unpaid_by_month': 'Current recorded receipts and open balances grouped by invoice issue month; not monthly cash flow. Cancelled and credit-note records are excluded.',
+            'paid_unpaid_by_month': 'Actual Payment Received (AA), with blanks counted as zero, and positive or unknown Invoice Amount (L) minus Actual Payment Received (AA) balances grouped by invoice issue month; not monthly cash flow. Cancelled and credit-note records are excluded.',
             'priority': 'Up to five open invoices ordered by days past due, recorded balance and invoice number. Owner is the recorded project manager, not an assigned collection owner.',
             'payables': 'Active supplier invoice balances preserve the existing finance visibility scope; rejected and closed records are excluded.',
         },

@@ -1,5 +1,5 @@
 """Customer invoice table permissions, paging and explicit monetary bases."""
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -25,7 +25,7 @@ class CustomerInvoiceRegisterTests(TestCase):
     grant = command_center_tests.FinanceCommandCenterTests.grant
     deny = command_center_tests.FinanceCommandCenterTests.deny
 
-    def invoice(self, number, *, amount='100', home='100', due='100', **fields):
+    def invoice(self, number, *, amount='100', home='100', due=None, **fields):
         defaults = {
             'invoice_number': number, 'account': 'Customer', 'company': 'Entity',
             'invoice_date': date(2026, 9, 21), 'due_date': date(2026, 10, 21),
@@ -33,6 +33,7 @@ class CustomerInvoiceRegisterTests(TestCase):
             'invoice_amount': Decimal(amount) if amount is not None else None,
             'invoice_amount_aed': Decimal(home) if home is not None else None,
             'balance_to_be_received': Decimal(due) if due is not None else None,
+            'actual_payment_received': Decimal(amount) - Decimal(due) if amount is not None and due is not None else None,
         }
         item = CustomerInvoice(**{**defaults, **fields})
         item.save(_skip_recompute=True)
@@ -101,7 +102,7 @@ class CustomerInvoiceRegisterTests(TestCase):
         self.assertEqual({row['payment_status_label'] for row in data['rows']}, {'Paid', 'Pending'})
         self.assertIn('do not filter this register', data['definitions']['period'])
 
-    def test_original_amount_fallback_is_explicit_and_preserves_zero(self):
+    def test_original_amount_uses_invoice_amount_only_and_preserves_zero(self):
         self.grant('finance_overview', 'finance_outgoing')
         self.invoice('PRIMARY', amount='50', grand_total=Decimal('999'))
         self.invoice('FALLBACK', amount=None, grand_total=Decimal('25'))
@@ -111,11 +112,11 @@ class CustomerInvoiceRegisterTests(TestCase):
         rows = {row['invoice_number']: row for row in data['rows']}
         self.assertEqual(rows['PRIMARY']['amount'], '50.00')
         self.assertEqual(rows['PRIMARY']['amount_basis'], 'invoice_amount')
-        self.assertEqual(rows['FALLBACK']['amount'], '25.00')
-        self.assertEqual(rows['FALLBACK']['amount_basis'], 'grand_total')
+        self.assertIsNone(rows['FALLBACK']['amount'])
+        self.assertEqual(rows['FALLBACK']['amount_basis'], 'not_recorded')
         self.assertEqual(rows['ZERO']['amount'], '0.00')
         self.assertIsNone(rows['UNKNOWN']['amount'])
-        self.assertEqual(data['totals']['amount'], {'amount': None, 'known_amount': '75.00', 'count': 4, 'missing_count': 1, 'partial': True, 'currency': 'AED'})
+        self.assertEqual(data['totals']['amount'], {'amount': None, 'known_amount': '50.00', 'count': 4, 'missing_count': 2, 'partial': True, 'currency': 'AED'})
 
     def test_foreign_home_due_is_unknown_and_persisted_home_invoice_amount_is_not_recomputed(self):
         self.grant('finance_overview', 'finance_outgoing')
@@ -139,7 +140,7 @@ class CustomerInvoiceRegisterTests(TestCase):
         data = self.report()
         self.assertEqual(data['rows'][0]['amount'], '10.00')
         self.assertIsNone(data['rows'][0]['amount_home'])
-        self.assertIsNone(data['rows'][0]['amount_due_home'])
+        self.assertEqual(data['rows'][0]['amount_due_home'], '10.00')
         self.assertIsNone(data['totals']['amount_home']['known_amount'])
         self.invoice('UNKNOWN-CURRENCY', amount='900', home='70', due='900', currency='')
         unknown = self.report(currency='UNSPECIFIED')
@@ -148,7 +149,7 @@ class CustomerInvoiceRegisterTests(TestCase):
         self.assertEqual(unknown['totals']['amount_home']['amount'], '70.00')
         self.assertIsNone(unknown['rows'][0]['amount_due_home'])
 
-    def test_foreign_zero_balance_is_known_home_zero_but_paid_status_does_not_invent_zero(self):
+    def test_foreign_calculated_zero_is_known_home_zero_but_paid_status_does_not_invent_zero(self):
         self.grant('finance_overview', 'finance_outgoing')
         self.invoice('SETTLED', currency='USD', due='0', payment_status='paid')
         self.invoice('ZERO-PENDING', currency='USD', due='0', payment_status='pending')
@@ -158,7 +159,7 @@ class CustomerInvoiceRegisterTests(TestCase):
         rows = {row['invoice_number']: row for row in data['rows']}
         for number in ['SETTLED', 'ZERO-PENDING']:
             self.assertEqual(rows[number]['amount_due_home'], '0.00')
-            self.assertEqual(rows[number]['amount_due_home_basis'], 'zero_recorded_balance')
+            self.assertEqual(rows[number]['amount_due_home_basis'], 'zero_calculated_balance')
         self.assertIsNone(rows['PAID-UNKNOWN']['amount_due_home'])
         self.assertIsNone(rows['POSITIVE']['amount_due_home'])
         self.assertEqual(data['totals']['amount_due_home'], {'amount': None, 'known_amount': '0.00', 'count': 4, 'missing_count': 2, 'partial': True, 'currency': 'AED'})
@@ -238,3 +239,104 @@ class CustomerInvoiceRegisterTests(TestCase):
         self.assertEqual(response.data['source']['source_updated_at'], invoice.updated_at.isoformat())
         self.assertEqual([row['sql'] for row in queries if row['sql'].lstrip().upper().startswith(('INSERT ', 'UPDATE ', 'DELETE '))], [])
         self.assertEqual(self.client.post(URL, {}).status_code, 403)
+
+    def test_formula_controls_home_due_totals_and_sort_without_stored_balance_fallback(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        self.invoice('TEN', amount='100', actual_payment_received=Decimal('90'),
+                     balance_to_be_received=Decimal('999'), grand_total=Decimal('9000'))
+        self.invoice('FIFTY', amount='60', actual_payment_received=Decimal('10'),
+                     balance_to_be_received=Decimal('0'))
+        self.invoice('OVERPAID', amount='40', actual_payment_received=Decimal('60'),
+                     balance_to_be_received=Decimal('900'))
+        self.invoice('UNKNOWN', amount=None, actual_payment_received=Decimal('5'),
+                     balance_to_be_received=Decimal('700'), grand_total=Decimal('500'))
+        ascending = self.report(ordering='amount_due_home')
+        descending = self.report(ordering='-amount_due_home')
+        self.assertEqual([row['invoice_number'] for row in ascending['rows']],
+                         ['OVERPAID', 'TEN', 'FIFTY', 'UNKNOWN'])
+        self.assertEqual([row['invoice_number'] for row in descending['rows']],
+                         ['FIFTY', 'TEN', 'OVERPAID', 'UNKNOWN'])
+        self.assertEqual([row['amount_due_home'] for row in ascending['rows']],
+                         ['-20.00', '10.00', '50.00', None])
+        self.assertEqual(ascending['totals']['amount_due_home'], {
+            'amount': None, 'known_amount': '40.00', 'count': 4,
+            'missing_count': 1, 'partial': True, 'currency': 'AED',
+        })
+        self.assertEqual(ascending['totals'], descending['totals'])
+        self.assertEqual(ascending['totals']['actual_payment_received']['amount'], '165.00')
+
+    def test_receipt_totals_cover_all_pages_and_preserve_blank_rows_without_inventing_fx(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        self.invoice('BLANK-RECEIPT', amount='100', actual_payment_received=None,
+                     balance_to_be_received=Decimal('9000'), currency='USD')
+        for index in range(8):
+            self.invoice(f'RECEIPT-{index}', actual_payment_received=Decimal('5'), currency='USD')
+        first = self.report(currency='USD', page=1)
+        second = self.report(currency='USD', page=2)
+        self.assertIsNone(first['rows'][0]['actual_payment_received'])
+        self.assertIsNone(first['rows'][0]['amount_due_home'])
+        self.assertEqual(first['totals'], second['totals'])
+        self.assertEqual(first['totals']['actual_payment_received'], {
+            'amount': '40.00', 'known_amount': '40.00', 'count': 9,
+            'missing_count': 0, 'partial': False, 'currency': 'USD',
+        })
+        self.assertIn('blank receipts as zero', first['definitions']['actual_payment_received'])
+
+    def test_extended_columns_and_overdue_day_sort_use_selected_date_without_writes(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        reference = date(2026, 9, 21)
+        recorded = self.invoice(
+            'OVERDUE', amount='100', home='367.25', due_date=reference - timedelta(days=40),
+            invoice_sent_date=date(2026, 7, 2), project_name='Recorded project',
+            payment_terms='30 days', pm='Recorded PM', days_overdue=999,
+            payment_date=date(2026, 9, 3), actual_payment_received=Decimal('25'),
+            remarks='Recorded note',
+        )
+        self.invoice('PAID', payment_status='paid', due_date=reference - timedelta(days=80))
+        self.invoice('FUTURE', due_date=reference + timedelta(days=5))
+        self.invoice('NO-DUE', due_date=None)
+        with CaptureQueriesContext(connection) as queries:
+            descending = self.report(as_of=reference.isoformat(), ordering='-days_overdue')
+        rows = {row['invoice_number']: row for row in descending['rows']}
+        row = rows['OVERDUE']
+        for key, expected in {
+            'invoice_sent_date': '2026-07-02', 'project_name': 'Recorded project',
+            'payment_terms': '30 days', 'pm': 'Recorded PM', 'days_overdue': 40,
+            'payment_date': '2026-09-03', 'actual_payment_received': '25.00',
+            'remarks': 'Recorded note', 'invoice_amount': '100.00', 'invoice_amount_aed': '367.25',
+        }.items():
+            self.assertEqual(row[key], expected, key)
+        self.assertEqual(rows['PAID']['days_overdue'], 0)
+        self.assertEqual(rows['FUTURE']['days_overdue'], 0)
+        self.assertIsNone(rows['NO-DUE']['days_overdue'])
+        self.assertEqual(descending['as_of_date'], '2026-09-21')
+        self.assertEqual([item['invoice_number'] for item in descending['rows']],
+                         ['OVERDUE', 'PAID', 'FUTURE', 'NO-DUE'])
+        ascending = self.report(as_of='2026-09-21', ordering='days_overdue')
+        self.assertEqual([item['invoice_number'] for item in ascending['rows']],
+                         ['PAID', 'FUTURE', 'OVERDUE', 'NO-DUE'])
+        earlier = self.report(as_of='2026-08-01')
+        self.assertEqual(earlier['pagination']['count'], 4)
+        self.assertEqual(earlier['totals'], descending['totals'])
+        self.assertEqual(next(item for item in earlier['rows'] if item['invoice_number'] == 'OVERDUE')['days_overdue'], 0)
+        self.assertEqual([q['sql'] for q in queries if q['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))], [])
+        recorded.refresh_from_db()
+        self.assertEqual(recorded.days_overdue, 999)
+
+    def test_additional_columns_support_server_ordering_and_date_validation(self):
+        from django.utils import timezone
+
+        self.grant('finance_overview', 'finance_outgoing')
+        self.invoice('A', invoice_sent_date=date(2026, 1, 1), project_name='Alpha',
+                     payment_terms='10 days', pm='Alpha', payment_date=date(2026, 1, 1),
+                     actual_payment_received=Decimal('1'), remarks='Alpha')
+        self.invoice('Z', invoice_sent_date=date(2026, 2, 1), project_name='Zeta',
+                     payment_terms='20 days', pm='Zeta', payment_date=date(2026, 2, 1),
+                     actual_payment_received=Decimal('2'), remarks='Zeta')
+        for field in ('invoice_sent_date', 'project_name', 'payment_terms', 'pm',
+                      'payment_date', 'actual_payment_received', 'remarks'):
+            with self.subTest(field=field):
+                self.assertEqual([row['invoice_number'] for row in self.report(ordering=field)['rows']], ['A', 'Z'])
+                self.assertEqual([row['invoice_number'] for row in self.report(ordering='-' + field)['rows']], ['Z', 'A'])
+        for as_of in ('bad', '1901-01-01', (timezone.localdate() + timedelta(days=1)).isoformat()):
+            self.assertEqual(self.client.get(URL, {'as_of': as_of}).status_code, 400)

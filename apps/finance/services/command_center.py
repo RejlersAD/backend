@@ -9,6 +9,7 @@ from django.db.models import Case, Count, DecimalField, F, Max, Min, Q, Sum, Val
 from django.utils import timezone
 
 from apps.rbac.action_policy import module_action_allowed
+from apps.invoice_tracker.services.receivable_balance import annotate_receivable_balance
 
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,8 @@ def _conditions(as_of):
 def _source_summary(kind, source, as_of):
     active = source.exclude(payment_status__in=['paid', 'cancelled'])
     if kind == 'receivables':
-        active = active.exclude(payment_status='credit_note')
-        balance = F('balance_to_be_received')
+        active = annotate_receivable_balance(active.exclude(payment_status='credit_note'))
+        balance = F('calculated_receivable_balance')
     else:
         active = active.exclude(procurement_status__in=['rejected', 'closed'])
         balance = Case(
@@ -149,7 +150,7 @@ def _source_summary(kind, source, as_of):
         'unknown_due_date_count': sum(row['unknown_due_date_count'] for row in rows),
         'oldest_due_date': min(dates) if dates else None, 'by_currency': rows,
         'definition': ('Unsettled positive recorded balances and invoices with unknown balances; paid and cancelled records excluded. Counts include unknown balances. Negative and zero balances are excluded.'
-                       + (' Supplier invoices marked rejected or closed are also excluded; these are active workflow balances, not an approved liability ledger.' if kind == 'payables' else ' Credit-note records are also excluded.')),
+                       + (' Supplier invoices marked rejected or closed are also excluded; these are active workflow balances, not an approved liability ledger.' if kind == 'payables' else ' Receivables use Invoice Amount (L) minus Actual Payment Received (AA), treating a missing payment as zero. Missing Invoice Amount stays unknown; stored balance and grand total are not substitutes. Credit-note records are also excluded.')),
         'due_30d_definition': 'Contractual due dates from today through 30 days ahead, inclusive; this is not a payment forecast.',
     }
 
