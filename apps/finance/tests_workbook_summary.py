@@ -6,7 +6,6 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
-from xml.etree import ElementTree
 from zipfile import ZipFile
 
 from django.core.management import call_command
@@ -28,7 +27,7 @@ class WorkbookSummaryTests(SimpleTestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / 'source.xlsx'
 
-    def workbook(self, rows):
+    def workbook(self, rows, formats=None):
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = 'External Invoice '
@@ -37,6 +36,8 @@ class WorkbookSummaryTests(SimpleTestCase):
         for number, values in enumerate(rows, 6):
             for column, value in values.items():
                 sheet[f'{column}{number}'] = value
+        for coordinate, number_format in (formats or {}).items():
+            sheet[coordinate].number_format = number_format
         workbook.save(self.path)
         workbook.close()
 
@@ -51,6 +52,12 @@ class WorkbookSummaryTests(SimpleTestCase):
         })
         self.assertEqual(data['invoice_count'], 4404)
         self.assertEqual([row['count'] for row in data['payment_status']], [3895, 368, 58, 34, 49])
+        self.assertEqual([row['amount_aed'] for row in data['payment_status']], [
+            '412405138.81', '39497085.61', '6401792.89', '2257559.79', '5589813.06',
+        ])
+        self.assertEqual(data['payment_status'][0]['amount_coverage']['error_count'], 2)
+        self.assertEqual(data['payment_status'][1]['amount_coverage']['blank_count'], 5)
+        self.assertEqual(data['payment_status_rounding_adjustment'], '0.00')
         self.assertEqual(data['source']['sha256'], '308a453a0bf71490174f6699760cfb670186e1731adf8f3843eff55b12840e43')
         self.assertEqual(data['source']['first_row'], 6)
         self.assertEqual(data['source']['last_row'], 4409)
@@ -62,6 +69,118 @@ class WorkbookSummaryTests(SimpleTestCase):
             'actual_payment_received': {'numeric_count': 3865, 'blank_count': 527, 'text_count': 12, 'error_count': 0},
         })
         self.assertNotIn('C:\\', data['source']['file_name'])
+        groups = {(row['currency'], row['currency_status']): row for row in data['currency_breakdown']}
+        expected = {
+            ('AED', 'recorded'): ('256727607.14', '236869176.92', 2020, 1829),
+            ('EUR', 'recorded'): ('13008426.71', '9592153.57', 1707, 1462),
+            ('SEK', 'recorded'): ('219000.00', '219000.00', 1, 1),
+            ('USD', 'recorded'): ('41706207.76', '36175812.14', 639, 549),
+            (None, 'conflict'): ('674340.40', '475467.22', 11, 10),
+            (None, 'not_recorded'): ('3146096.40', '2428132.15', 19, 14),
+        }
+        self.assertEqual(set(groups), set(expected))
+        for identity, (invoice, receipt, invoice_count, receipt_count) in expected.items():
+            group = groups[identity]
+            self.assertEqual(group['invoice_amount'], invoice)
+            self.assertEqual(group['actual_payment_received'], receipt)
+            self.assertEqual(group['coverage']['invoice_amount']['numeric_count'], invoice_count)
+            self.assertEqual(group['coverage']['actual_payment_received']['numeric_count'], receipt_count)
+        self.assertEqual(data['currency_rounding_adjustment'], {
+            'invoice_amount': '0.00', 'actual_payment_received': '0.00',
+        })
+
+    def test_currency_classification_uses_each_amounts_own_explicit_sources(self):
+        self.workbook([
+            {'A': '1', 'L': 1, 'AA': 2, 'AE': ' usd '},
+            {'A': '2', 'L': 3, 'AA': 4},
+            {'A': '3', 'L': 5, 'AA': 6, 'AE': 'AED'},
+            {'A': '4', 'L': 0, 'AA': None, 'AE': 'Euro'},
+            {'A': '5', 'L': 7, 'AA': 8},
+            {'A': '6', 'L': 9, 'AA': 10, 'AE': '#VALUE!'},
+            {'A': '7', 'L': 11, 'AA': 12, 'AE': 'dollars'},
+            {'A': '8', 'L': 'GBP 12', 'AA': None, 'AE': 'GBP'},
+            {'A': '9', 'L': 0, 'AA': None},
+        ], formats={
+            'L6': '[$EUR] #,##0.00', 'AA6': '[$USD] #,##0.00',
+            'L7': '#,##0.00 [$\u20ac-1]', 'AA7': '[$AED] #,##0.00',
+            'AA8': '[$EUR] #,##0.00',
+            'L11': '[$USD] #,##0.00', 'AA11': '[$USD] #,##0.00',
+            'L12': '[$USD] #,##0.00', 'AA12': '[$USD] #,##0.00',
+            'L14': '[$SEK] #,##0.00', 'AA14': '[$USD] #,##0.00',
+        })
+        data = self.snapshot(14)
+        groups = {(row['currency'], row['currency_status']): row for row in data['currency_breakdown']}
+        self.assertEqual(groups[('EUR', 'recorded')]['invoice_amount'], '3.00')
+        self.assertIsNone(groups[('EUR', 'recorded')]['actual_payment_received'])
+        self.assertEqual(groups[('AED', 'recorded')]['invoice_amount'], '5.00')
+        self.assertEqual(groups[('AED', 'recorded')]['actual_payment_received'], '4.00')
+        self.assertEqual(groups[('USD', 'recorded')]['actual_payment_received'], '2.00')
+        self.assertIsNone(groups[('USD', 'recorded')]['invoice_amount'])
+        self.assertEqual(groups[(None, 'conflict')]['invoice_amount'], '1.00')
+        self.assertEqual(groups[(None, 'conflict')]['actual_payment_received'], '6.00')
+        self.assertEqual(groups[(None, 'not_recorded')]['invoice_amount'], '7.00')
+        self.assertEqual(groups[(None, 'not_recorded')]['actual_payment_received'], '8.00')
+        self.assertEqual(groups[(None, 'error')]['actual_payment_received'], '10.00')
+        self.assertEqual(groups[(None, 'unrecognized')]['invoice_amount'], '11.00')
+        self.assertEqual(groups[('SEK', 'recorded')]['invoice_amount'], '0.00')
+        self.assertIsNone(groups[('GBP', 'recorded')]['invoice_amount'])
+        self.assertEqual(groups[('GBP', 'recorded')]['coverage']['invoice_amount']['text_count'], 1)
+        for key in ('invoice_amount', 'actual_payment_received'):
+            self.assertEqual(sum(row['row_counts'][key] for row in groups.values()), 9)
+
+    def test_ambiguous_or_disagreeing_format_markers_remain_unassigned(self):
+        self.workbook([
+            {'A': '1', 'L': 3, 'AA': 4},
+            {'A': '2', 'L': 5, 'AA': 6},
+        ], formats={
+            'L6': '[$$-409] #,##0.00', 'AA6': '#,##0.00',
+            'L7': '[$EUR] #,##0.00;[$USD] -#,##0.00',
+            'AA7': '"US DOLLAR" #,##0.00',
+        })
+        groups = {(row['currency'], row['currency_status']): row for row in self.snapshot(7)['currency_breakdown']}
+        self.assertEqual(groups[(None, 'not_recorded')]['invoice_amount'], '3.00')
+        self.assertEqual(groups[(None, 'conflict')]['invoice_amount'], '5.00')
+        self.assertEqual(groups[('USD', 'recorded')]['actual_payment_received'], '6.00')
+
+    def test_currency_subtotals_keep_exact_precision_and_report_rounding_difference(self):
+        self.workbook([
+            {'A': '1', 'L': .005, 'M': .005, 'AA': -.005, 'AE': 'EUR', 'R': 'Paid'},
+            {'A': '2', 'L': .005, 'M': .005, 'AA': -.005, 'AE': 'USD', 'R': 'New'},
+        ])
+        data = self.snapshot(7)
+        self.assertEqual(data['totals']['invoice_amount'], '0.01')
+        self.assertEqual([row['invoice_amount'] for row in data['currency_breakdown']], ['0.01', '0.01'])
+        self.assertEqual(data['currency_rounding_adjustment'], {
+            'invoice_amount': '-0.01', 'actual_payment_received': '0.01',
+        })
+        for key in ('invoice_amount', 'actual_payment_received'):
+            broken = deepcopy(data)
+            broken['currency_breakdown'][0]['exact_amounts'][key] = '100'
+            with self.assertRaises(ValueError):
+                validate_snapshot(broken)
+        broken = deepcopy(data)
+        broken['currency_breakdown'][0]['coverage']['invoice_amount']['numeric_count'] = 0
+        with self.assertRaises(ValueError):
+            validate_snapshot(broken)
+        self.assertEqual(data['payment_status_rounding_adjustment'], '-0.01')
+        self.assertEqual(data['totals']['invoice_amount_aed'], '0.01')
+        for field, value in [('amount_aed', '999'), ('exact_amount_aed', '999')]:
+            broken = deepcopy(data)
+            broken['payment_status'][0][field] = value
+            with self.assertRaises(ValueError):
+                validate_snapshot(broken)
+        broken = deepcopy(data)
+        broken['payment_status'][0]['amount_coverage']['numeric_count'] = 0
+        with self.assertRaises(ValueError):
+            validate_snapshot(broken)
+        broken = deepcopy(data)
+        broken['payment_status_rounding_adjustment'] = '0.00'
+        with self.assertRaises(ValueError):
+            validate_snapshot(broken)
+        broken = deepcopy(data)
+        broken['currency_rounding_adjustment']['invoice_amount'] = '0.00'
+        with self.assertRaises(ValueError):
+            validate_snapshot(broken)
 
     def test_generation_preserves_duplicate_rows_and_source_statuses(self):
         self.workbook([
@@ -82,6 +201,11 @@ class WorkbookSummaryTests(SimpleTestCase):
             'actual_payment_received': '2.00', 'project_count': 2,
         })
         self.assertEqual([row['count'] for row in data['payment_status']], [2, 1, 1, 1, 3])
+        self.assertEqual([row['amount_aed'] for row in data['payment_status']], [
+            '60.01', None, None, '-9.00', '0.00',
+        ])
+        self.assertEqual(data['payment_status'][1]['amount_coverage']['error_count'], 1)
+        self.assertEqual(data['payment_status'][2]['amount_coverage']['blank_count'], 1)
         self.assertEqual(data['other_statuses'], [
             {'label': '#VALUE!', 'count': 1}, {'label': 'Not recorded', 'count': 1},
             {'label': 'Offset', 'count': 1},
@@ -101,11 +225,10 @@ class WorkbookSummaryTests(SimpleTestCase):
             for info in source.infolist():
                 content = source.read(info.filename)
                 if info.filename == 'xl/worksheets/sheet1.xml':
-                    root = ElementTree.fromstring(content)
-                    ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
                     # The deliberately stale cached value must be preserved.
-                    root.find('.//s:c[@r="M6"]/s:v', ns).text = '8.123'
-                    content = ElementTree.tostring(root)
+                    uncached = b'<f>L6*3</f><v></v>'
+                    self.assertEqual(content.count(uncached), 1)
+                    content = content.replace(uncached, b'<f>L6*3</f><v>8.123</v>', 1)
                 target.writestr(info, content)
         self.path.write_bytes(replacement.getvalue())
         self.assertEqual(self.snapshot(6)['totals']['invoice_amount_aed'], '8.12')

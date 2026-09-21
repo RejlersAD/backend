@@ -23,6 +23,30 @@ numeric, blank, text and error cell counts for each amount column. Only aggregat
 and provenance are packaged; invoice numbers, customer names and project codes
 are not retained.
 
+The L and AA currency breakdowns are classified independently from each amount
+cell's explicit Excel currency format and column AE (`Inv. CUR`). When both
+sources state a code, they must agree; disagreements are retained in a separate
+conflict group. When only one source states a code it is used. Missing, invalid
+and error currencies remain explicit groups. Generic numeric/date formats and
+ambiguous dollar symbols do not imply a currency, and AA never inherits L's
+currency. Explicit aliases such as the euro symbol and lowercase codes are
+normalized; no exchange rates or amount ratios are used.
+
+Each currency group includes separate L/AA row counts, numeric/blank/text/error
+coverage, rounded amounts and exact Decimal sums. An amount is null when that
+group has no numeric cells; numeric zero remains zero. Each field's group counts
+and coverage reconcile to all invoice rows. Exact sums reconcile to the existing
+headline totals; `currency_rounding_adjustment` records any difference introduced
+by summing separately rounded group amounts. A source conflict retains its amount
+in the full-workbook total without assigning it to an unverified currency.
+
+Payment status amounts use the numeric cached M (`Inv Amt. (AED)`) values, so all
+status rows share the AED basis. Each row includes its known subtotal, exact
+Decimal sum and numeric/blank/text/error coverage. Missing amounts remain null;
+recorded zero and negative amounts are preserved. Group coverage and exact sums
+reconcile to the full M total. `payment_status_rounding_adjustment` records any
+difference between separately rounded status amounts and the headline AED total.
+
 To regenerate from the same source, run from the backend directory:
 
 ```powershell
