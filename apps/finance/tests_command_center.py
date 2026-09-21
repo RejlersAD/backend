@@ -59,7 +59,10 @@ class FinanceCommandCenterTests(TestCase):
 
     def ar(self, number, balance='100', currency='AED', due=TODAY, status='pending'):
         item = CustomerInvoice(invoice_number=number, currency=currency, due_date=due,
-                               payment_status=status, balance_to_be_received=Decimal(balance) if balance is not None else None)
+                               payment_status=status,
+                               invoice_amount=Decimal(balance) if balance is not None else None,
+                               actual_payment_received=Decimal('0'),
+                               balance_to_be_received=Decimal(balance) if balance is not None else None)
         item.save(_skip_recompute=True)
         return item
 
@@ -281,3 +284,28 @@ class FinanceCommandCenterTests(TestCase):
         with patch('apps.finance.services.command_center.timezone.now', return_value=datetime(2026, 9, 13, 20, 30, tzinfo=dt_timezone.utc)), override_settings(TIME_ZONE='Asia/Dubai'):
             data = build_command_center(self.user)
         self.assertEqual(data['as_of_date'], '2026-09-14')
+
+    def test_receivables_summary_uses_invoice_amount_less_receipts_and_ignores_stored_balance(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        for number, amount, payment, currency in [
+            ('REDUCED', '100', '70', 'AED'), ('NO-RECEIPT', '20', None, 'AED'),
+            ('SETTLED', '50', '50', 'AED'), ('OVERPAID', '10', '20', 'AED'),
+            ('UNKNOWN-L', None, '10', 'USD'),
+        ]:
+            item = CustomerInvoice(
+                invoice_number=number, currency=currency, payment_status='pending',
+                due_date=TODAY - timedelta(days=31),
+                invoice_amount=Decimal(amount) if amount is not None else None,
+                actual_payment_received=Decimal(payment) if payment is not None else None,
+                balance_to_be_received=Decimal('999'), grand_total=Decimal('888'),
+            )
+            item.save(_skip_recompute=True)
+        source = self.report()['sources']['receivables']
+        rows = {row['currency']: row for row in source['by_currency']}
+        self.assertEqual(source['open_count'], 3)
+        self.assertEqual(source['overdue_count'], 3)
+        self.assertEqual(rows['AED']['outstanding'], '50.00')
+        self.assertEqual(rows['AED']['overdue'], '50.00')
+        self.assertEqual(rows['AED']['invoice_count'], 2)
+        self.assertEqual(rows['USD']['missing_balance_count'], 1)
+        self.assertIsNone(rows['USD']['outstanding'])

@@ -8,6 +8,7 @@ from django.utils.dateparse import parse_date
 from rest_framework.exceptions import ValidationError
 
 from apps.finance.services.command_center import _source_summary
+from .receivable_balance import annotate_receivable_balance
 
 
 QUEUE_KEYS = ('all', 'open', 'overdue', 'due_soon', 'partial', 'paid')
@@ -17,7 +18,7 @@ FILTER_OPTION_LIMIT = 200
 
 def _open():
     return (~Q(payment_status__in=['paid', 'cancelled', 'credit_note'])
-            & (Q(balance_to_be_received__gt=0) | Q(balance_to_be_received__isnull=True)))
+            & (Q(calculated_receivable_balance__gt=0) | Q(calculated_receivable_balance__isnull=True)))
 
 
 def queue_conditions(as_of):
@@ -29,7 +30,7 @@ def queue_conditions(as_of):
         'due_soon': unsettled & Q(due_date__gte=as_of, due_date__lte=sunday),
         'partial': unsettled & (Q(payment_status='partial') | Q(actual_payment_received__gt=0)),
         'paid': Q(payment_status='paid') | (~Q(payment_status__in=['cancelled', 'credit_note'])
-                                          & Q(balance_to_be_received=0, grand_total__gt=0)),
+                                          & Q(calculated_receivable_balance=0, invoice_amount__gt=0)),
     }
 
 
@@ -62,6 +63,7 @@ def filter_collection_queryset(qs, params, *, as_of, include_queue=True):
     queue = params.get('queue') or 'all'
     if queue not in QUEUE_KEYS:
         raise ValidationError({'queue': 'Choose all, open, overdue, due_soon, partial or paid.'})
+    qs = annotate_receivable_balance(qs)
     currency = params.get('currency')
     if currency:
         currency = currency.strip().upper()
@@ -103,6 +105,7 @@ def _options(source, field):
 def build_collections_summary(source, *, full_source, queue='all', generated_at=None):
     now = generated_at or timezone.now()
     as_of = timezone.localtime(now).date()
+    source = annotate_receivable_balance(source)
     conditions = queue_conditions(as_of)
     counts = source.aggregate(**{key: Count('pk', filter=condition) for key, condition in conditions.items()})
     # Credit notes remain in the all-register count but are not collectible.
@@ -136,11 +139,11 @@ def build_collections_summary(source, *, full_source, queue='all', generated_at=
         },
         'queue_definitions': {
             'all': 'All register records, including cancelled invoices and credit notes.',
-            'open': 'Positive or unknown recorded balances, excluding paid, cancelled and credit-note records.',
+            'open': 'Positive or unknown Invoice Amount (L) minus Actual Payment Received (AA), treating missing payments as zero. Missing Invoice Amount stays unknown; stored balance and grand total are not substitutes. Paid, cancelled and credit-note records are excluded.',
             'overdue': 'Open invoices with a contractual due date before today; counts include unknown balances.',
             'due_soon': 'Open invoices due today through the end of the current local week (Sunday).',
             'partial': 'Open invoices recorded as partially paid or with a positive recorded payment received.',
-            'paid': 'Recorded paid status, or a known zero balance with a positive grand total, excluding cancelled and credit-note records.',
+            'paid': 'Recorded paid status, or a calculated zero balance with a positive Invoice Amount (L), excluding cancelled and credit-note records.',
         },
         'filter_options': {
             'companies': companies, 'project_managers': managers,

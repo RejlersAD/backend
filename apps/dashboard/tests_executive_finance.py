@@ -9,7 +9,9 @@ from django.db import connection
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
+from django.urls import path
 
+from apps.finance.command_center_views import FinanceReceivablesDashboardView
 from apps.finance.models import Invoice
 from apps.finance.services.customer_invoice_register import build_customer_invoice_register
 from apps.finance.services.receivables_dashboard import build_receivables_dashboard
@@ -20,12 +22,18 @@ from apps.rbac.models import (
     UserPermissionOverride, UserProfile, UserRole,
 )
 from apps.rbac.module_actions import ensure_module_actions
+from apps.rbac.route_guard import secure_module_endpoints
+from config.urls_executive_test import urlpatterns as executive_urlpatterns
 
 
 RECEIVABLES_URL = '/api/v1/dashboard/executive/receivables/'
 REGISTER_URL = '/api/v1/dashboard/executive/customer-invoices/'
 TODAY = date(2026, 9, 21)
 NOW = datetime(2026, 9, 21, 9, tzinfo=dt_timezone.utc)
+FINANCE_RECEIVABLES_URL = '/api/v1/finance/dashboard/receivables/'
+finance_urlpatterns = [path('api/v1/finance/dashboard/receivables/', FinanceReceivablesDashboardView.as_view())]
+secure_module_endpoints(finance_urlpatterns)
+urlpatterns = [*executive_urlpatterns, *finance_urlpatterns]
 
 
 @override_settings(ROOT_URLCONF='config.urls_executive_test')
@@ -65,11 +73,13 @@ class ExecutiveFinanceTests(TestCase):
 
     def invoice(self, number, balance='100', **fields):
         amount = Decimal(balance) if balance is not None else None
+        received = fields.get('actual_payment_received') or Decimal('0')
+        invoice_amount = None if amount is None else amount + received
         item = CustomerInvoice(**{
             'invoice_number': number, 'company': 'Customer company', 'account': 'Account code',
             'invoice_date': TODAY, 'due_date': TODAY - timedelta(days=31),
             'currency': 'AED', 'payment_status': 'pending',
-            'invoice_amount': amount, 'invoice_amount_aed': amount,
+            'invoice_amount': invoice_amount, 'invoice_amount_aed': invoice_amount,
             'balance_to_be_received': amount, **fields,
         })
         item.save(_skip_recompute=True)
@@ -182,8 +192,36 @@ class ExecutiveFinanceTests(TestCase):
         self.assertEqual(actual['customers'][0]['company'], 'Acme')
         self.assertEqual(actual['sources']['payables']['status'], 'unavailable')
         self.assertEqual(len(actual['overdue_by_month']), 6)
-        self.assertIn('Current recorded invoice balances', actual['definitions']['balance_basis'])
+        self.assertIn('Invoice Amount (L) minus Actual Payment Received (AA)', actual['definitions']['balance_basis'])
         self.assertFalse(actual['currency_conversion_applied'])
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_executive_and_finance_overdue_use_l_less_aa_with_stale_y(self):
+        self.grant('executive_dashboard', 'finance_overview', 'finance_outgoing')
+        self.invoice('PARTIAL', '9999', invoice_amount=Decimal('1000'),
+                     actual_payment_received=Decimal('300'), company='Acme')
+        self.invoice('BLANK-RECEIPT', '0', invoice_amount=Decimal('200'), company='Acme')
+        self.invoice('UNKNOWN-INVOICE', '8888', invoice_amount=None,
+                     grand_total=Decimal('8888'), company='Acme')
+        self.invoice('SETTLED', '7777', invoice_amount=Decimal('50'),
+                     actual_payment_received=Decimal('50'), company='Acme')
+        self.invoice('OTHER-CURRENCY', '50', currency='USD', company='Acme')
+        self.invoice('OTHER-COMPANY', '60', company='Other')
+
+        executive = self.report(company='Acme')
+        finance = self.report(FINANCE_RECEIVABLES_URL, company='Acme')
+        self.assertEqual(executive, finance)
+        self.assertEqual(executive['kpis']['overdue'], {
+            'amount': None, 'known_amount': '900.00', 'count': 3,
+            'missing_count': 1, 'partial': True,
+        })
+        self.assertEqual(executive['kpis']['over30']['known_amount'], '900.00')
+        self.assertEqual(executive['kpis']['over90']['amount'], '0.00')
+        self.assertEqual(executive['customers'][0]['known_amount'], '900.00')
+        self.assertEqual({row['invoice_number']: row['balance'] for row in executive['priority_invoices']}, {
+            'PARTIAL': '700.00', 'BLANK-RECEIPT': '200.00', 'UNKNOWN-INVOICE': None,
+        })
+        self.assertFalse(executive['currency_conversion_applied'])
 
     def test_register_pagination_sorting_and_totals_match_finance_builder(self):
         self.grant('executive_dashboard', 'finance_outgoing')

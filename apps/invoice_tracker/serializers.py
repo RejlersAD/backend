@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import CustomerInvoice, InvoiceAttachment
+from .services.receivable_balance import receivable_balance
 
 
 class InvoiceAttachmentSerializer(serializers.ModelSerializer):
@@ -23,10 +24,15 @@ class InvoiceAttachmentSerializer(serializers.ModelSerializer):
 
 
 class CustomerInvoiceSerializer(serializers.ModelSerializer):
+    calculated_receivable_balance = serializers.SerializerMethodField()
     attachments = InvoiceAttachmentSerializer(many=True, read_only=True)
     attachments_count = serializers.IntegerField(source='attachments.count', read_only=True)
     payment_status_label = serializers.CharField(source='get_payment_status_display', read_only=True)
     category_label = serializers.CharField(source='get_category_display', read_only=True)
+
+    def get_calculated_receivable_balance(self, obj):
+        balance = receivable_balance(obj.invoice_amount, obj.actual_payment_received)
+        return format(balance, '.2f') if balance is not None else None
 
     class Meta:
         model = CustomerInvoice

@@ -28,6 +28,8 @@ class ReceivablesDashboardTests(TestCase):
 
     def ar(self, number, balance='100', currency='AED', due=TODAY, status='pending', **fields):
         item = command_center_tests.FinanceCommandCenterTests.ar(self, number, balance, currency, due, status)
+        received = fields.get('actual_payment_received') or Decimal('0')
+        fields.setdefault('invoice_amount', None if balance is None else Decimal(balance) + received)
         for field, value in fields.items():
             setattr(item, field, value)
         if fields:
@@ -110,6 +112,73 @@ class ReceivablesDashboardTests(TestCase):
         self.assertEqual(data['customers'], [])
         self.assertEqual(data['priority_invoices'], [])
 
+    def test_every_receivable_exposure_uses_invoice_amount_less_receipts_not_stored_balance(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        common = {'company': 'Formula customer', 'invoice_date': date(2026, 9, 1)}
+        partial = self.ar('FORMULA-PARTIAL', '999', invoice_amount=Decimal('100'),
+                          actual_payment_received=Decimal('40'),
+                          due=TODAY - timedelta(days=91), **common)
+        blank_receipt = self.ar('FORMULA-BLANK-RECEIPT', '0', invoice_amount=Decimal('200'),
+                                due=TODAY - timedelta(days=31), **common)
+        missing_invoice = self.ar('FORMULA-MISSING-INVOICE', '400', invoice_amount=None,
+                                  grand_total=Decimal('700'), actual_payment_received=Decimal('50'),
+                                  due=TODAY - timedelta(days=10), **common)
+        self.ar('FORMULA-SETTLED', '999', invoice_amount=Decimal('50'),
+                actual_payment_received=Decimal('50'), due=TODAY - timedelta(days=100), **common)
+        self.ar('FORMULA-OVERPAID', '999', invoice_amount=Decimal('10'),
+                actual_payment_received=Decimal('20'), due=TODAY - timedelta(days=100), **common)
+
+        data = self.report()
+        for metric in ['unpaid', 'overdue']:
+            self.assertEqual(data['kpis'][metric], {
+                'amount': None, 'known_amount': '260.00', 'count': 3,
+                'missing_count': 1, 'partial': True,
+            })
+        self.assertEqual(data['kpis']['over30']['amount'], '260.00')
+        self.assertEqual(data['kpis']['over90']['amount'], '60.00')
+        self.assertEqual(data['customers'][0]['known_amount'], '260.00')
+        self.assertEqual(data['customers'][0]['overdue']['known_amount'], '260.00')
+        ageing = {row['id']: row['receivables'] for row in data['ageing']}
+        self.assertEqual(ageing['over90']['amount'], '60.00')
+        self.assertEqual(ageing['days_31_60']['amount'], '200.00')
+        self.assertIsNone(ageing['days_1_30']['known_amount'])
+        priority = {row['invoice_number']: row['balance'] for row in data['priority_invoices']}
+        self.assertEqual(priority, {
+            'FORMULA-PARTIAL': '60.00', 'FORMULA-BLANK-RECEIPT': '200.00',
+            'FORMULA-MISSING-INVOICE': None,
+        })
+        cohorts = {row['month']: row for row in data['paid_unpaid_by_month']}
+        self.assertEqual(cohorts['2026-09']['unpaid']['known_amount'], '260.00')
+        self.assertEqual(cohorts['2026-09']['paid'], {
+            'amount': '160.00', 'known_amount': '160.00', 'count': 5,
+            'missing_count': 0, 'partial': False,
+        })
+        monthly = {row['month']: row['receivables'] for row in data['overdue_by_month']}
+        self.assertEqual(monthly['2026-06']['amount'], '60.00')
+        self.assertEqual(monthly['2026-08']['amount'], '200.00')
+        self.assertEqual(data['sources']['receivables']['open_count'], 3)
+        for item, stored in [(partial, '999'), (blank_receipt, '0'), (missing_invoice, '400')]:
+            item.refresh_from_db()
+            self.assertEqual(item.balance_to_be_received, Decimal(stored))
+
+    def test_python_and_database_balance_calculation_agree_without_fallbacks(self):
+        from apps.invoice_tracker.models import CustomerInvoice
+        from apps.invoice_tracker.services.receivable_balance import (
+            annotate_receivable_balance, receivable_balance,
+        )
+
+        cases = [('100.25', '40.10', '60.15'), ('8.12', None, '8.12'),
+                 (None, '5', None), ('10', '20', '-10'), ('0', None, '0')]
+        for index, (invoice_amount, received, expected) in enumerate(cases):
+            amount = None if invoice_amount is None else Decimal(invoice_amount)
+            paid = None if received is None else Decimal(received)
+            invoice = self.ar(f'PARITY-{index}', '9999', invoice_amount=amount,
+                              actual_payment_received=paid)
+            annotated = annotate_receivable_balance(CustomerInvoice.objects.filter(pk=invoice.pk)).get()
+            expected_value = None if expected is None else Decimal(expected)
+            self.assertEqual(receivable_balance(amount, paid), expected_value)
+            self.assertEqual(annotated.calculated_receivable_balance, expected_value)
+
     def test_unknown_only_group_is_null_while_empty_group_is_zero(self):
         self.grant('finance_overview', 'finance_outgoing')
         self.ar('unknown', None, account='Missing')
@@ -151,7 +220,7 @@ class ReceivablesDashboardTests(TestCase):
         historical = self.report(as_of='2026-07-15', months=6)
         self.assertEqual(historical['kpis']['unpaid']['amount'], '700.00')
         self.assertEqual(historical['kpis']['overdue']['amount'], '500.00')
-        self.assertIn('Current recorded invoice balances', historical['definitions']['balance_basis'])
+        self.assertIn('Invoice Amount (L) minus Actual Payment Received (AA)', historical['definitions']['balance_basis'])
         self.assertEqual(historical['as_of_date'], '2026-07-15')
 
     def test_paid_unpaid_cohorts_use_invoice_issue_month_and_recorded_receipts(self):
@@ -163,7 +232,7 @@ class ReceivablesDashboardTests(TestCase):
         self.ar('CANCELLED', '999', status='cancelled', invoice_date=date(2026, 7, 1), actual_payment_received=Decimal('999'))
         data = self.report()
         cohort = next(row for row in data['paid_unpaid_by_month'] if row['month'] == '2026-07')
-        self.assertEqual(cohort['paid'], {'amount': None, 'known_amount': '140.00', 'count': 3, 'missing_count': 1, 'partial': True})
+        self.assertEqual(cohort['paid'], {'amount': '140.00', 'known_amount': '140.00', 'count': 3, 'missing_count': 0, 'partial': False})
         self.assertEqual(cohort['unpaid']['amount'], '80.00')
         self.assertEqual(data['chart_exclusions']['receivables']['invoice_date_unknown'], 1)
         self.assertEqual(data['paid_unpaid_by_month'][-1]['paid']['amount'], '0.00')

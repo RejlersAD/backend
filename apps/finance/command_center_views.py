@@ -58,6 +58,8 @@ class CustomerInvoiceRegisterFilters(serializers.Serializer):
     page = serializers.IntegerField(min_value=1, default=1)
     page_size = serializers.ChoiceField(choices=[8, 20, 50], default=8)
     ordering = serializers.ChoiceField(choices=ORDERINGS, default='-invoice_date')
+    as_of = serializers.DateField(required=False)
+    validate_as_of = ReceivablesDashboardFilters.validate_as_of
 
     def validate_currency(self, value):
         return value.upper()

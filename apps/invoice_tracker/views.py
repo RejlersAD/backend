@@ -45,6 +45,12 @@ class CustomerInvoicePagination(PageNumberPagination):
 class StableInvoiceOrderingFilter(filters.OrderingFilter):
     def get_ordering(self, request, queryset, view):
         ordering = super().get_ordering(request, queryset, view)
+        if ordering:
+            ordering = [
+                ('-' if field.startswith('-') else '') + 'calculated_receivable_balance'
+                if field.lstrip('-') == 'balance_to_be_received' else field
+                for field in ordering
+            ]
         if ordering and not any(field.lstrip('-') == 'id' for field in ordering):
             return [*ordering, '-id']
         return ordering
@@ -63,7 +69,7 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['invoice_date', 'due_date', 'grand_total',
                        'invoice_amount', 'payment_status', 'created_at',
-                       'invoice_number', 'balance_to_be_received', 'id']
+                       'invoice_number', 'balance_to_be_received', 'calculated_receivable_balance', 'id']
     ordering = ['-invoice_date', '-id']
     pagination_class = CustomerInvoicePagination
 
