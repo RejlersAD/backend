@@ -9,7 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from django.db.models import Q, Count, Prefetch
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -21,7 +21,7 @@ import re
 
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment, ProbationPerformanceReport,
-    Document, AccessProvisioning, Checklist, ExitApproval,
+    Document, AccessProvisioning, Checklist, ExitApproval, LifecycleCaseDeletion,
     ONBOARDING_ACTIVE_STATUSES, OFFBOARDING_ACTIVE_STATUSES,
     CHECKLIST_STAGE_PRE_HIRE, CHECKLIST_STAGE_IT_PROVISIONING,
     CHECKLIST_STAGE_FIRST_DAY, CHECKLIST_STAGE_FINAL_VALIDATION,
@@ -49,7 +49,7 @@ from .rbac import (
     can_manage_offboarding, can_manage_onboarding_stage,
     can_start_onboarding_stage, can_manage_offboarding_stage,
     can_start_offboarding_stage, can_manage_probation_report, can_decide_exit_project,
-    onboarding_action_allowed,
+    onboarding_action_allowed, lifecycle_case_delete_allowed,
     ONBOARDING_MANAGEMENT_MODULES,
 )
 from .project_assignments import get_active_project_assignments, get_profile_project_manager
@@ -345,6 +345,16 @@ def ensure_onboarding_record(employee, created_by=None):
     if existing:
         return existing, False
 
+    deleted_identity = Q(canonical_employee=employee)
+    if employee.user_id:
+        deleted_identity |= Q(user_id=employee.user_id)
+    if employee.email:
+        deleted_identity |= Q(employee_email__iexact=employee.email.strip())
+    if employee.employee_number:
+        deleted_identity |= Q(employee_number=employee.employee_number)
+    if LifecycleCaseDeletion.objects.filter(workflow='onboarding').filter(deleted_identity).exists():
+        return None, False
+
     joining_date = employee.join_date or date.today()
     employee_name = (
         employee.get_full_name()
@@ -378,7 +388,31 @@ def ensure_onboarding_record(employee, created_by=None):
     )
 
 
-class OnboardingRecordViewSet(viewsets.ModelViewSet):
+class LifecycleCaseDeletionMixin:
+    """Delete only workflow-owned data and retain an automatic-sync tombstone."""
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        if not lifecycle_case_delete_allowed(request.user):
+            raise PermissionDenied('HR Delete permission is required to delete an employee lifecycle case.')
+        record = self.get_object()
+        try:
+            record = type(record).objects.select_for_update().get(pk=record.pk)
+        except type(record).DoesNotExist:
+            raise NotFound('This employee lifecycle case has already been deleted.')
+        self.check_object_permissions(request, record)
+        workflow = 'onboarding' if isinstance(record, OnboardingRecord) else 'offboarding'
+        LifecycleCaseDeletion.objects.create(
+            workflow=workflow, record_id=record.pk,
+            canonical_employee_id=record.canonical_employee_id, user_id=record.user_id,
+            employee_email=(record.employee_email or '').strip().lower(),
+            employee_number=record.employee_id or '', deleted_by=request.user,
+        )
+        record.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet):
     business_approval_actions = {'mark_completed'}
     """
     API endpoint for onboarding records
@@ -481,6 +515,11 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
             )
 
         record, created = ensure_onboarding_record(employee, request.user)
+        if record is None:
+            return Response(
+                {'detail': 'This onboarding case was deleted. Automatic recreation is disabled; create a new case explicitly if needed.'},
+                status=status.HTTP_410_GONE,
+            )
         return Response(
             OnboardingRecordSerializer(record, context={'request': request}).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -1046,7 +1085,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs)
 
 
-class OffboardingRecordViewSet(viewsets.ModelViewSet):
+class OffboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet):
     business_approval_actions = {'project_manager_decision', 'reject', 'mark_completed'}
     """
     API endpoint for offboarding records
@@ -1220,12 +1259,6 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         if request.data.get('status') == 'rejected':
             raise ValidationError({'detail': 'Use the Reject action to validate active project assignments.'})
         return super().update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        """Only lifecycle HR/admin users may permanently delete an offboarding."""
-        if not can_manage_offboarding(request.user):
-            raise PermissionDenied('Only HR or an administrator may delete an offboarding process.')
-        return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     @transaction.atomic

@@ -48,6 +48,11 @@ def onboarding_action_allowed(user, action):
         return False
     return any(module_action_allowed(current, module, action) for module in ONBOARDING_MANAGEMENT_MODULES)
 
+def lifecycle_case_delete_allowed(user):
+    """A case deletion requires the effective HR Delete action, never a role name."""
+    return onboarding_action_allowed(user, 'delete')
+
+
 ONBOARDING_STAGE_RBAC = {
     CHECKLIST_STAGE_PRE_HIRE: {
         'label': 'Pre-Hire Initiation',

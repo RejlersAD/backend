@@ -338,7 +338,13 @@ def request_action_allowed(request, module, action):
     key = (request.user.pk, module, action)
     if key not in request._module_action_decisions:
         view = (getattr(request, 'parser_context', None) or {}).get('view')
-        if module == 'hr_onboarding' and is_onboarding_request(request, view):
+        offboarding_case_delete = bool(
+            action == 'delete' and view is not None
+            and view.__class__.__module__ == 'apps.onboarding.views'
+            and view.__class__.__name__ == 'OffboardingRecordViewSet'
+            and getattr(view, 'action', '') == 'destroy'
+        )
+        if module == 'hr_onboarding' and (is_onboarding_request(request, view) or offboarding_case_delete):
             from apps.onboarding.rbac import onboarding_action_allowed
             request._module_action_decisions[key] = onboarding_action_allowed(request.user, action)
         else:
