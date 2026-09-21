@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Case, Count, F, Max, Q, Sum, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, NullIf, Trim
 from rest_framework.exceptions import APIException, NotFound
 
 from apps.rbac.action_policy import module_action_allowed
@@ -19,7 +19,8 @@ from .receivables_dashboard import _Metric, _money, _selected, _unknown_metric
 
 logger = logging.getLogger(__name__)
 SORT_FIELDS = {
-    'account': 'account', 'invoice_number': 'invoice_number',
+    'company': 'register_customer_company', 'account': 'register_customer_company',
+    'invoice_number': 'invoice_number',
     'invoice_date': 'invoice_date', 'due_date': 'due_date',
     'payment_status': 'payment_status', 'currency': 'normalized_currency',
     'amount': 'register_amount', 'amount_home': 'invoice_amount_aed',
@@ -49,6 +50,7 @@ def _response(currency, company, page, page_size, ordering, status, reason=None)
                    for key in METRIC_FIELDS},
         'definitions': {
             'scope': 'Current customer invoice register, including paid and unpaid invoices. Cancelled and credit-note records are excluded. Company and original currency filters apply.',
+            'customer': 'Customer uses the recorded COMPANY column, trimmed of surrounding spaces. The original account is retained separately and is never a fallback customer name. Customer ordering uses company; account is accepted as a legacy ordering alias.',
             'period': 'Dashboard period and ageing reference date do not filter this register. It shows current recorded invoice amounts and payment statuses.',
             'amount': 'Recorded invoice_amount in the original currency, with grand_total used only when invoice_amount is absent. Zero amounts remain zero.',
             'amount_home': 'Stored invoice_amount_aed only. This endpoint does not apply or refresh exchange rates.',
@@ -71,6 +73,7 @@ def build_customer_invoice_register(user, *, currency='AED', company='', page=1,
             source = _selected(CustomerInvoice.objects.exclude(
                 payment_status__in=['cancelled', 'credit_note'],
             ), currency, company).annotate(
+                register_customer_company=NullIf(Trim('company'), Value('')),
                 register_amount=Coalesce('invoice_amount', 'grand_total', output_field=MONEY),
                 register_amount_due_home=Case(
                     When(normalized_currency='AED', then=F('balance_to_be_received')),
@@ -114,8 +117,9 @@ def build_customer_invoice_register(user, *, currency='AED', company='', page=1,
                 row_currency = row['normalized_currency'] or 'UNSPECIFIED'
                 amount = row['register_amount'] if row_currency != 'UNSPECIFIED' else None
                 data['rows'].append({
-                    'id': row['id'], 'account': row['account'].strip() or 'Customer not recorded',
-                    'company': row['company'].strip(), 'invoice_number': row['invoice_number'],
+                    'id': row['id'], 'account': row['account'],
+                    'company': row['company'].strip(), 'customer': row['company'].strip() or 'Customer not recorded',
+                    'invoice_number': row['invoice_number'],
                     'invoice_date': row['invoice_date'].isoformat() if row['invoice_date'] else None,
                     'due_date': row['due_date'].isoformat() if row['due_date'] else None,
                     'payment_status': row['payment_status'],

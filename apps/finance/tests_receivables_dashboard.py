@@ -172,17 +172,50 @@ class ReceivablesDashboardTests(TestCase):
     def test_customer_shares_include_all_customers_and_priority_rows_use_recorded_pm(self):
         self.grant('finance_overview', 'finance_outgoing')
         for index in range(7):
-            self.ar(f'INV-{index}', str((index + 1) * 10), account=f'Account {index}', pm='Recorded PM' if index == 6 else '', due=TODAY - timedelta(days=index))
+            self.ar(f'INV-{index}', str((index + 1) * 10), company=f'Company {index}', account=f'Account {index}', pm='Recorded PM' if index == 6 else '', due=TODAY - timedelta(days=index))
         data = self.report()
         self.assertEqual(len(data['customers']), 7)
-        self.assertEqual(data['customers'][0]['account'], 'Account 6')
+        self.assertEqual(data['customers'][0]['company'], 'Company 6')
+        self.assertEqual(data['customers'][0]['customer'], 'Company 6')
+        self.assertEqual(data['customers'][0]['account'], 'Company 6')
         self.assertEqual(data['customers'][0]['overdue']['amount'], '70.00')
         self.assertEqual(data['customers'][0]['share_percentage'], 25.0)
         self.assertEqual(len(data['priority_invoices']), 5)
         self.assertEqual(data['priority_invoice_count'], 7)
         self.assertEqual(data['priority_invoices'][0]['owner'], 'Recorded PM')
         self.assertEqual(data['priority_invoices'][0]['days_overdue'], 6)
+        self.assertEqual(data['priority_invoices'][0]['company'], 'Company 6')
+        self.assertEqual(data['priority_invoices'][0]['account'], 'Account 6')
         self.assertIsNone(data['priority_invoices'][1]['owner'])
+
+    def test_company_is_authoritative_customer_identity_and_grouping_without_account_fallback(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        due = TODAY - timedelta(days=10)
+        self.ar('BLANK-ACCOUNT', '100', company=' Acme ', account='', due=due)
+        self.ar('CONFLICTING-ACCOUNT', '25', company='Acme', account=' Shared ledger ', due=due)
+        self.ar('SAME-ACCOUNT-OTHER-COMPANY', '75', company='Beta', account=' Shared ledger ', due=due)
+        self.ar('MISSING-COMPANY', '40', company='', account='Account is not a customer', due=due)
+        self.ar('BLANK-COMPANY', None, company='   ', account='Another account', due=due)
+        data = self.report()
+        customers = {row['company']: row for row in data['customers']}
+        self.assertEqual(set(customers), {'Acme', 'Beta', ''})
+        self.assertEqual(customers['Acme']['customer'], 'Acme')
+        self.assertEqual(customers['Acme']['account'], 'Acme')
+        self.assertEqual(customers['Acme']['amount'], '125.00')
+        self.assertEqual(customers['Acme']['count'], 2)
+        self.assertEqual(customers['Acme']['overdue']['amount'], '125.00')
+        self.assertEqual(customers['Beta']['amount'], '75.00')
+        self.assertEqual(customers['']['customer'], 'Customer not recorded')
+        self.assertEqual(customers['']['known_amount'], '40.00')
+        self.assertEqual(customers['']['missing_count'], 1)
+        self.assertEqual(customers['']['count'], 2)
+        self.assertEqual(data['kpis']['unpaid']['known_amount'], '240.00')
+        rows = {row['invoice_number']: row for row in data['priority_invoices']}
+        self.assertEqual(rows['BLANK-ACCOUNT']['customer'], 'Acme')
+        self.assertEqual(rows['BLANK-ACCOUNT']['account'], '')
+        self.assertEqual(rows['CONFLICTING-ACCOUNT']['account'], ' Shared ledger ')
+        self.assertEqual(rows['MISSING-COMPANY']['customer'], 'Customer not recorded')
+        self.assertEqual(self.report(company='Acme')['kpis']['unpaid']['amount'], '125.00')
 
     def test_payables_retain_team_visibility_and_fail_independently(self):
         from django.contrib.auth import get_user_model
