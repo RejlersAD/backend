@@ -8,6 +8,7 @@ from django.contrib.postgres.fields import ArrayField
 import uuid
 import json
 from decimal import Decimal
+from apps.project_organizer.models import Project
 
 User = get_user_model()
 
@@ -513,6 +514,149 @@ class DatasheetExtractionJob(models.Model):
     
     def __str__(self):
         return f"{self.job_type} - {self.status}"
+
+
+class HMBMasterTemplateProfile(models.Model):
+    """
+    Persisted analysis profile for HMB Master Template workbooks.
+
+    Phase 1 persistence goal:
+      - store analyzed schema/sections/streams as backend data
+      - allow users to reload previously analyzed templates
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Identity
+    template_name = models.CharField(max_length=255, blank=True, default='')
+    source_filename = models.CharField(max_length=255)
+    file_sha256 = models.CharField(max_length=64, db_index=True)
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='hmb_master_template_profiles',
+    )
+
+    # Extracted summary
+    sheet_name = models.CharField(max_length=120, blank=True, default='')
+    case_title = models.TextField(blank=True, default='')
+    stream_count = models.IntegerField(default=0)
+    section_count = models.IntegerField(default=0)
+    property_row_count = models.IntegerField(default=0)
+
+    # Soft-coded parser version/config snapshot
+    analysis_version = models.CharField(max_length=20, default='1.0')
+    config_snapshot = models.JSONField(default=dict, blank=True)
+
+    # Stored payload
+    analysis_payload = models.JSONField(default=dict, blank=True)
+    normalized_preview = models.JSONField(default=list, blank=True)
+
+    # Ownership and status
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='hmb_master_template_profiles',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'process_hmb_master_template_profiles'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['created_by', '-updated_at'], name='process_dat_created_245513_idx'),
+            models.Index(fields=['source_filename'], name='process_dat_source__43a10d_idx'),
+        ]
+
+    def __str__(self):
+        name = self.template_name or self.source_filename
+        return f"{name} ({self.stream_count} streams)"
+
+
+class HMBCaseImportBatch(models.Model):
+    """Tracks one multi-file HMB case import run for a project."""
+
+    STATUS_CHOICES = [
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='hmb_case_import_batches')
+    template_profile = models.ForeignKey(
+        HMBMasterTemplateProfile,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='case_import_batches',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='completed')
+    source_file_count = models.IntegerField(default=0)
+    total_records = models.IntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    imported_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='hmb_case_import_batches',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'process_hmb_case_import_batches'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['project', '-created_at'], name='process_dat_project_377848_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.project_id} · {self.source_file_count} file(s)"
+
+
+class HMBCaseRecord(models.Model):
+    """Normalized long-format rows extracted from uploaded HMB case workbooks."""
+
+    id = models.BigAutoField(primary_key=True)
+    batch = models.ForeignKey(HMBCaseImportBatch, on_delete=models.CASCADE, related_name='records')
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='hmb_case_records')
+    template_profile = models.ForeignKey(
+        HMBMasterTemplateProfile,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='case_records',
+    )
+
+    case_name = models.CharField(max_length=255, db_index=True)
+    source_filename = models.CharField(max_length=255)
+    stream_id = models.CharField(max_length=64, db_index=True)
+    source_stream_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    stream_description = models.TextField(blank=True, default='')
+    section_key = models.CharField(max_length=64, db_index=True)
+    section_label = models.CharField(max_length=128)
+    property_name = models.CharField(max_length=255, db_index=True)
+    unit = models.CharField(max_length=64, blank=True, default='')
+    value_text = models.TextField(blank=True, default='')
+    row_index = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'process_hmb_case_records'
+        ordering = ['case_name', 'stream_id', 'row_index']
+        indexes = [
+            models.Index(fields=['project', 'case_name'], name='process_dat_project_45d54d_idx'),
+            models.Index(fields=['project', 'stream_id'], name='process_dat_project_f8c5eb_idx'),
+            models.Index(fields=['project', 'property_name'], name='process_dat_project_c8c67e_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.case_name} · {self.stream_id} · {self.property_name}"
 
 
 class PumpCalculationData(models.Model):

@@ -17,7 +17,19 @@ from .mov_equipment_view import extract_mov_equipment, check_mov_job_status
 from .smart_datasheet_view import smart_datasheet_upload, smart_datasheet_status, smart_datasheet_preview
 from .pump_hydraulic_view import extract_pump_hydraulic_view
 from .pump_hydraulic_snapshot import PumpHydraulicSnapshotViewSet
-from .hmb_extractor_view import extract_hmb_data
+from .hmb_extractor_view import (
+    extract_hmb_data,
+    analyze_hmb_master_template_view,
+    list_hmb_master_templates_view,
+    retrieve_hmb_master_template_view,
+    preview_hmb_case_files_view,
+    execute_hmb_case_preview_view,
+    import_hmb_case_files_view,
+    hmb_project_consolidated_summary_view,
+    hmb_project_records_preview_view,
+    hmb_project_stream_comparison_view,
+    hmb_project_stream_export_view,
+)
 
 router = DefaultRouter()
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
@@ -44,5 +56,15 @@ urlpatterns = [
     path('datasheets/extract-pump-hydraulic/', extract_pump_hydraulic_view, name='extract-pump-hydraulic'),
     # HMB Extractor — standalone stream data extraction (additive, no P&ID coupling)
     path('datasheets/extract-hmb/', extract_hmb_data, name='extract-hmb'),
+    path('datasheets/analyze-hmb-master-template/', analyze_hmb_master_template_view, name='analyze-hmb-master-template'),
+    path('datasheets/hmb-master-templates/', list_hmb_master_templates_view, name='hmb-master-templates-list'),
+    path('datasheets/hmb-master-templates/<uuid:profile_id>/', retrieve_hmb_master_template_view, name='hmb-master-templates-detail'),
+    path('datasheets/preview-hmb-cases/', preview_hmb_case_files_view, name='preview-hmb-cases'),
+    path('datasheets/execute-hmb-cases/', execute_hmb_case_preview_view, name='execute-hmb-cases'),
+    path('datasheets/import-hmb-cases/', import_hmb_case_files_view, name='import-hmb-cases'),
+    path('datasheets/hmb-projects/<uuid:project_id>/summary/', hmb_project_consolidated_summary_view, name='hmb-project-summary'),
+    path('datasheets/hmb-projects/<uuid:project_id>/records-preview/', hmb_project_records_preview_view, name='hmb-project-records-preview'),
+    path('datasheets/hmb-projects/<uuid:project_id>/stream-comparison/', hmb_project_stream_comparison_view, name='hmb-project-stream-comparison'),
+    path('datasheets/hmb-projects/<uuid:project_id>/stream-export/', hmb_project_stream_export_view, name='hmb-project-stream-export'),
     path('', include(router.urls)),
 ]
