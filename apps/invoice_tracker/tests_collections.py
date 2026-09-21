@@ -162,6 +162,21 @@ class CollectionsTests(TestCase):
                 self.assertEqual(self.get({'ageing': age}, summary=False)['count'], count)
                 self.assertEqual(self.get({'ageing': age})['counts']['all'], count)
 
+    def test_dashboard_company_drilldown_matches_trimmed_import_values_exactly(self):
+        self.grant()
+        padded = self.invoice('PADDED-COMPANY', company='  Entity A  ', pm='PM one')
+        self.invoice('NORMAL-COMPANY', company='Entity A', pm='PM one')
+        self.invoice('DIFFERENT-COMPANY', company='Entity A branch', pm='PM one')
+        self.invoice('DIFFERENT-PM', company='Entity A', pm=' PM one ')
+        for company in ['Entity A', '  Entity A  ']:
+            with self.subTest(company=company):
+                filters = {'company': company, 'pm': 'PM one', 'queue': 'open'}
+                self.assertEqual(self.get(filters)['filtered_count'], 2)
+                self.assertEqual({row['invoice_number'] for row in self.get(filters, summary=False)['results']},
+                                 {'PADDED-COMPANY', 'NORMAL-COMPANY'})
+        padded.refresh_from_db()
+        self.assertEqual(padded.company, '  Entity A  ')
+
     def test_invalid_filters_are_400_and_do_not_silently_broaden_scope(self):
         self.grant()
         for params in [{'queue': 'disputed'}, {'ageing': 'unsupported'}, {'date_from': 'bad'},

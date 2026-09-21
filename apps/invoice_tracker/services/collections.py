@@ -67,9 +67,14 @@ def filter_collection_queryset(qs, params, *, as_of, include_queue=True):
         currency = currency.strip().upper()
         qs = qs.annotate(collection_currency=Upper(Trim('currency')))
         qs = qs.filter(Q(collection_currency='') | Q(currency__isnull=True)) if currency == 'UNSPECIFIED' else qs.filter(collection_currency=currency)
-    for name in ['company', 'pm']:
-        if params.get(name):
-            qs = qs.filter(**{name: params[name]})
+    if params.get('company'):
+        # Match the overview's recorded-company facet without changing stored
+        # import values or broadening an exact company match to its branches.
+        qs = qs.annotate(collection_company=Trim('company')).filter(
+            collection_company=params['company'].strip(),
+        )
+    if params.get('pm'):
+        qs = qs.filter(pm=params['pm'])
     for start_name, end_name, field in [('date_from', 'date_to', 'invoice_date'), ('due_from', 'due_to', 'due_date')]:
         start, end = _date_param(params, start_name), _date_param(params, end_name)
         if start and end and start > end:
