@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.exceptions import ValidationError
 from rest_framework.exceptions import PermissionDenied
 
@@ -112,9 +112,11 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
         self.assertEqual(response.data['created_count'], 1)
         self.assertEqual(response.data['created_record_ids'], [101])
 
+    @patch('apps.onboarding.views.LifecycleCaseDeletion.objects.filter')
     @patch('apps.onboarding.views.OnboardingRecord.objects.get_or_create')
     @patch('apps.onboarding.views.OnboardingRecord.objects.filter')
-    def test_missing_employee_starts_in_initiated_status(self, mock_filter, mock_get_or_create):
+    def test_missing_employee_starts_in_initiated_status(self, mock_filter, mock_get_or_create, mock_deleted):
+        mock_deleted.return_value.filter.return_value.exists.return_value = False
         lookup = MagicMock()
         lookup.order_by.return_value.first.return_value = None
         mock_filter.return_value = lookup
@@ -140,13 +142,15 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
 
         self.assertIs(result, record)
         self.assertTrue(created)
+        mock_deleted.assert_called_once_with(workflow='onboarding')
         defaults = mock_get_or_create.call_args.kwargs['defaults']
         self.assertEqual(defaults['status'], 'initiated')
         self.assertEqual(defaults['progress_percentage'], 0)
         self.assertEqual(mock_get_or_create.call_args.kwargs['employee_email'], 'test@example.com')
 
+    @patch('apps.onboarding.views.can_start_onboarding_stage', return_value=True)
     @patch('apps.onboarding.views.Checklist')
-    def test_start_it_checklist_creates_template_and_advances_workflow(self, mock_checklist):
+    def test_start_it_checklist_creates_template_and_advances_workflow(self, mock_checklist, mock_can_start):
         record = MagicMock()
         record.status = 'initiated'
         record.progress_percentage = 0
@@ -160,13 +164,15 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
         request = SimpleNamespace(user=SimpleNamespace(is_authenticated=True, is_superuser=True))
         response = view.start_it_checklist(request, pk=88)
 
+        mock_can_start.assert_called_once_with(request.user, 'it_provisioning', record)
         self.assertEqual(len(mock_checklist.objects.bulk_create.call_args.args[0]), len(IT_ONBOARDING_CHECKLIST_TEMPLATE))
         self.assertEqual(record.status, 'equipment')
         self.assertEqual(record.progress_percentage, 40)
         self.assertEqual(response.data['created_checklist_count'], len(IT_ONBOARDING_CHECKLIST_TEMPLATE))
 
+    @patch('apps.onboarding.views.can_start_onboarding_stage', return_value=True)
     @patch('apps.onboarding.views.Checklist')
-    def test_start_it_checklist_does_not_duplicate_existing_tasks(self, mock_checklist):
+    def test_start_it_checklist_does_not_duplicate_existing_tasks(self, mock_checklist, mock_can_start):
         existing_task = IT_ONBOARDING_CHECKLIST_TEMPLATE[0][0]
         record = MagicMock()
         record.status = 'equipment'
@@ -181,10 +187,11 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
         request = SimpleNamespace(user=SimpleNamespace(is_authenticated=True, is_superuser=True))
         response = view.start_it_checklist(request, pk=88)
 
+        mock_can_start.assert_called_once_with(request.user, 'it_provisioning', record)
         self.assertEqual(len(mock_checklist.objects.bulk_create.call_args.args[0]), len(IT_ONBOARDING_CHECKLIST_TEMPLATE) - 1)
         self.assertEqual(response.data['created_checklist_count'], len(IT_ONBOARDING_CHECKLIST_TEMPLATE) - 1)
 
-    def test_it_checklist_rejects_user_without_required_rbac_role(self):
+    def test_it_checklist_rejects_user_without_effective_edit_permission(self):
         record = MagicMock()
         view = OnboardingRecordViewSet()
         view.get_object = MagicMock(return_value=record)
@@ -194,7 +201,7 @@ class OnboardingRecordUserFilterTests(SimpleTestCase):
             id=51,
         ))
 
-        with patch('apps.onboarding.rbac.get_active_role_codes', return_value={'default'}):
+        with patch('apps.onboarding.rbac.onboarding_action_allowed', return_value=False):
             with self.assertRaises(PermissionDenied):
                 view.start_it_checklist(request, pk=88)
 
@@ -253,7 +260,8 @@ class OffboardingDuplicateValidationTests(SimpleTestCase):
                 self.assertIn('detail', serializer.errors)
 
     @patch('apps.onboarding.serializers.OffboardingRecord.objects.filter')
-    def test_completed_or_cancelled_request_allows_a_new_offboarding(self, mock_filter):
+    def test_closed_client_status_cannot_bypass_active_request_validation(self, mock_filter):
+        mock_filter.return_value.exists.return_value = True
         for status in ('completed', 'cancelled'):
             with self.subTest(status=status):
                 payload = self.payload()
@@ -261,9 +269,10 @@ class OffboardingDuplicateValidationTests(SimpleTestCase):
 
                 serializer = OffboardingRecordSerializer(data=payload)
 
-                self.assertTrue(serializer.is_valid(), serializer.errors)
+                self.assertFalse(serializer.is_valid())
+                self.assertIn('already has an active offboarding', str(serializer.errors['detail'][0]))
 
-        mock_filter.assert_not_called()
+        self.assertEqual(mock_filter.call_count, 2)
 
     @patch('apps.onboarding.serializers.OffboardingRecord.objects.filter')
     def test_updating_the_same_active_record_is_allowed(self, mock_filter):
@@ -302,24 +311,34 @@ class OffboardingActiveEmployeeLookupTests(SimpleTestCase):
 class OnboardingChecklistRBACTests(SimpleTestCase):
     def setUp(self):
         self.user = SimpleNamespace(is_authenticated=True, is_superuser=False, id=501)
+        self.record = MagicMock(status='initiated')
+        self.record.checklist_items.filter.return_value.exists.return_value = True
+        self.record.checklist_items.filter.return_value.filter.return_value.exists.return_value = False
 
-    @patch('apps.onboarding.rbac.get_active_role_codes', return_value={'hr_admin'})
-    def test_hr_can_start_it_but_cannot_complete_it_tasks(self, _mock_roles):
-        self.assertTrue(can_start_onboarding_stage(self.user, 'it_provisioning'))
-        self.assertFalse(can_manage_onboarding_stage(self.user, 'it_provisioning'))
-        self.assertTrue(can_manage_onboarding_stage(self.user, 'pre_hire'))
-        self.assertTrue(can_manage_onboarding_stage(self.user, 'final_validation'))
+    @patch('apps.onboarding.rbac.onboarding_action_allowed', return_value=True)
+    def test_effective_edit_permission_allows_eligible_stages(self, mock_action):
+        for stage in ('pre_hire', 'it_provisioning', 'first_day', 'final_validation'):
+            with self.subTest(stage=stage):
+                self.assertTrue(can_start_onboarding_stage(self.user, stage, self.record))
+                self.assertTrue(can_manage_onboarding_stage(self.user, stage, self.record))
+        mock_action.assert_called_with(self.user, 'update')
 
-    @patch('apps.onboarding.rbac.get_active_role_codes', return_value={'ict_admin'})
-    def test_ict_role_only_manages_it_stage(self, _mock_roles):
-        self.assertTrue(can_manage_onboarding_stage(self.user, 'it_provisioning'))
-        self.assertFalse(can_manage_onboarding_stage(self.user, 'pre_hire'))
-        self.assertFalse(can_manage_onboarding_stage(self.user, 'final_validation'))
+    @patch('apps.onboarding.rbac.onboarding_action_allowed', return_value=False)
+    def test_stages_require_effective_edit_permission(self, mock_action):
+        for stage in ('pre_hire', 'it_provisioning', 'first_day', 'final_validation'):
+            with self.subTest(stage=stage):
+                self.assertFalse(can_start_onboarding_stage(self.user, stage, self.record))
+                self.assertFalse(can_manage_onboarding_stage(self.user, stage, self.record))
+        mock_action.assert_called_with(self.user, 'update')
 
-    @patch('apps.onboarding.rbac.get_active_role_codes', return_value={'manager'})
-    def test_manager_role_only_manages_first_day_stage(self, _mock_roles):
-        self.assertTrue(can_manage_onboarding_stage(self.user, 'first_day'))
-        self.assertFalse(can_manage_onboarding_stage(self.user, 'it_provisioning'))
+    @patch('apps.onboarding.rbac.onboarding_action_allowed', return_value=True)
+    def test_edit_permission_cannot_skip_incomplete_prior_stages(self, _mock_action):
+        self.record.checklist_items.filter.return_value.filter.return_value.exists.return_value = True
+        self.assertTrue(can_start_onboarding_stage(self.user, 'pre_hire', self.record))
+        for stage in ('it_provisioning', 'first_day', 'final_validation'):
+            with self.subTest(stage=stage):
+                self.assertFalse(can_start_onboarding_stage(self.user, stage, self.record))
+                self.assertFalse(can_manage_onboarding_stage(self.user, stage, self.record))
 
 
 class OnboardingChecklistCompletionTests(SimpleTestCase):
@@ -360,6 +379,8 @@ class OffboardingChecklistCompletionTests(SimpleTestCase):
     def test_all_required_exit_stages_auto_complete_offboarding(self):
         record = MagicMock()
         record.status = 'final_settlement'
+        record.project_manager_approval_status = 'not_required'
+        record.exit_approvals.exclude.return_value.exists.return_value = False
         stage_rows = record.checklist_items.filter.return_value
         stage_rows.values_list.return_value.distinct.return_value = [
             'exit_initiation', 'access_revocation', 'asset_return',
@@ -387,7 +408,7 @@ class OffboardingChecklistCompletionTests(SimpleTestCase):
         record.save.assert_not_called()
 
 
-class OffboardingManagementActionTests(SimpleTestCase):
+class OffboardingManagementActionTests(TestCase):
     @patch('apps.onboarding.views.get_profile_project_manager')
     def test_exit_reporting_manager_prefers_active_project_pom(self, mock_project_manager):
         pom = MagicMock()
@@ -413,9 +434,10 @@ class OffboardingManagementActionTests(SimpleTestCase):
 
     @patch('apps.onboarding.views.NotificationService.create_notification', return_value=None)
     @patch('apps.onboarding.views.get_active_project_assignments')
-    @patch('apps.onboarding.views.can_manage_offboarding', return_value=True)
+    @patch('apps.onboarding.views.OffboardingRecord.objects.select_for_update')
+    @patch('apps.onboarding.views.require_approval')
     def test_rejects_active_request_when_employee_has_active_project(
-        self, _mock_can_manage, mock_projects, _mock_notification,
+        self, mock_approval, mock_locked, mock_projects, _mock_notification,
     ):
         project = {'code': 'P-100', 'name': 'Active Project', 'id': 100, 'managers': []}
         mock_projects.return_value = [project]
@@ -424,6 +446,8 @@ class OffboardingManagementActionTests(SimpleTestCase):
         record.user_id = 22
         record.user = MagicMock()
         record.id = 7
+        record.project_manager_approval_status = 'not_required'
+        mock_locked.return_value.get.return_value = record
 
         view = OffboardingRecordViewSet()
         view.get_object = MagicMock(return_value=record)
@@ -432,6 +456,11 @@ class OffboardingManagementActionTests(SimpleTestCase):
 
         response = view.reject(request, pk=record.id)
 
+        mock_locked.return_value.get.assert_called_once_with(pk=record.pk)
+        mock_approval.assert_called_once_with(
+            request.user, 'hr_onboarding', assigned=True, current=True,
+            positions={'hr_manager', 'hr_admin', 'human_resource'},
+        )
         self.assertEqual(response.data['status'], 'rejected')
         self.assertEqual(record.status, 'rejected')
         self.assertIn('P-100 - Active Project', record.rejection_reason)
@@ -439,9 +468,12 @@ class OffboardingManagementActionTests(SimpleTestCase):
         record.save.assert_called_once()
 
     @patch('apps.onboarding.views.get_active_project_assignments', return_value=[])
-    @patch('apps.onboarding.views.can_manage_offboarding', return_value=True)
-    def test_reject_requires_an_active_project_assignment(self, _mock_can_manage, _mock_projects):
+    @patch('apps.onboarding.views.OffboardingRecord.objects.select_for_update')
+    @patch('apps.onboarding.views.require_approval')
+    def test_reject_requires_an_active_project_assignment(self, _mock_approval, mock_locked, _mock_projects):
         record = MagicMock(status='initiated', user=MagicMock())
+        record.project_manager_approval_status = 'not_required'
+        mock_locked.return_value.get.return_value = record
         view = OffboardingRecordViewSet()
         view.get_object = MagicMock(return_value=record)
 
@@ -451,11 +483,11 @@ class OffboardingManagementActionTests(SimpleTestCase):
         ):
             view.reject(SimpleNamespace(user=MagicMock(), data={}), pk=1)
 
-    @patch('apps.onboarding.views.can_manage_offboarding', return_value=False)
-    def test_employee_cannot_delete_offboarding(self, _mock_can_manage):
+    @patch('apps.onboarding.views.lifecycle_case_delete_allowed', return_value=False)
+    def test_employee_cannot_delete_offboarding(self, _mock_can_delete):
         view = OffboardingRecordViewSet()
         with self.assertRaisesMessage(
             PermissionDenied,
-            'Only HR or an administrator may delete an offboarding process.',
+            'HR Delete permission is required to delete an employee lifecycle case.',
         ):
             view.destroy(SimpleNamespace(user=MagicMock()), pk=1)
