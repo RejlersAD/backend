@@ -67,6 +67,19 @@ class ReceivablesDashboardTests(TestCase):
         self.assertIsNone(data['kpis']['unpaid']['known_amount'])
         self.assertTrue(all(source['route'] is None and source['open_count'] is None for source in data['sources'].values()))
         self.assertNotIn('Secret', str(data))
+        self.assertEqual(data['workbook_summary']['status'], 'restricted')
+        self.assertEqual(set(data['workbook_summary']), {'schema_version', 'status', 'reason'})
+
+    def test_workbook_summary_preserves_all_rows_independently_of_live_register_filters(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        self.ar('FILTERED', '10', company='Acme', currency='USD')
+        all_data = self.report()
+        filtered = self.report(company='Acme', currency='USD', months=6, as_of='2026-08-01')
+        self.assertEqual(all_data['workbook_summary'], filtered['workbook_summary'])
+        self.assertEqual(filtered['workbook_summary']['invoice_count'], 4404)
+        self.assertEqual(filtered['workbook_summary']['totals']['project_count'], 496)
+        self.assertEqual(filtered['workbook_summary']['source']['scope'], 'full_workbook')
+        self.assertEqual(filtered['sources']['receivables']['invoice_count'], 1)
 
     def test_explicit_deny_wins_over_superuser_for_sources_and_overview(self):
         self.grant('finance_overview', 'finance_outgoing', 'finance_incoming')

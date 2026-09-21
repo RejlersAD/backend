@@ -1,0 +1,103 @@
+{
+  "schema_version": "1.0",
+  "status": "available",
+  "source": {
+    "file_name": "Updated!Invoice Tracking _MASTER FILE- Latest (2).xlsx",
+    "sheet": "External Invoice ",
+    "first_row": 6,
+    "last_row": 4409,
+    "snapshot_at": "2026-09-21T13:50:49.630323+00:00",
+    "sha256": "308a453a0bf71490174f6699760cfb670186e1731adf8f3843eff55b12840e43",
+    "scope": "full_workbook"
+  },
+  "invoice_count": 4404,
+  "totals": {
+    "invoice_amount": "315481678.41",
+    "invoice_amount_aed": "466151390.16",
+    "actual_payment_received": "285759742.00",
+    "project_count": 496
+  },
+  "coverage": {
+    "invoice_amount": {
+      "numeric_count": 4397,
+      "blank_count": 5,
+      "text_count": 2,
+      "error_count": 0
+    },
+    "invoice_amount_aed": {
+      "numeric_count": 4397,
+      "blank_count": 5,
+      "text_count": 0,
+      "error_count": 2
+    },
+    "actual_payment_received": {
+      "numeric_count": 3865,
+      "blank_count": 527,
+      "text_count": 12,
+      "error_count": 0
+    }
+  },
+  "payment_status": [
+    {
+      "id": "paid",
+      "label": "Paid",
+      "count": 3895
+    },
+    {
+      "id": "cancelled",
+      "label": "Cancelled",
+      "count": 368
+    },
+    {
+      "id": "pending",
+      "label": "Pending",
+      "count": 58
+    },
+    {
+      "id": "new",
+      "label": "New",
+      "count": 34
+    },
+    {
+      "id": "other",
+      "label": "Other statuses",
+      "count": 49
+    }
+  ],
+  "other_statuses": [
+    {
+      "label": "#VALUE!",
+      "count": 1
+    },
+    {
+      "label": "Not recorded",
+      "count": 3
+    },
+    {
+      "label": "Offset",
+      "count": 7
+    },
+    {
+      "label": "Overdue",
+      "count": 18
+    },
+    {
+      "label": "Paid (Partial)",
+      "count": 3
+    },
+    {
+      "label": "Rejected",
+      "count": 14
+    },
+    {
+      "label": "Tbc",
+      "count": 1
+    },
+    {
+      "label": "Written Off",
+      "count": 2
+    }
+  ],
+  "project_excluded_rows": 37,
+  "currency_basis": "mixed_original"
+}
