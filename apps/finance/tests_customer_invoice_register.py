@@ -176,13 +176,37 @@ class CustomerInvoiceRegisterTests(TestCase):
 
     def test_ordering_in_both_directions_uses_recorded_fields_and_nulls_last(self):
         self.grant('finance_overview', 'finance_outgoing')
-        self.invoice('LOW', amount='10', invoice_date=date(2026, 1, 1), account='Alpha')
-        self.invoice('HIGH', amount='90', invoice_date=date(2026, 9, 1), account='Zeta')
-        self.invoice('UNKNOWN', amount=None, invoice_date=None, account='Middle')
+        self.invoice('LOW', amount='10', invoice_date=date(2026, 1, 1), company=' Alpha ', account='Zeta')
+        self.invoice('HIGH', amount='90', invoice_date=date(2026, 9, 1), company='Zeta', account='Alpha')
+        self.invoice('UNKNOWN', amount=None, invoice_date=None, company='Middle', account='Different')
         self.assertEqual([row['invoice_number'] for row in self.report(ordering='amount')['rows']], ['LOW', 'HIGH', 'UNKNOWN'])
         self.assertEqual([row['invoice_number'] for row in self.report(ordering='-amount')['rows']], ['HIGH', 'LOW', 'UNKNOWN'])
         self.assertEqual([row['invoice_number'] for row in self.report(ordering='account')['rows']], ['LOW', 'UNKNOWN', 'HIGH'])
+        self.assertEqual([row['invoice_number'] for row in self.report(ordering='company')['rows']], ['LOW', 'UNKNOWN', 'HIGH'])
+        self.assertEqual([row['invoice_number'] for row in self.report(ordering='-company')['rows']], ['HIGH', 'UNKNOWN', 'LOW'])
+        self.assertEqual([row['invoice_number'] for row in self.report(ordering='-account')['rows']], ['HIGH', 'UNKNOWN', 'LOW'])
         self.assertEqual([row['invoice_number'] for row in self.report(ordering='-invoice_date')['rows']], ['HIGH', 'LOW', 'UNKNOWN'])
+
+    def test_customer_labels_use_company_preserve_original_account_and_sort_missing_companies_last(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        self.invoice('BLANK-ACCOUNT', company=' Alpha Company ', account='')
+        self.invoice('CONFLICTING', company='Beta Company', account=' Ledger account ')
+        self.invoice('NO-COMPANY', company='   ', account='Recorded account only')
+        ascending = self.report(ordering='company')
+        descending = self.report(ordering='-company')
+        self.assertEqual([row['invoice_number'] for row in ascending['rows']], ['BLANK-ACCOUNT', 'CONFLICTING', 'NO-COMPANY'])
+        self.assertEqual([row['invoice_number'] for row in descending['rows']], ['CONFLICTING', 'BLANK-ACCOUNT', 'NO-COMPANY'])
+        rows = {row['invoice_number']: row for row in ascending['rows']}
+        self.assertEqual(rows['BLANK-ACCOUNT']['customer'], 'Alpha Company')
+        self.assertEqual(rows['BLANK-ACCOUNT']['company'], 'Alpha Company')
+        self.assertEqual(rows['BLANK-ACCOUNT']['account'], '')
+        self.assertEqual(rows['CONFLICTING']['customer'], 'Beta Company')
+        self.assertEqual(rows['CONFLICTING']['account'], ' Ledger account ')
+        self.assertEqual(rows['NO-COMPANY']['customer'], 'Customer not recorded')
+        self.assertEqual(rows['NO-COMPANY']['company'], '')
+        self.assertEqual(rows['NO-COMPANY']['account'], 'Recorded account only')
+        self.assertEqual(ascending['totals']['amount']['amount'], '300.00')
+        self.assertEqual(ascending['totals'], descending['totals'])
 
     def test_empty_success_is_zero_and_read_failures_are_unknown_without_row_leaks(self):
         self.grant('finance_overview', 'finance_outgoing')

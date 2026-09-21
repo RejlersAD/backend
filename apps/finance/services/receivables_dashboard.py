@@ -114,7 +114,7 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
     exclusions = {'overdue_outside_window': 0, 'invoice_date_unknown': 0,
                   'invoice_date_outside_window': 0}
     fields = ['id', 'invoice_number', 'invoice_date', 'due_date', 'payment_status']
-    fields += (['account', 'pm', 'balance_to_be_received', 'actual_payment_received'] if ar
+    fields += (['account', 'company', 'pm', 'balance_to_be_received', 'actual_payment_received'] if ar
                else ['total_amount', 'paid_amount', 'procurement_status'])
     metadata = queryset.aggregate(invoice_count=Count('pk'), updated=Max('updated_at'))
     for row in queryset.order_by().values(*fields).iterator(chunk_size=1000):
@@ -157,8 +157,8 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
         if days is not None and days > 90:
             metrics['over90'].add(balance)
         if ar:
-            account = row['account'].strip() or 'Customer not recorded'
-            customer = customers.setdefault(account, {
+            company = row['company'].strip()
+            customer = customers.setdefault(company, {
                 'unpaid': _Metric(), 'overdue': _Metric(),
                 'buckets': {key: _Metric() for key, _ in BUCKETS},
             })
@@ -167,7 +167,8 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
             if days is not None and days > 0:
                 customer['overdue'].add(balance)
             priority.append({
-                'id': row['id'], 'account': account, 'invoice_number': row['invoice_number'],
+                'id': row['id'], 'account': row['account'], 'company': company,
+                'customer': company or 'Customer not recorded', 'invoice_number': row['invoice_number'],
                 'due_date': row['due_date'].isoformat() if row['due_date'] else None,
                 'days_overdue': days, 'balance': _money(balance) if balance is not None and currency != 'UNSPECIFIED' else None,
                 'owner': row['pm'].strip() or None,
@@ -182,16 +183,19 @@ def _summary(queryset, *, kind, currency, as_of, month_keys):
         return metric.result(currency_known=known_currency)
 
     customer_rows = []
-    for account, customer in customers.items():
+    for company, customer in customers.items():
         total = customer['unpaid']
         customer_rows.append({
-            'account': account, **serialize(total),
+            'company': company, 'customer': company or 'Customer not recorded',
+            # Keep the aggregate API's original label key for older consumers;
+            # invoice-level account remains the independently recorded value.
+            'account': company or 'Customer not recorded', **serialize(total),
             'overdue': serialize(customer['overdue']),
             'buckets': {key: serialize(value) for key, value in customer['buckets'].items()},
             'share_percentage': round(float(total.total / metrics['unpaid'].total * 100), 2)
             if known_currency and total.count > total.missing and metrics['unpaid'].total > 0 else None,
         })
-    customer_rows.sort(key=lambda item: (item['known_amount'] is None, -Decimal(item['known_amount'] or '0'), item['account'].casefold()))
+    customer_rows.sort(key=lambda item: (item['known_amount'] is None, -Decimal(item['known_amount'] or '0'), item['customer'].casefold()))
     missing = metrics['unpaid'].missing
     return {
         'source': {
@@ -263,7 +267,7 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
         'definitions': {
             'balance_basis': 'Current recorded invoice balances aged against the selected reference date; this is not a historical balance sheet.',
             'currency': 'Amounts remain in their original invoice currency. No currency conversion is applied.',
-            'company': 'Company recorded on the customer invoice; this is not a verified legal-entity consolidation.',
+            'company': 'Customer identity and grouping use the recorded COMPANY column, trimmed of surrounding spaces. Account is retained separately and is never a fallback customer name. This is not a verified legal-entity consolidation.',
             'period': 'The period limits chart months only. KPI cards and customer ageing include all current open balances.',
             'unpaid': 'Positive or unknown balances on unsettled customer invoices; paid, cancelled and credit-note records are excluded.',
             'ageing': 'Due today and future due dates are current. Overdue thresholds are strictly more than 0, 30 and 90 days. Unknown due dates remain separate.',
