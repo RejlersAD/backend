@@ -1,5 +1,6 @@
 """Secured REST endpoints for calendars, CPM schedules, resources, and baselines."""
 import hashlib
+from copy import deepcopy
 from django.db import transaction
 from django.http import Http404, HttpResponse
 from django.db.models import Count, IntegerField, Max, OuterRef, Q, Subquery, Value
@@ -44,14 +45,16 @@ from .services.audit import record_event
 from .services.activity_generator import build_activities
 from .services.project_controls import build_control_dashboard, capture_control_snapshot
 from .services.schedule_exports import generate_schedule_export
+from .services.schedule_export_contract import ScheduleExportError, export_capabilities
 from .services.operational_jobs import (
     assurance_state_fingerprint, dispatch_job, get_or_create_job, schedule_state_fingerprint,
 )
 from .services.trustworthy_scheduling import approve_schedule_assurance, current_assurance
 from .services.schedule_approval import (
     ScheduleApprovalError, approve_schedule_version, decide_schedule_review, lock_schedule_version,
-    current_schedule_version, require_simple_plan_source_import,
+    current_schedule_version, require_simple_plan_source_import, require_accepted_schedule_inputs,
 )
+from .services.planning_boundaries import freeze_schedule_inputs
 
 
 def _governance_audit_state(item):
@@ -200,6 +203,10 @@ class ScheduleViewSet(SoftDeleteViewSet):
             version = ScheduleVersion.objects.create(
                 schedule=schedule, version=next_number, parent_version=source,
                 change_summary=summary, created_by=request.user,
+                planning_build_id=source.planning_build_id if source else None,
+                evidence_graph_id=source.evidence_graph_id if source else None,
+                evidence_graph_revision=source.evidence_graph_revision if source else None,
+                evidence_input_snapshot=deepcopy(source.evidence_input_snapshot) if source else {},
             )
             if source:
                 source_nodes = list(
@@ -245,6 +252,7 @@ class ScheduleViewSet(SoftDeleteViewSet):
                             version=version, predecessor=activity_map[link.predecessor_id],
                             successor=activity_map[link.successor_id],
                             relationship_type=link.relationship_type, lag_days=link.lag_days,
+                            metadata=deepcopy(link.metadata),
                         ))
                 ActivityRelationship.objects.bulk_create(relationship_rows, batch_size=500)
 
@@ -258,8 +266,11 @@ class ScheduleViewSet(SoftDeleteViewSet):
                             activity=activity_map[assignment.activity_id], resource_id=assignment.resource_id,
                             planned_units=assignment.planned_units, budgeted_hours=assignment.budgeted_hours,
                             budgeted_cost=assignment.budgeted_cost,
+                            planned_output_quantity=assignment.planned_output_quantity,
                         ))
                 ActivityAssignment.objects.bulk_create(assignment_rows, batch_size=500)
+                from .services.planning_registers import clone_risks
+                clone_risks(source, version)
         record_event(project=schedule.project, actor=request.user, action='schedule.version_created', entity=version, after={'version': version.version})
         return Response(ScheduleVersionSerializer(version).data, status=status.HTTP_201_CREATED)
 
@@ -347,10 +358,10 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'relationships': ActivityRelationshipSerializer(
                 version.relationships.filter(is_deleted=False).select_related('predecessor', 'successor'), many=True,
             ).data,
-            'resources': ScheduleResourceSerializer(project.schedule_resources.filter(is_deleted=False), many=True).data,
+            'resources': ScheduleResourceSerializer(project.schedule_resources.filter(is_deleted=False), many=True, context={'request': request}).data,
             'assignments': ActivityAssignmentSerializer(
                 ActivityAssignment.objects.filter(activity__version=version, is_deleted=False).select_related('resource'),
-                many=True,
+                many=True, context={'request': request},
             ).data,
             'baselines': ScheduleBaselineSerializer(schedule.baselines.filter(is_deleted=False), many=True).data,
             'calculation_runs': ScheduleCalculationRunSerializer(
@@ -387,8 +398,11 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
     def export(self, request, pk=None):
         version = self.get_object()
         export_format = str(request.query_params.get('export_format') or 'xlsx').lower()
+        export_format = {'ms_project_xml': 'mspdi'}.get(export_format, export_format)
         try:
             content, content_type, filename = generate_schedule_export(version, export_format)
+        except ScheduleExportError as exc:
+            return Response(exc.payload, status=exc.status_code)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         digest = hashlib.sha256(content).hexdigest()
@@ -403,7 +417,18 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         response = HttpResponse(content, content_type=content_type)
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         response['X-Content-SHA256'] = digest
+        response['X-RADAI-Export-State'] = 'approved_baseline' if version.status == 'baselined' else 'structured_draft'
+        if export_format == 'xer':
+            response['X-RADAI-Adapter-Status'] = 'legacy_unvalidated'
+        elif export_format in {'mspdi', 'mspdi_zip'}:
+            response['X-RADAI-Adapter-Status'] = 'implemented_subset'
+            response['X-RADAI-Vendor-Roundtrip'] = 'not_tested'
         return response
+
+    @action(detail=True, methods=['get'], url_path='export-capabilities')
+    def export_capabilities(self, request, pk=None):
+        self.get_object()  # Apply the same project access boundary as export.
+        return Response({'schema_version': '1.0', 'adapters': export_capabilities()})
 
     @action(detail=True, methods=['patch'], url_path='bulk-activities')
     def bulk_activities(self, request, pk=None):
@@ -953,6 +978,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'The version is no longer available for baselining.'}, status=status.HTTP_409_CONFLICT)
             try:
                 require_simple_plan_source_import(version)
+                require_accepted_schedule_inputs(version)
             except ScheduleApprovalError as exc:
                 return Response(exc.payload, status=exc.status_code)
             assurance = current_assurance(version)
@@ -960,12 +986,15 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'An approved Phase 3 assurance review is required for this exact calculated state.'}, status=status.HTTP_409_CONFLICT)
             if version.governance_items.filter(priority='critical', is_deleted=False).exclude(status__in=['closed', 'implemented', 'rejected']).exists():
                 return Response({'error': 'Resolve open critical governance items before baselining.'}, status=status.HTTP_409_CONFLICT)
+            from .services.planning_registers import risk_snapshot
             snapshot = {
                 'version': ScheduleVersionSerializer(version).data,
                 'wbs': ScheduleWBSNodeSerializer(version.wbs_nodes.filter(is_deleted=False), many=True).data,
                 'activities': ScheduleActivitySerializer(version.activities.filter(is_deleted=False), many=True).data,
                 'relationships': ActivityRelationshipSerializer(version.relationships.filter(is_deleted=False), many=True).data,
                 'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance).data,
+                'accepted_inputs': freeze_schedule_inputs(version),
+                'risk_register': risk_snapshot(version),
             }
             baseline = ScheduleBaseline.objects.create(
                 schedule=version.schedule, source_version=version, name=name,
@@ -1027,6 +1056,44 @@ class ScheduleResourceViewSet(SoftDeleteViewSet):
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
 
+    @action(detail=False, methods=['get'])
+    def plan(self, request):
+        from rest_framework import serializers
+        from .services.resource_planning import resource_plan
+        project_id = serializers.IntegerField(min_value=1).run_validation(request.query_params.get('project'))
+        project = accessible_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            raise Http404
+        version = None
+        if request.query_params.get('version'):
+            version_id = serializers.IntegerField(min_value=1).run_validation(request.query_params['version'])
+            version = ScheduleVersion.objects.filter(pk=version_id, is_deleted=False,
+                schedule__project=project, schedule__is_deleted=False).select_related('schedule__project').first()
+            if not version:
+                raise Http404
+        return Response(resource_plan(project, version, request))
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        from .services.resource_planning import resource_is_locked
+        resource = ScheduleResource.objects.select_for_update().get(pk=serializer.instance.pk)
+        list(ScheduleVersion.objects.select_for_update().filter(schedule__project=resource.project).order_by('pk'))
+        if resource_is_locked(resource):
+            raise ValidationError('This resource is used by an immutable schedule. Create a new resource code for revised planning.')
+        serializer.instance = resource
+        serializer.validate(serializer.validated_data)
+        resource = serializer.save()
+        for version in ScheduleVersion.objects.filter(activities__assignments__resource=resource,
+                activities__assignments__is_deleted=False, status__in=['draft', 'calculated']).distinct():
+            _mark_version_draft(version)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        instance = ScheduleResource.objects.select_for_update().get(pk=instance.pk)
+        if instance.assignments.filter(is_deleted=False, activity__is_deleted=False).exists():
+            raise ValidationError('Remove active allocations before deleting this resource.')
+        super().perform_destroy(instance)
+
 
 class ActivityAssignmentViewSet(SoftDeleteViewSet):
     serializer_class = ActivityAssignmentSerializer
@@ -1034,11 +1101,23 @@ class ActivityAssignmentViewSet(SoftDeleteViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset().filter(activity__version__schedule__project__in=accessible_projects(self.request.user))
+        version_id = self.request.query_params.get('version')
+        if version_id:
+            queryset = queryset.filter(activity__version_id=version_id)
         activity_id = self.request.query_params.get('activity')
         return queryset.filter(activity_id=activity_id) if activity_id else queryset
 
+    @transaction.atomic
     def perform_create(self, serializer):
         values = serializer.validated_data
+        from .services.resource_planning import require_mutable_allocation_version
+        resource = ScheduleResource.objects.select_for_update().get(pk=values['resource'].pk)
+        version = lock_schedule_version(values['activity'].version)
+        require_mutable_allocation_version(version)
+        if resource.is_deleted:
+            raise ValidationError('Choose an active resource.')
+        values['resource'] = resource
+        serializer.validate(values)
         assignment = ActivityAssignment.objects.filter(
             activity=values['activity'], resource=values['resource'], is_deleted=True,
         ).first()
@@ -1051,16 +1130,29 @@ class ActivityAssignmentViewSet(SoftDeleteViewSet):
             serializer.instance = assignment
         else:
             assignment = serializer.save()
-        _mark_version_draft(assignment.activity.version)
+        _mark_version_draft(version)
 
+    @transaction.atomic
     def perform_update(self, serializer):
-        assignment = serializer.save()
-        _mark_version_draft(assignment.activity.version)
+        from .services.resource_planning import require_mutable_allocation_version
+        resource = ScheduleResource.objects.select_for_update().get(pk=serializer.instance.resource_id)
+        version = lock_schedule_version(serializer.instance.activity.version)
+        require_mutable_allocation_version(version)
+        assignment = ActivityAssignment.objects.select_for_update().get(pk=serializer.instance.pk)
+        assignment.resource = resource
+        serializer.instance = assignment
+        if 'resource' in serializer.validated_data:
+            serializer.validated_data['resource'] = resource
+        serializer.validate(serializer.validated_data)
+        serializer.save()
+        _mark_version_draft(version)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
-        if instance.activity.version.status in {'approved', 'baselined', 'superseded'}:
-            raise ValidationError('Approved, baselined, and superseded schedule versions are immutable.')
-        version = instance.activity.version
+        from .services.resource_planning import require_mutable_allocation_version
+        ScheduleResource.objects.select_for_update().get(pk=instance.resource_id)
+        version = lock_schedule_version(instance.activity.version)
+        require_mutable_allocation_version(version)
         super().perform_destroy(instance)
         _mark_version_draft(version)
 

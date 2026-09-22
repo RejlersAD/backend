@@ -61,9 +61,10 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
         self.assertEqual(project_fact.source_file_id, file_obj.id)
         self.assertEqual(project_fact.source_locator['line'], 1)
         self.assertIn('Project Name', project_fact.source_excerpt)
-        self.assertTrue(run.facts.filter(fact_type='deliverable', value__name='Piping & Instrumentation Diagram (P&ID) - Process').exists())
-        self.assertTrue(run.facts.filter(fact_type='hse_study').exists())
+        self.assertFalse(run.facts.filter(fact_type='deliverable', value__name='Piping & Instrumentation Diagram (P&ID) - Process').exists())
+        self.assertFalse(run.facts.filter(fact_type='hse_study').exists())
         self.assertTrue(run.facts.filter(fact_type='requirement').exists())
+        self.assertTrue(run.facts.filter(fact_type='requirement', value='The Contractor shall prepare the P&ID and HAZOP Study.').exists())
         self.assertEqual(run.facts.filter(fact_type='calendar').count(), 2)
 
     def test_workspace_name_disagreement_is_retained_as_a_reviewable_conflict(self):
@@ -106,7 +107,7 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
         self.assertEqual(old_run.status, 'succeeded')
         self.assertEqual(list(old_run.facts.order_by('id').values_list('id', flat=True)), old_fact_ids)
 
-    def test_explicit_scope_exclusion_is_flagged_against_positive_mention(self):
+    def test_explicit_scope_exclusion_does_not_create_a_positive_discipline_obligation(self):
         self.source(
             'scope.txt', 'sow',
             'Electrical Engineering is identified for interface purposes but is explicitly out of scope.',
@@ -114,9 +115,9 @@ class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
 
         run, _ = run_document_intelligence(self.project, user=self.owner)
 
-        conflict = run.conflicts.get(key='discipline:electrical')
-        self.assertEqual(conflict.conflict_type, 'explicit_exclusion')
-        self.assertGreaterEqual(len(conflict.fact_ids), 2)
+        self.assertFalse(run.facts.filter(fact_type='discipline', key='electrical').exists())
+        self.assertTrue(run.facts.filter(fact_type='exclusion').exists())
+        self.assertFalse(run.conflicts.filter(key='discipline:electrical').exists())
 
 
 class ConflictReviewWorkflowTests(DocumentIntelligenceFixture):

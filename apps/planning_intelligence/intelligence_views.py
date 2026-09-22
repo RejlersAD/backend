@@ -61,10 +61,39 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
 
+    @action(detail=True, methods=['post'], permission_action='update')
+    def resume(self, request, pk=None):
+        """Continue a bounded extraction in a new auditable run via durable jobs."""
+        run = self.get_object()
+        from .access import can_write_project
+        from apps.rbac.action_policy import module_action_allowed
+        from .services.operational_jobs import canonical_fingerprint
+        if not can_write_project(request.user, run.project) or not module_action_allowed(request.user, 'planning_package', 'update'):
+            return Response({'error': 'Your access does not permit document analysis.'}, status=403)
+        summary = run.summary or {}
+        if run.status == 'running' or not (summary.get('extraction_summary') or {}).get('resume_available'):
+            return Response({'error': 'This run has no paused extraction to continue.', 'code': 'intelligence_resume_unavailable'}, status=409)
+        from .services.document_intelligence import validate_resume_source
+        try:
+            validate_resume_source(run.project, run)
+        except ValueError as exc:
+            return Response({'error': str(exc), 'code': 'intelligence_resume_sources_changed'}, status=409)
+        key = canonical_fingerprint({'operation': 'resume-intelligence/1', 'run_id': run.pk,
+                                     'checkpoint': summary.get('ai_checkpoint'), 'manifest': summary.get('extraction_source_manifest')})
+        job, created = get_or_create_job(run.project, 'analyze', {'resume_run_id': run.pk}, request.user, idempotency_key=key)
+        if created:
+            dispatch_job(job)
+            record_event(project=run.project, actor=request.user, action='intelligence.resume_requested', entity=job,
+                         after={'resumed_from_run_id': run.pk})
+        return Response(PlanningJobSerializer(job, context={'request': request}).data, status=202)
+
     @action(detail=True, methods=['post'], url_path='confirm-preview', permission_action='update')
     def confirm_preview(self, request, pk=None):
         """Confirm the full preview, preserving both raw evidence and edits."""
         run = self.get_object()
+        from apps.rbac.action_policy import module_action_allowed
+        if not module_action_allowed(request.user, 'planning_package', 'update'):
+            return Response({'error': 'You do not have permission to confirm project inputs.'}, status=403)
         serializer = ConfirmIntelligencePreviewSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         selection = serializer.validated_data['preview']

@@ -5,12 +5,32 @@ from django.db import transaction
 from django.db.models import Max
 
 from ..models import PlanningGeneration, PlanningProject
-from .activity_generator import build_activities
-from .eddr_generator import build_eddr
-from .manhour_estimator import build_manhours
-from .narrative_generator import build_narrative
-from .validation_engine import validate
-from .wbs_generator import build_wbs
+from .document_plan import POLICY, project_document_plan
+
+
+def _document_payload(project, intelligence):
+    plan = project_document_plan(project, intelligence)
+    intelligence = {**intelligence, 'schedule_engine': {
+        'policy': POLICY, 'engine_version': plan['engine_version'],
+        'date_authority': 'source_document', 'applied_dependency_rules': [],
+        'ready_for_calculation': plan['ready_for_calculation'],
+        'missing_information': plan['missing_information'],
+        'unresolved_relationships': plan['unresolved_relationships'],
+        'extraction_reports': plan['extraction_reports'],
+        'source_summaries': plan['source_summaries'],
+        'source_constraints': plan['source_constraints'],
+        'register_inventory': plan['register_inventory'],
+        'unmapped_register_count': plan['unmapped_register_count'],
+        'additional_source_facts': plan['additional_source_facts'],
+    }}
+    return {
+        'intelligence': intelligence, 'wbs': plan['wbs'], 'activities': plan['activities'],
+        'logic_matrix': plan['logic_matrix'], 'eddr': [],
+        'milestones': [row for row in plan['activities'] if row.get('is_milestone') is True],
+        'manhours': {'basis': {'status': 'Not Specified'}, 'by_discipline': [], 'grand_total_man_hours': None},
+        'validation': plan['validation'],
+        'narrative': 'Document facts extracted for review. Missing information is Not Specified. No template durations, inferred dependencies or fallback calendar have been applied.',
+    }
 
 
 def apply_intelligence_overrides(intelligence, overrides):
@@ -44,28 +64,22 @@ def preview_schedule(project, *, user=None, overrides=None):
     intelligence = analyze_documents(project, user=user)
     if isinstance(overrides, dict) and overrides:
         intelligence = apply_intelligence_overrides(intelligence, overrides)
-    from .schedule_basis import apply_approved_basis
-    intelligence = apply_approved_basis(project, intelligence)
-    from .generation_plan import apply_approved_generation_plan
-    intelligence = apply_approved_generation_plan(project, intelligence)
-    wbs = build_wbs(project, intelligence)
-    schedule = build_activities(project, wbs, intelligence)
-    activities = schedule['activities']
-    eddr = build_eddr(activities)
-    validation = validate(project, wbs, activities, eddr, intelligence)
-    deliverables = {
-        (item.get('discipline'), item.get('deliverable'))
-        for item in activities if item.get('deliverable') and item.get('workflow_template_code')
-    }
+    payload = _document_payload(project, intelligence)
+    wbs, activities, validation = payload['wbs'], payload['activities'], payload['validation']
+    schedule = {**payload['intelligence']['schedule_engine'], 'logic_matrix': payload['logic_matrix']}
     return {
         'wbs_node_count': len(wbs),
-        'deliverable_count': len(deliverables),
+        'deliverable_count': len(schedule['register_inventory']),
         'activity_count': len(activities),
         'relationship_count': len(schedule.get('logic_matrix') or []),
         'milestone_count': sum(1 for item in activities if item.get('is_milestone')),
-        'configured_workflow_activity_count': sum(
-            1 for item in activities if item.get('workflow_template_code')
-        ),
+        'configured_workflow_activity_count': 0,
+        'evidence_policy': POLICY,
+        'processing_coverage': intelligence.get('processing_coverage') or {},
+        'missing_information': schedule['missing_information'],
+        'extraction_reports': schedule['extraction_reports'],
+        'sample_logic_matrix': schedule['logic_matrix'][:100],
+        'unresolved_relationships': schedule['unresolved_relationships'],
         'project_finish_hint': schedule.get('project_finish_date'),
         'date_authority': schedule.get('date_authority', 'relational_cpm'),
         'applied_dependency_rules': schedule.get('applied_dependency_rules') or [],
@@ -80,13 +94,18 @@ def preview_schedule(project, *, user=None, overrides=None):
             key: item.get(key) for key in (
                 'id', 'name', 'discipline', 'deliverable', 'workflow_stage_code',
                 'original_duration_days', 'predecessors',
+                'source_activity_id', 'source_references', 'duration_unit',
+                'start_date', 'finish_date', 'field_evidence',
             )
-        } for item in activities if item.get('workflow_template_code')][:20],
+        } for item in activities][:20],
     }
 
 
 @tracked_planning('generate_schedule')
 def generate_schedule(project, *, user=None, overrides=None, input_fingerprint=None):
+    if input_fingerprint:
+        from .operational_jobs import canonical_fingerprint
+        input_fingerprint = canonical_fingerprint({'policy': POLICY, 'input': input_fingerprint})
     if input_fingerprint:
         existing = project.generations.filter(
             is_deleted=False, input_fingerprint=input_fingerprint,
@@ -96,29 +115,7 @@ def generate_schedule(project, *, user=None, overrides=None, input_fingerprint=N
     intelligence = analyze_documents(project, user=user)
     if isinstance(overrides, dict) and overrides:
         intelligence = apply_intelligence_overrides(intelligence, overrides)
-    from .schedule_basis import apply_approved_basis
-    intelligence = apply_approved_basis(project, intelligence)
-    from .generation_plan import apply_approved_generation_plan
-    intelligence = apply_approved_generation_plan(project, intelligence)
-    wbs = build_wbs(project, intelligence)
-    schedule = build_activities(project, wbs, intelligence)
-    activities = schedule['activities']
-    intelligence = dict(intelligence)
-    intelligence['schedule_engine'] = {
-        'date_authority': schedule.get('date_authority', 'relational_cpm'),
-        'applied_dependency_rules': schedule.get('applied_dependency_rules', []),
-    }
-    eddr = build_eddr(activities)
-    manhours = build_manhours(project, activities)
-    validation = validate(project, wbs, activities, eddr, intelligence)
-    narrative = build_narrative(project, activities, eddr, validation, user=user)
-
-    payload = {
-        'intelligence': intelligence, 'wbs': wbs, 'activities': activities,
-        'logic_matrix': schedule['logic_matrix'], 'eddr': eddr,
-        'milestones': [activity for activity in activities if activity.get('is_milestone')],
-        'manhours': manhours, 'validation': validation, 'narrative': narrative,
-    }
+    payload = _document_payload(project, intelligence)
     with transaction.atomic():
         locked_project = PlanningProject.objects.select_for_update().get(pk=project.pk)
         if input_fingerprint:

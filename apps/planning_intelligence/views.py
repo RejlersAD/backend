@@ -166,6 +166,9 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         project = self.get_object()
         data = None
         if request.method == 'PUT':
+            from apps.rbac.action_policy import module_action_allowed
+            if not module_action_allowed(request.user, 'planning_package', 'update'):
+                return Response({'error': 'You do not have permission to edit this project plan.'}, status=403)
             serializer = WorkBreakdownSaveSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             data = serializer.validated_data
@@ -403,9 +406,6 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
     def analyze(self, request, pk=None):
         """Document Intelligence preview — does not persist a generation."""
         project = self.get_object()
-        byok_error = self._require_byok(project)
-        if byok_error is not None:
-            return byok_error
         files_qs = project.files.filter(is_deleted=False, parse_status='done')
         if not files_qs.exists():
             return Response(
@@ -416,13 +416,12 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='generate')
     def generate(self, request, pk=None):
-        """Runs the full planning pipeline: intelligence -> WBS -> activities
-        -> EDDR -> manhours -> validation -> narrative, then persists a new
-        PlanningGeneration version."""
+        """Persist document evidence for review; publication is a separate action."""
         project = self.get_object()
         generation_options = (request.data or {}).get('generation_options') or {}
         expected_configuration_version = generation_options.get('expected_configuration_version')
-        configuration, _ = ensure_project_schedule_configuration(project, actor=request.user)
+        from .models import ProjectScheduleConfiguration
+        configuration = ProjectScheduleConfiguration.objects.filter(project=project, is_deleted=False).first()
         try:
             expected_configuration_version = (
                 int(expected_configuration_version) if expected_configuration_version is not None else None
@@ -440,51 +439,19 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
                 'code': 'configuration_conflict',
                 'current_configuration_version': configuration.configuration_version,
             }, status=status.HTTP_409_CONFLICT)
-        byok_error = self._require_byok(project)
-        if byok_error is not None:
-            return byok_error
         if not project.files.filter(is_deleted=False, parse_status='done').exists():
             return Response({'error': 'No successfully parsed files are available.'}, status=status.HTTP_400_BAD_REQUEST)
-        approved_basis = project.schedule_bases.filter(is_deleted=False, status='approved').first()
-        if not approved_basis:
-            return Response({
-                'error': 'Approve a Schedule Basis before generating a schedule.',
-                'code': 'schedule_basis_required',
-            }, status=status.HTTP_409_CONFLICT)
-        if not project.generation_plans.filter(
-            is_deleted=False, status='approved', basis=approved_basis,
-        ).exists():
-            return Response({
-                'error': 'Approve a Trustworthy Generation Plan before generating a schedule.',
-                'code': 'generation_plan_required',
-            }, status=status.HTTP_409_CONFLICT)
         return self._enqueue_job(project, 'generate', dict(request.data or {}))
 
     @action(detail=True, methods=['post'], url_path='generation-preview')
     def generation_preview(self, request, pk=None):
-        """Return the exact deterministic plan without creating a version."""
+        """Preview source evidence without creating a schedule version."""
         project = self.get_object()
-        byok_error = self._require_byok(project)
-        if byok_error is not None:
-            return byok_error
         if not project.files.filter(is_deleted=False, parse_status='done').exists():
             return Response(
                 {'error': 'No successfully parsed files are available.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        approved_basis = project.schedule_bases.filter(is_deleted=False, status='approved').first()
-        if not approved_basis:
-            return Response({
-                'error': 'Approve a Schedule Basis before preparing a generation preview.',
-                'code': 'schedule_basis_required',
-            }, status=status.HTTP_409_CONFLICT)
-        if not project.generation_plans.filter(
-            is_deleted=False, status='approved', basis=approved_basis,
-        ).exists():
-            return Response({
-                'error': 'Approve a Trustworthy Generation Plan before preparing a preview.',
-                'code': 'generation_plan_required',
-            }, status=status.HTTP_409_CONFLICT)
         return self._enqueue_job(project, 'preview', dict(request.data or {}))
 
     def _enqueue_job(self, project, job_type, request_data):
@@ -779,20 +746,26 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
             for field in ('intelligence', 'wbs', 'activities', 'logic_matrix', 'eddr', 'milestones', 'manhours', 'validation', 'narrative')
         }
         payload.update(validated)
+        document_driven = (payload.get('intelligence', {}).get('schedule_engine') or {}).get('policy') == 'document_driven'
         if 'activities' in validated:
             payload['logic_matrix'] = [
                 {
                     'activity_id': activity['id'], 'predecessor_id': predecessor.get('id'),
-                    'type': predecessor.get('type', 'FS'), 'lag_days': predecessor.get('lag_days', 0),
+                    'type': predecessor.get('type') if document_driven else predecessor.get('type', 'FS'),
+                    'lag_days': predecessor.get('lag_days') if document_driven else predecessor.get('lag_days', 0),
                 }
                 for activity in payload['activities']
                 for predecessor in activity.get('predecessors', [])
                 if predecessor.get('id')
             ]
             payload['milestones'] = [activity for activity in payload['activities'] if activity.get('is_milestone')]
-        payload['validation'] = validate(
-            generation.project, payload['wbs'], payload['activities'], payload['eddr'], payload['intelligence'],
-        )
+        if document_driven:
+            payload['validation'] = [{'severity': 'warning', 'code': 'source_revision_requires_review',
+                                      'message': 'Edited document values require evidence review; missing data remains Not Specified.'}]
+        else:
+            payload['validation'] = validate(
+                generation.project, payload['wbs'], payload['activities'], payload['eddr'], payload['intelligence'],
+            )
 
         with transaction.atomic():
             project = PlanningProject.objects.select_for_update().get(pk=generation.project_id)
@@ -809,7 +782,7 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
         from .services.schedule_materializer import materialize_generation
         schedule_version, calculation_run, issues = materialize_generation(revision, requested_by=request.user)
         response_data = PlanningGenerationSerializer(revision).data
-        response_data['schedule_version_id'] = schedule_version.id
+        response_data['schedule_version_id'] = schedule_version.id if schedule_version else None
         response_data['calculation_run_id'] = calculation_run.id if calculation_run else None
         response_data['materialization_issues'] = issues
         return Response(response_data, status=status.HTTP_201_CREATED)
@@ -820,6 +793,10 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
         generation = self.get_object()
         from .services.schedule_materializer import materialize_generation
         schedule_version, calculation_run, issues = materialize_generation(generation, requested_by=request.user)
+        if schedule_version is None:
+            return Response({'generation_id': generation.id, 'state': 'needs_evidence_review',
+                             'schedule_version_id': None, 'calculation_run_id': None,
+                             'materialization_issues': issues})
         record_event(
             project=generation.project, actor=request.user, action='generation.materialized',
             entity=schedule_version, after={'generation_id': generation.id, 'run_id': getattr(calculation_run, 'id', None)},
@@ -882,7 +859,11 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
             return response
 
         if fmt == 'xer':
-            content = export_utils.generation_to_xer_bytes(generation)
+            from .services.schedule_exports import ScheduleExportError
+            try:
+                content = export_utils.generation_to_xer_bytes(generation)
+            except ScheduleExportError as exc:
+                return Response(exc.payload, status=exc.status_code)
             response = HttpResponse(content, content_type='application/octet-stream')
             response['Content-Disposition'] = f'attachment; filename="{base_name}_schedule.xer"'
             return response

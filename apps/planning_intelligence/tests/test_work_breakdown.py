@@ -28,6 +28,8 @@ class WorkBreakdownFixture(DocumentIntelligenceFixture):
             RolePermission.objects.create(role=self.role, permission=permission)
         for user in (self.owner, self.outsider):
             profile, _ = UserProfile.objects.get_or_create(user=user, defaults={'organization': organization})
+            # Isolate this role from grants installed by migration seed data.
+            UserRole.objects.filter(user_profile=profile).delete()
             UserRole.objects.create(user_profile=profile, role=self.role)
         self.file = self.source('scope.txt', 'sow', 'Single line diagram E-001. Cable list. HAZOP.')
         self.raw = {
@@ -186,6 +188,7 @@ class WorkBreakdownTests(WorkBreakdownFixture):
         self.assertEqual(version.status, 'draft')
         self.assertEqual(version.activities.count(), len(draft['tasks']))
         first = version.activities.get(external_id=draft['tasks'][0]['id'])
+        self.assertEqual(first.metadata['evidence_entity_id'], 'task:' + draft['tasks'][0]['id'])
         self.assertEqual(first.responsible_role, 'A. Khan')
         self.assertEqual(first.duration_days, 0)
         self.assertTrue(first.metadata['duration_pending'])

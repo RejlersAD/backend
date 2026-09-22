@@ -18,7 +18,7 @@ class DocumentProfileSerializer(serializers.ModelSerializer):
             'id', 'file', 'filename', 'declared_category', 'detected_category',
             'classification_confidence', 'extension', 'mime_type', 'language',
             'page_count', 'word_count', 'checksum_sha256', 'extraction_method',
-            'quality_flags', 'classified_at', 'created_at', 'updated_at',
+            'quality_flags', 'extraction_coverage', 'classified_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
 

@@ -33,45 +33,11 @@ def _range_count(document_number):
 
 
 def classify_deliverable(deliverable):
-    name = deliverable.canonical_name.casefold()
-    number_count = _range_count(deliverable.document_number)
-    recurrence, count = 'none', 1
-    if 'weekly' in name:
-        recurrence, count = 'weekly', number_count or 1
-    elif 'monthly' in name:
-        recurrence, count = 'monthly', number_count or 1
-
-    if recurrence != 'none':
-        family, sequence, reason = 'recurring_report', 15, f'{recurrence.title()} reporting requirement'
-    elif 'final dossier' in name or 'handover dossier' in name:
-        family, sequence, reason = 'final_dossier', 90, 'Final compilation and handover deliverable'
-    elif any(term in name for term in ('tender package', 'tender document', 'invitation to bid')):
-        family, sequence, reason = 'tender_package', 80, 'Tender/procurement package'
-    elif any(term in name for term in ('cost estimate', 'cost estimation', 'estimated value', 'scrap value')):
-        family, sequence, reason = 'cost_estimate', 70, 'Cost or valuation deliverable'
-    elif any(term in name for term in ('drawing', 'layout', 'plot plan', 'development plan')):
-        family, sequence, reason = 'drawing', 60, 'Drawing production deliverable'
-    elif any(term in name for term in ('method statement', 'procedure', 'plan', 'design basis', 'basis of design', 'specification', 'scope of work', 'quality plan', 'hse plan')):
-        family, sequence, reason = 'plan_procedure', 10, 'Plan, basis, specification or procedure'
-    elif any(term in name for term in ('inspection report', 'site visit report', 'survey report')):
-        family, sequence, reason = 'inspection_report', 20, 'Inspection/fieldwork report'
-    elif any(term in name for term in ('ndt', 'test report', 'testing report', 'laboratory')):
-        family, sequence, reason = 'inspection_report', 30, 'Testing and findings report'
-    elif any(term in name for term in ('finding', 'deterioration mapping')):
-        family, sequence, reason = 'technical_study', 35, 'Findings consolidation before assessment'
-    elif any(term in name for term in ('study', 'analysis', 'assessment', 'adequacy', 'evaluation', 'calculation', 'report')):
-        family, sequence, reason = 'technical_study', 40, 'Engineering study or assessment'
-    else:
-        family, sequence, reason = 'engineering_document', 50, 'General controlled engineering document'
-
-    scenario = 'common'
-    if any(term in name for term in ('scrap and build', 'scrap/build', 'demolition', 'new build')):
-        scenario = 'scrap_build'
-    elif any(term in name for term in ('repair work', 'rehabilitation', 'remedial', 'maintenance plan')):
-        scenario = 'continue_use'
+    """Names identify documents; they do not establish workflow or execution order."""
     return {
-        'workflow_family': family, 'recurrence': recurrence, 'recurrence_count': max(1, min(260, count)),
-        'scenario_code': scenario, 'technical_sequence': sequence, 'classification_reason': reason,
+        'workflow_family': 'not_specified', 'recurrence': 'none', 'recurrence_count': 1,
+        'scenario_code': 'common', 'technical_sequence': 0,
+        'classification_reason': 'Not Specified: no source-defined workflow, recurrence or execution sequence.',
     }
 
 
@@ -172,65 +138,9 @@ def build_generation_plan(basis):
     for deliverable in basis.deliverables.filter(is_deleted=False, status='confirmed').order_by('id'):
         plan_entries.append(PlanDeliverable(plan=plan, basis_deliverable=deliverable, **classify_deliverable(deliverable)))
     PlanDeliverable.objects.bulk_create(plan_entries)
-    entries = list(plan.deliverables.select_related('basis_deliverable').order_by('technical_sequence', 'basis_deliverable_id'))
-
-    phase_evidence = _document_phase_evidence(basis)
-    phases = [('mobilization', 'Mobilization and Planning', 10)]
-    if any(entry.technical_sequence in range(20, 40) for entry in entries):
-        phases.append(('fieldwork', 'Inspection, Survey and Testing', 20))
-    if entries:
-        phases.append(('engineering', 'Engineering, Study and Deliverables', 30))
-    if any(entry.workflow_family == 'final_dossier' for entry in entries):
-        phases.append(('closeout', 'Final Dossier and Handover', 40))
-    GenerationPhase.objects.bulk_create([
-        GenerationPhase(
-            plan=plan, code=code, name=name, sequence=sequence,
-            duration_months=(phase_evidence.get(code) or {}).get('duration_months'),
-            source_references=(phase_evidence.get(code) or {}).get('references', []),
-        )
-        for code, name, sequence in phases
-    ])
-
-    dependencies = []
-    ordinary = [entry for entry in entries if entry.workflow_family != 'recurring_report']
-    for successor in ordinary:
-        if successor.workflow_family == 'final_dossier':
-            predecessors = [entry for entry in ordinary if entry.pk != successor.pk and entry.workflow_family != 'final_dossier']
-        else:
-            candidates = [
-                entry for entry in ordinary
-                if entry.technical_sequence < successor.technical_sequence
-                and (entry.scenario_code == 'common' or entry.scenario_code == successor.scenario_code)
-            ]
-            if not candidates:
-                continue
-            nearest_sequence = max(entry.technical_sequence for entry in candidates)
-            nearest = [entry for entry in candidates if entry.technical_sequence == nearest_sequence]
-            same_discipline = [
-                entry for entry in nearest
-                if entry.basis_deliverable.discipline == successor.basis_deliverable.discipline
-            ]
-            predecessors = same_discipline or nearest[:1]
-        for predecessor in predecessors:
-            dependencies.append(GenerationDependency(
-                plan=plan, predecessor=predecessor, successor=successor,
-                relationship_type='FS', lag_days=0, status='proposed',
-                rationale=(
-                    f'{predecessor.classification_reason} precedes '
-                    f'{successor.classification_reason.lower()}.'
-                )[:500],
-                source_type='document', source_references=_references(predecessor, successor),
-            ))
-    GenerationDependency.objects.bulk_create(dependencies, ignore_conflicts=True)
-
-    scenarios = sorted({entry.scenario_code for entry in entries if entry.scenario_code != 'common'})
-    if scenarios:
-        analysis_entries = [entry for entry in entries if entry.scenario_code == 'common' and entry.technical_sequence <= 40]
-        GenerationDecisionGate.objects.create(
-            plan=plan, code='CLIENT_WAY_FORWARD', name='Client Way-Forward Decision', sequence=1,
-            scenarios=[{'code': code, 'label': code.replace('_', ' ').title()} for code in scenarios],
-            source_references=_references(*analysis_entries[-3:]) if analysis_entries else [],
-        )
+    # A deliverable title or discipline is not evidence of a phase, dependency,
+    # scenario or approval gate. Explicit source activities/relationships are
+    # recovered by document_plan, with per-field references and unresolved gaps.
     refresh_generation_plan_readiness(plan)
     return plan
 

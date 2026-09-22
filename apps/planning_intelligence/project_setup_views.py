@@ -5,6 +5,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.throttling import UserRateThrottle
+from rest_framework.exceptions import PermissionDenied
+
+from apps.rbac.action_policy import module_action_allowed
+from apps.rbac.approval_eligibility import active_approval_user
 
 from .project_setup_serializers import PROJECT_TYPES, ProjectSetupAISettingsSerializer, ProjectSetupCreateSerializer
 from .services.project_setup import build_preview, create_from_preview, employee_payload, require_setup_access, setup_employees
@@ -28,25 +32,30 @@ class ProjectSetupAISettingsView(APIView):
     @property
     def permission_action(self):
         # Removing a personal credential edits connection settings; it does not
-        # delete a planning project. The setup access checks still apply below.
+        # delete a planning project. Personal connections also support editing
+        # an existing schedule, without granting project creation access.
         return 'read' if self.request.method in {'GET', 'HEAD', 'OPTIONS'} else 'update'
 
     def get_throttles(self):
         return [SetupAISettingsThrottle()] if self.request.method == 'POST' else []
 
+    def require_connection_access(self, actor):
+        if not active_approval_user(actor) or not module_action_allowed(actor, 'planning_package', 'update'):
+            raise PermissionDenied('Planning edit access is required to configure your AI connection.')
+
     def get(self, request):
-        require_setup_access(request.user)
+        self.require_connection_access(request.user)
         return Response(ai_settings_payload(request.user))
 
     @sensitive_variables()
     def post(self, request):
-        require_setup_access(request.user)
+        self.require_connection_access(request.user)
         serializer = ProjectSetupAISettingsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return Response(test_and_save_settings(request.user, serializer.validated_data))
 
     def delete(self, request):
-        require_setup_access(request.user)
+        self.require_connection_access(request.user)
         return Response(delete_settings(request.user))
 
 

@@ -131,7 +131,11 @@ class SourceScheduleVerificationTests(TestCase):
         self.assertEqual(result['timing']['inferred_relationship_count'], 1)
         self.assertEqual(result['timing']['source_date_count'], 0)
         self.assertFalse(result['timing']['dependencies_verified'])
-        self.assertEqual({(row['kind'], row['value']) for row in result['source_requirements']}, {('review_days', 10), ('relative_weeks', 28)})
+        self.assertEqual({(row['kind'], row['value']) for row in result['source_requirements']}, {
+            ('review_days', 10), ('relative_weeks', 28),
+            ('constraint_candidate', 'Completion is 28 weeks after award.')})
+        self.assertTrue(all(row['status'] == 'requires_review' and not row['executable']
+                            for row in result['source_requirements']))
         self.assertTrue(all(row['source_references'][0]['file_id'] == source.pk for row in result['source_requirements']))
         relative = next(row for row in result['source_requirements'] if row['kind'] == 'relative_weeks')
         self.assertEqual(relative['anchor_status'], 'unconfirmed')
