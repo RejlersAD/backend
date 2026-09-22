@@ -55,6 +55,7 @@ def _version_inputs(version):
     from .simple_planning import _version_tasks
     from .planning_boundaries import calculation_inputs_current
     from .planner_timing import expose_planner_timing
+    from .source_date_read_model import enrich_source_dates
     tasks = _version_tasks(version)
     calculated = bool(version.calculated_at and calculation_inputs_current(version))
     for task in tasks:
@@ -67,6 +68,7 @@ def _version_inputs(version):
         parent = task.get('source_deliverable')
         if task.get('parent_deliverable_id') and parent:
             parents.setdefault(str(task['parent_deliverable_id']), deepcopy(parent))
+    enrich_source_dates({'tasks': tasks, 'deliverables': list(parents.values())})
     return tasks, list(parents.values())
 
 

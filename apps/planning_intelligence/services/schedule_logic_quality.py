@@ -10,6 +10,8 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 
+from .source_date_read_model import source_date_fields
+
 
 SCHEMA = 'schedule-logic-quality/1'
 PARALLEL_REVIEW_THRESHOLD = 5
@@ -57,11 +59,13 @@ def _date(value):
 
 def _timing(row):
     planned = [_date(_field(row, key)) for key in ('planned_start_date', 'planned_finish_date')]
-    source = [_date(_field(row, key)) for key in ('source_start_date', 'source_finish_date')]
-    evidence = _field(row, 'source_evidence', {}) or {}
-    values = evidence.get('values') or {}
-    source = [value or _date(values.get(key)) for value, key in
-              zip(source, ('planned_start_date', 'planned_finish_date'))]
+    # Reuse the source read model's traceability, ambiguity and conflict rules.
+    # An explicit suppressed endpoint must never fall back to its raw evidence.
+    derived = source_date_fields({**(row.get('metadata') or {}), **row})
+    source_status = [_field(row, f'source_{endpoint}_status', derived[f'source_{endpoint}_status'])
+                     for endpoint in ('start', 'finish')]
+    source = [_date(_field(row, f'source_{endpoint}_date', derived[f'source_{endpoint}_date']))
+              if status == 'extracted' else None for endpoint, status in zip(('start', 'finish'), source_status)]
     review = _field(row, 'source_evidence_review', {}) or {}
     stale = bool(_field(row, 'calculation_stale', False) or _field(row, 'dates_stale', False)
                  or _field(row, 'calculation_status') == 'stale')
@@ -80,7 +84,8 @@ def _timing(row):
     if all(effective) and effective[1] < effective[0]:
         effective, basis = [None, None], 'unknown'
     return {'start_date': effective[0], 'finish_date': effective[1], 'date_basis': basis,
-            'planned_dates': planned, 'source_dates': source, 'stale': stale,
+            'planned_dates': planned, 'source_dates': source,
+            'source_status': source_status, 'stale': stale,
             'calculated': calculated, 'date_authority': authority, 'evidence_review': review.get('status')}
 
 

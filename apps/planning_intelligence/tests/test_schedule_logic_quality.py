@@ -117,12 +117,53 @@ class ScheduleLogicQualityTests(TestCase):
         tasks = parallel(calculated=False)
         for task in tasks[1:]:
             task['source_evidence'] = {'values': {'planned_start_date': task['planned_start_date'],
-                                                  'planned_finish_date': task['planned_finish_date']}}
+                                                  'planned_finish_date': task['planned_finish_date']},
+                                       'source_references': [{'file_id': 1, 'locator': {'row': task['id']}}]}
             task['planned_start_date'] = '2028-01-01'
         group = review_groups(analyze_schedule_logic(tasks))[0]
         self.assertEqual(group['date_basis'], 'source')
         self.assertEqual(group['start_date'], '2026-04-15')
         self.assertEqual(group['finish_date'], '2026-05-27')
+
+    def test_suppressed_or_untraceable_source_dates_are_not_resurrected(self):
+        for status in ('conflicting', 'ambiguous', 'invalid', 'not_specified', 'explicit_none'):
+            with self.subTest(status=status):
+                tasks = parallel(calculated=False)
+                for task in tasks[1:]:
+                    task['source_evidence'] = {
+                        'values': {'planned_start_date': task['planned_start_date'], 'planned_finish_date': task['planned_finish_date']},
+                        'source_references': [{'file_id': 1, 'locator': {'row': task['id']}}],
+                    }
+                    task.update(source_start_status=status, source_finish_status=status,
+                                source_start_date=None, source_finish_date=None)
+                group = review_groups(analyze_schedule_logic(tasks))[0]
+                self.assertIsNone(group['start_date'])
+                self.assertIsNone(group['finish_date'])
+                self.assertEqual(group['date_basis'], 'unknown')
+        tasks = parallel(calculated=False)
+        for task in tasks[1:]:
+            task['source_evidence'] = {'values': {'planned_start_date': task['planned_start_date'],
+                                                  'planned_finish_date': task['planned_finish_date']},
+                                       'source_references': [{'filename': 'Unmatched.pdf'}]}
+        group = review_groups(analyze_schedule_logic(tasks))[0]
+        self.assertEqual(group['date_basis'], 'unknown')
+        self.assertIsNone(group['start_date'])
+
+    def test_conflicting_matched_legacy_and_current_source_rows_stay_unknown(self):
+        tasks = parallel(calculated=False)
+        for task in tasks[1:]:
+            task['source_evidence'] = {
+                'values': {'planned_start_date': task['planned_start_date'], 'planned_finish_date': task['planned_finish_date']},
+                'source_references': [{'file_id': 1, 'locator': {'row': task['id']}}],
+            }
+            task['duration_evidence'] = {
+                'values': {'planned_start_date': '2028-01-01', 'planned_finish_date': '2028-02-01'},
+                'source_references': [{'file_id': 2, 'locator': {'row': task['id']}}],
+            }
+        group = review_groups(analyze_schedule_logic(tasks))[0]
+        self.assertIsNone(group['start_date'])
+        self.assertIsNone(group['finish_date'])
+        self.assertEqual(group['date_basis'], 'unknown')
 
     def test_missing_one_stage_date_does_not_claim_complete_window(self):
         tasks = parallel()
@@ -230,6 +271,8 @@ class ScheduleLogicQualityTests(TestCase):
             with self.subTest(field=field):
                 updated = deepcopy(tasks)
                 updated[1][field] = value
+                if field == 'source_start_date':
+                    updated[1]['source_start_status'] = 'extracted'
                 self.assertNotEqual(before['fingerprint'], analyze_schedule_logic(updated)['fingerprint'])
         updated = deepcopy(tasks)
         updated[1]['dependency_details'][0]['lag_days'] = 1

@@ -210,6 +210,23 @@ class ScheduleLogicReviewTests(TestCase):
         self.assertFalse(after['permissions']['can_approve_publish'])
         self.assertFalse(ScheduleBaseline.objects.exists())
 
+    def test_legacy_matched_source_dates_have_identical_display_and_review_fingerprints(self):
+        version = self.materialize()
+        for activity in version.activities.all():
+            activity.metadata = {**activity.metadata, 'duration_evidence': {
+                'activity_specific': True,
+                'source_references': [{'file_id': 91, 'filename': 'Original schedule.pdf',
+                                       'locator': {'page': 10, 'row': activity.external_id}}],
+                'values': {'planned_start_date': '2026-04-15', 'planned_finish_date': '2026-05-27'},
+            }}
+            activity.save(update_fields=['metadata'])
+        state = self.activate(version)
+        self.assertTrue(all(row['source_start_date'] == '2026-04-15' for row in state['tasks']))
+        self.assertEqual(version_logic_quality(version)['fingerprint'], self.quality(state)['fingerprint'])
+        reviewed = self.confirm(state)
+        self.assertEqual(self.quality(reviewed)['summary']['unreviewed_group_count'], 0)
+        self.assertEqual(version_logic_quality(version)['summary']['unreviewed_group_count'], 0)
+
     def test_baseline_can_be_reopened_but_original_review_and_snapshot_remain_unchanged(self):
         version = self.materialize()
         state = self.activate(version)
@@ -286,7 +303,7 @@ class ScheduleLogicReviewTests(TestCase):
             ScheduleReviewDecision.objects.create(review=review, reviewer=self.owner)
             with self.assertRaises(ScheduleApprovalError) as raised:
                 decide_schedule_review(version, review.pk, self.reviewer, decision='approved', comment='Ready')
-            self.assertEqual(raised.exception.code, 'schedule_logic_review_required')
+            self.assertEqual(raised.exception.payload['code'], 'schedule_logic_review_required')
             vote.refresh_from_db(); review.refresh_from_db()
             self.assertEqual(vote.status, 'pending')
             self.assertEqual(vote.comment, '')
