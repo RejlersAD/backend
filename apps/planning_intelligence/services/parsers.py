@@ -30,6 +30,33 @@ MAX_EXTRACTED_CHARS = _positive_setting('PLANNING_MAX_EXTRACTED_CHARS', 4_000_00
 MAX_OCR_PAGES = _positive_setting('PLANNING_MAX_OCR_PAGES', 50)
 
 
+def _pdf_page_needs_ocr(page, text):
+    """A scanned body with an electronic footer is not a text-readable page."""
+    if not text.strip():
+        return True
+    try:
+        width, height = float(page.width), float(page.height)
+        if width <= 0 or height <= 0:
+            return False
+        images = getattr(page, 'images', []) or []
+        large_image = any(
+            max(0, min(width, float(item.get('x1', 0))) - max(0, float(item.get('x0', 0))))
+            * max(0, min(height, float(item.get('bottom', 0))) - max(0, float(item.get('top', 0))))
+            >= width * height * 0.5 for item in images
+        )
+        if not large_image:
+            return False
+        if len(text.split()) < 80:
+            return True
+        # Repeated watermark/footer overlays may have many characters, while
+        # none of the scanned agreement's body has a searchable text layer.
+        chars = getattr(page, 'chars', []) or []
+        body_chars = [item for item in chars if height * 0.18 < float(item.get('top', 0)) < height * 0.82]
+        return bool(chars) and len(body_chars) < 40
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _truncate(text: str, coverage=None) -> str:
     # Defensive: strip NUL bytes from any extractor's output — Postgres TEXT
     # columns reject them and would otherwise crash the save() call.
@@ -59,16 +86,20 @@ def _extract_pdf(file_obj, coverage=None) -> str:
                     text = ''
                 method = 'pdf_text'
                 status = 'processed'
-                if not text.strip():
+                if _pdf_page_needs_ocr(page, text):
+                    native_text = text
                     if ocr_count < MAX_OCR_PAGES:
                         ocr_count += 1
-                        text = _ocr_pdf_page(file_obj, index)
+                        ocr_text = _ocr_pdf_page(file_obj, index)
                         method = 'tesseract_ocr'
-                        if text:
-                            text = f'--- OCR Page: {index + 1} ---\n{text}'
+                        if ocr_text:
+                            text = f'--- OCR Page: {index + 1} ---\n{ocr_text}'
+                            if native_text.strip() and native_text.strip() not in ocr_text:
+                                text += f'\n--- Embedded text ---\n{native_text}'
                         else:
-                            status = 'empty'
-                            record_issue(coverage, 'page_without_text', 'No text was recovered from this page; it may be blank or require manual review.', page=index + 1)
+                            text = native_text
+                            status = 'failed' if native_text.strip() else 'empty'
+                            record_issue(coverage, 'page_without_text', 'The scanned page body could not be read; any embedded footer text is incomplete evidence.', page=index + 1)
                     else:
                         status = 'skipped'
                         record_issue(coverage, 'ocr_page_limit', 'This page requires OCR but the OCR page budget was exhausted.', page=index + 1)
@@ -101,6 +132,29 @@ def _extract_pdf(file_obj, coverage=None) -> str:
     return _extract_pdf_ocr(file_obj, coverage)
 
 
+def _remove_ocr_table_rules(image):
+    """Remove only long straight rules that make Tesseract omit contract cells."""
+    try:
+        import numpy as np
+        from PIL import Image
+        pixels = np.array(image.convert('L'))
+        dark = pixels < 160
+        mask = np.zeros_like(dark)
+        for transpose in (False, True):
+            rows = dark.T if transpose else dark
+            target = mask.T if transpose else mask
+            minimum = max(100, int(rows.shape[1] * 0.18))
+            for index, row in enumerate(rows):
+                transitions = np.diff(np.pad(row.astype(np.int8), (1, 1)))
+                for start, end in zip(np.where(transitions == 1)[0], np.where(transitions == -1)[0]):
+                    if end - start >= minimum:
+                        target[index, max(0, start - 1):end + 1] = True
+        pixels[mask] = 255
+        return Image.fromarray(pixels)
+    except ImportError:
+        return image
+
+
 def _ocr_pdf_page(file_obj, index):
     try:
         import fitz
@@ -108,9 +162,14 @@ def _ocr_pdf_page(file_obj, index):
         from PIL import Image
         file_obj.seek(0)
         with fitz.open(stream=file_obj.read(), filetype='pdf') as document:
-            pixmap = document[index].get_pixmap(matrix=fitz.Matrix(200 / 72, 200 / 72), alpha=False)
+            pixmap = document[index].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), alpha=False)
             with Image.open(io.BytesIO(pixmap.tobytes('png'))) as image:
-                return pytesseract.image_to_string(image, lang='eng', config='--oem 3 --psm 6').strip()
+                prepared = _remove_ocr_table_rules(image)
+                try:
+                    return pytesseract.image_to_string(prepared, lang='eng', config='--oem 3 --psm 6', timeout=45).strip()
+                finally:
+                    if prepared is not image:
+                        prepared.close()
     except Exception as exc:
         logger.warning('PDF page OCR failed: %s', exc)
         return ''
