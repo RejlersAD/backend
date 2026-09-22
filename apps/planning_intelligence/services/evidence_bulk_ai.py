@@ -8,7 +8,7 @@ import json
 from collections import Counter
 
 from ..config import CLAUDE_MAX_INPUT_CHARS
-from . import claude_client
+from . import project_ai
 
 
 MAX_GROUPS_PER_BATCH = 12
@@ -54,19 +54,20 @@ def ai_availability(project):
     settings = getattr(project, 'ai_settings', None)
     settings = settings if isinstance(settings, dict) else {}
     model = settings.get('model') if isinstance(settings.get('model'), str) else None
-    result = {'available': False, 'provider': 'anthropic', 'model': model, 'reason': ''}
-    if settings.get('provider') not in (None, '', 'anthropic'):
-        result['reason'] = 'The project does not have a supported Claude configuration.'
+    provider = project_ai.project_provider(project)
+    result = {'available': False, 'provider': provider, 'model': model, 'reason': ''}
+    if provider not in project_ai.MODEL_CHOICES_BY_PROVIDER:
+        result['reason'] = 'The project does not have a supported AI provider configuration.'
         return result
     try:
-        configuration = claude_client.get_claude_config(project)
+        configuration = project_ai.get_project_ai_config(project)
     except Exception:
         configuration = None
     if (not isinstance(configuration, dict)
             or not isinstance(configuration.get('model'), str)
             or not configuration['model'].strip()
             or not configuration.get('api_key')):
-        result['reason'] = 'Project Claude AI is disabled or its saved credentials are unavailable.'
+        result['reason'] = 'Project AI is disabled or its saved credentials are unavailable.'
         return result
     result.update(available=True, model=configuration['model'])
     return result
@@ -239,9 +240,9 @@ def resolve_conflicts(groups, *, project, actor, progress_callback=None):
         else:
             try:
                 try:
-                    result = claude_client.call_claude(project, system_prompt=SYSTEM_PROMPT,
+                    result = project_ai.call_project_ai(project, system_prompt=SYSTEM_PROMPT,
                         user_prompt=_json({'groups': batch}), max_tokens=MAX_OUTPUT_TOKENS,
-                        feature='evidence_review', user=actor)
+                        feature='evidence_review', user=actor, json_output=True)
                 except Exception:
                     # The shared client normally returns None on provider
                     # failures. Also stop if a client adapter unexpectedly

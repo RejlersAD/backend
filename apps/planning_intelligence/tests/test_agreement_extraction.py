@@ -26,7 +26,7 @@ class AgreementExtractionTests(SimpleTestCase):
 
     def analyze(self, text, candidates=None, **kwargs):
         response = {'text': json.dumps({'candidates': candidates or []}), 'stop_reason': 'end_turn'}
-        with patch.object(extraction.claude_client, 'get_claude_config', return_value={'model': 'configured'}), patch.object(extraction.claude_client, 'call_claude', return_value=response) as call:
+        with patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value={'model': 'configured'}), patch.object(extraction.project_ai.claude_client, 'call_claude', return_value=response) as call:
             result = extraction.extract_agreement_workspace(SimpleNamespace(pk=1), [self.source(text)], **kwargs)
         return result, call
 
@@ -69,7 +69,7 @@ class AgreementExtractionTests(SimpleTestCase):
 
     def test_duration_events_and_anchors_remain_separate(self):
         text = 'Provisional acceptance: 8 months from commencement date. FEED completion within 7 months (28 weeks) from effective award date.'
-        with patch.object(extraction.claude_client, 'get_claude_config', return_value=None):
+        with patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value=None):
             result = extraction.extract_agreement_workspace(None, [self.source(text)])
         facts = [row for row in result['candidates'] if row['field'] == 'duration_requirement']
         self.assertEqual({(row['value']['amount'], row['value']['unit'], row['value']['anchor']) for row in facts},
@@ -103,7 +103,7 @@ class AgreementExtractionTests(SimpleTestCase):
                 'CONTRACTOR shall prepare a Design Report.\n'
                 'EPC cost estimate shall have accuracy of 15%.\n'
                 'Refer to Appendix 3.2 for the document list.')
-        with patch.object(extraction.claude_client, 'get_claude_config', return_value=None), patch.object(extraction.claude_client, 'call_claude') as call:
+        with patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value=None), patch.object(extraction.project_ai.claude_client, 'call_claude') as call:
             result = extraction.extract_agreement_workspace(None, [self.source(text)])
         fields = {row['field'] for row in result['candidates']}
         self.assertTrue({'project_name', 'client', 'contractor', 'contract_reference', 'date_constraint', 'contract_value', 'payment_term', 'warranty', 'performance_guarantee', 'review_window', 'deliverable', 'estimate_requirement', 'document_requirement'} <= fields, fields)
@@ -122,7 +122,7 @@ class AgreementExtractionTests(SimpleTestCase):
 
     def test_unfilled_appendix_templates_do_not_override_actual_parties(self):
         text = 'Client: Harbor Company\n\fClient: [INSERT NAME OF COMPANY]\nContractor: 3. Name [Insert Here]'
-        with patch.object(extraction.claude_client, 'get_claude_config', return_value=None):
+        with patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value=None):
             result = extraction.extract_agreement_workspace(None, [self.source(text)])
         self.assertEqual([row['value']['text'] for row in result['candidates']], ['Harbor Company'])
 
@@ -131,7 +131,7 @@ class AgreementExtractionTests(SimpleTestCase):
                 '! WEEK for DESIGN Scope\nDELAY LIQUIDATED 9% of FEES\nDAMAGES CAP:\n'
                 'WARRANTY PERIOD duration: | 18 months\n'
                 'PERFORMANCE BANK YES\nGUARANTEE\nPERFORMANCE BANK 7% of total FEES\nGUARANTEE amount:')
-        with patch.object(extraction.claude_client, 'get_claude_config', return_value=None):
+        with patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value=None):
             result = extraction.extract_agreement_workspace(None, [self.source(text)])
         values = {row['field']: row['value'] for row in result['candidates']}
         self.assertEqual(values['warranty']['amount'], 18)
@@ -194,14 +194,14 @@ class AgreementExtractionTests(SimpleTestCase):
 
     def test_malformed_and_truncated_ai_results_never_become_complete(self):
         for response in ({'text': '{"candidates":[],"candidates":[]}'}, {'text': '{"candidates":[]}', 'stop_reason': 'max_tokens'}, {'text': '{"candidates":[NaN]}'}, {'text': '{"candidates":[]}', 'stop_reason': 'tool_use'}):
-            with self.subTest(response=response), patch.object(extraction.claude_client, 'get_claude_config', return_value={'model': 'configured'}), patch.object(extraction.claude_client, 'call_claude', return_value=response):
+            with self.subTest(response=response), patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value={'model': 'configured'}), patch.object(extraction.project_ai.claude_client, 'call_claude', return_value=response):
                 result = extraction.extract_agreement_workspace(None, [self.source('Unrelated contract section.')])
                 self.assertEqual(result['coverage']['status'], 'partial')
                 self.assertEqual(result['coverage']['chunks_processed'], 0)
                 self.assertEqual(result['candidates'], [])
 
     def test_provider_failure_keeps_supported_literal_evidence_and_stops(self):
-        with patch.object(extraction, 'MAX_CHUNK_CHARS', 40), patch.object(extraction.claude_client, 'get_claude_config', return_value={'model': 'configured'}), patch.object(extraction.claude_client, 'call_claude', return_value=None) as call:
+        with patch.object(extraction, 'MAX_CHUNK_CHARS', 40), patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value={'model': 'configured'}), patch.object(extraction.project_ai.claude_client, 'call_claude', return_value=None) as call:
             result = extraction.extract_agreement_workspace(None, [self.source('Project Name: Harbor Upgrade\n' + 'General terms. ' * 30)])
         self.assertEqual(call.call_count, 1)
         self.assertTrue(any(row['field'] == 'project_name' for row in result['candidates']))
@@ -215,7 +215,7 @@ class AgreementExtractionTests(SimpleTestCase):
         self.assertFalse(any(row.get('status') == 'accepted' for row in result['candidates']))
 
     def test_file_budget_and_unreadable_sources_are_explicit(self):
-        with patch.object(extraction, 'MAX_FILES', 1), patch.object(extraction, 'MAX_FILE_BYTES', 2), patch.object(extraction.claude_client, 'get_claude_config', return_value=None):
+        with patch.object(extraction, 'MAX_FILES', 1), patch.object(extraction, 'MAX_FILE_BYTES', 2), patch.object(extraction.project_ai.claude_client, 'get_claude_config', return_value=None):
             result = extraction.extract_agreement_workspace(None, [self.source('large'), self.source('other', pk=2)])
         self.assertEqual(result['coverage']['status'], 'failed')
         self.assertTrue({'source_unreadable', 'file_limit'} <= {row['code'] for row in result['warnings']})

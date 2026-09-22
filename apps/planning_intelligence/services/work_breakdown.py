@@ -299,6 +299,8 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'duration_evidence', 'duration_comparison_evidence', 'duration_review_status', 'duration_review_reason', 'duration_calendar_verified',
                 'source_activity_id', 'source_evidence', 'dependency_status', 'source_missing_fields', 'duration_unit',
                 'evidence_policy', 'duration_policy', 'planner_timing', 'date_authority',
+                'requirement_id', 'requirement_value', 'requirement_status', 'selection_basis',
+                'needs_review', 'review_flags', 'proposal_timing',
                 'activity_type', 'is_milestone',
             }
         }

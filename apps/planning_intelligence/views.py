@@ -31,14 +31,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .access import PlanningObjectPermission, accessible_projects, can_final_approve_defaults, can_write_project
-from .config import CLAUDE_API_KEY_PATTERN, CLAUDE_MODEL_CHOICES, DEFAULT_CLAUDE_MODEL
 from .models import PlanningAuditEvent, PlanningFile, PlanningGeneration, PlanningJob, PlanningProject
 from .serializers import (
     PlanningAuditEventSerializer, PlanningFileListSerializer, PlanningFileSerializer,
     PlanningGenerationEditSerializer, PlanningGenerationListSerializer,
     PlanningGenerationSerializer, PlanningJobSerializer, PlanningProjectSerializer,
 )
-from .services import byok_crypto, claude_client, export_utils
+from .services import byok_crypto, export_utils, project_ai
+from .services.project_ai_settings import settings_payload, updated_settings
 from .services.audit import record_event
 from .services.operational_jobs import dispatch_job, get_or_create_job, workable_plan_fingerprint
 from .services.validation_engine import validate
@@ -380,20 +380,20 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
 
     def _require_byok(self, project):
         """Hard gate: refuse to analyze / generate when this project has no
-        usable BYOK / Claude configuration. Returns a Response on failure,
+        usable project AI configuration. Returns a Response on failure,
         None on success."""
         if not byok_crypto.is_encryption_configured():
             return Response(
                 {'error': 'Planning AI encryption is not configured on the server.', 'code': 'byok_encryption_unavailable'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        if claude_client.get_claude_config(project) is None:
+        if project_ai.get_project_ai_config(project) is None:
             return Response(
                 {
                     'error': (
-                        'This project has no active BYOK (Claude) configuration. '
-                        'Open the AI Settings (BYOK) panel, enable it, save a valid '
-                        'Anthropic API key, and run Test Connection before analyzing '
+                        'This project has no active AI configuration. '
+                        'Open the AI Settings panel, choose a provider, enable it, save a valid '
+                        'API key, and run Test Connection before analyzing '
                         'or generating a schedule.'
                     ),
                     'code': 'byok_required',
@@ -476,106 +476,38 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='ai-settings')
     def ai_settings(self, request, pk=None):
-        """
-        GET    -> {'enabled','provider','model','key_configured','model_choices'}
-        POST   -> body {'enabled': bool, 'model': str, 'api_key': str (optional)}
-                  Saves settings; only overwrites the stored key when 'api_key'
-                  is supplied (so enabling/switching models doesn't require
-                  re-entering the key every time).
-        DELETE -> clears all BYOK settings for this project.
-        """
+        """Read provider choices or update encrypted project AI credentials."""
         project = self.get_object()
-        ai_settings = project.ai_settings or {}
-
         if request.method == 'GET':
-            return Response({
-                'enabled': bool(ai_settings.get('enabled')),
-                'provider': ai_settings.get('provider') or 'anthropic',
-                'model': ai_settings.get('model') or DEFAULT_CLAUDE_MODEL,
-                'key_configured': bool(ai_settings.get('api_key_encrypted')),
-                'model_choices': CLAUDE_MODEL_CHOICES,
-                'encryption_configured': byok_crypto.is_encryption_configured(),
-            })
-
-        if request.method == 'DELETE':
-            project.ai_settings = {}
+            return Response(settings_payload(project))
+        with transaction.atomic():
+            project = PlanningProject.objects.select_for_update().get(pk=project.pk)
+            if request.method == 'DELETE':
+                project.ai_settings = {}
+                action_name = 'ai_settings.removed'
+            else:
+                if request.data.get('api_key') and not byok_crypto.is_encryption_configured():
+                    return Response({'error': 'Secure API key storage is not configured on the server.'}, status=503)
+                project.ai_settings = updated_settings(project.ai_settings or {}, request.data)
+                action_name = 'ai_settings.updated'
             project.save(update_fields=['ai_settings'])
-            record_event(project=project, actor=request.user, action='ai_settings.removed', entity=project)
-            return Response({
-                'enabled': False, 'provider': 'anthropic', 'model': DEFAULT_CLAUDE_MODEL,
-                'key_configured': False, 'model_choices': CLAUDE_MODEL_CHOICES,
-            })
-
-        # POST
-        enabled = bool(request.data.get('enabled', ai_settings.get('enabled', False)))
-        model = request.data.get('model') or ai_settings.get('model') or DEFAULT_CLAUDE_MODEL
-        valid_models = {choice['value'] for choice in CLAUDE_MODEL_CHOICES}
-        if model not in valid_models:
-            return Response({'error': f'Unknown model "{model}".'}, status=status.HTTP_400_BAD_REQUEST)
-
-        api_key = (request.data.get('api_key') or '').strip()
-        if api_key and not byok_crypto.is_encryption_configured():
-            return Response(
-                {'error': 'BYOK_ENCRYPTION_KEY is not configured on the server.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        new_settings = dict(ai_settings)
-        new_settings['provider'] = 'anthropic'
-        new_settings['enabled'] = enabled
-        new_settings['model'] = model
-
-        if api_key:
-            if not CLAUDE_API_KEY_PATTERN.match(api_key):
-                return Response(
-                    {'error': 'API key does not look like a valid Anthropic key (expected format: sk-ant-...).'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            new_settings['api_key_encrypted'] = byok_crypto.encrypt_api_key(api_key)
-            new_settings['key_updated_at'] = timezone.now().isoformat()
-        elif enabled and not new_settings.get('api_key_encrypted'):
-            return Response(
-                {'error': 'No API key is configured for this project yet — provide one to enable BYOK.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        project.ai_settings = new_settings
-        project.save(update_fields=['ai_settings'])
-        record_event(
-            project=project, actor=request.user, action='ai_settings.updated', entity=project,
-            after={'enabled': new_settings['enabled'], 'provider': new_settings['provider'], 'model': new_settings['model']},
-        )
-        return Response({
-            'enabled': new_settings['enabled'],
-            'provider': new_settings['provider'],
-            'model': new_settings['model'],
-            'key_configured': bool(new_settings.get('api_key_encrypted')),
-            'model_choices': CLAUDE_MODEL_CHOICES,
-        })
+            record_event(project=project, actor=request.user, action=action_name, entity=project,
+                         after={key: project.ai_settings.get(key) for key in ('enabled', 'provider', 'model')})
+        return Response(settings_payload(project))
 
     @action(detail=True, methods=['post'], url_path='ai-settings/test')
     def ai_settings_test(self, request, pk=None):
-        """One minimal live Claude call to validate the stored key works.
-        Persists nothing."""
+        """Test the saved provider; return only a sanitized connection result."""
         project = self.get_object()
-        if claude_client.get_claude_config(project) is None:
+        if project_ai.get_project_ai_config(project) is None:
             return Response(
-                {'success': False, 'message': 'BYOK is not enabled or no API key is configured for this project.'},
+                {'success': False, 'message': 'AI is not enabled or no usable API key is configured for this project.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        result = claude_client.call_claude(
-            project,
-            system_prompt='Reply with exactly one word: OK',
-            user_prompt='Connection test.',
-            max_tokens=10,
-            feature='connection_test',
-            user=request.user,
-        )
-        if result is None:
-            return Response({
-                'success': False,
-                'message': 'Claude call failed — check that the API key is valid and has available quota.',
-            })
-        return Response({'success': True, 'message': 'Claude connection verified successfully.'})
+        result = project_ai.test_project_ai_connection(project, user=request.user)
+        label = next(row['label'] for row in project_ai.PROVIDER_CHOICES if row['value'] == result['provider'])
+        return Response({'success': result['success'], 'provider': result['provider'], 'model': result['model'],
+                         'message': f'{label} connection verified successfully.' if result['success'] else result['error']})
 
 
 class PlanningFileViewSet(viewsets.ModelViewSet):
