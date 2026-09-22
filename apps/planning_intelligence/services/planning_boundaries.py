@@ -52,6 +52,9 @@ def _whole_number(value):
 
 def accepted_input_validation(version):
     """Return current readiness without materializing or changing any inputs."""
+    if (version.evidence_input_snapshot or {}).get('schema') == 'source-schedule-logic/1':
+        from .source_schedule_logic import logic_readiness
+        return logic_readiness(version)
     strict = is_document_driven_version(version)
     issues = []
     schedule = version.schedule

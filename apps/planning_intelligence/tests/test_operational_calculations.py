@@ -45,6 +45,46 @@ class OperationalCalculationTests(unittest.TestCase):
         self.assertEqual(metrics['cpi'], '1.2500')
         self.assertEqual(metrics['eac'], '160.00')
         self.assertEqual(metrics['planned_progress_pct'], '50.00')
+        self.assertEqual(metrics['remaining_progress_pct'], '25.00')
+        self.assertEqual([row['remaining_progress_pct'] for row in report['activity_comparisons']], ['0.00', '100.00'])
+        self.assertEqual(metrics['bac'], '200.00')
+        self.assertEqual(metrics['etc'], '80.00')
+
+    def test_remaining_progress_uses_approved_weights_and_does_not_require_money(self):
+        baseline, policy, observations = inputs()
+        policy['currency'] = None
+        for row in policy['activities']:
+            row['budget'] = None
+        policy['activities'][0]['weight'] = '3'
+        observations[0]['physical_progress_pct'] = '20'
+        observations[1]['physical_progress_pct'] = '80'
+        report = run_report(baseline, policy, observations, confirmed=False)
+        self.assertEqual(report['metrics']['progress_pct'], '35.00')
+        self.assertEqual(report['metrics']['remaining_progress_pct'], '65.00')
+        self.assertEqual(report['metrics']['planned_progress_pct'], '60.00')
+        self.assertEqual([row['remaining_progress_pct'] for row in report['activity_comparisons']], ['80.00', '20.00'])
+        self.assertIsNone(report['metrics']['bac'])
+        self.assertIsNone(report['metrics']['etc'])
+
+    def test_remaining_progress_is_unknown_for_missing_or_invalid_measurements(self):
+        baseline, policy, observations = inputs()
+        missing = run_report(baseline, policy, observations[:1])
+        self.assertIsNone(missing['metrics']['remaining_progress_pct'])
+        self.assertIsNone(missing['activity_comparisons'][1]['remaining_progress_pct'])
+        self.assertIn('progress_observations_incomplete', missing['metrics']['null_reasons']['remaining_progress_pct'])
+        self.assertNotIn('currency_not_specified', missing['metrics']['null_reasons']['remaining_progress_pct'])
+        observations[0]['physical_progress_pct'] = '101'
+        invalid = run_report(baseline, policy, observations)
+        self.assertIsNone(invalid['metrics']['remaining_progress_pct'])
+        self.assertIsNone(invalid['activity_comparisons'][0]['remaining_progress_pct'])
+
+    def test_missing_weights_do_not_invent_project_remaining_progress(self):
+        baseline, policy, observations = inputs()
+        policy['activities'][0]['weight'] = None
+        report = run_report(baseline, policy, observations)
+        self.assertIsNone(report['metrics']['remaining_progress_pct'])
+        self.assertEqual(report['metrics']['null_reasons']['remaining_progress_pct'], ['approved_weights_incomplete'])
+        self.assertEqual(report['activity_comparisons'][0]['remaining_progress_pct'], '50.00')
 
     def test_eac_never_divides_by_display_rounded_cpi(self):
         baseline, policy, observations = inputs(1)

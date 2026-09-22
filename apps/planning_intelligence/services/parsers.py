@@ -9,6 +9,7 @@ and the caller (views.py) records parse_status='failed' with the error.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import logging
 import os
@@ -324,6 +325,18 @@ def extract_text_with_coverage(file_field, original_filename: str):
     # Keep PDF page separators, including empty boundary pages, for provenance.
     text = _truncate(raw_text.strip(' \t\r\n'), coverage)
     finish_coverage(coverage, raw_text, text)
+    if ext == 'pdf':
+        # A separate bounded adapter retains PDF column placement. The ordinary
+        # text remains intact for classification, search and other parsers.
+        try:
+            from .reference_schedule_geometry import parse_reference_schedule_pdf
+            geometry = parse_reference_schedule_pdf(file_field)
+            if geometry.get('rows') and geometry.get('status') in {'parsed', 'partial'}:
+                geometry['text_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
+                geometry['source_storage_name'] = getattr(file_field, 'name', None)
+                coverage['structured_evidence'] = {'reference_schedule_geometry': geometry}
+        except Exception as exc:
+            logger.info('Optional PDF schedule geometry extraction failed: %s', exc)
 
     if not text.strip():
         coverage['status'] = 'failed'

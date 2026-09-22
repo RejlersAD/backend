@@ -7,6 +7,7 @@ from collections import deque
 from copy import deepcopy
 from datetime import date, timedelta
 from math import ceil, isfinite
+from types import SimpleNamespace
 import re
 import hashlib
 
@@ -21,7 +22,8 @@ from apps.core.project_models import ProjectTask
 from ..access import can_write_project, proposal_approver_users
 from ..models import PlanningProject, ScheduleBaseline, ScheduleReview, ScheduleReviewDecision, ScheduleVersion
 from .audit import record_event
-from .cpm import WorkdayCalendar, calculate_schedule_version, calculate_backward_pass, _edge_weight, _finish_date
+from .cpm import SchedulingError, WorkdayCalendar, calculate_schedule_version, calculate_backward_pass, _edge_weight, _finish_date, _constraint_bound
+from .manual_wbs import manual_wbs
 from .document_intelligence import run_document_intelligence
 from .operational_jobs import canonical_fingerprint
 from .schedule_approval import (
@@ -153,7 +155,9 @@ def _version_tasks(version):
         'activity_code': row.external_id, 'activity_code_source': 'schedule_activity',
         'sort_order': row.sort_order,
         'wbs_code': row.wbs_node.code if row.wbs_node else '',
-        'constraint_type': row.constraint_type, 'calendar_id': row.calendar_id,
+        'constraint_type': row.constraint_type, 'constraint_date': row.constraint_date.isoformat() if row.constraint_date else None,
+        'wbs_phase': (row.metadata or {}).get('wbs_phase', ''), 'wbs_deliverable': (row.metadata or {}).get('wbs_deliverable', ''),
+        'calendar_id': row.calendar_id,
         **{key: (row.metadata or {})[key] for key in
            ('property_provenance', 'derivation', 'schedule_rationale', 'schedule_phase', 'schedule_generated_fields', 'dependency_rationales',
             'duration_evidence', 'duration_comparison_evidence', 'duration_review_status', 'duration_review_reason', 'duration_calendar_verified')
@@ -274,17 +278,29 @@ def _canvas_metadata(project, state, version, activities):
             'discipline': node.discipline, 'sort_order': node.sort_order, 'level': node.level,
             'is_derived': False,
         } for node in version.wbs_nodes.filter(is_deleted=False).order_by('sort_order', 'id')]
-        state['hierarchy_source'] = 'schedule_version'
+        version_nodes = {node['id']: node for node in nodes}
+        for activity in activities.values():
+            metadata = activity.metadata or {}
+            node = version_nodes.get(activity.wbs_node_id)
+            if not node or not metadata.get('wbs_phase'):
+                continue
+            node['kind'] = 'deliverable' if metadata.get('wbs_deliverable') else 'phase'
+            if node['kind'] == 'deliverable' and node['parent_id'] in version_nodes:
+                version_nodes[node['parent_id']]['kind'] = 'phase'
+        state['hierarchy_source'] = 'manual_wbs' if any(node.get('kind') for node in nodes) else 'schedule_version'
     else:
         labels = {row['code']: row['name'] for row in state['disciplines']}
-        codes = list(dict.fromkeys(task['discipline'] for task in state['tasks']))
+        manual_nodes, manual_assignments = manual_wbs(state['tasks']) if project.planning_mode == 'manual' else ([], {})
+        codes = list(dict.fromkeys(task['discipline'] for task in state['tasks'] if task['id'] not in manual_assignments))
         nodes = [{
             'id': f'draft:{code}', 'parent_id': None, 'code': f'{index + 1}.0',
             'name': labels.get(code) or code.replace('_', ' ').title(), 'discipline': code,
             'sort_order': index, 'level': 0, 'is_derived': True,
         } for index, code in enumerate(codes)]
-        state['hierarchy_source'] = 'draft_workstreams'
+        nodes.extend(manual_nodes)
+        state['hierarchy_source'] = 'manual_wbs' if manual_nodes else 'draft_workstreams'
     draft_nodes = {node['discipline']: node for node in nodes} if not version else {}
+    manual_by_id = {node['id']: node for node in nodes} if not version else {}
     activity_positions = {}
     version_positions = {}
     for activity in sorted(activities.values(), key=lambda row: (row.sort_order, row.pk)):
@@ -314,9 +330,9 @@ def _canvas_metadata(project, state, version, activities):
                 sort_order=activity.sort_order, calendar_id=activity.calendar_id,
             )
         elif not version:
-            node = draft_nodes[task['discipline']]
+            node = manual_by_id[manual_assignments[task['id']]] if task['id'] in manual_assignments else draft_nodes[task['discipline']]
             positions[node['id']] = positions.get(node['id'], 0) + 1
-            row_code = f"{node['sort_order'] + 1}.{positions[node['id']]}"
+            row_code = f"{node['code']}.{positions[node['id']]}" if node.get('kind') else f"{node['sort_order'] + 1}.{positions[node['id']]}"
             task.update(
                 external_id=None, activity_code=task.get('document_number') or row_code,
                 activity_code_source='document_number' if task.get('document_number') else 'draft_wbs',
@@ -371,6 +387,11 @@ def _canvas_metadata(project, state, version, activities):
 def _dated_tasks(project, tasks):
     tasks = deepcopy(tasks)
     for task in tasks:
+        task.pop('constraint_issue', None)
+        task.pop('constraint_violation_days', None)
+        if 'constraint_type' not in task:
+            task['constraint_type'] = 'start_no_earlier' if task.get('planned_start_date') else 'none'
+            task['constraint_date'] = task.get('planned_start_date') or None
         task.update(is_critical=None, total_float_days=None, free_float_days=None,
                     calculated=False, calculation_basis=None)
     if tasks and all(task.get('evidence_policy') == 'document_driven'
@@ -411,7 +432,7 @@ def _dated_tasks(project, tasks):
         for predecessor in dependencies:
             outgoing[predecessor].append(task['id'])
     pending = deque(key for key, count in incoming.items() if count == 0)
-    starts, visited = {}, set()
+    starts, visited, upper_bounds = {}, set(), {}
     while pending:
         task = by_id[pending.popleft()]
         visited.add(task['id'])
@@ -431,11 +452,28 @@ def _dated_tasks(project, tasks):
                 weight = _edge_weight(kind, durations[predecessor], durations[task['id']], link.get('lag_days', 0))
                 bounds.append(starts[predecessor] + weight)
                 weighted_outgoing[predecessor].append((task['id'], weight))
+        lower, upper = None, None
+        if resolved:
+            try:
+                lower, upper = _constraint_bound(calendar, SimpleNamespace(
+                    constraint_type=task.get('constraint_type', 'none'),
+                    constraint_date=date.fromisoformat(str(task['constraint_date'])) if task.get('constraint_date') else None,
+                    external_id=task['id'],
+                ), durations[task['id']])
+            except SchedulingError as error:
+                # Calendar changes can invalidate a previously valid exact date.
+                # Keep the draft readable so the planner can repair the input.
+                task['constraint_issue'] = {'code': error.code, 'message': str(error),
+                                            'task_id': task['id'], 'task_ids': [task['id']], 'field': 'constraint_date'}
+                resolved = False
         if resolved:
             earliest = max(bounds, default=0)
-            requested_start = task.get('planned_start_date')
-            if requested_start:
-                earliest = max(earliest, calendar.index_of(date.fromisoformat(str(requested_start))))
+            if lower is not None:
+                earliest = max(earliest, lower)
+            if upper is not None:
+                upper_bounds[task['id']] = upper
+                if earliest > upper:
+                    task['constraint_violation_days'] = earliest - upper
             task['planned_start_date'] = calendar.date_at(earliest).isoformat()
             task['planned_finish_date'] = _finish_date(calendar, earliest, durations[task['id']]).isoformat()
             starts[task['id']] = earliest
@@ -450,10 +488,10 @@ def _dated_tasks(project, tasks):
                 pending.append(successor)
     if len(visited) != len(tasks):
         _error('Dependencies must not form a cycle.', 'simple_plan_dependencies')
-    if tasks and duration_complete:
+    if tasks and duration_complete and len(starts) == len(tasks):
         finish_index = (calendar.index_of(calendar.on_or_before(project.planned_end_date))
                         if project.planned_end_date else max(starts[key] + max(durations[key] - 1, 0) for key in starts))
-        late, free_float = calculate_backward_pass(list(starts), durations, starts, weighted_outgoing, finish_index)
+        late, free_float = calculate_backward_pass(list(starts), durations, starts, weighted_outgoing, finish_index, upper_bounds)
         for task in tasks:
             key = task['id']
             total_float = late[key] - starts[key]
@@ -484,6 +522,12 @@ def _blockers(project, state):
     if project.files.filter(is_deleted=False).exclude(parse_status='done').exists():
         blockers.append({'code': 'documents_processing', 'message': 'Wait for uploaded documents to finish processing, or remove failed uploads.'})
     for task in state['tasks']:
+        if task.get('constraint_issue'):
+            blockers.append(task['constraint_issue'])
+        if task.get('constraint_violation_days'):
+            blockers.append({'code': 'constraint_violation', 'message': f"{task['title']} cannot meet its {task.get('constraint_type', '').replace('_', ' ')} constraint with the current dependencies.",
+                             'task_id': task['id'], 'task_ids': [task['id']], 'field': 'constraint_date',
+                             'resolution': 'Review the constraint date, duration and predecessor relationships.'})
         if task.get('duration_days') is None or (float(task['duration_days']) <= 0 and not _milestone(task)):
             blockers.append({'code': 'duration_required', 'message': f"Missing planned source duration: {task['title']}.",
                              'task_id': task['id'], 'task_ids': [task['id']], 'field': 'duration_days',
@@ -673,10 +717,17 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
     blockers.extend(row for row in timing_findings if row.get('severity') != 'warning')
     # Recalculate advisory timing findings on every read; persisted submission
     # warnings must not keep obsolete dates after the draft has been repaired.
-    timing_codes = {'negative_float', 'contract_finish_overrun', 'contractual_finish_overrun'}
+    timing_codes = {'negative_float', 'contract_finish_overrun', 'contractual_finish_overrun', 'working_day_precision'}
     state['warnings'] = [row for row in state.get('warnings') or []
                          if not isinstance(row, dict) or row.get('code') not in timing_codes]
     state['warnings'].extend(row for row in timing_findings if row.get('severity') == 'warning')
+    fractional_tasks = [task['id'] for task in state['tasks'] if task.get('calculated') and (
+        (task.get('duration_days') is not None and not float(task['duration_days']).is_integer())
+        or any(link.get('lag_days') is not None and not float(link['lag_days']).is_integer()
+               for link in task.get('dependency_details') or []))]
+    if fractional_tasks:
+        state['warnings'].append({'code': 'working_day_precision', 'severity': 'warning', 'task_ids': fractional_tasks,
+                                  'message': 'Dates use whole working days. Fractional durations and relationship lags round up for calculation; entered values are retained.'})
     review = ScheduleReview.objects.filter(pk=state.get('review_id'), is_deleted=False).first()
     approvers = list(proposal_approver_users(project))
     edit = not viewing_history and can_write_project(actor, project) and module_action_allowed(actor, 'planning_package', 'update')
@@ -1090,7 +1141,11 @@ def _rebuild_workflow_rows(state, current_work, proposed):
 
 
 def _schedule_due_dates(project, tasks):
-    dates = {task['id']: task.get('planned_finish_date') for task in _dated_tasks(project, tasks)}
+    dated = _dated_tasks(project, tasks)
+    constraint_issues = [task['constraint_issue'] for task in dated if task.get('constraint_issue')]
+    if constraint_issues:
+        _error('Review the exact constraint dates against the working calendar.', constraint_issues[0]['code'], blockers=constraint_issues)
+    dates = {task['id']: task.get('planned_finish_date') for task in dated}
     for task in tasks:
         if task.get('due_date_source') == 'schedule':
             task['due_date'] = dates.get(task['id'])
@@ -1244,12 +1299,38 @@ def save_plan(project, actor, data):
         for key in (*WORKFLOW_FIELDS, *SOURCE_FIELDS):
             if key in original:
                 task[key] = deepcopy(original[key])
-        if original.get('dependency_details'):
+        for key in ('wbs_phase', 'wbs_deliverable', 'constraint_type', 'constraint_date'):
+            if key not in task and key in original:
+                task[key] = deepcopy(original[key])
+        displayed = dated.get(task['id']) or {}
+        if ('planned_start_date' in task and task.get('planned_start_date') != displayed.get('planned_start_date')
+                and task.get('constraint_type') == displayed.get('constraint_type')
+                and task.get('constraint_type') in {'none', 'start_no_earlier'}
+                and task.get('constraint_date') == displayed.get('constraint_date')):
+            # Older clients edit the start field directly. Keep its unchanged
+            # start constraint synchronized, or create one for an unconstrained
+            # row, without overriding a deliberate constraint edit.
+            task['constraint_type'] = 'start_no_earlier' if task.get('planned_start_date') else 'none'
+            task['constraint_date'] = task.get('planned_start_date') or None
+        if task.get('constraint_type', 'none') != 'none' and not task.get('constraint_date'):
+            _error('Choose a date for the selected constraint.', 'simple_plan_constraint_date_required')
+        if task.get('constraint_type', 'none') == 'none' and task.get('constraint_date'):
+            _error('Choose a constraint type or clear its date.', 'simple_plan_constraint_type_required')
+        if task.get('wbs_deliverable') and not task.get('wbs_phase'):
+            _error('Enter the phase that contains this deliverable.', 'simple_plan_wbs_phase_required')
+        if 'dependency_details' not in task and original.get('dependency_details'):
             details = original['dependency_details']
             task['dependency_details'] = [deepcopy(link) for key in task['depends_on']
                                           for link in ([row for row in details if row['task_id'] == key]
                                                        or [{'task_id': key, 'type': 'FS', 'lag_days': 0, 'source': 'planner', 'status': 'confirmed'}])]
-        if set(task.get('depends_on') or []) != set(original.get('depends_on') or []):
+        elif 'dependency_details' in task:
+            existing_details = {(link['task_id'], link.get('type', 'FS'), float(link['lag_days'])): link
+                                for link in original.get('dependency_details') or [] if link.get('lag_days') is not None}
+            task['dependency_details'] = [deepcopy(existing_details.get((link['task_id'], link['type'], float(link['lag_days'])))
+                                                  or {**link, 'source': 'planner', 'status': 'confirmed'})
+                                          for link in task['dependency_details']]
+        if (set(task.get('depends_on') or []) != set(original.get('depends_on') or [])
+                or task.get('dependency_details', []) != original.get('dependency_details', [])):
             task['dependency_status'] = 'planner'
         if _milestone(task) and task.get('evidence_policy') != 'document_driven':
             task['duration_days'] = 0
@@ -1308,7 +1389,7 @@ def submit_plan(project, actor, *, revision, approver_id=None):
         return plan_state(project, actor)
     if state['state'] != 'review':
         _error('Review the draft before submitting it.', 'simple_plan_state')
-    blockers = _blockers(project, state)
+    blockers = _blockers(project, {**state, 'tasks': _dated_tasks(project, state['tasks'])})
     if blockers:
         _error('Complete the plan before submitting.', 'simple_plan_incomplete', blockers=blockers)
     timing_blockers = [row for row in schedule_timing_blockers(

@@ -50,9 +50,13 @@ def proposal_context(project, state, calendar_record):
                         'progress_weight': float(stage.progress_weight), 'is_release_gate': stage.is_release_gate}
                        for stage in template.stages.all() if not stage.is_deleted],
         })
-    files = [{'id': item.pk, 'filename': item.original_filename, 'category': item.category,
-              'parse_status': item.parse_status, 'text': item.extracted_text, 'updated_at': item.updated_at.isoformat()}
-             for item in project.files.filter(is_deleted=False).order_by('pk')]
+    from .reference_schedule_geometry import cached_schedule_geometry
+    files = []
+    for item in project.files.filter(is_deleted=False).select_related('document_profile').order_by('pk'):
+        geometry = cached_schedule_geometry(item)
+        files.append({'id': item.pk, 'filename': item.original_filename, 'category': item.category,
+              'parse_status': item.parse_status, 'text': item.extracted_text, 'updated_at': item.updated_at.isoformat(),
+              **({'structured_evidence': {'reference_schedule_geometry': geometry}} if geometry else {})})
     calendar = {
         'id': calendar_record.pk if calendar_record else None,
         'weekdays': calendar_record.working_weekdays if calendar_record else [0, 1, 2, 3, 4],

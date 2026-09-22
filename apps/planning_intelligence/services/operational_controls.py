@@ -28,6 +28,7 @@ MONEY_FIELDS = {'currency', 'bac', 'planned_value', 'earned_value', 'actual_cost
                 'schedule_variance', 'cost_variance', 'eac', 'etc', 'vac', 'budget', 'budgeted_cost',
                 'pv', 'ev', 'ac', 'costs', 'costs_by_currency', 'planned_curve'}
 MONEY_FIELDS.update({'hourly_cost_rate', 'labor_actual_cost'})
+RULE_VERSION = 'operational-controls/1.1'
 
 
 def _conflict(message, code='operational_control_conflict'):
@@ -142,10 +143,11 @@ def _report_preview(report):
         cost_coverage_confirmed=report.cost_coverage_confirmed)
     fingerprint = canonical_fingerprint({'baseline': report.baseline.snapshot, 'policy': report.policy.definition,
         'policy_id': report.policy_id, 'period': report.period_snapshot, 'sources': sources['fingerprint'],
-        'observations': report.observations, 'cost_coverage_confirmed': report.cost_coverage_confirmed})
+        'observations': report.observations, 'cost_coverage_confirmed': report.cost_coverage_confirmed,
+        'rule_version': RULE_VERSION})
     return {'preview': preview, 'source_actuals': sources, 'source_fingerprint': fingerprint,
             'baseline_fingerprint': canonical_fingerprint(report.baseline.snapshot),
-            'policy_snapshot': deepcopy(report.policy.definition), 'rule_version': 'operational-controls/1.0'}
+            'policy_snapshot': deepcopy(report.policy.definition), 'rule_version': RULE_VERSION}
 
 
 def _money_policy(policy):

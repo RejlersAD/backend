@@ -12,6 +12,7 @@ import json
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from django.db import transaction
+from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
 from ..evidence_models import EvidenceDecision, EvidenceDocumentVersion, EvidenceEdge, EvidenceGraph, EvidenceNode
@@ -113,9 +114,12 @@ def _source(document, reference):
             excerpt = lines[locator['line'] - 1]
     supported = False
     if excerpt and locator:
-        lines = document.extracted_text.splitlines(keepends=True)
         line = locator.get('line')
-        if type(locator.get('character_start')) is int and type(locator.get('character_end')) is int:
+        character_range = type(locator.get('character_start')) is int and type(locator.get('character_end')) is int
+        # Exact character locators need only the original text slice. Splitting
+        # the entire document for every fact adds no verification in this path.
+        lines = document.extracted_text.splitlines(keepends=True) if type(line) is int and not character_range else []
+        if character_range:
             start, end = locator['character_start'], locator['character_end']
             supported = 0 <= start < end <= len(document.extracted_text) and excerpt == document.extracted_text[start:end]
         elif type(line) is int and 0 < line <= len(lines):
@@ -242,6 +246,40 @@ def _activity_values(row):
             'activity_type': activity_type, 'dependencies': links, 'calendar': values.get('calendar')}
 
 
+def _citation_repair_survives(edge, documents):
+    """Retain an audited citation repair only for its unchanged original fact."""
+    replacement, original = edge.source, edge.target
+    rule = replacement.rule or {}
+    if (replacement.provenance_type != 'document_evidence'
+            or original.provenance_type != 'document_evidence'
+            or rule.get('name') != 'verified_source_citation_repair'
+            or rule.get('version') != '1'
+            or rule.get('original_fact_id') != str(original.pk)
+            or (edge.provenance or {}).get('rule') != 'verified_source_citation_repair'
+            or replacement.entity_id != original.entity_id
+            or replacement.property != original.property
+            or replacement.unit != original.unit
+            or _json(replacement.value) != _json(original.value)
+            or validate_value(replacement.property, replacement.value)
+            or not replacement.sources or not original.sources
+            or len(replacement.sources) != len(original.sources)):
+        return False
+    for repaired, previous in zip(replacement.sources, original.sources):
+        if not isinstance(repaired, dict) or not isinstance(previous, dict):
+            return False
+        document = documents.get(repaired.get('file_id'))
+        if (document is None or document.integrity_status != 'verified'
+                or any(repaired.get(key) != previous.get(key)
+                       for key in ('file_id', 'document_version', 'sha256', 'text_sha256'))
+                or repaired.get('document_version') != str(document.pk)
+                or repaired.get('sha256') != document.file_sha256
+                or repaired.get('text_sha256') != document.text_sha256
+                or not _source(document, {'locator': repaired.get('locator'),
+                                         'excerpt': repaired.get('verbatim')})['quote_verified']):
+            return False
+    return True
+
+
 @transaction.atomic
 def refresh_evidence_graph(project, actor):
     _require_write(project, actor)
@@ -323,7 +361,9 @@ def refresh_evidence_graph(project, actor):
     surviving = set(builder.nodes)
     pending = list(graph.edges.filter(relationship='supersedes').select_related('source', 'target'))
     while pending:
-        ready = [edge for edge in pending if edge.target_id in surviving and edge.source.provenance_type == 'approved_planning_input']
+        ready = [edge for edge in pending if edge.target_id in surviving and (
+            edge.source.provenance_type == 'approved_planning_input'
+            or _citation_repair_survives(edge, documents))]
         if not ready:
             break
         for edge in ready:
@@ -352,6 +392,15 @@ def _issue(node, code, message, *, candidates=None, blocks=None, allowed=None):
             'required_decision': 'Review the source or record an approved planning input with a reason.',
             'blocks': blocks if blocks is not None else ['calculation', 'approval', 'export'],
             'allowed_actions': allowed or (['accept', 'reject', 'correct', 'link'] if node.property == 'identity' else ['accept', 'reject', 'correct']), 'input_schema': input_schema(node.property)}
+
+
+def _current_documents(graph):
+    # A document may support thousands of facts/fragments. Joining those nodes
+    # and DISTINCTing full document rows repeatedly sorts the original extracted
+    # text and coverage JSON. A correlated existence check returns each document
+    # once, without expanding or rewriting its immutable source data.
+    current_nodes = graph.nodes.filter(current=True, document_version_id=OuterRef('pk'))
+    return graph.documents.filter(Exists(current_nodes))
 
 
 def _knowledge(graph):
@@ -403,7 +452,7 @@ def _knowledge(graph):
             if identity:
                 issues.append(_issue(identity, 'scope_link_missing', 'Link this register item to its explicit schedule activity, or record its exclusion from scope.', allowed=['link', 'reject']))
     current_file_ids = [item['id'] for item in graph.source_manifest]
-    for document in graph.documents.filter(source_file_id__in=current_file_ids, nodes__current=True).distinct():
+    for document in _current_documents(graph).filter(source_file_id__in=current_file_ids).only('id', 'graph_id', 'filename', 'integrity_status'):
         if document.integrity_status != 'verified':
             issues.append({'id': f'source_integrity:{document.id}', 'code': 'source_integrity_unverified', 'kind': 'source_integrity',
                            'title': document.filename, 'message': 'The original source file could not be read to verify its integrity. Restore access and refresh evidence.',
@@ -464,34 +513,45 @@ def _serialize_fact(node):
             'input_schema': input_schema(node.property), 'category': _category(node)}
 
 
-def evidence_review(project, *, offset=0, limit=100, fact_id=None):
+def evidence_review(project, *, offset=0, limit=100, fact_id=None, group=None, include_bulk=False):
     graph = _graph(project)
     empty = {'graph_id': None, 'revision': 0, 'facts': [], 'issues': [], 'decisions': [], 'category_summary': [],
              'readiness': {'stale': True, 'calculation': {'ready': False, 'reasons': ['Refresh evidence to build the review queue.']},
                            'baseline': {'eligible': False, 'reasons': ['Evidence has not been reviewed.']}}}
     if not graph:
+        if include_bulk:
+            from .evidence_bulk import bulk_review_summary
+            empty['bulk_review'] = bulk_review_summary(project, nodes=[], issues=[])
         return empty
     nodes, accepted, issues = _knowledge(graph)
     issues.sort(key=lambda item: ('calculation' not in item['blocks'], item['id']))
+    all_issues = issues
+    if group:
+        from .evidence_bulk import issue_group_key
+        issues = [item for item in issues if issue_group_key(item) == group or (item.get('code') or item.get('kind')) == group]
     selected = issues[offset:offset + limit]
     focused = next((node for node in nodes if str(node.pk) == str(fact_id)), None) if fact_id else None
     if focused and not any(str(focused.pk) in item.get('candidate_fact_ids', []) for item in selected):
         selected = [_issue(focused, 'inspect_fact', 'Inspect the recorded value and its review history.', blocks=[])] + selected
     ids = {key for item in selected for key in item.get('candidate_fact_ids', [])}
-    return {'graph_id': str(graph.id), 'revision': graph.revision, 'schema_version': graph.schema_version,
-            'rule_version': graph.rule_version, 'readiness': _readiness(graph, project, issues),
+    result = {'graph_id': str(graph.id), 'revision': graph.revision, 'schema_version': graph.schema_version,
+            'rule_version': graph.rule_version, 'readiness': _readiness(graph, project, all_issues),
             'issues': selected, 'facts': [_serialize_fact(node) for node in nodes if str(node.id) in ids],
-            'pagination': {'offset': offset, 'limit': limit, 'total': len(issues), 'has_more': offset + limit < len(issues),
+            'pagination': {'offset': offset, 'limit': limit, 'total': len(issues), 'overall_total': len(all_issues), 'group': group or None, 'has_more': offset + limit < len(issues),
                            'next_offset': offset + limit if offset + limit < len(issues) else None},
             'category_summary': [{'category': category, 'label': category.replace('_', ' ').title(), 'count': count}
                                  for category, count in sorted(Counter(_category(node) for node in nodes).items())],
             'summary': {'fact_count': len(nodes), 'accepted_count': sum(node.status == 'accepted' for node in nodes),
-                        'open_issue_count': len(issues)},
+                        'open_issue_count': len(all_issues)},
             'decisions': [{'id': str(item.id), 'action': item.action, 'fact_id': str(item.fact_id),
                            'target_fact_id': str(item.target_fact_id) if item.target_fact_id else None,
                            'actor_id': str(item.actor_id), 'reason': item.reason, 'created_at': item.created_at.isoformat()}
                           for item in graph.decisions.order_by('-created_at')[:50]],
             'messages': ['Review decisions update accepted knowledge. They do not overwrite the current schedule.']}
+    if include_bulk:
+        from .evidence_bulk import bulk_review_summary
+        result['bulk_review'] = bulk_review_summary(project, nodes=nodes, issues=all_issues)
+    return result
 
 
 @transaction.atomic
@@ -581,7 +641,9 @@ def evidence_graph_snapshot(project):
             'documents': [{'id': str(doc.id), 'file_id': doc.source_file_id, 'file_sha256': doc.file_sha256,
                            'text_sha256': doc.text_sha256, 'integrity_status': doc.integrity_status,
                            'extraction_method': doc.extraction_method, 'coverage': doc.coverage}
-                          for doc in graph.documents.filter(nodes__current=True).distinct()],
+                          for doc in _current_documents(graph).only(
+                              'id', 'graph_id', 'source_file_id', 'file_sha256', 'text_sha256',
+                              'integrity_status', 'extraction_method', 'coverage')],
             'issues': issues}
 
 

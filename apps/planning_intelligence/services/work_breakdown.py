@@ -19,6 +19,7 @@ from ..models import (
 )
 from .audit import record_event
 from .preview_confirmation import current_confirmed_preview
+from .manual_wbs import manual_wbs
 from .schedule_basis import _as_date, _deliverable_rows
 from .work_assignments import (
     hydrate_assignments, normalize_assignment_fields, sync_assignments, sync_workspace_assignments,
@@ -166,7 +167,7 @@ def _workflow_relationships(tasks):
             rows = [row for row in details if row.get('task_id') == predecessor] or [{'type': 'FS', 'lag_days': 0}]
             seen = set()
             for detail in rows:
-                kind = str(detail.get('type') or 'FS').upper()
+                kind = str(detail.get('type', 'FS')).upper()
                 try:
                     lag = Decimal(str(detail.get('lag_days', 0)))
                 except (InvalidOperation, TypeError, ValueError):
@@ -196,7 +197,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
     source_parents = {row['id']: deepcopy(row) for row in draft.get('deliverables') or []}
     expanded = bool(source_parents)
     parent_tasks = {key: [] for key in source_parents}
-    typed_links = _workflow_relationships(draft['tasks']) if expanded else []
+    typed_links = _workflow_relationships(draft['tasks'])
     if expanded:
         if len(source_parents) != len(draft['deliverables']):
             raise WorkBreakdownConflict('Source deliverables need unique IDs.', 'workflow_parent_ids_invalid')
@@ -252,15 +253,23 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
     parent_counts = {}
     activities = {}
     resources = {}
+    manual_nodes, manual_assignments = manual_wbs(draft['tasks']) if project.planning_mode == 'manual' and not expanded else ([], {})
+    persisted_manual_nodes = {}
+    for item in manual_nodes:
+        persisted_manual_nodes[item['id']] = ScheduleWBSNode.objects.create(
+            version=version, parent=persisted_manual_nodes.get(item['parent_id']), code=item['code'],
+            name=item['name'], level=item['level'], sort_order=item['sort_order'],
+        )
     for index, task in enumerate(draft['tasks']):
         discipline = task['discipline']
-        if discipline not in nodes:
+        manual_node = persisted_manual_nodes.get(manual_assignments.get(task['id']))
+        if manual_node is None and discipline not in nodes:
             nodes[discipline] = ScheduleWBSNode.objects.create(
                 version=version, code=f'{len(nodes) + 1}.0',
                 name=discipline_names.get(discipline, DISCIPLINE_NAME_BY_CODE.get(discipline, discipline.replace('_', ' ').title()))[:255],
                 discipline=discipline, sort_order=len(nodes),
             )
-        node = nodes[discipline]
+        node = manual_node or nodes[discipline]
         source_parent = source_parents.get(task.get('parent_deliverable_id'))
         if source_parent is not None:
             parent_id = source_parent['id']
@@ -303,8 +312,8 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
             responsible_role=(task.get('responsible_role') or '') if source_parent is not None else task['owner'],
             duration_days=task.get('duration_days') or 0,
             activity_type=(task.get('activity_type') or 'task') if expanded else 'task', calendar=schedule.default_calendar,
-            constraint_type='start_no_earlier' if task.get('planned_start_date') else 'none',
-            constraint_date=task.get('planned_start_date') or None,
+            constraint_type=task.get('constraint_type', 'start_no_earlier' if task.get('planned_start_date') else 'none'),
+            constraint_date=task.get('constraint_date') if 'constraint_type' in task else task.get('planned_start_date') or None,
             sort_order=index, metadata={
                 'source': source, 'work_breakdown_revision': draft['revision'],
                 'intelligence_run_id': intelligence_run_id,
@@ -317,6 +326,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'source_references': task['source_references'],
                 'evidence_entity_id': task.get('evidence_entity_id') or ('task:' + str(task['id'])),
                 'document_number': task['document_number'], 'document_revision': task['document_revision'],
+                'wbs_phase': task.get('wbs_phase', ''), 'wbs_deliverable': task.get('wbs_deliverable', ''),
                 **expansion_metadata,
             },
         )
@@ -335,20 +345,12 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 activity=activity, resource=resource, planned_units=hours, budgeted_hours=hours,
                 budgeted_cost=hours * resource.unit_cost,
             )
-    if expanded:
-        ActivityRelationship.objects.bulk_create([
-            ActivityRelationship(
-                version=version, predecessor=activities[predecessor], successor=activities[successor],
-                relationship_type=kind, lag_days=lag, metadata={'source': source, **metadata},
-            ) for predecessor, successor, kind, lag, metadata in typed_links
-        ], batch_size=500)
-    else:
-        ActivityRelationship.objects.bulk_create([
-            ActivityRelationship(
-                version=version, predecessor=activities[predecessor], successor=activities[task['id']],
-                relationship_type='FS', metadata={'source': source},
-            ) for task in draft['tasks'] for predecessor in task['depends_on']
-        ])
+    ActivityRelationship.objects.bulk_create([
+        ActivityRelationship(
+            version=version, predecessor=activities[predecessor], successor=activities[successor],
+            relationship_type=kind, lag_days=lag, metadata={'source': source, **metadata},
+        ) for predecessor, successor, kind, lag, metadata in typed_links
+    ], batch_size=500)
     record_event(
         project=project, actor=actor, action='work_breakdown.schedule_created', entity=version,
         after={'schedule_id': schedule.pk, 'schedule_version_id': version.pk, 'task_count': len(draft['tasks'])},

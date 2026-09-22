@@ -98,6 +98,15 @@ class DocumentPlanTests(SimpleTestCase):
         self.assertIsNone(activity['total_float_days'])
         self.assertFalse(plan['ready_for_calculation'])
 
+    def test_source_start_and_finish_milestones_keep_their_printed_types_in_draft(self):
+        text = ('ID|Task|Duration (days)|Start|Finish|Activity Type\n'
+                'M1|Project start|0|2026-01-06||Start Milestone\n'
+                'M2|Project finish|0||2026-09-04|Finish Milestone\n')
+        plan = build_document_plan([upload(text)])
+        tasks = simple_tasks(plan)
+        self.assertEqual([row['activity_type'] for row in tasks], ['start_milestone', 'finish_milestone'])
+        self.assertEqual([row['is_milestone'] for row in tasks], [True, True])
+
     def test_predecessor_without_type_and_lag_is_unresolved_without_fs_zero_defaults(self):
         text = 'ID|Task|Duration (days)|Predecessor\nA|A test|1|None\nB|B test|2|A\n'
         plan = build_document_plan([upload(text)])

@@ -221,6 +221,7 @@ class PlanningJob(BaseModel):
         ('build_plan', 'Build Generation Plan'), ('workable_plan', 'Build Workable Project Plan'),
         ('calculate', 'Calculate CPM'),
         ('assurance', 'Run Schedule Assurance'),
+        ('evidence_bulk', 'Bulk Evidence Review'),
     ]
     STATUS_CHOICES = [
         ('queued', 'Queued'), ('running', 'Running'), ('succeeded', 'Succeeded'),

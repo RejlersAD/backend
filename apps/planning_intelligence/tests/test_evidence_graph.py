@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import date
 from hashlib import sha256
 from unittest.mock import patch
+from uuid import uuid4
 
 from django.core.files.base import ContentFile
 from django.db import DatabaseError, connection, transaction
@@ -31,6 +32,11 @@ class EvidenceGraphTests(TestCase):
     def test_exact_locator_quote_is_verified_instead_of_normalized_context(self):
         self.refresh()
         document = self.graph.documents.get()
+        class CharacterLocatedText(str):
+            def splitlines(self, *args, **kwargs):
+                raise AssertionError('Character-located quotes must not rescan every document line.')
+
+        document.extracted_text = CharacterLocatedText(document.extracted_text)
         quote = 'Qualify supplier|7'
         start = document.extracted_text.index(quote)
         source = _source(document, {'excerpt': 'Normalized display context that differs from the exact row.',
@@ -71,6 +77,58 @@ class EvidenceGraphTests(TestCase):
         self.assertFalse(review['readiness']['calculation']['ready'])
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state, before)
+
+    def test_many_source_references_read_each_current_document_without_wide_distinct(self):
+        self.refresh()
+        self.decide(self.fact('identity'))
+        self.graph.refresh_from_db()
+        revision = self.graph.revision
+        accepted = _knowledge(self.graph)[1]
+        decisions = list(self.graph.decisions.values_list('id', 'action', 'fact_id', 'reason'))
+        planning_state = deepcopy(self.project.simple_planning_state)
+        document = self.graph.documents.get()
+        original_text = document.extracted_text
+        # Integrity warnings remain visible once per current document, even
+        # when thousands of facts/fragments reference that same upload.
+        document.integrity_status = 'unavailable'
+        document.save(update_fields=['integrity_status'])
+        historical = deepcopy(document)
+        historical.id = uuid4()
+        historical.filename = 'Historical source version'
+        historical.save(force_insert=True)
+        EvidenceNode.objects.bulk_create([
+            EvidenceNode(id=uuid4(), graph=self.graph, document_version=document,
+                         kind='evidence_fragment', entity_id=f'bulk-source:{index}')
+            for index in range(1000)
+        ] + [EvidenceNode(id=uuid4(), graph=self.graph, document_version=historical,
+                          kind='evidence_fragment', entity_id='historical-source', current=False)], batch_size=250)
+
+        with CaptureQueriesContext(connection) as queries:
+            snapshot = evidence_graph_snapshot(self.project)
+        self.assertEqual([row['id'] for row in snapshot['documents']], [str(document.pk)])
+        self.assertEqual(snapshot['documents'][0]['file_sha256'], document.file_sha256)
+        self.assertEqual(snapshot['documents'][0]['coverage'], document.coverage)
+        integrity = [row for row in snapshot['issues'] if row['code'] == 'source_integrity_unverified']
+        self.assertEqual([row['entity_id'] for row in integrity], [f'document:{document.pk}'])
+        self.assertEqual(snapshot['accepted_inputs'], accepted)
+        # A timing assertion would depend on machine load. Verify the query
+        # shape that caused PostgreSQL to sort repeated large source texts.
+        document_queries = [row['sql'] for row in queries
+                            if f'FROM "{EvidenceDocumentVersion._meta.db_table}"' in row['sql']]
+        self.assertEqual(len(document_queries), 2)
+        for sql in document_queries:
+            self.assertIn('EXISTS', sql.upper())
+            self.assertNotIn('DISTINCT', sql.upper())
+            self.assertNotIn('extracted_text', sql)
+            self.assertNotIn(' JOIN ', sql.upper())
+        self.assertFalse([row for row in queries if row['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
+        self.graph.refresh_from_db()
+        document.refresh_from_db()
+        self.project.refresh_from_db()
+        self.assertEqual(self.graph.revision, revision)
+        self.assertEqual(list(self.graph.decisions.values_list('id', 'action', 'fact_id', 'reason')), decisions)
+        self.assertEqual(document.extracted_text, original_text)
+        self.assertEqual(self.project.simple_planning_state, planning_state)
 
     def test_correction_records_actor_and_reason_without_rewriting_source(self):
         self.refresh()

@@ -6,7 +6,8 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
-from django.db.models import Q, Count, Sum, Avg
+from django.db.models import Q, Count, Sum, Avg, IntegerField, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.db import transaction
 from django.utils import timezone
 from django.core.cache import cache
@@ -80,10 +81,25 @@ class ProjectViewSet(viewsets.ModelViewSet):
         commercial_read = self.request.method in ('GET', 'HEAD', 'OPTIONS') and has_commercial_module_access(user)
         if not user.is_staff and not commercial_read:
             queryset = queryset.filter(
-                Q(owner=user) | Q(team_members=user)
+                Q(owner=user) | Q(memberships__user=user, memberships__is_active=True)
             ).distinct()
 
         return queryset
+
+    def list(self, request, *args, **kwargs):
+        from .project_portfolio import project_portfolio_facts
+
+        team_size = ProjectMember.objects.filter(project_id=OuterRef('pk')).order_by().values(
+            'project_id',
+        ).annotate(total=Count('pk')).values('total')[:1]
+        queryset = self.filter_queryset(self.get_queryset()).select_related('owner').annotate(
+            _portfolio_team_size=Coalesce(Subquery(team_size), 0, output_field=IntegerField()),
+        )
+        page = self.paginate_queryset(queryset)
+        projects = list(page if page is not None else queryset)
+        context = {**self.get_serializer_context(), 'portfolio': project_portfolio_facts(projects)}
+        data = self.get_serializer(projects, many=True, context=context).data
+        return self.get_paginated_response(data) if page is not None else Response(data)
 
     def perform_create(self, serializer):
         """Set owner to current user if not specified"""

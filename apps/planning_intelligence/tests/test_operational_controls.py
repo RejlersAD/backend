@@ -1,6 +1,7 @@
 """Operational publication is approved, reproducible and isolated from plan editing."""
 from copy import deepcopy
 from datetime import date
+from unittest.mock import patch
 
 from django.db import DatabaseError, connection, transaction
 from django.test.utils import CaptureQueriesContext
@@ -127,6 +128,20 @@ class OperationalControlTests(fixture.ScheduleFixture):
         error = self.command('publish_report', expected=409, report_id=report['id'], revision=report['revision'],
             source_fingerprint=fresh['source_fingerprint'], reason='Reviewed')
         self.assertEqual(error['code'], 'operational_submission_stale')
+
+    def test_changed_calculation_rules_require_review_and_published_progress_remains_frozen(self):
+        report = self.submitted()
+        self.assertEqual(report['preview']['metrics']['remaining_progress_pct'], '82.50')
+        self.client.force_authenticate(self.manager)
+        with patch('apps.planning_intelligence.services.operational_controls.RULE_VERSION', 'operational-controls/future'):
+            self.command('publish_report', expected=409, report_id=report['id'], revision=report['revision'],
+                source_fingerprint=report['source_fingerprint'], reason='Reviewed older calculation')
+        published = self.command('publish_report', report_id=report['id'], revision=report['revision'],
+            source_fingerprint=report['source_fingerprint'], reason='Reviewed current calculation')['report']
+        with patch('apps.planning_intelligence.services.operational_controls.RULE_VERSION', 'operational-controls/future'):
+            retained = self.client.get(self.url, {'report_id': report['id']}).data['report']
+        self.assertEqual(retained, published)
+        self.assertEqual(retained['rule_version'], 'operational-controls/1.1')
 
     def test_correction_preserves_original_and_curves_use_only_published_observations(self):
         report = self.published()

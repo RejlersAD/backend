@@ -14,13 +14,13 @@ from django.http import Http404
 
 from apps.rbac.action_policy import module_action_allowed
 from ..access import can_write_project
-from ..models import ActivityRelationship, PlanningProject, Schedule, ScheduleActivity, ScheduleVersion
+from ..models import ActivityRelationship, PlanningProject, Schedule, ScheduleActivity, ScheduleVersion, ScheduleWBSNode
 from .audit import record_event
 from .document_plan import project_document_plan
 from .evidence_graph import input_fingerprint, source_manifest
 from .operational_jobs import canonical_fingerprint, schedule_state_fingerprint
 from .schedule_approval import ScheduleApprovalError
-from .source_date_read_model import source_date_fields
+from .source_date_read_model import source_date_fields, source_float_fields
 
 
 SCHEMA = 'source-schedule-import/1'
@@ -103,6 +103,50 @@ def _decimal_fits(value, *, digits, nonnegative=True):
         return False
 
 
+def _geometry_hierarchy(activities, summaries):
+    """Retain measured printed indentation without inventing native WBS IDs."""
+    records = [(row['source_evidence'], row['id']) for row in activities] + [(row, None) for row in summaries]
+    if not any(record.get('source_hierarchy') for record, _ in records):
+        return None
+    if any((record.get('source_hierarchy') or {}).get('basis') != 'printed_pdf_indentation' for record, _ in records):
+        raise ValueError('The source hierarchy is incomplete.')
+    ordered = sorted(records, key=lambda item: item[0]['source_hierarchy'].get('row_number', 0))
+    nodes, parents, seen = [], {}, set()
+    levels = {}
+    for evidence, activity_id in ordered:
+        hierarchy = evidence['source_hierarchy']
+        number, parent, level = hierarchy.get('row_number'), hierarchy.get('parent_row_number'), hierarchy.get('level')
+        if (type(number) is not int or number < 1 or number in seen or type(level) is not int or level < 0
+                or (parent is not None and (type(parent) is not int or parent not in levels))
+                or level != (levels[parent] + 1 if parent is not None else 0)):
+            raise ValueError('The printed row hierarchy is inconsistent.')
+        seen.add(number)
+        if activity_id is not None:
+            parents[activity_id] = str(parent) if parent is not None else None
+            continue
+        title = evidence.get('title')
+        if not title or len(title) > 255:
+            raise ValueError('A printed summary title exceeds the supported field length.')
+        levels[number] = level
+        nodes.append({'key': str(number), 'parent_key': str(parent) if parent is not None else None,
+                      'code': f'PDF-{number}', 'name': title, 'level': level, 'sort_order': number,
+                      'source_evidence': deepcopy(evidence)})
+    return {'basis': 'printed_pdf_indentation', 'nodes': nodes, 'activity_parents': parents}
+
+
+def _source_summary(evidence):
+    values = evidence.get('values') or {}
+    duration = values.get('original_duration_days')
+    return {**source_date_fields({'source_evidence': evidence}),
+            **source_float_fields({'source_evidence': evidence}),
+            'duration_days': duration, 'original_duration_days': duration,
+            'duration_unit': values.get('duration_unit'),
+            'duration_source': 'source_document' if duration is not None else 'missing_source',
+            'duration_evidence': deepcopy(evidence), 'source_evidence': deepcopy(evidence),
+            'source_references': deepcopy(evidence.get('source_references') or []),
+            'duration_calendar_verified': False, 'duration_basis': 'source_document', 'calculated': False}
+
+
 def _payload(project, source_file_id):
     source = project.files.filter(pk=source_file_id, is_deleted=False).first()
     if source is None:
@@ -138,6 +182,12 @@ def _payload(project, source_file_id):
         (errors if blocks else warnings).append(row)
     if source.parse_status != 'done':
         finding('source_import_parse_incomplete', 'Wait for this document to finish processing before importing.', blocks=True)
+    try:
+        hierarchy = _geometry_hierarchy(rows, snapshot['source_summaries'])
+        if hierarchy is not None:
+            snapshot['source_hierarchy'] = hierarchy
+    except ValueError as exc:
+        finding('source_import_hierarchy_unsupported', str(exc), blocks=True)
     if not rows:
         finding('source_import_empty', 'This document has no extracted schedule activity rows. Review its extraction first.', blocks=True)
     if not project.effective_date:
@@ -216,6 +266,19 @@ def imported_snapshot(version):
         return None
     actual = list(version.activities.filter(is_deleted=False))
     expected = {row['id']: row for row in snapshot['activities']}
+    hierarchy = snapshot.get('source_hierarchy') or {}
+    expected_nodes = {row['code']: row for row in hierarchy.get('nodes') or []}
+    actual_nodes = list(version.wbs_nodes.filter(is_deleted=False))
+    node_keys = {node.pk: expected_nodes[node.code]['key'] for node in actual_nodes if node.code in expected_nodes}
+    if len(actual_nodes) != len(expected_nodes):
+        return None
+    for node in actual_nodes:
+        expected_node = expected_nodes.get(node.code)
+        if (expected_node is None or node.name != expected_node['name'] or node.level != expected_node['level']
+                or node.sort_order != expected_node['sort_order'] or node.discipline
+                or (node.parent_id is not None and node.parent_id not in node_keys)
+                or node_keys.get(node.parent_id) != expected_node['parent_key']):
+            return None
     if (len(actual) != len(expected) or version.calculated_at or version.schedule.default_calendar_id
             or str(version.schedule.planned_start) != snapshot['project_window']['start_date']):
         return None
@@ -224,6 +287,8 @@ def imported_snapshot(version):
         if (row is None or activity.name != row['name'] or activity.duration_days != Decimal(str(row['duration_days']))
                 or activity.activity_type != _activity_type(row) or activity.metadata != _metadata(row)
                 or activity.planned_start or activity.planned_finish or activity.calendar_id
+                or (activity.wbs_node_id is not None and activity.wbs_node_id not in node_keys)
+                or node_keys.get(activity.wbs_node_id) != (hierarchy.get('activity_parents') or {}).get(activity.external_id)
                 or activity.constraint_type != 'none' or activity.constraint_date):
             return None
     keys = {row.pk: row.external_id for row in actual}
@@ -243,6 +308,11 @@ def enrich_imported_state(version, state):
     snapshot = imported_snapshot(version)
     if snapshot is None:
         return state
+    # A source snapshot can be current while its calendar/network remains
+    # unverified. Freshness comes from the signed import inputs, independently
+    # of the calculation and approval readiness gates.
+    signed = signing.loads(version.evidence_input_snapshot['review_token'], salt=SALT)
+    state['stale_inputs'] = signed.get('content_fingerprint') != _content(version.schedule.project)
     expected = {row['id']: row for row in snapshot['activities']}
     state['source_import'] = {
         'source_file': deepcopy(snapshot['source_file']), 'activity_count': len(expected),
@@ -260,17 +330,23 @@ def enrich_imported_state(version, state):
     project_summaries = snapshot.get('source_project_summaries') or []
     if len(project_summaries) == 1:
         evidence = project_summaries[0]
-        values = evidence.get('values') or {}
-        state['project_summary'].update(
-            **source_date_fields({'source_evidence': evidence}),
-            duration_days=values.get('original_duration_days'),
-            original_duration_days=values.get('original_duration_days'),
-            duration_unit=values.get('duration_unit'),
-            duration_source='source_document' if values.get('original_duration_days') is not None else 'missing_source',
-            duration_evidence=deepcopy(evidence), source_evidence=deepcopy(evidence),
-            source_references=deepcopy(evidence.get('source_references') or []),
-            duration_calendar_verified=False, duration_basis='source_document', calculated=False,
-        )
+        state['project_summary'].update(_source_summary(evidence))
+    hierarchy = snapshot.get('source_hierarchy') or {}
+    if hierarchy:
+        nodes = {row['code']: row for row in hierarchy['nodes']}
+        state['hierarchy_source'] = 'printed_pdf_indentation'
+        for node in state['wbs_nodes']:
+            printed = nodes.get(node['code'])
+            if printed:
+                evidence = printed['source_evidence']
+                project_evidence = project_summaries[0] if len(project_summaries) == 1 else None
+                is_source_project = bool(project_evidence and evidence.get('source_references')
+                    and evidence['source_references'] == project_evidence.get('source_references')
+                    and evidence.get('values') == project_evidence.get('values'))
+                node.update(source_row_number=int(printed['key']), code_source='printed_row_reference',
+                            is_source_project=is_source_project,
+                            source_evidence=deepcopy(evidence), source_references=deepcopy(evidence['source_references']))
+                node['summary'].update(_source_summary(evidence))
     for task in state['tasks']:
         row = expected.get(task['id'])
         if not row:
@@ -287,6 +363,8 @@ def enrich_imported_state(version, state):
             for endpoint in ('start', 'finish'):
                 if task.get(f'source_{endpoint}_status') == 'extracted':
                     provenance[f'source_{endpoint}_date'] = deepcopy(label)
+            if task.get('source_total_float_status') == 'extracted':
+                provenance['source_total_float_days'] = deepcopy(label)
             task['is_milestone'] = row.get('is_milestone') is True
             task['source_activity_type'] = (row['source_evidence'] or {}).get('record_type')
         if row.get('source_activity_id') and task.get('source_activity_id') == row['source_activity_id']:
@@ -346,8 +424,14 @@ def apply_source_import(project, actor, *, proposal_token, reason, acknowledge_s
         change_summary='Reviewed source schedule import; calculation and evidence acceptance pending.',
         evidence_input_snapshot={**snapshot, 'review_token': proposal_token, 'reason': reason.strip()})
     activities = {}
+    hierarchy = snapshot.get('source_hierarchy') or {}
+    nodes = {}
+    for row in hierarchy.get('nodes') or []:
+        nodes[row['key']] = ScheduleWBSNode.objects.create(version=version, parent=nodes.get(row['parent_key']),
+            code=row['code'], name=row['name'], level=row['level'], sort_order=row['sort_order'])
     for index, row in enumerate(snapshot['activities']):
         activities[row['id']] = ScheduleActivity(version=version, external_id=row['id'], name=row['name'],
+            wbs_node=nodes.get((hierarchy.get('activity_parents') or {}).get(row['id'])),
             duration_days=Decimal(str(row['duration_days'])), activity_type=_activity_type(row), sort_order=index,
             metadata=_metadata(row))
     ScheduleActivity.objects.bulk_create(list(activities.values()), batch_size=500)

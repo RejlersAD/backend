@@ -54,6 +54,18 @@ class IntelligentSequencePreviewSerializer(serializers.Serializer):
     revision = serializers.IntegerField(min_value=0)
 
 
+class SourceLogicPreviewSerializer(serializers.Serializer):
+    source_version_id = serializers.IntegerField(min_value=1)
+    revision = serializers.IntegerField(min_value=0)
+    calendar_spec = serializers.JSONField()
+    reason = serializers.CharField(max_length=2000, allow_blank=False)
+
+
+class SourceLogicApplySerializer(serializers.Serializer):
+    preview_token = serializers.CharField(max_length=8192)
+    reason = serializers.CharField(max_length=2000, allow_blank=False)
+
+
 class IntelligentSequenceApplySerializer(serializers.Serializer):
     proposal_token = serializers.CharField(max_length=4096)
 
@@ -107,6 +119,16 @@ class SimplePlanningView(APIView):
         if not self.operation or self.operation == 'source-preview':
             raise MethodNotAllowed('POST')
         project = self.project(request, project_id)
+        if self.operation in {'preview-source-logic', 'apply-source-logic'}:
+            from .services.source_schedule_logic import preview_source_logic, apply_source_logic
+            if request.query_params.get('version_id') or request.data.get('viewing_history'):
+                return Response({'error': 'Return to the current source schedule before building a planning revision.',
+                                 'code': 'simple_plan_history_read_only'}, status=409)
+            preview = self.operation == 'preview-source-logic'
+            serializer = (SourceLogicPreviewSerializer if preview else SourceLogicApplySerializer)(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            operation = preview_source_logic if preview else apply_source_logic
+            return self.perform(lambda: operation(project, request.user, **serializer.validated_data))
         if self.operation in {'propose-intelligent-sequence', 'apply-intelligent-sequence'}:
             from .services.intelligent_sequence import propose_intelligent_sequence, apply_intelligent_sequence
             if request.query_params.get('version_id') or request.data.get('viewing_history'):

@@ -9,7 +9,7 @@ from collections import Counter
 from copy import deepcopy
 
 from .document_plan import project_document_plan
-from .source_date_read_model import source_date_fields
+from .source_date_read_model import source_date_fields, source_float_fields
 
 
 def document_schedule_summary(plan):
@@ -27,6 +27,7 @@ def document_schedule_summary(plan):
         'duration_count': sum(row.get('duration_days') is not None for row in activities),
         'start_date_count': sum(row['source_start_date'] is not None for row in dated),
         'finish_date_count': sum(row['source_finish_date'] is not None for row in dated),
+        'total_float_count': sum(source_float_fields(row)['source_total_float_status'] == 'extracted' for row in activities),
         'relationship_count': len(plan.get('logic_matrix') or []),
         'register_count': len(register),
         'matched_register_count': matched_register_count,
@@ -89,6 +90,7 @@ def source_schedule_preview(project, *, offset=0, limit=100, search='', source_f
             'predecessors': deepcopy(row.get('predecessors') or []),
             'missing_fields': deepcopy(row.get('missing_fields') or []),
             'calendar_verified': False, 'total_float_days': None,
+            **source_float_fields(row),
         })
     return {
         'project_id': project.pk, 'policy': 'source_document_preview', 'applied': False,

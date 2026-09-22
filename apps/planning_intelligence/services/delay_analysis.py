@@ -13,9 +13,9 @@ from .operational_calculations import (
 )
 
 
-DELAY_RULE_VERSION = 'delay-recovery-sensitivity/1.0'
+DELAY_RULE_VERSION = 'delay-recovery-sensitivity/1.1'
 METHOD = DELAY_RULE_VERSION
-REFERENCE_RULE = 'operational-controls/1.0'
+REFERENCE_RULE = 'operational-controls/1.1'
 MAX_WITNESSES = 30
 MAX_PATH_NODES = 10000
 MAX_PATH_EDGES = 20000

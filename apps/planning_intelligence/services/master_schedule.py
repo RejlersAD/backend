@@ -151,11 +151,15 @@ def master_plan_state(project, actor, *, version_id=None):
     if selected_id:
         from .source_schedule_import import enrich_imported_state
         enrich_imported_state(version, state)
+        from .source_schedule_logic import enrich_logic_state
+        enrich_logic_state(version, state)
         from .intelligent_sequence import enrich_sequence_state
         enrich_sequence_state(version, state)
     from .intelligent_sequence import can_propose_sequence
     state['permissions']['can_propose_sequence'] = (can_propose_sequence(project, actor)
         and not state.get('viewing_history') and state.get('state') not in {'baselined', 'submitted'})
+    state['permissions']['can_build_source_logic'] = bool(state.get('source_import') and not state.get('viewing_history')
+        and not state.get('stale_inputs') and _write(project, actor))
     return state
 
 
@@ -259,7 +263,7 @@ def _clone(version, actor):
         for row in version.relationships.filter(is_deleted=False)
         if row.predecessor_id in activity_map and row.successor_id in activity_map], batch_size=500)
     ActivityAssignment.objects.bulk_create([ActivityAssignment(activity=activity_map[row.activity_id],
-        **{key: getattr(row, key) for key in ('resource_id', 'planned_units', 'budgeted_hours', 'budgeted_cost')})
+        **{key: getattr(row, key) for key in ('resource_id', 'planned_units', 'budgeted_hours', 'budgeted_cost', 'planned_output_quantity')})
         for row in ActivityAssignment.objects.filter(activity__version=version, is_deleted=False)
         if row.activity_id in activity_map], batch_size=500)
     from .planning_registers import clone_risks

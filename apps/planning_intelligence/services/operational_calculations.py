@@ -580,6 +580,7 @@ def calculate_operational_report(baseline_snapshot, policy_definition, observati
             'baseline_start': activity.get('planned_start'), 'baseline_finish': activity.get('planned_finish'),
             'budget': _rounded(budget) if currency_valid else None, 'weight': weight,
             'physical_progress_pct': _rounded(fraction * HUNDRED) if fraction is not None else None,
+            'remaining_progress_pct': _rounded((ONE - fraction) * HUNDRED) if fraction is not None else None,
             'planned_progress_pct': _rounded(planned * HUNDRED) if planned is not None else None,
             'planned_value': _rounded(value) if currency_valid else None,
             'earned_value': _rounded(budget * fraction) if currency_valid and budget is not None and fraction is not None else None})
@@ -623,6 +624,7 @@ def calculate_operational_report(baseline_snapshot, policy_definition, observati
     eac = bac * ac / ev if bac is not None and ac is not None and ac > ZERO and ev is not None and ev > ZERO else None
     values = {'bac': bac, 'planned_value': pv, 'earned_value': ev, 'actual_cost': ac,
               'progress_pct': progress, 'planned_progress_pct': planned_progress,
+              'remaining_progress_pct': HUNDRED - progress if progress is not None else None,
               'schedule_variance': ev - pv if ev is not None and pv is not None else None,
               'cost_variance': ev - ac if ev is not None and ac is not None else None,
               'spi': spi, 'cpi': cpi, 'eac': eac,
@@ -634,7 +636,7 @@ def calculate_operational_report(baseline_snapshot, policy_definition, observati
         reason = []
         if not valid_scope:
             reason.append('baseline_scope_incomplete')
-        if key in {'progress_pct', 'planned_progress_pct'}:
+        if key in {'progress_pct', 'planned_progress_pct', 'remaining_progress_pct'}:
             if not weight_ready:
                 reason.append('approved_weights_incomplete')
         else:
@@ -642,7 +644,7 @@ def calculate_operational_report(baseline_snapshot, policy_definition, observati
                 reason.append('currency_not_specified')
             if not money_ready:
                 reason.append('approved_budgets_incomplete')
-        if key in {'earned_value', 'progress_pct', 'schedule_variance', 'cost_variance', 'spi', 'cpi', 'eac', 'etc', 'vac'} and not progress_ready:
+        if key in {'earned_value', 'progress_pct', 'remaining_progress_pct', 'schedule_variance', 'cost_variance', 'spi', 'cpi', 'eac', 'etc', 'vac'} and not progress_ready:
             reason.append('progress_observations_incomplete')
         if key in {'planned_value', 'planned_progress_pct', 'schedule_variance', 'spi'} and not all(item is not None for item in planned_values):
             reason.append('planned_value_incomplete')
@@ -662,7 +664,10 @@ def calculate_operational_report(baseline_snapshot, policy_definition, observati
                   'budgeted_activity_count': sum(value is not None for value in budgets), 'cost_coverage_confirmed': bool(cost_coverage_confirmed)},
         formulas={'PV': 'Sum of approved activity time-phased budgets', 'EV': 'Sum of approved activity budget × measured earning fraction',
                   'progress_pct': 'Sum of approved activity weight × measured fraction / sum of approved weights × 100',
-                  'SPI': 'EV / PV', 'CPI': 'EV / AC', 'EAC': 'BAC × AC / EV (unrounded inputs)'})
+                  'remaining_progress_pct': '100 − approved-weight actual progress percentage',
+                  'BAC': 'Sum of approved activity budgets',
+                  'SPI': 'EV / PV', 'CPI': 'EV / AC', 'EAC': 'BAC × AC / EV (unrounded inputs)',
+                  'ETC': 'EAC − AC (unrounded inputs)'})
     # Baseline PV curve only. Historical EV/AC must come from sealed observations,
     # never from projecting this report's cumulative values into earlier weeks.
     dates = {_date(row.get('planned_start')) for row in activities} | {_date(row.get('planned_finish')) for row in activities}

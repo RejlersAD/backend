@@ -20,6 +20,7 @@ _IDENTITY_ISSUES = {'duplicate_row_numbers', 'duplicate_activity_ids'}
 _PRINTED_VALUES = (
     'original_duration_days', 'planned_start_date', 'planned_finish_date',
     'total_float_days', 'printed_single_date', 'date_columns_status',
+    'is_milestone',
 )
 
 
@@ -83,12 +84,14 @@ def _evidence(source, row):
         }
     return {
         'title': row['title'], 'activity_id': row.get('activity_id'),
-        'kind': row['kind'], 'basis': 'printed_schedule',
+        'kind': row['kind'], 'basis': 'printed_schedule', 'record_type': row.get('record_type'),
+        **({'source_hierarchy': deepcopy(row['source_hierarchy'])} if row.get('source_hierarchy') else {}),
         'values': {key: deepcopy(row[key]) for key in _PRINTED_VALUES if key in row},
         'relationships': None,
-        'field_status': {'predecessors': 'not_specified'},
+        'field_status': {'predecessors': 'not_specified', **{key: value['status'] for key, value in row.get('field_evidence', {}).items()}},
         'field_evidence': {
-            key: {'raw_text': row.get('raw_text') or '', 'status': 'extracted' if row.get(key) is not None else 'not_specified',
+            key: deepcopy(row['field_evidence'][key]) if key in row.get('field_evidence', {}) else {
+                  'raw_text': row.get('raw_text') or '', 'status': 'extracted' if row.get(key) is not None else 'not_specified',
                   'source_locator': deepcopy(row.get('source_locator') or {}),
                   'source_excerpt': row.get('raw_text') or ''}
             for key in _PRINTED_VALUES if key in row
@@ -152,13 +155,20 @@ def source_timing_evidence(tasks, context):
         result['evidence_records'].append(evidence)
     for source in ready:
         structured = parse_structured_schedule_evidence(source.get('text') or '')
-        parsed = parse_reference_schedule_text(source.get('text') or '')
+        geometry = (source.get('structured_evidence') or {}).get('reference_schedule_geometry')
+        valid_geometry = bool(isinstance(geometry, dict) and geometry.get('adapter') == 'printed_schedule_geometry_v1'
+                              and geometry.get('status') == 'parsed'
+                              and geometry.get('rows') and geometry.get('text_sha256') == hashlib.sha256(
+                                  (source.get('text') or '').encode('utf-8')).hexdigest())
+        parsed = deepcopy(geometry) if valid_geometry else parse_reference_schedule_text(source.get('text') or '')
+        if valid_geometry:
+            source = {**source, 'checksum_sha256': geometry['checksum_sha256']}
         result['extraction_reports'].append({
             'file_id': source['id'], 'filename': source.get('filename') or '',
             'adapters': [
                 {'adapter': structured['adapter'], 'status': structured['status'],
                  'coverage': deepcopy(structured['coverage']), 'issues': deepcopy(structured['issues'])},
-                {'adapter': 'printed_activity_table', 'status': parsed['status'],
+                {'adapter': parsed.get('adapter', 'printed_activity_table'), 'status': parsed['status'],
                  'row_count': len(parsed['rows']), 'issues': deepcopy(parsed['issues'])},
             ],
             'complete_document_understanding': False,

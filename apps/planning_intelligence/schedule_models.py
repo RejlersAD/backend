@@ -1,4 +1,6 @@
 """Relational scheduling domain for CPM calculation and controlled baselines."""
+from decimal import Decimal
+
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.core.exceptions import ValidationError
@@ -195,6 +197,12 @@ class ScheduleResource(BaseModel):
         max_digits=12, decimal_places=2, default=8,
         help_text='Maximum available units per working day for concurrency checks.',
     )
+    productivity_rate = models.DecimalField(
+        max_digits=14, decimal_places=4, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0.0001'))],
+        help_text='Output quantity produced per one resource unit; unknown when omitted.',
+    )
+    productivity_unit = models.CharField(max_length=32, blank=True, help_text='Output unit, for example m3 or drawings.')
 
     class Meta:
         ordering = ['code']
@@ -207,6 +215,9 @@ class ActivityAssignment(BaseModel):
     planned_units = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     budgeted_hours = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     budgeted_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    planned_output_quantity = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True, validators=[MinValueValidator(0)],
+    )
 
     class Meta:
         unique_together = [('activity', 'resource')]

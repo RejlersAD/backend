@@ -113,6 +113,13 @@ class RiskInputSerializer(StrictSerializer):
     owner_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
     response = serializers.CharField(max_length=20000, allow_blank=True, required=False)
     resolution = serializers.CharField(max_length=20000, allow_blank=True, required=False)
+    probability_percent = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=0, max_value=100, allow_null=True, required=False)
+    cost_impact = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=0, allow_null=True, required=False)
+    impact_currency = serializers.RegexField(r'^[A-Z]{3}$', allow_blank=True, required=False)
+    schedule_impact_days = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, allow_null=True, required=False)
+    impact_basis = serializers.CharField(max_length=20000, allow_blank=True, required=False)
+    mitigation_due_date = serializers.DateField(allow_null=True, required=False)
+    mitigation_status = serializers.ChoiceField(choices=['not_planned', 'planned', 'in_progress', 'completed'], required=False)
     reason = serializers.CharField(max_length=4000)
 
 

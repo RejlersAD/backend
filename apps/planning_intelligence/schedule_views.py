@@ -266,6 +266,7 @@ class ScheduleViewSet(SoftDeleteViewSet):
                             activity=activity_map[assignment.activity_id], resource_id=assignment.resource_id,
                             planned_units=assignment.planned_units, budgeted_hours=assignment.budgeted_hours,
                             budgeted_cost=assignment.budgeted_cost,
+                            planned_output_quantity=assignment.planned_output_quantity,
                         ))
                 ActivityAssignment.objects.bulk_create(assignment_rows, batch_size=500)
                 from .services.planning_registers import clone_risks
@@ -357,10 +358,10 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'relationships': ActivityRelationshipSerializer(
                 version.relationships.filter(is_deleted=False).select_related('predecessor', 'successor'), many=True,
             ).data,
-            'resources': ScheduleResourceSerializer(project.schedule_resources.filter(is_deleted=False), many=True).data,
+            'resources': ScheduleResourceSerializer(project.schedule_resources.filter(is_deleted=False), many=True, context={'request': request}).data,
             'assignments': ActivityAssignmentSerializer(
                 ActivityAssignment.objects.filter(activity__version=version, is_deleted=False).select_related('resource'),
-                many=True,
+                many=True, context={'request': request},
             ).data,
             'baselines': ScheduleBaselineSerializer(schedule.baselines.filter(is_deleted=False), many=True).data,
             'calculation_runs': ScheduleCalculationRunSerializer(
@@ -1055,6 +1056,44 @@ class ScheduleResourceViewSet(SoftDeleteViewSet):
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
 
+    @action(detail=False, methods=['get'])
+    def plan(self, request):
+        from rest_framework import serializers
+        from .services.resource_planning import resource_plan
+        project_id = serializers.IntegerField(min_value=1).run_validation(request.query_params.get('project'))
+        project = accessible_projects(request.user).filter(pk=project_id).first()
+        if not project:
+            raise Http404
+        version = None
+        if request.query_params.get('version'):
+            version_id = serializers.IntegerField(min_value=1).run_validation(request.query_params['version'])
+            version = ScheduleVersion.objects.filter(pk=version_id, is_deleted=False,
+                schedule__project=project, schedule__is_deleted=False).select_related('schedule__project').first()
+            if not version:
+                raise Http404
+        return Response(resource_plan(project, version, request))
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        from .services.resource_planning import resource_is_locked
+        resource = ScheduleResource.objects.select_for_update().get(pk=serializer.instance.pk)
+        list(ScheduleVersion.objects.select_for_update().filter(schedule__project=resource.project).order_by('pk'))
+        if resource_is_locked(resource):
+            raise ValidationError('This resource is used by an immutable schedule. Create a new resource code for revised planning.')
+        serializer.instance = resource
+        serializer.validate(serializer.validated_data)
+        resource = serializer.save()
+        for version in ScheduleVersion.objects.filter(activities__assignments__resource=resource,
+                activities__assignments__is_deleted=False, status__in=['draft', 'calculated']).distinct():
+            _mark_version_draft(version)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        instance = ScheduleResource.objects.select_for_update().get(pk=instance.pk)
+        if instance.assignments.filter(is_deleted=False, activity__is_deleted=False).exists():
+            raise ValidationError('Remove active allocations before deleting this resource.')
+        super().perform_destroy(instance)
+
 
 class ActivityAssignmentViewSet(SoftDeleteViewSet):
     serializer_class = ActivityAssignmentSerializer
@@ -1062,11 +1101,23 @@ class ActivityAssignmentViewSet(SoftDeleteViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset().filter(activity__version__schedule__project__in=accessible_projects(self.request.user))
+        version_id = self.request.query_params.get('version')
+        if version_id:
+            queryset = queryset.filter(activity__version_id=version_id)
         activity_id = self.request.query_params.get('activity')
         return queryset.filter(activity_id=activity_id) if activity_id else queryset
 
+    @transaction.atomic
     def perform_create(self, serializer):
         values = serializer.validated_data
+        from .services.resource_planning import require_mutable_allocation_version
+        resource = ScheduleResource.objects.select_for_update().get(pk=values['resource'].pk)
+        version = lock_schedule_version(values['activity'].version)
+        require_mutable_allocation_version(version)
+        if resource.is_deleted:
+            raise ValidationError('Choose an active resource.')
+        values['resource'] = resource
+        serializer.validate(values)
         assignment = ActivityAssignment.objects.filter(
             activity=values['activity'], resource=values['resource'], is_deleted=True,
         ).first()
@@ -1079,16 +1130,29 @@ class ActivityAssignmentViewSet(SoftDeleteViewSet):
             serializer.instance = assignment
         else:
             assignment = serializer.save()
-        _mark_version_draft(assignment.activity.version)
+        _mark_version_draft(version)
 
+    @transaction.atomic
     def perform_update(self, serializer):
-        assignment = serializer.save()
-        _mark_version_draft(assignment.activity.version)
+        from .services.resource_planning import require_mutable_allocation_version
+        resource = ScheduleResource.objects.select_for_update().get(pk=serializer.instance.resource_id)
+        version = lock_schedule_version(serializer.instance.activity.version)
+        require_mutable_allocation_version(version)
+        assignment = ActivityAssignment.objects.select_for_update().get(pk=serializer.instance.pk)
+        assignment.resource = resource
+        serializer.instance = assignment
+        if 'resource' in serializer.validated_data:
+            serializer.validated_data['resource'] = resource
+        serializer.validate(serializer.validated_data)
+        serializer.save()
+        _mark_version_draft(version)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
-        if instance.activity.version.status in {'approved', 'baselined', 'superseded'}:
-            raise ValidationError('Approved, baselined, and superseded schedule versions are immutable.')
-        version = instance.activity.version
+        from .services.resource_planning import require_mutable_allocation_version
+        ScheduleResource.objects.select_for_update().get(pk=instance.resource_id)
+        version = lock_schedule_version(instance.activity.version)
+        require_mutable_allocation_version(version)
         super().perform_destroy(instance)
         _mark_version_draft(version)
 

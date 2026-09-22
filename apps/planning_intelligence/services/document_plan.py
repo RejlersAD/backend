@@ -21,11 +21,17 @@ NOT_SPECIFIED = 'Not Specified'
 
 
 def source_files(project):
-    return [{'id': item.pk, 'filename': item.original_filename, 'category': item.category,
-             'project_id': project.pk,
-             'parse_status': item.parse_status, 'text': item.extracted_text,
-             'updated_at': item.updated_at.isoformat()}
-            for item in project.files.filter(is_deleted=False).order_by('pk')]
+    from .reference_schedule_geometry import cached_schedule_geometry
+    sources = []
+    for item in project.files.filter(is_deleted=False).select_related('document_profile').order_by('pk'):
+        source = {'id': item.pk, 'filename': item.original_filename, 'category': item.category,
+                  'project_id': project.pk, 'parse_status': item.parse_status, 'text': item.extracted_text,
+                  'updated_at': item.updated_at.isoformat()}
+        geometry = cached_schedule_geometry(item)
+        if geometry:
+            source['structured_evidence'] = {'reference_schedule_geometry': geometry}
+        sources.append(source)
+    return sources
 
 
 def _source_id(record):
@@ -257,7 +263,9 @@ def simple_tasks(plan):
         'duration_days': row['duration_days'], 'duration_source': row['duration_source'],
         'duration_unit': row['duration_unit'],
         'duration_calendar_verified': False, 'is_milestone': row['is_milestone'] is True,
-        'activity_type': 'finish_milestone' if row['is_milestone'] is True else 'task',
+        'activity_type': ('start_milestone' if row['is_milestone'] is True
+                          and str((row.get('source_evidence') or {}).get('record_type') or '').lower().replace('_', ' ') == 'start milestone'
+                          else 'finish_milestone' if row['is_milestone'] is True else 'task'),
         'duration_review_status': 'source_verified' if row['duration_days'] is not None else 'missing_source',
         'duration_review_reason': 'Explicit document value.' if row['duration_days'] is not None else NOT_SPECIFIED,
         'depends_on': [link['id'] for link in row['predecessors']],
