@@ -58,6 +58,14 @@ def _review(version):
 
 
 def master_plan_state(project, actor, *, version_id=None):
+    from .schedule_logic_state import enrich_logic_quality
+    state = _master_plan_state(project, actor, version_id=version_id)
+    selected_id = version_id or project.master_schedule_version_id
+    version = _version(project, selected_id) if selected_id else None
+    return enrich_logic_quality(project, state, version)
+
+
+def _master_plan_state(project, actor, *, version_id=None):
     from .simple_planning import plan_state
     from .planning_provenance import annotate_plan_provenance
     from .planning_profiles import planning_profile_selection

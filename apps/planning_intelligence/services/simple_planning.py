@@ -553,6 +553,14 @@ def _blockers(project, state):
                          'message': 'Printed durations are available, but their working calendar has not been verified.',
                          'task_ids': unverified_calendar, 'task_count': len(unverified_calendar),
                          'resolution': 'Verify the source working calendar before calculating or publishing dates from printed durations.'})
+    from .schedule_logic_state import state_logic_quality
+    submitted_version = ScheduleVersion.objects.filter(pk=state.get('version_id'), schedule__project=project,
+        is_deleted=False).first() if state.get('state') in {'submitted', 'baselined'} else None
+    if submitted_version:
+        from .schedule_logic_review import version_logic_quality
+        blockers.extend(version_logic_quality(submitted_version)['blockers'])
+    else:
+        blockers.extend(state_logic_quality(project, state)['blockers'])
     return blockers
 
 
@@ -773,7 +781,8 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
         (state.get('document_schedule_summary') or {}).get('activity_count')
         or reference.get('files'))
     state.pop('input_fingerprint', None)
-    return state
+    from .schedule_logic_state import enrich_logic_quality
+    return enrich_logic_quality(project, state)
 
 
 def _require_schedule_proposal(project, actor, state, revision, workflow_mode=None):
@@ -1433,7 +1442,8 @@ def submit_plan(project, actor, *, revision, approver_id=None):
         return plan_state(project, actor)
     if state['state'] != 'review':
         _error('Review the draft before submitting it.', 'simple_plan_state')
-    blockers = _blockers(project, {**state, 'tasks': _dated_tasks(project, state['tasks'])})
+    dated_tasks = _dated_tasks(project, state['tasks'])
+    blockers = _blockers(project, {**state, 'tasks': dated_tasks})
     if blockers:
         _error('Complete the plan before submitting.', 'simple_plan_incomplete', blockers=blockers)
     timing_blockers = [row for row in schedule_timing_blockers(
@@ -1463,6 +1473,8 @@ def submit_plan(project, actor, *, revision, approver_id=None):
     type(activities[0]).objects.bulk_update(activities, ['metadata'])
     calculation = calculate_schedule_version(version, requested_by=actor)
     version.refresh_from_db()
+    from .schedule_logic_review import carry_logic_reviews
+    carry_logic_reviews(project, dated_tasks, state.get('deliverables'), version)
     assurance = run_schedule_assurance(version, requested_by=actor)
     if assurance.blockers:
         _error('Resolve the schedule checks before submitting.', 'simple_plan_schedule_blocked', blockers=assurance.blockers)

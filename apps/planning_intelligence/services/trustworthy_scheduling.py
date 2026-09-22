@@ -246,6 +246,9 @@ def run_schedule_assurance(version, *, requested_by=None):
     from .operational_jobs import assurance_state_fingerprint
     input_fingerprint = assurance_state_fingerprint(version)
     network = _network_validation(version, activities, relationships)
+    from .schedule_logic_review import version_logic_quality
+    logic = version_logic_quality(version)
+    network['findings'].extend(logic['blockers'] + logic['warnings'])
     contract = _contract_scenarios(version, activities, calculation_run)
     resources = _resource_validation(version, activities)
     comparison = _change_comparison(version, activities, relationships)
@@ -286,9 +289,12 @@ def current_assurance(version):
         input_fingerprint=assurance_state_fingerprint(version),
     ).first()
     if review:
+        from .schedule_logic_review import version_logic_quality
+        logic = version_logic_quality(version)
         # Apply the current approval policy without rewriting a historical review
         # on a GET. Keep its dates, evidence and calculated-state fingerprint.
-        findings = [apply_timing_warning_policy(row) for row in (review.blockers or [])]
+        findings = [apply_timing_warning_policy(row) for row in (review.blockers or [])
+                    if row.get('code') != 'parallel_workflow_review_required'] + logic['blockers']
         warnings = [apply_timing_warning_policy(row) for row in (review.warnings or [])]
         warning_codes = {row.get('code') for row in warnings}
         warnings.extend(row for row in findings if row.get('severity') == 'warning' and row.get('code') not in warning_codes)
@@ -301,6 +307,8 @@ def current_assurance(version):
             setattr(review, field, content)
         if review.status == 'draft' and findings and not review.blockers:
             review.status = 'ready'
+        elif review.blockers:
+            review.status = 'draft'
     return review
 
 

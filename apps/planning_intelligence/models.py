@@ -340,3 +340,4 @@ from .planning_build_models import PlanningBuild  # noqa: E402,F401
 from .planning_register_models import PlanningRiskRecord  # noqa: E402,F401
 from .operational_control_models import OperationalControlReport, OperationalEarningPolicy  # noqa: E402,F401
 from .delay_models import DelayAnalysisCase, DelayAnalysisRun, DelayEvent  # noqa: E402,F401
+from .logic_review_models import ScheduleLogicReview  # noqa: E402,F401
