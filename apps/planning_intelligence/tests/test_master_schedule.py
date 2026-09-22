@@ -6,10 +6,13 @@ from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 
+from apps.core.project_models import ProjectMember
+from apps.users.models import User
 from ..models import PlanningProject, ScheduleVersion, ScheduleBaseline
 from ..services.evidence_graph import materialize_accepted_plan
 from ..services.planning_provenance import annotate_plan_provenance
 from . import test_evidence_graph as graph_fixture
+from .test_business_approval_gates import grant_test_approval
 
 
 class MasterScheduleTests(TestCase):
@@ -46,6 +49,7 @@ class MasterScheduleTests(TestCase):
         self.assertFalse(state['canonical_version'])
         self.assertIsNone(state['master_version_id'])
         self.assertFalse(state['planning_profile']['valid'])
+        self.assertTrue(state['permissions']['can_generate_plan'])
 
     def test_accepted_projection_reloads_on_same_canvas_and_can_restore_working_draft(self):
         before = deepcopy(self.project.simple_planning_state)
@@ -53,6 +57,7 @@ class MasterScheduleTests(TestCase):
         self.assertTrue(state['canonical_version'])
         self.assertFalse(state['viewing_history'])
         self.assertFalse(state['permissions']['can_edit'])
+        self.assertTrue(state['permissions']['can_generate_plan'])
         self.assertTrue(state['permissions']['can_calculate'])
         self.assertEqual(len(state['tasks']), 2)
         self.assertEqual({row['field_provenance']['duration_days']['type'] for row in state['tasks']}, {'document'})
@@ -82,6 +87,7 @@ class MasterScheduleTests(TestCase):
         self.assertTrue(state['permissions']['can_approve_publish'], state['blockers'])
         state = self.action('approve-publish', state, name='Accepted source baseline')
         self.assertEqual(state['state'], 'baselined')
+        self.assertTrue(state['permissions']['can_generate_plan'])
         baseline = ScheduleBaseline.objects.get(pk=state['baseline']['id'])
         snapshot = deepcopy(baseline.snapshot)
         state = self.action('reopen', state)
@@ -89,6 +95,8 @@ class MasterScheduleTests(TestCase):
         version = ScheduleVersion.objects.get(pk=state['version_id'])
         self.assertEqual(version.parent_version_id, version_id)
         self.assertEqual(version.evidence_graph_id, self.graph.pk)
+        self.assertFalse(state['permissions']['can_edit'])
+        self.assertTrue(state['permissions']['can_generate_plan'])
         self.assertTrue(state['permissions']['can_calculate'])
         baseline.refresh_from_db()
         self.assertEqual(baseline.snapshot, snapshot)
@@ -96,6 +104,52 @@ class MasterScheduleTests(TestCase):
         self.assertTrue(history['viewing_history'])
         self.assertFalse(history['canonical_version'])
         self.assertEqual(history['state'], 'baselined')
+        self.assertFalse(history['permissions']['can_generate_plan'])
+
+    def test_plan_generation_permission_respects_project_role_and_history(self):
+        state = self.activate()
+        version_id = state['version_id']
+        reviewer = User.objects.create_user(username='build-reader', email='build-reader@example.test')
+        grant_test_approval((reviewer,))
+        ProjectMember.objects.create(project=self.project.enterprise_project, user=reviewer, role='reviewer')
+        self.client.force_authenticate(reviewer)
+        self.assertFalse(self.read()['permissions']['can_generate_plan'])
+        self.client.force_authenticate(self.user)
+        with patch('apps.planning_intelligence.services.master_schedule.module_action_allowed', return_value=False):
+            self.assertFalse(self.read()['permissions']['can_generate_plan'])
+        response = self.client.post(self.endpoint('select-version'), {
+            'revision': state['master_revision'], 'version_id': None}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['permissions']['can_generate_plan'])
+        self.assertFalse(self.read(version_id=version_id)['permissions']['can_generate_plan'])
+
+    def test_generation_access_matches_read_only_build_lookup_without_ready_profile(self):
+        state = self.activate()
+        self.assertFalse(state['permissions']['can_edit'])
+        self.assertTrue(state['permissions']['can_generate_plan'])
+        self.assertFalse(state['planning_profile']['valid'])
+        url = f'/api/v1/planning-intelligence/projects/{self.project.pk}/planning-builds/'
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['permissions']['can_preview'])
+        self.assertTrue(response.data['permissions']['can_apply'])
+        self.assertFalse(response.data['options']['profile']['valid'])
+        self.assertFalse([query for query in queries if query['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
+
+        reviewer = User.objects.create_user(username='build-lookup-reader', email='build-lookup-reader@example.test')
+        grant_test_approval((reviewer,))
+        ProjectMember.objects.create(project=self.project.enterprise_project, user=reviewer, role='reviewer')
+        self.client.force_authenticate(reviewer)
+        self.assertFalse(self.read()['permissions']['can_generate_plan'])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data['permissions']['can_preview'])
+        self.assertFalse(response.data['permissions']['can_apply'])
+        response = self.client.post(url, {'evidence_revision': self.graph.revision,
+            'profile_selection_revision': 1, 'options': {}, 'reason': 'Attempt by read-only member.'}, format='json')
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(ScheduleVersion.objects.filter(schedule__project=self.project).count(), 1)
 
     def test_activation_conflict_rolls_back_materialization(self):
         self.approve_inputs()
