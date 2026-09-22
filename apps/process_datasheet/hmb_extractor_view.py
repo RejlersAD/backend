@@ -343,6 +343,8 @@ def _hmb_preview_file_summary(parsed: dict) -> dict:
         confidence = max(confidence, 0.9)
     return {
         'filename': parsed.get('source_filename', ''),
+        'source_stored': bool(parsed.get('source_upload_id')),
+        'source_upload_id': parsed.get('source_upload_id'),
         'case_name': parsed.get('case_name', ''),
         'detected_format': parsed.get('detected_format', ''),
         'stream_count': parsed.get('stream_count', 0),

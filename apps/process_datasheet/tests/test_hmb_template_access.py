@@ -186,6 +186,8 @@ class HMBUploadStorageTests(TestCase):
 
         self.assertEqual(preview_response.status_code, 200)
         source = HMBSourceUpload.objects.get(upload_kind=HMBSourceUpload.KIND_CASE_FILE)
+        self.assertTrue(preview_response.data['files'][0]['source_stored'])
+        self.assertEqual(preview_response.data['files'][0]['source_upload_id'], str(source.id))
         self.assertEqual(source.status, HMBSourceUpload.STATUS_ANALYZED)
 
         execute_request = self.factory.post(
