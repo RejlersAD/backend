@@ -6,6 +6,7 @@ from .models import (
     Approval,
     AuditLog,
     ApprovalRoute,
+    ExecutiveFinancePeriod,
 )
 
 
@@ -70,3 +71,14 @@ class AuditLogAdmin(admin.ModelAdmin):
 class ApprovalRouteAdmin(admin.ModelAdmin):
     list_display = ['invoice_type', 'priority', 'is_active']
     list_filter = ['invoice_type', 'is_active']
+
+
+@admin.register(ExecutiveFinancePeriod)
+class ExecutiveFinancePeriodAdmin(admin.ModelAdmin):
+    list_display = ['month', 'currency', 'status', 'budget_invoiced', 'forecast_invoiced', 'actual_through', 'approved_by']
+    list_filter = ['status', 'currency']
+    search_fields = ['source_reference']
+    readonly_fields = ['updated_at']
+    fields = ['month', 'currency', 'budget_invoiced', 'forecast_invoiced',
+              'recognised_revenue', 'operating_costs', 'actual_through',
+              'source_reference', 'status', 'approved_by', 'approved_at', 'updated_at']

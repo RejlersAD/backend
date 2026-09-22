@@ -237,7 +237,7 @@ class ExecutiveFinanceTests(TestCase):
         self.invoice('OTHER', '999', company='Other company')
         params = {'currency': 'AED', 'company': 'Acme', 'page': 2, 'page_size': 8, 'ordering': 'company'}
         actual = self.report(REGISTER_URL, **params)
-        self.assertEqual(actual, build_customer_invoice_register(self.user, **params))
+        self.assertEqual(actual, build_customer_invoice_register(self.user, as_of=TODAY, **params))
         self.assertEqual(actual['pagination']['count'], 9)
         self.assertEqual(actual['pagination']['pages'], 2)
         self.assertEqual([row['id'] for row in actual['rows']], [records[-1].pk])

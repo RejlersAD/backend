@@ -286,3 +286,8 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_project_setup.py
 !apps/planning_intelligence/tests/test_project_setup_byok.py
 !apps/project_control/tests/test_epc_*.py
+
+!docs/executive-invoice-performance.md
+
+# Private Finance aggregates are provisioned separately from application code.
+apps/finance/data/invoice_performance_summary.json
