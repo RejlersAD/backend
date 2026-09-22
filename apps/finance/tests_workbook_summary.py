@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 from zipfile import ZipFile
 
@@ -264,6 +265,11 @@ class WorkbookSummaryTests(SimpleTestCase):
 
     def test_unavailable_or_inconsistent_snapshot_does_not_return_partial_data(self):
         data = json.loads(SNAPSHOT_PATH.read_text(encoding='utf-8'))
+        snapshot = SimpleNamespace(
+            sha256=data['source']['sha256'], sheet_name=data['source']['sheet'],
+            first_row=data['source']['first_row'], last_row=data['source']['last_row'],
+            header_row=data['source']['first_row'] - 1, row_count=data['invoice_count'],
+            file_name=data['source']['file_name'], reconciliation={})
         inconsistent = deepcopy(data)
         inconsistent['payment_status'][0]['count'] += 1
         for content in ('not json', '{}', json.dumps(inconsistent)):
@@ -273,13 +279,55 @@ class WorkbookSummaryTests(SimpleTestCase):
                 with patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True), \
                         patch('apps.finance.services.workbook_summary.SNAPSHOT_PATH', path), \
                         self.assertLogs('apps.finance.services.workbook_summary', level='ERROR'):
-                    result = build_workbook_summary('reader')
+                    result = build_workbook_summary('reader', source_snapshot=snapshot)
                 self.assertEqual(result['status'], 'unavailable')
                 self.assertEqual(set(result), {'schema_version', 'status', 'reason'})
         with patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True), \
                 patch('apps.finance.services.workbook_summary.SNAPSHOT_PATH', Path(self.directory.name) / 'missing.json'), \
                 self.assertLogs('apps.finance.services.workbook_summary', level='ERROR'):
-            self.assertEqual(build_workbook_summary('reader')['status'], 'unavailable')
+            self.assertEqual(build_workbook_summary('reader', source_snapshot=snapshot)['status'], 'unavailable')
+
+    def test_legacy_packaged_summary_requires_matching_active_source_provenance(self):
+        data = json.loads(SNAPSHOT_PATH.read_text(encoding='utf-8'))
+        snapshot = SimpleNamespace(
+            sha256=data['source']['sha256'], sheet_name=data['source']['sheet'],
+            first_row=data['source']['first_row'], last_row=data['source']['last_row'],
+            header_row=data['source']['first_row'] - 1, row_count=data['invoice_count'],
+            file_name='Original uploaded workbook.xlsx', reconciliation={})
+        with patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True):
+            result = build_workbook_summary('reader', source_snapshot=snapshot)
+            self.assertEqual(result['totals'], data['totals'])
+            self.assertEqual(result['source']['file_name'], snapshot.file_name)
+            for field, value in (('sha256', 'b' * 64), ('sheet_name', 'Other sheet'),
+                                 ('first_row', 7), ('last_row', 4408), ('row_count', 4403), ('header_row', 4)):
+                with self.subTest(field=field):
+                    changed = deepcopy(snapshot)
+                    setattr(changed, field, value)
+                    with self.assertLogs('apps.finance.services.workbook_summary', level='ERROR'):
+                        self.assertEqual(build_workbook_summary('reader', source_snapshot=changed)['status'],
+                                         'unavailable')
+
+    def test_invalid_stored_summary_never_falls_back_to_packaged_totals(self):
+        data = json.loads(SNAPSHOT_PATH.read_text(encoding='utf-8'))
+        snapshot = SimpleNamespace(
+            sha256=data['source']['sha256'], sheet_name=data['source']['sheet'],
+            first_row=data['source']['first_row'], last_row=data['source']['last_row'],
+            header_row=data['source']['first_row'] - 1, row_count=data['invoice_count'],
+            file_name=data['source']['file_name'], reconciliation={'workbook_summary': {}})
+        with patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True), \
+                patch.object(Path, 'open') as opened, \
+                self.assertLogs('apps.finance.services.workbook_summary', level='ERROR'):
+            result = build_workbook_summary('reader', source_snapshot=snapshot)
+        opened.assert_not_called()
+        self.assertEqual(result['status'], 'unavailable')
+
+    def test_no_active_snapshot_requires_upload_and_never_opens_packaged_totals(self):
+        with patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True), \
+                patch.object(Path, 'open') as opened:
+            result = build_workbook_summary('reader', source_snapshot=None)
+        opened.assert_not_called()
+        self.assertEqual(result, {'schema_version': '1.0', 'status': 'unavailable',
+                                 'reason': 'Upload a receivables workbook to view its totals.'})
 
     def test_management_command_generates_only_an_aggregate_artifact(self):
         self.workbook([{'A': 'PRIVATE-INVOICE', 'G': 'PRIVATE-PROJECT', 'L': 10, 'M': 30, 'AA': 2, 'R': 'Paid'}])

@@ -10,12 +10,15 @@ Endpoints (registered under /api/v1/invoice-tracker/):
   PATCH  /invoices/{id}/              partial update
   DELETE /invoices/{id}/              delete
   GET    /invoices/stats/             aggregated counts/sums
-  POST   /invoices/import-excel/      multipart upload — bulk upsert
+  POST   /invoices/import-excel/      multipart upload — publish reporting workbook or update register
   POST   /invoices/{id}/upload-attachment/   multipart — S3 attachment
   DELETE /attachments/{id}/           remove attachment
 """
 import os
 import tempfile
+from zipfile import BadZipFile
+
+from openpyxl.utils.exceptions import InvalidFileException
 
 from django.db.models import Count, Sum, Q
 from django.utils import timezone
@@ -172,8 +175,24 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
             return Response({'error': "No 'file' provided"},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        mode = request.data.get('mode', 'workbook')
+        if mode not in ('workbook', 'operational'):
+            return Response({'error': 'Choose receivables reporting or the invoice register.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not upload.name.lower().endswith('.xlsx'):
+            return Response({'error': 'Upload an Excel .xlsx workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         sheet_names_csv = request.data.get('sheets', '') or ''
+        if not isinstance(sheet_names_csv, str):
+            return Response({'error': 'Sheet names must be comma-separated text.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         sheet_names = [s.strip() for s in sheet_names_csv.split(',') if s.strip()] or None
+        if mode == 'workbook' and sheet_names and (
+            len(sheet_names) != 1 or ''.join(sheet_names[0].casefold().split()) != 'externalinvoice'
+        ):
+            return Response({'error': 'Receivables reporting uses the External Invoice sheet. '
+                                      'Choose the invoice register to import other sheets.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         # Save upload to a temp file (openpyxl reads from path)
         tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
@@ -181,15 +200,44 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
             for chunk in upload.chunks():
                 tmp.write(chunk)
             tmp.close()
-            result = import_workbook(tmp.name, user=request.user,
-                                     sheet_names=sheet_names)
+            if mode == 'workbook':
+                from apps.finance.services.receivables_source import import_receivables_source
+
+                result = import_receivables_source(
+                    tmp.name, original_filename=upload.name, last_row=None,
+                )
+                response_data = {
+                    'mode': 'workbook', 'rows_published': result['row_count'],
+                    'created': result['created'], 'activated': result['activated'],
+                    'source': {key: result[key] for key in (
+                        'snapshot_id', 'sha256', 'file_name', 'sheet_name',
+                        'header_row', 'first_row', 'last_row', 'row_count',
+                    )},
+                    'reconciliation': result['reconciliation'],
+                    # Preserve the response shape for clients deployed before
+                    # the reporting-specific upload confirmation was added.
+                    'rows_created': result['row_count'] if result['created'] else 0,
+                    'rows_updated': 0, 'rows_skipped': 0, 'rows_seen': result['row_count'],
+                    'sheets_processed': 1, 'errors': [], 'warnings': [],
+                }
+            else:
+                result = import_workbook(tmp.name, user=request.user,
+                                         sheet_names=sheet_names)
+                response_data = {'mode': 'operational', **result.as_dict()}
+        except (ValueError, KeyError, BadZipFile, InvalidFileException, SyntaxError) as exc:
+            message = (str(exc) if isinstance(exc, ValueError)
+                       else 'The workbook could not be read. Upload a valid Excel .xlsx file.')
+            return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
         finally:
+            tmp.close()
             try:
                 os.unlink(tmp.name)
             except OSError:
                 pass
 
-        return Response(result.as_dict(), status=status.HTTP_200_OK)
+        response = Response(response_data, status=status.HTTP_200_OK)
+        response['Cache-Control'] = 'private, no-store'
+        return response
 
     # ── Attachment upload (S3) ─────────────────────────────────────
     @action(detail=True, methods=['post'], url_path='upload-attachment')
