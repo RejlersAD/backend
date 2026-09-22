@@ -10,6 +10,9 @@ Endpoints (registered under /api/v1/invoice-tracker/):
   PATCH  /invoices/{id}/              partial update
   DELETE /invoices/{id}/              delete
   GET    /invoices/stats/             aggregated counts/sums
+  GET    /invoices/duplicates/        review duplicate invoice IDs
+  DELETE /invoices/duplicates/        keep one reviewed copy and archive extras
+  DELETE /invoices/duplicates/bulk/   resolve reviewed groups in one transaction
   POST   /invoices/import-excel/      multipart upload — publish reporting workbook or update register
   POST   /invoices/{id}/upload-attachment/   multipart — S3 attachment
   DELETE /attachments/{id}/           remove attachment
@@ -36,6 +39,7 @@ from .models import CustomerInvoice, InvoiceAttachment, PaymentStatus, InvoiceCa
 from .serializers import CustomerInvoiceSerializer, InvoiceAttachmentSerializer
 from .services.excel_importer import import_workbook
 from .services.finance_engine import FINANCE_RULES, recompute
+from .services.duplicate_invoices import MAX_BULK_GROUPS
 
 
 # Soft-coded: aggregations exposed by /stats/
@@ -81,6 +85,19 @@ class DuplicateInvoiceQuery(serializers.Serializer):
 class DuplicateInvoiceSelection(serializers.Serializer):
     group_token = serializers.CharField(max_length=8192)
     keep_token = serializers.CharField(max_length=8192)
+
+
+class BulkDuplicateInvoiceSelection(serializers.Serializer):
+    selections = DuplicateInvoiceSelection(many=True, allow_empty=False, max_length=MAX_BULK_GROUPS)
+
+
+def _duplicate_error_response(exc):
+    data = {'detail': exc.detail}
+    if getattr(exc, 'stale_invoice_ids', None):
+        data['stale_invoice_ids'] = exc.stale_invoice_ids
+    response = Response(data, status=exc.status_code)
+    response['Cache-Control'] = 'private, no-store'
+    return response
 
 
 class CustomerInvoiceViewSet(viewsets.ModelViewSet):
@@ -180,10 +197,13 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
         try:
             data = list_duplicate_invoices(request.user, **query.validated_data)
         except DuplicateReviewError as exc:
-            return Response({'detail': exc.detail}, status=exc.status_code)
+            return _duplicate_error_response(exc)
+        can_delete = request_action_allowed(request, 'finance_outgoing', 'delete')
         data['capabilities'] = {
-            'resolve': request_action_allowed(request, 'finance_outgoing', 'delete'),
+            'resolve': can_delete,
+            'bulk_resolve': can_delete,
         }
+        data['limits'] = {'bulk_groups': MAX_BULK_GROUPS}
         response = Response(data)
         response['Cache-Control'] = 'private, no-store'
         return response
@@ -201,7 +221,25 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
         try:
             data = resolve_duplicate_invoices(request.user, **selection.validated_data)
         except DuplicateReviewError as exc:
-            return Response({'detail': exc.detail}, status=exc.status_code)
+            return _duplicate_error_response(exc)
+        response = Response(data)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+    @action(detail=False, methods=['delete'], url_path='duplicates/bulk')
+    def bulk_delete_duplicates(self, request):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.duplicate_invoices import DuplicateReviewError, resolve_duplicate_invoice_groups
+
+        if not all(request_action_allowed(request, 'finance_outgoing', action)
+                   for action in ('read', 'delete')):
+            raise PermissionDenied('Read and delete access to customer invoices is required.')
+        selection = BulkDuplicateInvoiceSelection(data=request.data)
+        selection.is_valid(raise_exception=True)
+        try:
+            data = resolve_duplicate_invoice_groups(request.user, **selection.validated_data)
+        except DuplicateReviewError as exc:
+            return _duplicate_error_response(exc)
         response = Response(data)
         response['Cache-Control'] = 'private, no-store'
         return response

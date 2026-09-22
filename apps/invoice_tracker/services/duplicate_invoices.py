@@ -18,6 +18,7 @@ from apps.invoice_tracker.models import (
 
 
 REVIEW_TOKEN_MAX_AGE = 15 * 60
+MAX_BULK_GROUPS = 50
 TOKEN_SALT = 'invoice_tracker.physical_duplicate_review.v1'
 DISPLAY_FIELDS = (
     'invoice_number', 'company', 'account', 'rad_project_no', 'project_name',
@@ -31,10 +32,11 @@ MONEY_FIELDS = {
 
 
 class DuplicateReviewError(Exception):
-    def __init__(self, detail, status_code=400):
+    def __init__(self, detail, status_code=400, *, stale_invoice_ids=None):
         super().__init__(detail)
         self.detail = detail
         self.status_code = status_code
+        self.stale_invoice_ids = sorted(set(stale_invoice_ids)) if stale_invoice_ids is not None else None
 
 
 class _ArchiveEncoder(DjangoJSONEncoder):
@@ -162,11 +164,12 @@ def list_duplicate_invoices(user, invoice_id=None, page=1, page_size=20):
             for key in MONEY_FIELDS:
                 if fields[key] is not None:
                     fields[key] = str(fields[key])
-            display.append({**fields, 'record_token': _token(
+            display.append({**fields, 'record_key': record['fingerprint'], 'record_token': _token(
                 'record', actor, identity, fingerprint, record['fingerprint'])})
         groups.append({
             'invoice_id': identity, 'record_count': len(records),
             'identical': len({_digest(record['data']) for record in records}) == 1,
+            'review_key': fingerprint,
             'group_token': _token('group', actor, identity, fingerprint), 'records': display,
             'attachments_count': InvoiceAttachment.objects.filter(invoice_id=identity).count(),
         })
@@ -192,43 +195,97 @@ def _lock_invoice_writes():
             cursor.execute(f'UPDATE {table} SET id = id WHERE 1 = 0')
 
 
-def resolve_duplicate_invoices(user, group_token, keep_token):
-    """Archive and remove exactly the reviewed extras, retaining their shared ID."""
-    actor = _actor(user)
-    _check_backend()
-    group = _decode(group_token, 'group', actor)
-    keep = _decode(keep_token, 'record', actor)
+def _decode_selection(selection, actor):
+    if not isinstance(selection, dict):
+        raise DuplicateReviewError('Each duplicate review must select a record to retain.')
+    group = _decode(selection.get('group_token'), 'group', actor)
+    keep = _decode(selection.get('keep_token'), 'record', actor)
     if (keep.get('invoice_id') != group.get('invoice_id')
             or keep.get('fingerprint') != group.get('fingerprint')):
         raise DuplicateReviewError('Select a record from this duplicate review to retain.')
-    invoice_id = _integer(group.get('invoice_id'), 'invoice_id', 1, 9223372036854775807)
+    return {'invoice_id': _integer(group.get('invoice_id'), 'invoice_id', 1, 9223372036854775807),
+            'fingerprint': group.get('fingerprint'), 'record': keep.get('record')}
+
+
+def resolve_duplicate_invoice_groups(user, selections):
+    """Resolve reviewed groups together; any invalid or failed group rolls back all."""
+    actor = _actor(user)
+    _check_backend()
+    if not isinstance(selections, list) or not 1 <= len(selections) <= MAX_BULK_GROUPS:
+        raise DuplicateReviewError(f'Select between 1 and {MAX_BULK_GROUPS} duplicate invoice groups.')
+    decoded = [_decode_selection(selection, actor) for selection in selections]
+    identities = [selection['invoice_id'] for selection in decoded]
+    if len(set(identities)) != len(identities):
+        raise DuplicateReviewError('Each invoice ID can appear only once in a bulk review.')
     with transaction.atomic():
         _lock_invoice_writes()
-        records = _read_records(invoice_id, lock=True)
-        if len(records) < 2 or _group_digest(invoice_id, records) != group.get('fingerprint'):
-            raise DuplicateReviewError('These invoice records changed. Refresh the duplicate review before deleting.', 409)
-        selected = [record for record in records if record['fingerprint'] == keep.get('record')]
-        if len(selected) != 1:
-            raise DuplicateReviewError('Select exactly one reviewed invoice record to retain.')
-        retained = selected[0]
-        removed = [record for record in records if record is not retained]
-        archive = InvoiceDuplicateResolution.objects.create(
-            invoice_id=invoice_id, actor_id=actor, retained_record=retained['data'],
-            removed_records=[record['data'] for record in removed],
-        )
+        # A lock wait must not extend a signed review's lifetime. Decode every
+        # pair again before reading rows, while keeping all writes behind the
+        # full batch's token and physical-membership validation.
+        decoded = [_decode_selection(selection, actor) for selection in selections]
+        prepared = {}
+        stale = []
+        for selection in sorted(decoded, key=lambda item: item['invoice_id']):
+            invoice_id = selection['invoice_id']
+            records = _read_records(invoice_id, lock=True)
+            if len(records) < 2 or _group_digest(invoice_id, records) != selection['fingerprint']:
+                stale.append(invoice_id)
+                continue
+            selected = [record for record in records if record['fingerprint'] == selection['record']]
+            if len(selected) != 1:
+                raise DuplicateReviewError('Select exactly one reviewed invoice record to retain.')
+            retained = selected[0]
+            prepared[invoice_id] = {'retained': retained,
+                                    'removed': [record for record in records if record is not retained]}
+        if stale:
+            raise DuplicateReviewError(
+                'These invoice records changed. Refresh the duplicate review before deleting.', 409,
+                stale_invoice_ids=stale,
+            )
+        # Archive every group before deleting any extras. Both phases share one
+        # transaction, so an archive or verification failure leaves no partial
+        # resolutions or audit entries behind.
+        for invoice_id in identities:
+            group = prepared[invoice_id]
+            archive = InvoiceDuplicateResolution.objects.create(
+                invoice_id=invoice_id, actor_id=actor, retained_record=group['retained']['data'],
+                removed_records=[record['data'] for record in group['removed']],
+            )
+            group['archive_id'] = str(archive.pk)
         table = connection.ops.quote_name(CustomerInvoice._meta.db_table)
         with connection.cursor() as cursor:
-            for record in removed:
-                if connection.vendor == 'postgresql':
-                    cursor.execute(f'DELETE FROM {table} WHERE id = %s AND ctid = %s::tid AND tableoid = %s::oid',
-                                   [invoice_id, record['locator'], record['table_oid']])
-                else:
-                    cursor.execute(f'DELETE FROM {table} WHERE id = %s AND rowid = %s',
-                                   [invoice_id, int(record['locator'])])
-                if cursor.rowcount != 1:
-                    raise DuplicateReviewError('The invoice records changed during resolution. Nothing was deleted.', 409)
-        remaining = _read_records(invoice_id)
-        if len(remaining) != 1 or remaining[0]['fingerprint'] != retained['fingerprint']:
-            raise DuplicateReviewError('The retained invoice could not be verified. Nothing was deleted.', 409)
-    return {'invoice_id': invoice_id, 'removed_count': len(removed),
-            'kept_invoice_number': retained['data'].get('invoice_number'), 'archive_id': str(archive.pk)}
+            for invoice_id in identities:
+                for record in prepared[invoice_id]['removed']:
+                    if connection.vendor == 'postgresql':
+                        cursor.execute(f'DELETE FROM {table} WHERE id = %s AND ctid = %s::tid AND tableoid = %s::oid',
+                                       [invoice_id, record['locator'], record['table_oid']])
+                    else:
+                        cursor.execute(f'DELETE FROM {table} WHERE id = %s AND rowid = %s',
+                                       [invoice_id, int(record['locator'])])
+                    if cursor.rowcount != 1:
+                        raise DuplicateReviewError(
+                            'The invoice records changed during resolution. Nothing was deleted.', 409,
+                            stale_invoice_ids=[invoice_id],
+                        )
+        for invoice_id in identities:
+            remaining = _read_records(invoice_id)
+            if len(remaining) != 1 or remaining[0]['fingerprint'] != prepared[invoice_id]['retained']['fingerprint']:
+                raise DuplicateReviewError(
+                    'The retained invoice could not be verified. Nothing was deleted.', 409,
+                    stale_invoice_ids=[invoice_id],
+                )
+    results = [
+        {'invoice_id': invoice_id, 'removed_count': len(prepared[invoice_id]['removed']),
+         'kept_invoice_number': prepared[invoice_id]['retained']['data'].get('invoice_number'),
+         'archive_id': prepared[invoice_id]['archive_id']}
+        for invoice_id in identities
+    ]
+    return {'resolved_count': len(results), 'removed_count': sum(item['removed_count'] for item in results),
+            'results': results}
+
+
+def resolve_duplicate_invoices(user, group_token, keep_token):
+    """Keep the single-review contract on the same atomic resolution path."""
+    return resolve_duplicate_invoice_groups(
+        user, [{'group_token': group_token, 'keep_token': keep_token}],
+    )['results'][0]
