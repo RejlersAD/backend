@@ -610,3 +610,4 @@ from .salary_models import (
 # Keep workflow models in the canonical Django model registry. Importing them
 # only from URL/view modules makes migration detection depend on import order.
 from .payroll_workflow import PayrollWorkflow, WorkflowNotificationLog
+from .reporting_models import ExecutiveFinancePeriod
