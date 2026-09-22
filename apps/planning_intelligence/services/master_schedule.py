@@ -77,6 +77,7 @@ def master_plan_state(project, actor, *, version_id=None):
                 risk_register=risk_snapshot(published_version),
                 permissions={'can_edit': False, 'can_assign': False, 'can_calculate': False, 'can_validate': False,
                     'can_submit': False, 'can_approve_publish': False,
+                    'can_generate_plan': writable and canonical,
                     'can_restore_working_draft': writable and bool(project.master_schedule_version_id),
                     'can_select_version': writable and current_schedule_version(published_version),
                     'can_reopen': writable and canonical and current_schedule_version(published_version)})
@@ -156,6 +157,9 @@ def master_plan_state(project, actor, *, version_id=None):
         from .intelligent_sequence import enrich_sequence_state
         enrich_sequence_state(version, state)
     from .intelligent_sequence import can_propose_sequence
+    # Generating a reviewed plan creates a separate schedule draft. A current
+    # accepted-input version does not need direct activity-edit permission.
+    state['permissions']['can_generate_plan'] = _write(project, actor) and not state.get('viewing_history')
     state['permissions']['can_propose_sequence'] = (can_propose_sequence(project, actor)
         and not state.get('viewing_history') and state.get('state') not in {'baselined', 'submitted'})
     state['permissions']['can_build_source_logic'] = bool(state.get('source_import') and not state.get('viewing_history')

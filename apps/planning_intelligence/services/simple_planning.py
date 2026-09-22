@@ -746,6 +746,7 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
                        + ([{'code': 'dependency_review', 'message': 'Tasks without dependencies run independently. Review the intended sequence.'}]
                           if len(state['tasks']) > 1 and any(not task['depends_on'] for task in state['tasks']) else []),
         'permissions': {'can_edit': edit and state['state'] != 'baselined',
+                        'can_generate_plan': edit,
                         'can_assign': edit and state['state'] != 'baselined' and manages_project_tasks(actor, project.enterprise_project),
                         'can_submit': edit and state['state'] == 'review' and not blockers,
                         'can_approve_publish': not viewing_history and can_approve and not blockers,
