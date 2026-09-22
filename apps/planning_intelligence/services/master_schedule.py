@@ -276,6 +276,10 @@ def _clone(version, actor):
         if row.activity_id in activity_map], batch_size=500)
     from .planning_registers import clone_risks
     clone_risks(version, clone)
+    if 'wbs_input_fingerprint' in clone.evidence_input_snapshot:
+        from .gantt_editing import _wbs_fingerprint
+        clone.evidence_input_snapshot['wbs_input_fingerprint'] = _wbs_fingerprint(clone)
+        clone.save(update_fields=['evidence_input_snapshot'])
     return clone
 
 

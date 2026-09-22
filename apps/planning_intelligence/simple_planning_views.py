@@ -119,16 +119,18 @@ class SimplePlanningView(APIView):
     patch = put
 
     def post(self, request, project_id):
-        if self.operation == 'edit-activity':
-            from .gantt_serializers import GanttEditSerializer
+        if self.operation in {'edit-activity', 'edit-row'}:
+            from .gantt_serializers import GanttEditSerializer, GanttRowEditSerializer
             from .services.gantt_editing import edit_gantt
+            from .services.gantt_rows import edit_gantt_row
             project = self.project(request, project_id)
             if request.query_params.get('version_id') or request.data.get('viewing_history'):
                 return Response({'error': 'Return to the current draft before editing activities.',
                                  'code': 'simple_plan_history_read_only'}, status=409)
-            serializer = GanttEditSerializer(data=request.data)
+            serializer = (GanttRowEditSerializer if self.operation == 'edit-row' else GanttEditSerializer)(data=request.data)
             serializer.is_valid(raise_exception=True)
-            return self.perform(lambda: edit_gantt(project, request.user, serializer.validated_data))
+            operation = edit_gantt_row if self.operation == 'edit-row' else edit_gantt
+            return self.perform(lambda: operation(project, request.user, serializer.validated_data))
         if not self.operation or self.operation == 'source-preview':
             raise MethodNotAllowed('POST')
         project = self.project(request, project_id)

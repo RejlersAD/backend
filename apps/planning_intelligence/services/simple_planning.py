@@ -187,6 +187,14 @@ def _version_tasks(version):
                         discipline=discipline or 'general', workflow_stage_sequence=stage.get('sequence'),
                         workflow_stage_name=row.get('workflow_stage_name'), workflow_template_id=workflow.get('id'),
                         workflow_template_code=workflow.get('code'), workflow_template_version=workflow.get('version'))
+    # Planner labels supplement the source identity; the accepted source and
+    # its immutable build snapshot retain their original document values.
+    titles = (version.evidence_input_snapshot or {}).get('deliverable_titles', {})
+    for task in tasks:
+        title = titles.get(str(task.get('parent_deliverable_id')))
+        if title:
+            task['deliverable'] = title
+            task['source_deliverable'] = {**task.get('source_deliverable', {}), 'title': title}
     return tasks
 
 
@@ -1308,6 +1316,11 @@ def save_plan(project, actor, data):
         for key in ('wbs_phase', 'wbs_deliverable', 'constraint_type', 'constraint_date'):
             if key not in task and key in original:
                 task[key] = deepcopy(original[key])
+        if task.get('wbs_phase') == original.get('wbs_phase'):
+            if 'wbs_phase_id' in original:
+                task['wbs_phase_id'] = original['wbs_phase_id']
+            if task.get('wbs_deliverable') == original.get('wbs_deliverable') and 'wbs_deliverable_id' in original:
+                task['wbs_deliverable_id'] = original['wbs_deliverable_id']
         displayed = dated.get(task['id']) or {}
         if ('planned_start_date' in task and task.get('planned_start_date') != displayed.get('planned_start_date')
                 and 'timing_edit' not in task
@@ -1388,7 +1401,7 @@ def save_plan(project, actor, data):
     sequence_edits = []
     for parent in state.get('deliverables') or []:
         chain = parent.get('workflow_task_ids') or []
-        if len(chain) != 5 or any(key not in task_by_id for key in chain):
+        if (len(chain) != 5 and not parent.get('workflow_structure_edited')) or any(key not in task_by_id for key in chain):
             _error('Each deliverable must retain its five workflow stages.', 'workflow_five_stages_required')
         for previous, current in zip(chain, chain[1:]):
             links = [link for link in task_by_id[current].get('dependency_details') or []
