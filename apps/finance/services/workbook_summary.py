@@ -1,12 +1,13 @@
-"""Read-only, permission-gated totals from the audited invoice workbook.
+"""Read-only, permission-gated totals from the active invoice workbook.
 
 This snapshot preserves spreadsheet rows and statuses, including duplicate
 invoice numbers. It is independent of the live register's dashboard filters.
-Only aggregates and source provenance are packaged; no invoice records are kept.
+Totals and source facts are published together under one immutable source version.
 """
 import json
 import logging
 import re
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
@@ -22,6 +23,7 @@ COVERAGE_FIELDS = ('numeric_count', 'blank_count', 'text_count', 'error_count')
 CURRENCY_AMOUNT_FIELDS = ('invoice_amount', 'actual_payment_received')
 CURRENCY_METHOD = 'strict_agreement_or_single_source'
 MONEY_QUANTUM = Decimal('0.01')
+_ACTIVE_SOURCE = object()
 
 
 def _nonnegative_integer(value):
@@ -159,14 +161,41 @@ def validate_snapshot(data):
     return data
 
 
-def build_workbook_summary(user):
-    """Check the outgoing-register permission before opening the snapshot file."""
+def validate_source_summary(data, source_snapshot):
+    """Require the aggregate to describe exactly the selected source version."""
+    validate_snapshot(data)
+    source = data['source']
+    if (source['sha256'] != source_snapshot.sha256
+            or source['sheet'] != source_snapshot.sheet_name
+            or source['first_row'] != source_snapshot.first_row
+            or source['last_row'] != source_snapshot.last_row
+            or source_snapshot.first_row != source_snapshot.header_row + 1
+            or data['invoice_count'] != source_snapshot.row_count):
+        raise ValueError('The workbook summary does not match the selected source version.')
+    return data
+
+
+def build_workbook_summary(user, *, source_snapshot=_ACTIVE_SOURCE):
+    """Read the pinned source aggregate, checking access before any source data."""
     if not module_action_allowed(user, 'finance_outgoing', 'read'):
         return {'schema_version': '1.0', 'status': 'restricted',
                 'reason': 'Read access to customer invoices is required.'}
     try:
-        with SNAPSHOT_PATH.open(encoding='utf-8') as source:
-            return validate_snapshot(json.load(source))
+        if source_snapshot is _ACTIVE_SOURCE:
+            from apps.finance.receivables_source_models import ReceivablesSourceSnapshot
+            source_snapshot = ReceivablesSourceSnapshot.objects.filter(is_active=True).first()
+        if source_snapshot is None:
+            return {'schema_version': '1.0', 'status': 'unavailable',
+                    'reason': 'Upload a receivables workbook to view its totals.'}
+        summary = source_snapshot.reconciliation.get('workbook_summary')
+        if summary is None:
+            # Compatibility for the previously imported audited workbook only.
+            # Never display this packaged aggregate for a different active file.
+            with SNAPSHOT_PATH.open(encoding='utf-8') as source:
+                summary = json.load(source)
+        summary = deepcopy(validate_source_summary(summary, source_snapshot))
+        summary['source']['file_name'] = source_snapshot.file_name
+        return summary
     except (OSError, ValueError, TypeError, KeyError, InvalidOperation):
         logger.exception('The invoice workbook summary could not be read.')
         return {'schema_version': '1.0', 'status': 'unavailable',

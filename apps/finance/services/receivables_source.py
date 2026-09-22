@@ -9,7 +9,10 @@ from django.db import transaction
 from openpyxl import load_workbook
 
 from apps.finance.receivables_source_models import ReceivablesSourceRow, ReceivablesSourceSnapshot
-from .workbook_summary_snapshot import FOOTER_LABELS, _cell_currency, _cell_kind, _text
+from .workbook_summary import validate_snapshot, validate_source_summary
+from .workbook_summary_snapshot import (
+    FOOTER_LABELS, _cell_currency, _cell_kind, _text, generate_workbook_snapshot,
+)
 
 
 SOURCE_HEADERS = {'A': 'Invoice #', 'B': 'Invoice Date', 'C': 'Invoice Sent',
@@ -24,7 +27,10 @@ MONEY_QUANTUM = Decimal('0.00000001')
 def _money(cell):
     if _cell_kind(cell) != 'numeric_count':
         return None
-    value = Decimal(str(cell.value)).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    value = Decimal(str(cell.value))
+    if abs(value) >= Decimal('1e20'):
+        raise ValueError('A monetary source value exceeds the supported precision.')
+    value = value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
     if abs(value) >= Decimal('1e20'):
         raise ValueError('A monetary source value exceeds the supported precision.')
     return value
@@ -71,31 +77,46 @@ def _reconciliation(rows):
     }
 
 
-def read_receivables_source(path, *, sheet='External Invoice ', first_row=6, last_row=4409, header_row=5):
-    """Read the explicitly bounded external sheet; errors and blanks stay unknown."""
+def read_receivables_source(path, *, sheet='External Invoice ', first_row=6, last_row=4409,
+                            header_row=5, original_filename=None):
+    """Read a complete external sheet; None bounds detect its contiguous invoice rows."""
     path = Path(path)
-    if sheet.strip() != 'External Invoice':
+    if sheet.strip().casefold() != 'external invoice':
         raise ValueError('Only the External Invoice source sheet is supported.')
-    if header_row < 1 or first_row != header_row + 1 or last_row < first_row:
+    if header_row < 1 or first_row != header_row + 1 or (last_row is not None and last_row < first_row):
         raise ValueError('The invoice range must immediately follow the header row.')
+    file_name = Path(str(original_filename or path.name).replace('\\', '/')).name
+    if not file_name or len(file_name) > ReceivablesSourceSnapshot._meta.get_field('file_name').max_length:
+        raise ValueError('The source filename is empty or too long.')
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     workbook = load_workbook(path, read_only=True, data_only=True)
     rows = []
     try:
-        if sheet not in workbook.sheetnames:
+        candidates = [name for name in workbook.sheetnames if name.strip().casefold() == 'external invoice']
+        if not candidates:
             raise ValueError('The requested source sheet was not found.')
+        if len(candidates) != 1:
+            raise ValueError('The workbook has more than one External Invoice source sheet.')
+        sheet = candidates[0]
         worksheet = workbook[sheet]
-        if last_row > worksheet.max_row:
+        if last_row is not None and last_row > worksheet.max_row:
             raise ValueError('The last invoice row is outside the worksheet.')
         from openpyxl.utils import column_index_from_string
         header = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=31))
         for column, expected in SOURCE_HEADERS.items():
             if _text(header[column_index_from_string(column) - 1].value).casefold() != expected.casefold():
                 raise ValueError(f'Unexpected source header at {column}{header_row}.')
+        detected_end = False
         for number, cells in enumerate(worksheet.iter_rows(min_row=first_row, max_col=31), first_row):
             invoice_number = _text(cells[0].value)
             footer = invoice_number.casefold().rstrip(':') in FOOTER_LABELS
-            if number > last_row:
+            if last_row is None:
+                if not invoice_number or footer:
+                    detected_end = True
+                    continue
+                if detected_end:
+                    raise ValueError(f'An invoice row exists after a blank or footer row: {number}.')
+            elif number > last_row:
                 if invoice_number and not footer:
                     raise ValueError(f'An invoice row exists after the specified last row: {number}.')
                 continue
@@ -129,17 +150,33 @@ def read_receivables_source(path, *, sheet='External Invoice ', first_row=6, las
         workbook.close()
     if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
         raise ValueError('The source workbook changed while it was being read.')
-    metadata = {'sha256': digest, 'file_name': path.name, 'sheet_name': sheet,
+    if not rows:
+        raise ValueError('The source worksheet contains no invoice rows.')
+    if last_row is None:
+        last_row = rows[-1]['row_number']
+    metadata = {'sha256': digest, 'file_name': file_name, 'sheet_name': sheet,
                 'header_row': header_row, 'first_row': first_row, 'last_row': last_row,
                 'row_count': len(rows)}
     return metadata, rows, _reconciliation(rows)
 
 
 def import_receivables_source(path, *, sheet='External Invoice ', first_row=6, last_row=4409,
-                               header_row=5, dry_run=False):
+                               header_row=5, dry_run=False, original_filename=None):
     """Stage and activate one immutable source version; never save operational invoices."""
     metadata, rows, reconciliation = read_receivables_source(
-        path, sheet=sheet, first_row=first_row, last_row=last_row, header_row=header_row)
+        path, sheet=sheet, first_row=first_row, last_row=last_row, header_row=header_row,
+        original_filename=original_filename)
+    # Validate the complete aggregate before publishing either the rows or totals.
+    # Both readers must have consumed the identical file, including cached cells.
+    summary = generate_workbook_snapshot(
+        path, sheet=metadata['sheet_name'], last_row=metadata['last_row'], header_row=header_row)
+    summary['source']['file_name'] = metadata['file_name']
+    validate_snapshot(summary)
+    if (summary['source']['sha256'] != metadata['sha256']
+            or hashlib.sha256(Path(path).read_bytes()).hexdigest() != metadata['sha256']
+            or summary['invoice_count'] != metadata['row_count']):
+        raise ValueError('The source workbook changed while its summary was being read.')
+    reconciliation['workbook_summary'] = summary
     result = {**metadata, 'reconciliation': reconciliation, 'dry_run': dry_run,
               'snapshot_id': None, 'created': False, 'activated': False}
     if dry_run:
@@ -161,6 +198,19 @@ def import_receivables_source(path, *, sheet='External Invoice ', first_row=6, l
             ReceivablesSourceRow.objects.bulk_create(records, batch_size=250)
         elif snapshot.row_count != len(rows) or snapshot.rows.count() != len(rows):
             raise ValueError('The existing source version has an inconsistent row count.')
+        else:
+            existing = snapshot.reconciliation.get('workbook_summary')
+            if existing is None:
+                # Older versions contain the same immutable facts but predate the
+                # stored aggregate. Preserve their original import provenance.
+                summary['source']['file_name'] = snapshot.file_name
+                reconciliation = {**snapshot.reconciliation, 'workbook_summary': summary}
+                ReceivablesSourceSnapshot.objects.filter(pk=snapshot.pk).update(reconciliation=reconciliation)
+                snapshot.reconciliation = reconciliation
+            else:
+                validate_source_summary(existing, snapshot)
+                reconciliation = snapshot.reconciliation
+            result.update(file_name=snapshot.file_name, reconciliation=reconciliation)
         activated = not snapshot.is_active
         if activated:
             ReceivablesSourceSnapshot.objects.filter(is_active=True).update(is_active=False)

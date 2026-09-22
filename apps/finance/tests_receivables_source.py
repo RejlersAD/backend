@@ -11,12 +11,14 @@ from django.core.management import call_command
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from apps.finance.receivables_source_models import ReceivablesSourceRow, ReceivablesSourceSnapshot
 from apps.finance.services.receivables_source import (
     SOURCE_HEADERS, get_active_receivables_source, import_receivables_source, read_receivables_source,
 )
+from apps.finance.services.workbook_summary import build_workbook_summary
+from apps.finance.services.receivables_dashboard import build_receivables_dashboard
 from apps.invoice_tracker.models import CustomerInvoice
 
 
@@ -176,3 +178,112 @@ class ReceivablesSourceTests(TestCase):
                                                      sheet_name='External Invoice ', last_row=6,
                                                      row_count=1, is_active=True)
         self.assertEqual(get_active_receivables_source()._receivables_snapshot.pk, first['snapshot_id'])
+
+    def test_upload_detects_sheet_and_bounds_and_publishes_matching_summary(self):
+        path = self.workbook([{'L': 10, 'M': 36.7, 'R': 'Overdue'},
+                              {'L': 20, 'M': 80, 'R': 'Paid'}])
+        workbook = load_workbook(path)
+        workbook.active.title = ' external invoice '
+        workbook.active['A8'] = 'Grand Total:'
+        workbook.active['M8'] = 99999
+        workbook.active['M12'] = 'Trailing note'
+        workbook.save(path)
+        workbook.close()
+        report = import_receivables_source(path, last_row=None, original_filename='Uploaded Finance.xlsx')
+        snapshot = ReceivablesSourceSnapshot.objects.get(pk=report['snapshot_id'])
+        summary = snapshot.reconciliation['workbook_summary']
+        self.assertEqual(snapshot.file_name, 'Uploaded Finance.xlsx')
+        self.assertEqual(snapshot.sheet_name, ' external invoice ')
+        self.assertEqual((snapshot.first_row, snapshot.last_row, snapshot.row_count), (6, 7, 2))
+        self.assertEqual(summary['source']['sha256'], snapshot.sha256)
+        self.assertEqual(summary['source']['file_name'], snapshot.file_name)
+        self.assertEqual(summary['source']['sheet'], snapshot.sheet_name)
+        self.assertEqual(summary['invoice_count'], 2)
+        self.assertEqual(summary['totals']['invoice_amount_aed'], '116.70')
+        self.assertEqual(snapshot.rows.count(), 2)
+
+    def test_auto_bounds_reject_empty_gaps_footers_followed_by_invoices_and_ambiguous_sheets(self):
+        for rows in ([], [{'A': None}, {'L': 20}], [{'A': 'Total'}, {'L': 20}]):
+            with self.subTest(rows=rows):
+                with self.assertRaises(ValueError):
+                    import_receivables_source(self.workbook(rows), last_row=None)
+        path = self.workbook([{'L': 10, 'M': 10}])
+        workbook = load_workbook(path)
+        workbook.create_sheet('External Invoice')
+        workbook.save(path)
+        workbook.close()
+        with self.assertRaisesMessage(ValueError, 'more than one External Invoice'):
+            import_receivables_source(path, last_row=None)
+        self.assertFalse(ReceivablesSourceSnapshot.objects.exists())
+
+    def test_summary_validation_failure_never_publishes_rows(self):
+        first = self.load(self.workbook([{'L': 10, 'M': 10}]), 1)
+        replacement = self.workbook([{'L': 20, 'M': 20}], name='replacement.xlsx')
+        with patch('apps.finance.services.receivables_source.generate_workbook_snapshot',
+                   side_effect=ValueError('Invalid aggregate')):
+            with self.assertRaisesMessage(ValueError, 'Invalid aggregate'):
+                import_receivables_source(replacement, last_row=None)
+        self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 1)
+        self.assertEqual(ReceivablesSourceRow.objects.count(), 1)
+        self.assertEqual(get_active_receivables_source()._receivables_snapshot.pk, first['snapshot_id'])
+
+    def test_oversized_source_amount_is_a_validation_error_before_publication(self):
+        for amount in (1e20, -1e20):
+            with self.subTest(amount=amount):
+                with self.assertRaisesMessage(ValueError, 'exceeds the supported precision'):
+                    import_receivables_source(self.workbook([{'L': amount, 'M': 1}]), last_row=None)
+        self.assertFalse(ReceivablesSourceSnapshot.objects.exists())
+
+    def test_same_file_backfills_legacy_summary_and_keeps_original_provenance(self):
+        path = self.workbook([{'L': 10, 'M': 36.7}])
+        first = import_receivables_source(path, last_row=None, original_filename='First upload.xlsx')
+        snapshot = ReceivablesSourceSnapshot.objects.get(pk=first['snapshot_id'])
+        snapshot.reconciliation.pop('workbook_summary')
+        snapshot.save(update_fields=['reconciliation'])
+        before_rows = list(snapshot.rows.values())
+        repeated = import_receivables_source(path, last_row=None, original_filename='Renamed upload.xlsx')
+        snapshot.refresh_from_db()
+        self.assertFalse(repeated['created'])
+        self.assertFalse(repeated['activated'])
+        self.assertEqual(repeated['snapshot_id'], first['snapshot_id'])
+        self.assertEqual(repeated['file_name'], 'First upload.xlsx')
+        self.assertEqual(snapshot.reconciliation['workbook_summary']['source']['file_name'], snapshot.file_name)
+        self.assertEqual(snapshot.reconciliation['workbook_summary']['source']['sha256'], snapshot.sha256)
+        self.assertEqual(list(snapshot.rows.values()), before_rows)
+        repeated_again = import_receivables_source(path, last_row=None)
+        self.assertEqual(repeated_again['reconciliation'], snapshot.reconciliation)
+
+    def test_summary_reader_uses_active_or_explicitly_pinned_source_and_no_static_totals_before_upload(self):
+        with patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True):
+            self.assertEqual(build_workbook_summary('reader')['status'], 'unavailable')
+            first = self.load(self.workbook([{'L': 10, 'M': 36.7}]), 1)
+            pinned = ReceivablesSourceSnapshot.objects.get(pk=first['snapshot_id'])
+            self.load(self.workbook([{'L': 20, 'M': 80}], name='replacement.xlsx'), 1)
+            self.assertEqual(build_workbook_summary('reader')['totals']['invoice_amount_aed'], '80.00')
+            with CaptureQueriesContext(connection) as queries, patch.object(Path, 'open') as opened:
+                summary = build_workbook_summary('reader', source_snapshot=pinned)
+            self.assertEqual(len(queries), 0)
+            opened.assert_not_called()
+            self.assertEqual(summary['source']['sha256'], pinned.sha256)
+            self.assertEqual(summary['totals']['invoice_amount_aed'], '36.70')
+            self.assertEqual(build_workbook_summary('reader', source_snapshot=None)['status'], 'unavailable')
+
+    def test_dashboard_pins_full_summary_to_its_selected_rows_even_after_another_upload(self):
+        self.load(self.workbook([{'L': 10, 'M': 36.7, 'F': 'Acme', 'AE': 'USD'},
+                                 {'L': 20, 'M': 80, 'F': 'Other', 'AE': 'AED'}]), 2)
+        pinned = get_active_receivables_source()
+        self.load(self.workbook([{'L': 30, 'M': 100}], name='replacement.xlsx'), 1)
+        with patch('apps.finance.services.receivables_dashboard.get_active_receivables_source', return_value=pinned), \
+                patch('apps.finance.services.receivables_dashboard.module_action_allowed',
+                      side_effect=lambda user, module, action: module == 'finance_outgoing'), \
+                patch('apps.finance.services.receivables_dashboard.build_invoice_performance', return_value={}), \
+                patch('apps.finance.services.workbook_summary.module_action_allowed', return_value=True):
+            all_rows = build_receivables_dashboard('reader', as_of=date(2026, 9, 22))
+            filtered = build_receivables_dashboard('reader', currency='USD', company='Acme',
+                                                   as_of=date(2026, 9, 22))
+        self.assertEqual(all_rows['workbook_summary'], filtered['workbook_summary'])
+        self.assertEqual(filtered['sources']['receivables']['invoice_count'], 1)
+        self.assertEqual(filtered['workbook_summary']['invoice_count'], 2)
+        self.assertEqual(filtered['workbook_summary']['totals']['invoice_amount_aed'], '116.70')
+        self.assertEqual(filtered['sources']['receivables']['sha256'], pinned._receivables_snapshot.sha256)
+        self.assertEqual(filtered['workbook_summary']['source']['sha256'], pinned._receivables_snapshot.sha256)

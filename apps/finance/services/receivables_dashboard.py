@@ -259,6 +259,7 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
     summaries = {}
     filters = {'companies': [], 'currencies': [], 'company': company, 'months': months}
     reporting_basis = 'original_currency'
+    reporting_snapshot = None
     for kind, module in [('receivables', 'finance_outgoing'), ('payables', 'finance_incoming')]:
         if not module_action_allowed(user, module, 'read'):
             sources[kind] = _source('restricted', 'Read access to this invoice register is required.', kind=kind)
@@ -289,6 +290,8 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
                 filters.update(available_filters)
             summaries[kind] = result
             sources[kind] = result['source']
+            if kind == 'receivables':
+                reporting_snapshot = snapshot
         except Exception:
             logger.exception('Receivables dashboard %s source failed', kind)
             sources[kind] = _source('error', 'The invoice register could not be read.', kind=kind)
@@ -302,7 +305,7 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
         'amount_basis': reporting_basis,
         'status': next(iter(states)) if len(states) == 1 else 'partial',
         'filters': filters, 'sources': sources,
-        'workbook_summary': build_workbook_summary(user),
+        'workbook_summary': build_workbook_summary(user, source_snapshot=reporting_snapshot),
         'invoice_performance': build_invoice_performance(user, currency=currency, company=company, as_of=as_of),
         'kpis': ar.get('kpis', {key: _unknown_metric() for key in KPI_NAMES}),
         'customers': ar.get('customers', []), 'priority_invoices': ar.get('priority_invoices', []),
