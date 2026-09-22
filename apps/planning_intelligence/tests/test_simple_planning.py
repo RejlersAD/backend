@@ -292,7 +292,7 @@ class SimplePlanningTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertTrue(response.data['viewing_history'])
         self.assertFalse(any(response.data['permissions'][key] for key in
-            ('can_edit', 'can_assign', 'can_submit', 'can_approve_publish', 'can_reopen')))
+            ('can_edit', 'can_generate_plan', 'can_assign', 'can_submit', 'can_approve_publish', 'can_reopen')))
         # Explicit selection is permitted; merely reading this history did not
         # select it or grant permission to edit the displayed version.
         self.assertTrue(response.data['permissions']['can_select_version'])
