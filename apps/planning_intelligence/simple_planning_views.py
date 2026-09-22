@@ -105,6 +105,9 @@ class SimplePlanningView(APIView):
     def put(self, request, project_id):
         if self.operation:
             raise MethodNotAllowed('PUT')
+        if request.query_params.get('version_id') or request.data.get('viewing_history'):
+            return Response({'error': 'Return to the current draft before editing activities.',
+                             'code': 'simple_plan_history_read_only'}, status=409)
         project = self.project(request, project_id)
         if project.master_schedule_version_id:
             return Response({'error': 'Edit accepted inputs in Evidence, or open the preserved working draft.',
@@ -116,6 +119,16 @@ class SimplePlanningView(APIView):
     patch = put
 
     def post(self, request, project_id):
+        if self.operation == 'edit-activity':
+            from .gantt_serializers import GanttEditSerializer
+            from .services.gantt_editing import edit_gantt
+            project = self.project(request, project_id)
+            if request.query_params.get('version_id') or request.data.get('viewing_history'):
+                return Response({'error': 'Return to the current draft before editing activities.',
+                                 'code': 'simple_plan_history_read_only'}, status=409)
+            serializer = GanttEditSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            return self.perform(lambda: edit_gantt(project, request.user, serializer.validated_data))
         if not self.operation or self.operation == 'source-preview':
             raise MethodNotAllowed('POST')
         project = self.project(request, project_id)

@@ -160,6 +160,10 @@ def master_plan_state(project, actor, *, version_id=None):
         and not state.get('viewing_history') and state.get('state') not in {'baselined', 'submitted'})
     state['permissions']['can_build_source_logic'] = bool(state.get('source_import') and not state.get('viewing_history')
         and not state.get('stale_inputs') and _write(project, actor))
+    from .gantt_editing import can_edit_gantt, enrich_gantt_state
+    state['permissions']['can_edit_gantt'] = bool(not state.get('viewing_history') and can_edit_gantt(project, actor, version if selected_id else None))
+    if selected_id:
+        enrich_gantt_state(version, state)
     return state
 
 

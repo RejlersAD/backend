@@ -44,6 +44,7 @@ from .source_timing_constraints import source_timing_evidence
 from .simple_workflow_expansion import expand_workflow_deliverables
 from .source_schedule_verification import reference_schedule_blocker, verify_plan_sources
 from .schedule_check_details import schedule_timing_blockers
+from .planner_timing import apply_timing_edit, expose_planner_timing, validate_planner_network
 
 
 WORKFLOW_FIELDS = ('parent_deliverable_id', 'deliverable', 'workflow_stage_code', 'workflow_stage_name',
@@ -53,7 +54,7 @@ WORKFLOW_FIELDS = ('parent_deliverable_id', 'deliverable', 'workflow_stage_code'
 SOURCE_FIELDS = ('source_activity_id', 'source_evidence', 'dependency_status', 'source_missing_fields', 'duration_unit',
                  'evidence_policy', 'duration_policy', 'evidence_entity_id', 'identity_review',
                  'source_evidence_history', 'source_evidence_review', 'sequence_review_required', 'dependency_review_reason',
-                 'planned_start_date_source', 'planned_finish_date_source', 'date_authority')
+                 'planned_start_date_source', 'planned_finish_date_source', 'date_authority', 'planner_timing')
 
 
 def _milestone(task):
@@ -129,14 +130,16 @@ def _version_tasks(version):
     details = {row.pk: [] for row in activities}
     for link in version.relationships.filter(is_deleted=False):
         if link.predecessor_id in task_ids and link.successor_id in task_ids:
-            dependencies[link.successor_id].append(task_ids[link.predecessor_id])
-            details[link.successor_id].append({'task_id': task_ids[link.predecessor_id],
+            if task_ids[link.predecessor_id] not in dependencies[link.successor_id]:
+                dependencies[link.successor_id].append(task_ids[link.predecessor_id])
+            details[link.successor_id].append({**deepcopy(link.metadata or {}), 'task_id': task_ids[link.predecessor_id],
                                              'type': link.relationship_type, 'lag_days': float(link.lag_days)})
     tasks = [{
         'id': row.external_id, 'title': row.name, 'discipline': row.discipline or 'general',
         'owner': (row.metadata or {}).get('owner', row.responsible_role), 'effort_hours': (row.metadata or {}).get('planned_effort_hours'),
         'responsible_role': row.responsible_role or None,
-        'duration_days': float(row.duration_days), 'duration_source': (row.metadata or {}).get('duration_source', 'unknown'),
+        'duration_days': None if (row.metadata or {}).get('duration_pending') else float(row.duration_days),
+        'duration_source': (row.metadata or {}).get('duration_source', 'unknown'),
         'depends_on': dependencies[row.pk], 'dependency_details': details[row.pk],
         'acceptance_criteria': (row.metadata or {}).get('acceptance_criteria', ''),
         'reviewer': (row.metadata or {}).get('reviewer', ''),
@@ -310,8 +313,8 @@ def _canvas_metadata(project, state, version, activities):
     for index, task in enumerate(state['tasks']):
         activity = activities.get(task['id'])
         if activity:
-            activity_code = activity.external_id
-            code_source = 'schedule_activity'
+            activity_code = task.get('source_activity_id') or activity.external_id
+            code_source = 'source_document' if task.get('source_activity_id') else 'schedule_activity'
             if re.fullmatch(r'task-(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})', activity_code, flags=re.I):
                 document_number = task.get('document_number') or (activity.metadata or {}).get('document_number')
                 if document_number:
@@ -326,7 +329,7 @@ def _canvas_metadata(project, state, version, activities):
                 wbs_node_id=activity.wbs_node_id,
                 wbs_code=activity.wbs_node.code if activity.wbs_node else '',
                 is_milestone=activity.is_milestone, activity_type=activity.activity_type,
-                duration_days=float(activity.duration_days),
+                duration_days=None if (activity.metadata or {}).get('duration_pending') else float(activity.duration_days),
                 sort_order=activity.sort_order, calendar_id=activity.calendar_id,
             )
         elif not version:
@@ -401,10 +404,10 @@ def _dated_tasks(project, tasks):
         for task in tasks:
             task.update(planned_start_date=None, planned_finish_date=None,
                         early_start=None, early_finish=None, late_start=None, late_finish=None)
-        return tasks
+        return expose_planner_timing(tasks)
     calendar = _calendar(project)
     if not calendar:
-        return tasks
+        return expose_planner_timing(tasks)
     by_id = {task['id']: task for task in tasks}
     if len(by_id) != len(tasks):
         _error('Each activity must have a unique ID.', 'simple_plan_dependencies')
@@ -417,8 +420,9 @@ def _dated_tasks(project, tasks):
         valid = value is not None and isfinite(float(value)) and (float(value) == 0 if _milestone(task) else float(value) > 0)
         # A printed duration alone does not establish a working calendar. Do not
         # recalculate its dates on the application fallback calendar.
-        verified_calendar = not (task.get('duration_source') == 'source_document'
-                                 and task.get('duration_calendar_verified') is False)
+        verified_calendar = not (task.get('duration_calendar_verified') is False
+                                 and (task.get('duration_source') == 'source_document'
+                                      or task.get('evidence_policy') == 'document_driven'))
         # Withdrawing obsolete source logic must not turn it into a new,
         # independent activity on the next read of the draft.
         verified_evidence = (task.get('source_evidence_review') or {}).get('status') != 'requires_review'
@@ -503,7 +507,7 @@ def _dated_tasks(project, tasks):
                 free_float_days=free_float[key],
                 is_critical=total_float <= 0, calculated=True, calculation_basis='draft_cpm',
             )
-    return list(by_id.values())
+    return expose_planner_timing(list(by_id.values()))
 
 
 def _blockers(project, state):
@@ -533,8 +537,9 @@ def _blockers(project, state):
                              'task_id': task['id'], 'task_ids': [task['id']], 'field': 'duration_days',
                              'resolution': 'Match the activity to an uploaded planned duration. A general review allowance is not an activity-specific planned duration.'})
     unverified_calendar = [task['id'] for task in state['tasks']
-                           if task.get('duration_source') == 'source_document'
-                           and task.get('duration_calendar_verified') is False]
+                           if task.get('duration_calendar_verified') is False
+                           and (task.get('duration_source') == 'source_document'
+                                or task.get('evidence_policy') == 'document_driven')]
     if unverified_calendar:
         blockers.append({'code': 'source_calendar_unverified',
                          'message': 'Printed durations are available, but their working calendar has not been verified.',
@@ -1304,6 +1309,7 @@ def save_plan(project, actor, data):
                 task[key] = deepcopy(original[key])
         displayed = dated.get(task['id']) or {}
         if ('planned_start_date' in task and task.get('planned_start_date') != displayed.get('planned_start_date')
+                and 'timing_edit' not in task
                 and task.get('constraint_type') == displayed.get('constraint_type')
                 and task.get('constraint_type') in {'none', 'start_no_earlier'}
                 and task.get('constraint_date') == displayed.get('constraint_date')):
@@ -1312,6 +1318,7 @@ def save_plan(project, actor, data):
             # row, without overriding a deliberate constraint edit.
             task['constraint_type'] = 'start_no_earlier' if task.get('planned_start_date') else 'none'
             task['constraint_date'] = task.get('planned_start_date') or None
+        apply_timing_edit(task, original, actor, origin=project.effective_date)
         if task.get('constraint_type', 'none') != 'none' and not task.get('constraint_date'):
             _error('Choose a date for the selected constraint.', 'simple_plan_constraint_date_required')
         if task.get('constraint_type', 'none') == 'none' and task.get('constraint_date'):
@@ -1332,6 +1339,12 @@ def save_plan(project, actor, data):
         if (set(task.get('depends_on') or []) != set(original.get('depends_on') or [])
                 or task.get('dependency_details', []) != original.get('dependency_details', [])):
             task['dependency_status'] = 'planner'
+        if (task.get('duration_days') is not None and task.get('duration_days') != original.get('duration_days')
+                and (float(task['duration_days']) < 0 or float(task['duration_days']) > 36525
+                     or (_milestone(task) and float(task['duration_days']) != 0)
+                     or (not _milestone(task) and float(task['duration_days']) == 0))):
+            _error('Milestones require zero duration; activities require a positive duration of at most 36,525 days.',
+                   'simple_plan_duration_invalid')
         if _milestone(task) and task.get('evidence_policy') != 'document_driven':
             task['duration_days'] = 0
         for key, default in [('source_references', []), ('document_number', ''), ('document_revision', ''), ('source_title', '')]:
@@ -1347,6 +1360,14 @@ def save_plan(project, actor, data):
                     task[key] = deepcopy(original[key])
         elif task.get('duration_days') is None:
             task['duration_source'] = 'missing_source'
+        if task.get('duration_days') != original.get('duration_days'):
+            # The user's working value changes; the document observation does
+            # not. An edit must not silently verify an unknown source calendar.
+            for key in ('duration_evidence', 'duration_comparison_evidence', 'duration_calendar_verified'):
+                if key in original:
+                    task[key] = deepcopy(original[key])
+            task['duration_review_status'] = 'manual_unverified'
+            task['duration_review_reason'] = 'Planner edit; original document duration retained for comparison.'
         original_due = original.get('due_date')
         incoming_due = task.get('due_date')
         # Explicit dates from an existing project stay independent of schedule
@@ -1361,14 +1382,23 @@ def save_plan(project, actor, data):
         if 'schedule_generated_fields' in task:
             task['schedule_generated_fields'] = [field for field in task['schedule_generated_fields'] if task.get(field) == original.get(field)]
             task['dependency_rationales'] = {key: value for key, value in task.get('dependency_rationales', {}).items() if key in task['depends_on']}
+    validate_planner_network(tasks)
     task_by_id = {task['id']: task for task in tasks}
+    sequence_edits = []
     for parent in state.get('deliverables') or []:
         chain = parent.get('workflow_task_ids') or []
         if len(chain) != 5 or any(key not in task_by_id for key in chain):
             _error('Each deliverable must retain its five workflow stages.', 'workflow_five_stages_required')
         for previous, current in zip(chain, chain[1:]):
-            if previous not in task_by_id[current]['depends_on']:
-                _error('Keep the predecessor connection between consecutive workflow stages.', 'workflow_sequence_required')
+            links = [link for link in task_by_id[current].get('dependency_details') or []
+                     if link['task_id'] == previous]
+            if (previous not in task_by_id[current]['depends_on']
+                    or any(link.get('type', 'FS') != 'FS' or float(link.get('lag_days') or 0) != 0 for link in links)):
+                sequence_edits.append(current)
+    sequence_warnings = ([{'code': 'workflow_sequence_edited', 'severity': 'warning',
+        'task_ids': sorted(set(sequence_edits)),
+        'message': 'Planner-edited workflow relationships differ from the configured stage sequence. Review the revised logic before approval.'}]
+        if sequence_edits else [])
     _schedule_due_dates(project, tasks)
     sync_workspace_assignments(
         project, tasks, actor=actor, token=state['assignment_token'], intelligence_run_id=state.get('intelligence_run_id'),
@@ -1376,7 +1406,7 @@ def save_plan(project, actor, data):
     )
     _cancel_review(state, actor)
     state.update(tasks=tasks, disciplines=deepcopy(data.get('disciplines', state['disciplines'])),
-                 state='review', revision=state['revision'] + 1, version_id=None, review_id=None, warnings=[],
+                 state='review', revision=state['revision'] + 1, version_id=None, review_id=None, warnings=sequence_warnings,
                  managed_task_ids=sorted(set(state.get('managed_task_ids') or []) | set(known) | {task['id'] for task in tasks}))
     _persist(project, state, actor, 'simple_plan.saved', before)
     return plan_state(project, actor)
