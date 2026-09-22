@@ -91,6 +91,13 @@ def annotate_plan_provenance(project, state):
                     result['duration_days'] = _label('unknown', 'requires_review', refs)
         if task.get('dependency_status') == 'planner' and result['depends_on']['type'] == 'unknown':
             result['depends_on'] = _label('planner', 'declared')
+        timing = task.get('planner_timing') or {}
+        if timing.get('anchor') in {'start', 'finish'} and timing.get('date'):
+            endpoint = f"planned_{timing['anchor']}_date"
+            result[endpoint] = _label('planner', 'declared', constraint_type=f"must_{timing['anchor']}",
+                                     declared_date=timing['date'], edited_by=timing.get('edited_by'),
+                                     edited_at=timing.get('edited_at'))
+            result['constraint_type'] = _label('planner', 'declared', declared_date=timing['date'])
         # A workflow selection proposes internal stages; it is never a source
         # quote nor an approved profile application merely because IDs match.
         if task.get('workflow_stage_code'):

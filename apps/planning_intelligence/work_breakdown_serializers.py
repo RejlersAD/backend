@@ -10,6 +10,12 @@ class WorkBreakdownDependencySerializer(serializers.Serializer):
     lag_days = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=-365, max_value=365, default=0)
 
 
+class PlanningTimingEditSerializer(serializers.Serializer):
+    """Explicit user intent, independent of source or calculated display dates."""
+    field = serializers.ChoiceField(choices=['start', 'finish'])
+    value = serializers.DateField(allow_null=True)
+
+
 class WorkBreakdownTaskSerializer(serializers.Serializer):
     id = serializers.RegexField(r'^[A-Za-z0-9_-]+$', max_length=64)
     discipline = serializers.RegexField(r'^[A-Za-z0-9_-]+$', max_length=64)
@@ -32,9 +38,12 @@ class WorkBreakdownTaskSerializer(serializers.Serializer):
     progress_percent = serializers.IntegerField(read_only=True)
     source_references = serializers.ListField(read_only=True)
     duration_days = serializers.DecimalField(
-        max_digits=10, decimal_places=2, min_value=0, allow_null=True, required=False,
+        max_digits=10, decimal_places=2, min_value=0, max_value=36525, allow_null=True, required=False,
     )
     planned_start_date = serializers.DateField(allow_null=True, required=False)
+    planned_finish_date = serializers.DateField(allow_null=True, required=False)
+    timing_edit = PlanningTimingEditSerializer(required=False)
+    planner_timing = serializers.JSONField(read_only=True)
     dependency_details = WorkBreakdownDependencySerializer(many=True, max_length=8000, required=False)
     constraint_type = serializers.ChoiceField(
         choices=['none', 'start_no_earlier', 'start_no_later', 'finish_no_later', 'must_start', 'must_finish'],
@@ -96,6 +105,10 @@ class WorkBreakdownSaveSerializer(serializers.Serializer):
                 task['duration_days'] = float(task['duration_days'])
             if task.get('planned_start_date') is not None:
                 task['planned_start_date'] = task['planned_start_date'].isoformat()
+            if task.get('planned_finish_date') is not None:
+                task['planned_finish_date'] = task['planned_finish_date'].isoformat()
+            if task.get('timing_edit', {}).get('value') is not None:
+                task['timing_edit']['value'] = task['timing_edit']['value'].isoformat()
             if task.get('constraint_date') is not None:
                 task['constraint_date'] = task['constraint_date'].isoformat()
         queue = deque(key for key in ids if incoming[key] == 0)
