@@ -39,6 +39,16 @@ class SourceSchedulePreviewSerializer(serializers.Serializer):
     search = serializers.CharField(max_length=250, allow_blank=True, default='')
 
 
+class ParallelLogicReviewSerializer(serializers.Serializer):
+    revision = serializers.IntegerField(min_value=0)
+    fingerprint = serializers.RegexField(r'^[a-f0-9]{64}$')
+    group_id = serializers.RegexField(r'^[a-f0-9]{64}$')
+    rationale = serializers.CharField(min_length=20, max_length=5000)
+    capacity_basis = serializers.CharField(min_length=20, max_length=5000)
+    duration_basis = serializers.CharField(min_length=20, max_length=5000)
+    max_parallel_deliverables = serializers.IntegerField(min_value=1, max_value=100000)
+
+
 class SourceScheduleImportPreviewSerializer(serializers.Serializer):
     source_file_id = serializers.IntegerField(min_value=1)
     master_revision = serializers.IntegerField(min_value=0)
@@ -134,6 +144,14 @@ class SimplePlanningView(APIView):
         if not self.operation or self.operation == 'source-preview':
             raise MethodNotAllowed('POST')
         project = self.project(request, project_id)
+        if self.operation == 'confirm-parallel-logic':
+            from .services.schedule_logic_review import confirm_parallel_logic
+            if request.query_params.get('version_id') or request.data.get('version_id') or request.data.get('viewing_history'):
+                return Response({'error': 'Return to the current editable schedule before reviewing parallel work.',
+                                 'code': 'simple_plan_history_read_only'}, status=409)
+            serializer = ParallelLogicReviewSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            return self.perform(lambda: confirm_parallel_logic(project, request.user, serializer.validated_data))
         if self.operation in {'preview-source-logic', 'apply-source-logic'}:
             from .services.source_schedule_logic import preview_source_logic, apply_source_logic
             if request.query_params.get('version_id') or request.data.get('viewing_history'):

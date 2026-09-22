@@ -87,6 +87,10 @@ def can_decide_schedule_review(review, user, *, decision='approved'):
     vote = next((item for item in votes if item.reviewer_id == user.pk), None)
     if not vote or vote.status != 'pending':
         return False
+    if decision == 'approved':
+        from .schedule_logic_review import version_logic_quality
+        if version_logic_quality(version)['blockers']:
+            return False
     if can_final_approve_defaults(user, version.schedule.project):
         return not any(item.pk != vote.pk and item.status != 'approved'
                        and not can_final_approve_defaults(item.reviewer, version.schedule.project)
@@ -205,6 +209,12 @@ def decide_schedule_review(version, review_id, user, *, decision, comment=''):
     if (not current_schedule_version(version) or version.status != 'calculated'
             or not version.calculated_at or (decision == 'approved' and version.calculated_at > review.requested_at)):
         raise ScheduleApprovalError('This review no longer matches the current schedule.', code='schedule_review_stale')
+    if decision == 'approved':
+        from .schedule_logic_review import version_logic_quality
+        blockers = version_logic_quality(version)['blockers']
+        if blockers:
+            raise ScheduleApprovalError('Review the parallel-work assumptions before approving this schedule.',
+                                        code='schedule_logic_review_required', blockers=blockers)
     if can_final_approve_defaults(user, version.schedule.project) and any(
         item.pk != vote.pk and item.status != 'approved'
         and not can_final_approve_defaults(item.reviewer, version.schedule.project) for item in votes
