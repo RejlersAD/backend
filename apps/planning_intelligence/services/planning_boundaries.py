@@ -52,6 +52,9 @@ def _whole_number(value):
 
 def accepted_input_validation(version):
     """Return current readiness without materializing or changing any inputs."""
+    if (version.evidence_input_snapshot or {}).get('schema') == 'planner-schedule-revision/1':
+        from .gantt_editing import planner_revision_readiness
+        return planner_revision_readiness(version)
     if (version.evidence_input_snapshot or {}).get('schema') == 'source-schedule-logic/1':
         from .source_schedule_logic import logic_readiness
         return logic_readiness(version)

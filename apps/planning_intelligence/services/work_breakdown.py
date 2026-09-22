@@ -298,10 +298,10 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'schedule_phase', 'schedule_generated_fields', 'dependency_rationales',
                 'duration_evidence', 'duration_comparison_evidence', 'duration_review_status', 'duration_review_reason', 'duration_calendar_verified',
                 'source_activity_id', 'source_evidence', 'dependency_status', 'source_missing_fields', 'duration_unit',
-                'evidence_policy', 'duration_policy',
+                'evidence_policy', 'duration_policy', 'planner_timing', 'date_authority',
                 'activity_type', 'is_milestone',
             }
-        } if expanded else {}
+        }
         if expanded:
             expansion_metadata['owner'] = task['owner']
         if source_parent is not None:
@@ -311,7 +311,8 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
             name=task['title'], discipline=discipline,
             responsible_role=(task.get('responsible_role') or '') if source_parent is not None else task['owner'],
             duration_days=task.get('duration_days') or 0,
-            activity_type=(task.get('activity_type') or 'task') if expanded else 'task', calendar=schedule.default_calendar,
+            activity_type=task.get('activity_type') or ('finish_milestone' if task.get('is_milestone') else 'task'),
+            calendar=schedule.default_calendar,
             constraint_type=task.get('constraint_type', 'start_no_earlier' if task.get('planned_start_date') else 'none'),
             constraint_date=task.get('constraint_date') if 'constraint_type' in task else task.get('planned_start_date') or None,
             sort_order=index, metadata={
@@ -327,6 +328,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 'evidence_entity_id': task.get('evidence_entity_id') or ('task:' + str(task['id'])),
                 'document_number': task['document_number'], 'document_revision': task['document_revision'],
                 'wbs_phase': task.get('wbs_phase', ''), 'wbs_deliverable': task.get('wbs_deliverable', ''),
+                **({'planner_timing': deepcopy(task['planner_timing'])} if task.get('planner_timing') else {}),
                 **expansion_metadata,
             },
         )
