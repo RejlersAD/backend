@@ -31,6 +31,10 @@ def get_claude_config(project) -> dict | None:
         return None
 
     ai_settings = getattr(project, 'ai_settings', None) or {}
+    if (not isinstance(ai_settings, dict)
+            or ai_settings.get('provider') not in (None, '', 'anthropic')
+            or ai_settings.get('api_key_provider', 'anthropic') != 'anthropic'):
+        return None
     if not ai_settings.get('enabled'):
         return None
 
@@ -105,7 +109,7 @@ def call_claude(
         error_code = type(exc).__name__
         logger.warning(
             '[Planning BYOK] Claude call failed (project=%s, feature=%s): %s',
-            getattr(project, 'id', None), feature, exc,
+            getattr(project, 'id', None), feature, error_code,
         )
         result_text = None
 

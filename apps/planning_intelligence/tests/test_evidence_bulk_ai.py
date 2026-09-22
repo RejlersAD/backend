@@ -64,15 +64,15 @@ class EvidenceBulkAIAvailabilityTests(SimpleTestCase):
     def test_uses_only_saved_project_claude_configuration(self):
         project = SimpleNamespace(ai_settings={
             'enabled': True, 'api_key_encrypted': 'encrypted-project-key',
-            'model': reviewer.claude_client.DEFAULT_CLAUDE_MODEL,
+            'model': reviewer.project_ai.claude_client.DEFAULT_CLAUDE_MODEL,
         })
-        with patch.object(reviewer.claude_client, 'CLAUDE_BYOK_ENABLED', True), patch.object(
-            reviewer.claude_client.byok_crypto, 'decrypt_api_key', return_value='private-test-key',
+        with patch.object(reviewer.project_ai.claude_client, 'CLAUDE_BYOK_ENABLED', True), patch.object(
+            reviewer.project_ai.claude_client.byok_crypto, 'decrypt_api_key', return_value='private-test-key',
         ) as decrypt:
             availability = reviewer.ai_availability(project)
         self.assertEqual(availability, {
             'available': True, 'provider': 'anthropic',
-            'model': reviewer.claude_client.DEFAULT_CLAUDE_MODEL, 'reason': '',
+            'model': reviewer.project_ai.claude_client.DEFAULT_CLAUDE_MODEL, 'reason': '',
         })
         decrypt.assert_called_once_with('encrypted-project-key')
         self.assertNotIn('private-test-key', json.dumps(availability))
@@ -83,9 +83,9 @@ class EvidenceBulkAIAvailabilityTests(SimpleTestCase):
                     {'enabled': True, 'provider': 'openai', 'api_key_encrypted': 'wrong-provider'},
                     {'enabled': True, 'provider': 'ANTHROPIC', 'api_key_encrypted': 'invalid-provider'},
                     'malformed-settings']
-        with patch.object(reviewer.claude_client, 'CLAUDE_BYOK_ENABLED', True), patch.object(
-            reviewer.claude_client.byok_crypto, 'decrypt_api_key',
-        ) as decrypt, patch.object(reviewer.claude_client, 'call_claude') as call:
+        with patch.object(reviewer.project_ai.claude_client, 'CLAUDE_BYOK_ENABLED', True), patch.object(
+            reviewer.project_ai.claude_client.byok_crypto, 'decrypt_api_key',
+        ) as decrypt, patch.object(reviewer.project_ai.claude_client, 'call_claude') as call:
             for value in settings:
                 with self.subTest(settings=value):
                     availability = reviewer.ai_availability(SimpleNamespace(ai_settings=value))
@@ -97,19 +97,19 @@ class EvidenceBulkAIAvailabilityTests(SimpleTestCase):
 
     def test_kill_switch_and_undecryptable_credentials_abstain(self):
         project = SimpleNamespace(ai_settings={'enabled': True, 'api_key_encrypted': 'encrypted'})
-        with patch.object(reviewer.claude_client, 'CLAUDE_BYOK_ENABLED', False), patch.object(
-            reviewer.claude_client.byok_crypto, 'decrypt_api_key',
+        with patch.object(reviewer.project_ai.claude_client, 'CLAUDE_BYOK_ENABLED', False), patch.object(
+            reviewer.project_ai.claude_client.byok_crypto, 'decrypt_api_key',
         ) as decrypt:
             self.assertFalse(reviewer.ai_availability(project)['available'])
         decrypt.assert_not_called()
-        with patch.object(reviewer.claude_client, 'CLAUDE_BYOK_ENABLED', True), patch.object(
-            reviewer.claude_client.byok_crypto, 'decrypt_api_key', return_value=None,
+        with patch.object(reviewer.project_ai.claude_client, 'CLAUDE_BYOK_ENABLED', True), patch.object(
+            reviewer.project_ai.claude_client.byok_crypto, 'decrypt_api_key', return_value=None,
         ):
             self.assertFalse(reviewer.ai_availability(project)['available'])
 
     def test_configuration_failure_never_exposes_private_error(self):
         project = SimpleNamespace(ai_settings={'enabled': True})
-        with patch.object(reviewer.claude_client, 'get_claude_config', side_effect=RuntimeError('PRIVATE-KEY')):
+        with patch.object(reviewer.project_ai.claude_client, 'get_claude_config', side_effect=RuntimeError('PRIVATE-KEY')):
             availability = reviewer.ai_availability(project)
         self.assertFalse(availability['available'])
         self.assertNotIn('PRIVATE-KEY', json.dumps(availability))
@@ -118,7 +118,7 @@ class EvidenceBulkAIAvailabilityTests(SimpleTestCase):
         for configuration in ({}, {'api_key': 'private'}, {'model': 'model'},
                               {'model': None, 'api_key': 'private'}, ['invalid']):
             with self.subTest(configuration=configuration), patch.object(
-                reviewer.claude_client, 'get_claude_config', return_value=configuration,
+                reviewer.project_ai.claude_client, 'get_claude_config', return_value=configuration,
             ):
                 self.assertFalse(reviewer.ai_availability(SimpleNamespace(ai_settings={}))['available'])
 
@@ -129,12 +129,12 @@ class EvidenceBulkAIReviewTests(SimpleTestCase):
             'enabled': True, 'model': 'configured-project-model',
         })
         self.actor = SimpleNamespace(id=27)
-        configuration = patch.object(reviewer.claude_client, 'get_claude_config', return_value={
+        configuration = patch.object(reviewer.project_ai.claude_client, 'get_claude_config', return_value={
             'api_key': 'private-project-key', 'model': 'configured-project-model',
         })
         self.config = configuration.start()
         self.addCleanup(configuration.stop)
-        provider = patch.object(reviewer.claude_client, 'call_claude')
+        provider = patch.object(reviewer.project_ai.claude_client, 'call_claude')
         self.provider = provider.start()
         self.addCleanup(provider.stop)
         self.group = conflict()

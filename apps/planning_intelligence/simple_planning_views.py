@@ -16,6 +16,7 @@ from .services.simple_planning import (
     reopen_plan, save_plan, submit_plan,
 )
 from .work_breakdown_serializers import ManualWorkBreakdownSaveSerializer
+from .services.programmatic_requirements import create_programmatic_draft
 
 
 class SimplePlanSaveSerializer(ManualWorkBreakdownSaveSerializer):
@@ -30,6 +31,7 @@ class SimplePlanActionSerializer(serializers.Serializer):
     proposal_token = serializers.CharField(max_length=4096, required=False)
     workflow_mode = serializers.ChoiceField(choices=['source_only', 'standard_five'], required=False)
     version_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
+    requirement_scope = serializers.ChoiceField(choices=['all'], default='all')
 
 
 class SourceSchedulePreviewSerializer(serializers.Serializer):
@@ -185,6 +187,12 @@ class SimplePlanningView(APIView):
         serializer = SimplePlanActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        if self.operation == 'programmatic-draft':
+            if request.query_params.get('version_id') or request.data.get('version_id') or request.data.get('viewing_history'):
+                return Response({'error': 'Return to the current editable draft before creating activities.',
+                                 'code': 'simple_plan_history_read_only'}, status=409)
+            return self.perform(lambda: create_programmatic_draft(project, request.user,
+                revision=data['revision'], requirement_scope=data['requirement_scope']))
         if self.operation == 'select-version':
             if 'version_id' not in data:
                 raise serializers.ValidationError({'version_id': 'Select a schedule version or null for the working draft.'})

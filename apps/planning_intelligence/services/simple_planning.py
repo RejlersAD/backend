@@ -22,6 +22,7 @@ from apps.core.project_models import ProjectTask
 from ..access import can_write_project, proposal_approver_users
 from ..models import PlanningProject, ScheduleBaseline, ScheduleReview, ScheduleReviewDecision, ScheduleVersion
 from .audit import record_event
+from .analysis_result import analysis_result
 from .cpm import SchedulingError, WorkdayCalendar, calculate_schedule_version, calculate_backward_pass, _edge_weight, _finish_date, _constraint_bound
 from .manual_wbs import manual_wbs
 from .document_intelligence import run_document_intelligence
@@ -54,7 +55,9 @@ WORKFLOW_FIELDS = ('parent_deliverable_id', 'deliverable', 'workflow_stage_code'
 SOURCE_FIELDS = ('source_activity_id', 'source_evidence', 'dependency_status', 'source_missing_fields', 'duration_unit',
                  'evidence_policy', 'duration_policy', 'evidence_entity_id', 'identity_review',
                  'source_evidence_history', 'source_evidence_review', 'sequence_review_required', 'dependency_review_reason',
-                 'planned_start_date_source', 'planned_finish_date_source', 'date_authority', 'planner_timing')
+                 'planned_start_date_source', 'planned_finish_date_source', 'date_authority', 'planner_timing',
+                 'requirement_id', 'requirement_value', 'requirement_status', 'selection_basis',
+                 'needs_review', 'review_flags', 'proposal_timing')
 
 
 def _milestone(task):
@@ -653,12 +656,21 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
     for key, value in {'state': 'review', 'tasks': [], 'disciplines': [], 'revision': 0,
                        'assignment_token': f'simple:{project.pk}'}.items():
         state.setdefault(key, value)
-    state['evidence_policy'] = 'document_driven'
-    state['duration_policy'] = 'source_only'
+    if state.get('method') != 'programmatic_requirements':
+        state['evidence_policy'] = 'document_driven'
+        state['duration_policy'] = 'source_only'
     state['current_version_id'] = state.get('version_id')
     viewing_history = version_id is not None
     if viewing_history:
         state.pop('schedule_proposal', None)
+        for key in ('programmatic_summary', 'programmatic_assumptions', 'document_deliverables'):
+            state.pop(key, None)
+        if state.get('method') == 'programmatic_requirements':
+            state['method'] = 'saved_schedule'
+            state['warnings'] = [row for row in state.get('warnings') or []
+                                 if row.get('code') != 'programmatic_draft_review']
+        state['evidence_policy'] = 'document_driven'
+        state['duration_policy'] = 'source_only'
         selected = ScheduleVersion.objects.filter(pk=version_id, schedule__project=project, schedule__is_deleted=False, is_deleted=False).first()
         if not selected:
             raise Http404
@@ -760,7 +772,8 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
         'assumptions': ([{'code': 'proposed_durations', 'message': 'Activity durations are proposed estimates. Review the schedule assumptions before approval.' if state.get('schedule_proposal') or any(task.get('schedule_generated_fields') for task in state['tasks']) else 'Unestimated tasks use a proposed five working days; effort-based durations assume eight hours per day. Review these estimates.'}]
                         if any(task.get('duration_source') == 'proposed' for task in state['tasks']) else [])
                        + ([{'code': 'dependency_review', 'message': 'Tasks without dependencies run independently. Review the intended sequence.'}]
-                          if len(state['tasks']) > 1 and any(not task['depends_on'] for task in state['tasks']) else []),
+                          if len(state['tasks']) > 1 and any(not task['depends_on'] for task in state['tasks']) else [])
+                       + (deepcopy(state.get('programmatic_assumptions') or []) if not viewing_history else []),
         'permissions': {'can_edit': edit and state['state'] != 'baselined',
                         'can_generate_plan': edit,
                         'can_assign': edit and state['state'] != 'baselined' and manages_project_tasks(actor, project.enterprise_project),
@@ -780,6 +793,16 @@ def plan_state(project, actor, *, version_id=None, state_override=None):
     state['source_preview_available'] = bool(
         (state.get('document_schedule_summary') or {}).get('activity_count')
         or reference.get('files'))
+    state['analysis_result'] = analysis_result(project, state)
+    state['warnings'] = [row for row in state.get('warnings') or []
+                         if not isinstance(row, dict) or row.get('code') != 'analysis_no_activities']
+    if state['analysis_result'] and state['analysis_result']['status'] == 'no_activities':
+        state['warnings'].append({
+            'code': 'analysis_no_activities', 'severity': 'warning',
+            'message': state['analysis_result']['message'],
+            'reason_code': state['analysis_result']['code'],
+            'next_action': state['analysis_result']['next_action'],
+        })
     state.pop('input_fingerprint', None)
     from .schedule_logic_state import enrich_logic_quality
     return enrich_logic_quality(project, state)
@@ -1179,7 +1202,9 @@ def analyse_plan(project, actor, *, revision=0, rebuild=False):
     project, state = _locked(project, actor, revision)
     if state['state'] == 'baselined':
         _error('Create a revision before changing the published baseline.', 'simple_plan_baselined')
-    if project.simple_planning_state and not rebuild:
+    # An empty analysis is retryable after AI setup, including when only provider
+    # settings changed. A populated draft still needs an explicit rebuild.
+    if project.simple_planning_state and state['tasks'] and not rebuild:
         if state['input_fingerprint'] != _fingerprint(project):
             _error('The inputs changed. Confirm rebuilding the draft; saved work remains in the audit history.', 'simple_plan_rebuild_required')
         return plan_state(project, actor)
@@ -1261,6 +1286,7 @@ def analyse_plan(project, actor, *, revision=0, rebuild=False):
                                 for code, info in selected.get('disciplines', {}).items() if info.get('in_scope')]
         state['intelligence_run_id'] = run.pk
         state['processing_coverage'] = preview.get('processing_coverage') or {}
+        state['extraction_summary'] = preview.get('extraction_summary') or {}
         state['extraction_reports'] = document_plan['extraction_reports']
         state['document_schedule_summary'] = document_schedule_summary(document_plan)
         state['evidence_policy'] = 'document_driven'
@@ -1277,9 +1303,10 @@ def analyse_plan(project, actor, *, revision=0, rebuild=False):
         if stale_evidence_rows:
             state['warnings'].append({'code': 'stale_source_evidence',
                 'message': f'{stale_evidence_rows} source rows used outdated or unverifiable timing or relationship evidence. Review the current documents; previous evidence is retained in history.'})
-        if rebuild:
-            for key in ('schedule_proposal', 'duration_review', 'assumptions', 'calculation_run_id'):
-                state.pop(key, None)
+        # Every extraction replaces the activity inputs, including an empty
+        # draft retry. Earlier proposals and calculations no longer apply.
+        for key in ('schedule_proposal', 'duration_review', 'assumptions', 'calculation_run_id'):
+            state.pop(key, None)
     _cancel_review(state, actor)
     if _fingerprint(project) != captured_inputs:
         _error('The source documents changed during analysis. Analyse the current inputs again.', 'simple_plan_inputs_changed_during_analysis')
