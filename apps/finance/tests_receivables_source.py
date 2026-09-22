@@ -94,27 +94,27 @@ class ReceivablesSourceTests(TestCase):
                          {'count': 2, 'amount_aed': '367.00', 'missing_amount_count': 1})
         self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 0)
 
-    def test_import_links_only_unique_source_ids_and_never_changes_operational_invoices(self):
-        invoices = []
+    def test_import_never_queries_links_or_changes_operational_invoices(self):
         for number in ('UNIQUE', 'DUPLICATE'):
             invoice = CustomerInvoice(invoice_number=number, payment_status='paid', currency='AED',
                                       invoice_amount=999, invoice_amount_aed=999,
                                       balance_to_be_received=0, actual_payment_received=999)
             invoice.save(_skip_recompute=True)
-            invoices.append(invoice)
         before = list(CustomerInvoice.objects.order_by('pk').values())
         path = self.workbook([{'A': 'UNIQUE', 'L': 10, 'M': 36.7, 'R': 'Overdue'},
                               {'A': 'DUPLICATE', 'L': 20, 'M': 20},
                               {'A': 'DUPLICATE', 'L': 30, 'M': 30}])
-        with patch.object(CustomerInvoice, 'save', side_effect=AssertionError('Operational invoices must not be saved')):
+        with CaptureQueriesContext(connection) as queries, patch.object(
+            CustomerInvoice, 'save', side_effect=AssertionError('Operational invoices must not be saved')
+        ):
             report = self.load(path, 3)
+        self.assertFalse(any('invoice_tracker_customerinvoice' in query['sql'] for query in queries))
         self.assertTrue(report['created'])
         self.assertTrue(report['activated'])
         self.assertEqual(report['reconciliation']['duplicate_invoice_number_count'], 1)
         self.assertEqual(list(CustomerInvoice.objects.order_by('pk').values()), before)
         rows = list(get_active_receivables_source())
-        self.assertEqual(rows[0].register_invoice_id, invoices[0].pk)
-        self.assertEqual([row.register_invoice_id for row in rows[1:]], [None, None])
+        self.assertEqual([row.register_invoice_id for row in rows], [None, None, None])
         self.assertEqual(rows[0].payment_status, 'overdue')
         self.assertEqual(rows[0].invoice_amount_aed, Decimal('36.7'))
         self.assertEqual([row.row_number for row in rows], [6, 7, 8])

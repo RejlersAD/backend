@@ -5,60 +5,6 @@ import django.utils.timezone
 from django.db import migrations, models
 
 
-def ensure_customer_invoice_reference_key(apps, schema_editor):
-    """Restore the PostgreSQL FK target without changing invoice identities.
-
-    A restored database can have the initial invoice migration recorded while
-    its ID key is missing. Repair before this migration's deferred foreign key
-    is created; a new predecessor would invalidate already-applied histories.
-    """
-    connection = schema_editor.connection
-    if connection.vendor != 'postgresql':
-        return
-    invoice = apps.get_model('invoice_tracker', 'CustomerInvoice')
-    table, column = invoice._meta.db_table, invoice._meta.pk.column
-    quote = schema_editor.quote_name
-    with connection.cursor() as cursor:
-        # Keep writes out until the atomic migration has validated identities
-        # and created both the reference key and its dependent foreign key.
-        cursor.execute(f'LOCK TABLE {quote(table)} IN ACCESS EXCLUSIVE MODE')
-        cursor.execute('''
-            SELECT EXISTS (
-                SELECT 1 FROM pg_index i
-                JOIN pg_attribute a ON a.attrelid = i.indrelid
-                WHERE i.indrelid = to_regclass(%s) AND a.attname = %s
-                  AND i.indisunique AND i.indisvalid AND i.indisready
-                  AND i.indimmediate AND i.indpred IS NULL
-                  AND i.indexprs IS NULL AND i.indnkeyatts = 1
-                  AND i.indkey[0] = a.attnum
-            )
-        ''', [table, column])
-        if cursor.fetchone()[0]:
-            return
-        cursor.execute(f'SELECT EXISTS (SELECT 1 FROM {quote(table)} WHERE {quote(column)} IS NULL)')
-        if cursor.fetchone()[0]:
-            raise RuntimeError(
-                f'Cannot repair {table}.{column}: null IDs exist. '
-                'Reconcile invoice identities before retrying migrations; '
-                'no invoice rows or IDs were changed.'
-            )
-        cursor.execute(f'''SELECT EXISTS (
-            SELECT 1 FROM {quote(table)} GROUP BY {quote(column)} HAVING COUNT(*) > 1
-        )''')
-        if cursor.fetchone()[0]:
-            raise RuntimeError(
-                f'Cannot repair {table}.{column}: duplicate IDs exist. '
-                'Reconcile invoice identities before retrying migrations; '
-                'no invoice rows or IDs were changed.'
-            )
-        cursor.execute(
-            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(%s) AND contype = 'p')",
-            [table],
-        )
-        kind = 'UNIQUE' if cursor.fetchone()[0] else 'PRIMARY KEY'
-        schema_editor.execute(f'ALTER TABLE {quote(table)} ADD {kind} ({quote(column)})')
-
-
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -67,7 +13,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(ensure_customer_invoice_reference_key, migrations.RunPython.noop),
         migrations.CreateModel(
             name='ReceivablesSourceSnapshot',
             fields=[
@@ -96,7 +41,9 @@ class Migration(migrations.Migration):
                 ('snapshot', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='rows', to='finance.receivablessourcesnapshot')),
                 ('row_number', models.PositiveIntegerField()),
                 ('invoice_number', models.CharField(db_index=True, max_length=128)),
-                ('register_invoice', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='invoice_tracker.customerinvoice')),
+                # Snapshot facts are independent of operational invoice IDs.
+                # 0014 detaches the old FK where this migration already ran.
+                ('register_invoice_id', models.BigIntegerField(blank=True, db_index=True, null=True)),
                 ('category', models.CharField(default='external', max_length=16)),
                 ('company', models.CharField(blank=True, default='', max_length=256)),
                 ('account', models.CharField(blank=True, default='', max_length=256)),

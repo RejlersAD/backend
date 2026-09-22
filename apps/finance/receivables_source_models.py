@@ -29,8 +29,9 @@ class ReceivablesSourceRow(models.Model):
     snapshot = models.ForeignKey(ReceivablesSourceSnapshot, on_delete=models.CASCADE, related_name='rows')
     row_number = models.PositiveIntegerField()
     invoice_number = models.CharField(max_length=128, db_index=True)
-    register_invoice = models.ForeignKey('invoice_tracker.CustomerInvoice', null=True, blank=True,
-                                        on_delete=models.SET_NULL, related_name='+')
+    # Retain previously stored IDs as unverified historical provenance. Source
+    # facts do not depend on operational invoice identities being unique.
+    register_invoice_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     category = models.CharField(max_length=16, default='external')
     company = models.CharField(max_length=256, blank=True, default='')
     account = models.CharField(max_length=256, blank=True, default='')
