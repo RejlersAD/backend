@@ -10,7 +10,8 @@ from decimal import Decimal
 from statistics import median
 
 from django.db import transaction
-from django.db.models import F, Q, Sum
+from django.db.models import Count, F, Q, Sum
+from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from apps.core.project_models import Project as EnterpriseProject
@@ -380,22 +381,137 @@ def _supplier_spend(commitments):
     return [{'currency': REPORTING_CURRENCY, 'suppliers': suppliers, 'missing_currencies': sorted(missing)}]
 
 
+def _spend_trend(commitments, period_start, period_end, today):
+    """Distribute governed commitments by PO month, without inventing forecasts."""
+    grouped = defaultdict(list)
+    order_counts = defaultdict(int)
+    for row in commitments.annotate(month=TruncMonth('po_date')).values('month', 'currency').annotate(
+        amount=Sum('total_amount'), order_count=Count('id')
+    ).order_by('month', 'currency'):
+        month = row['month'].strftime('%Y-%m')
+        grouped[month].append({'currency': row['currency'], 'amount': row['amount']})
+        order_counts[month] += row['order_count']
+
+    # Unfiltered reports include historical commitments so their trend reconciles
+    # to the headline total. The current year still starts with January zeroes.
+    first = (period_start or today.replace(month=1, day=1)).replace(day=1)
+    last = (period_end or today).replace(day=1)
+    if not period_start and grouped:
+        first = min(first, date.fromisoformat(f'{min(grouped)}-01'))
+    if not period_end and grouped:
+        last = max(last, date.fromisoformat(f'{max(grouped)}-01'))
+    months = []
+    missing = set()
+    cumulative = Decimal('0')
+    current = first
+    while current <= last:
+        month = current.strftime('%Y-%m')
+        converted = _to_aed(grouped[month])
+        missing.update(converted['missing_currencies'])
+        if converted['amount'] is not None:
+            cumulative += sum(
+                (_decimal(row['amount']) * FINANCE_RULES['fx_to_aed'][(row['currency'] or 'UNSPECIFIED').upper()]
+                 for row in grouped[month]),
+                Decimal('0'),
+            )
+        months.append({
+            'month': month,
+            'amount': converted['amount'],
+            'cumulative_amount': str(cumulative.quantize(Decimal('0.01'))) if not missing else None,
+            'order_count': order_counts[month],
+            'missing_currencies': converted['missing_currencies'],
+        })
+        if current.year == 9999 and current.month == 12:
+            break
+        current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
+    return {
+        'currency': REPORTING_CURRENCY,
+        'months': months,
+        'conversion_complete': not missing,
+        'missing_currencies': sorted(missing),
+        'date_basis': 'Purchase order date',
+    }
+
+
+def _order_status(pos):
+    counts = dict(pos.values('status').annotate(count=Count('id')).values_list('status', 'count'))
+    total = sum(counts.values())
+    return {
+        'total': total,
+        'statuses': [
+            {
+                'status': status,
+                'label': label,
+                'count': counts.get(status, 0),
+                'percent': round(counts.get(status, 0) / total * 100, 1) if total else None,
+            }
+            for status, label in PurchaseOrder.STATUS_CHOICES
+        ],
+    }
+
+
+def _supplier_readiness(vendors, watch):
+    total = len(vendors)
+    incomplete_master_data = sum(
+        any(not getattr(vendor, field, None) for field, _ in VENDOR_REQUIRED_FIELDS)
+        for vendor in vendors
+    )
+    complete = total - len(watch)
+    return {
+        'total': total,
+        'complete': complete,
+        'incomplete': len(watch),
+        'complete_percent': round(complete / total * 100, 1) if total else None,
+        'master_data_complete': total - incomplete_master_data,
+        'master_data_incomplete': incomplete_master_data,
+        'master_data_complete_percent': round((total - incomplete_master_data) / total * 100, 1) if total else None,
+    }
+
+
+def _purchasing_flow(prs, approved_prs, pos, commitments, receipts):
+    requisitions = prs.count()
+    approved = approved_prs.count()
+    issued = commitments.count()
+    acknowledged = commitments.filter(Q(confirmation_date__isnull=False) | Q(status='acknowledged')).count()
+    # Coverage uses the same issued-order cohort for numerator and denominator;
+    # several accepted receipts for one order still represent one covered PO.
+    received_orders = commitments.filter(receipts__status='accepted').distinct().count()
+    return {
+        'requisitions': requisitions,
+        'approved_requisitions': approved,
+        'purchase_orders': pos.count(),
+        'accepted_receipts': receipts.filter(status='accepted').count(),
+        'issued_purchase_orders': issued,
+        'supplier_acknowledged_orders': acknowledged,
+        'orders_with_accepted_receipts': received_orders,
+        'approval_percent': round(approved / requisitions * 100, 1) if requisitions else None,
+        'acknowledgement_percent': round(acknowledged / issued * 100, 1) if issued else None,
+        'receipt_coverage_percent': round(received_orders / issued * 100, 1) if issued else None,
+        'cohort_description': 'Requisitions by creation date; purchase orders by PO date within the selected period.',
+        'receipt_cohort_description': 'Acknowledgement and accepted-receipt coverage use issued POs in the selected period, including their subsequent receipts.',
+    }
+
+
 def _recent_decisions(prs, pos):
     rows = []
-    for pr in prs.filter(approved_at__isnull=False).order_by('-approved_at')[:10]:
+    for pr in prs.filter(approved_at__isnull=False).select_related('approved_by').order_by('-approved_at')[:10]:
         rows.append({
             'record': pr.pr_number,
             'title': pr.title or pr.product_service or 'Purchase requisition',
             'type': 'PR approved',
+            'supplier': pr.vendor.name if pr.vendor else None,
+            'status': 'approved',
             'owner': pr.approved_by.get_full_name() if pr.approved_by else None,
             'decided_at': pr.approved_at.isoformat(),
             'href': f'/procurement/requisitions/{pr.id}',
         })
-    for po in pos.filter(approved_at__isnull=False).order_by('-approved_at')[:10]:
+    for po in pos.filter(approved_at__isnull=False).select_related('approved_by').order_by('-approved_at')[:10]:
         rows.append({
             'record': po.po_number,
             'title': po.title,
             'type': 'PO approved',
+            'supplier': po.vendor.name,
+            'status': 'approved',
             'owner': po.approved_by.get_full_name() if po.approved_by else po.approved_by_name or None,
             'decided_at': po.approved_at.isoformat(),
             'href': f'/procurement/orders/{po.id}',
@@ -460,7 +576,19 @@ def build_dashboard(user, params):
         if not related_vendor_ids and scoped['scope']['type'] == 'portfolio'
         else Vendor.objects.filter(id__in=related_vendor_ids)
     )
-    supplier_watch = _supplier_watch(supplier_queryset, today)
+    suppliers = list(supplier_queryset)
+    supplier_watch = _supplier_watch(suppliers, today)
+    supplier_spend = _supplier_spend(commitments)
+    total_aed = _decimal(commitment_aed['amount'])
+    supplier_spend_aed = {
+        'currency': REPORTING_CURRENCY,
+        'conversion_complete': commitment_aed['conversion_complete'],
+        'missing_currencies': commitment_aed['missing_currencies'],
+        'suppliers': [
+            {**supplier, 'percent': round(float(_decimal(supplier['amount']) / total_aed * 100), 1) if total_aed else None}
+            for supplier in supplier_spend[0]['suppliers']
+        ] if commitment_aed['conversion_complete'] else [],
+    }
 
     project_links = {
         'requisitions_unlinked': prs.filter(enterprise_project__isnull=True).count(),
@@ -499,13 +627,12 @@ def build_dashboard(user, params):
         'terminology': TERMINOLOGY,
         'metrics': metrics,
         'actions': actions,
-        'supplier_spend': _supplier_spend(commitments),
-        'purchasing_flow': {
-            'requisitions': prs.count(),
-            'approved_requisitions': approved_prs.count(),
-            'purchase_orders': pos.count(),
-            'accepted_receipts': receipts.filter(status='accepted').count(),
-        },
+        'supplier_spend': supplier_spend,
+        'supplier_spend_aed': supplier_spend_aed,
+        'spend_trend': _spend_trend(commitments, scoped['period_start'], scoped['period_end'], today),
+        'purchase_order_status': _order_status(pos),
+        'supplier_readiness': _supplier_readiness(suppliers, supplier_watch),
+        'purchasing_flow': _purchasing_flow(prs, approved_prs, pos, commitments, receipts),
         'recent_decisions': _recent_decisions(prs, pos),
         'supplier_watch': supplier_watch[:20],
         'data_quality': {
