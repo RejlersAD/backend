@@ -102,9 +102,10 @@ class ReceivablesDashboardTests(TestCase):
         data = self.report()
         unpaid = data['kpis']['unpaid']
         self.assertEqual(unpaid, {'amount': None, 'known_amount': '120.00', 'count': 11, 'missing_count': 1, 'partial': True})
-        self.assertEqual(data['kpis']['overdue']['known_amount'], '70.00')
-        self.assertIsNone(data['kpis']['overdue']['amount'])
+        self.assertEqual(data['kpis']['overdue']['amount'], '0.00')
+        self.assertEqual(data['kpis']['overdue']['count'], 0)
         self.assertEqual(data['kpis']['over30']['amount'], '50.00')
+        self.assertEqual(data['kpis']['over60']['amount'], '30.00')
         self.assertEqual(data['kpis']['over90']['amount'], '10.00')
         buckets = {row['id']: row['receivables'] for row in data['ageing']}
         self.assertEqual(buckets['current']['amount'], '20.00')
@@ -113,66 +114,130 @@ class ReceivablesDashboardTests(TestCase):
         self.assertEqual(data['sources']['receivables']['unknown_due_date_count'], 1)
         self.assertEqual(data['sources']['receivables']['status'], 'incomplete')
 
-    def test_paid_cancelled_credit_zero_and_negative_are_not_open(self):
+    def test_only_finances_four_unpaid_statuses_are_eligible(self):
         self.grant('finance_overview', 'finance_outgoing')
-        for state in ['paid', 'cancelled', 'credit_note']:
+        for state in ['paid', 'cancelled', 'credit_note', 'draft', '']:
             self.ar(state, '500', status=state)
-        self.ar('zero', '0')
-        self.ar('negative', '-1')
         data = self.report()
         self.assertEqual(data['kpis']['unpaid']['amount'], '0.00')
         self.assertEqual(data['kpis']['unpaid']['count'], 0)
         self.assertEqual(data['customers'], [])
         self.assertEqual(data['priority_invoices'], [])
 
-    def test_every_receivable_exposure_uses_invoice_amount_less_receipts_not_stored_balance(self):
+    def test_status_totals_retain_negative_and_zero_amounts(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        common = {'due': TODAY - timedelta(days=91), 'invoice_date': TODAY, 'company': 'Signed amounts'}
+        self.ar('OVERDUE-POSITIVE', '100', status='overdue', **common)
+        self.ar('OVERDUE-NEGATIVE', '999', invoice_amount=Decimal('-25'), status='overdue', **common)
+        self.ar('PENDING-NEGATIVE', '999', invoice_amount=Decimal('-10'), status='pending', **common)
+        self.ar('PARTIAL-NEGATIVE', '-5', invoice_amount=Decimal('100'), status='partial', **common)
+        self.ar('NEW-ZERO', '999', invoice_amount=Decimal('0'), status='new', **common)
+        data = self.report()
+        self.assertEqual(data['kpis']['unpaid'], {
+            'amount': '60.00', 'known_amount': '60.00', 'count': 5,
+            'missing_count': 0, 'partial': False,
+        })
+        self.assertEqual(data['kpis']['overdue']['amount'], '75.00')
+        self.assertEqual(data['kpis']['overdue']['count'], 2)
+        self.assertEqual(data['kpis']['over30'], data['kpis']['unpaid'])
+        self.assertEqual(data['kpis']['over60'], data['kpis']['unpaid'])
+        self.assertEqual(data['kpis']['over90'], data['kpis']['unpaid'])
+        self.assertEqual(data['customers'][0]['amount'], '60.00')
+        self.assertEqual(data['customers'][0]['overdue']['amount'], '75.00')
+        self.assertEqual(sum(Decimal(row['balance']) for row in data['priority_invoices']), Decimal('60'))
+        self.assertEqual(sum(Decimal(row['receivables']['amount']) for row in data['overdue_by_month']), Decimal('75'))
+        self.assertEqual(data['paid_unpaid_by_month'][-1]['unpaid']['amount'], '60.00')
+
+    def test_dashboard_amounts_follow_finance_status_and_partial_balance_formula(self):
         self.grant('finance_overview', 'finance_outgoing')
         common = {'company': 'Formula customer', 'invoice_date': date(2026, 9, 1)}
-        partial = self.ar('FORMULA-PARTIAL', '999', invoice_amount=Decimal('100'),
-                          actual_payment_received=Decimal('40'),
-                          due=TODAY - timedelta(days=91), **common)
-        blank_receipt = self.ar('FORMULA-BLANK-RECEIPT', '0', invoice_amount=Decimal('200'),
-                                due=TODAY - timedelta(days=31), **common)
-        missing_invoice = self.ar('FORMULA-MISSING-INVOICE', '400', invoice_amount=None,
-                                  grand_total=Decimal('700'), actual_payment_received=Decimal('50'),
-                                  due=TODAY - timedelta(days=10), **common)
-        self.ar('FORMULA-SETTLED', '999', invoice_amount=Decimal('50'),
-                actual_payment_received=Decimal('50'), due=TODAY - timedelta(days=100), **common)
-        self.ar('FORMULA-OVERPAID', '999', invoice_amount=Decimal('10'),
-                actual_payment_received=Decimal('20'), due=TODAY - timedelta(days=100), **common)
+        new = self.ar('FORMULA-NEW', '999', status='new', invoice_amount=Decimal('100'),
+                      actual_payment_received=Decimal('40'), due=TODAY - timedelta(days=31), **common)
+        self.ar('FORMULA-PENDING', '0', status='pending', invoice_amount=Decimal('200'),
+                actual_payment_received=Decimal('200'), due=TODAY - timedelta(days=90), **common)
+        self.ar('FORMULA-OVERDUE', '999', status='overdue', invoice_amount=Decimal('300'),
+                actual_payment_received=Decimal('50'), due=TODAY + timedelta(days=1), **common)
+        partial = self.ar('FORMULA-PARTIAL', '60', status='partial', invoice_amount=Decimal('100'),
+                          actual_payment_received=Decimal('10'), due=TODAY - timedelta(days=91), **common)
+        missing_partial = self.ar('FORMULA-MISSING-PARTIAL', None, status='partial',
+                                  invoice_amount=Decimal('500'), actual_payment_received=Decimal('100'),
+                                  due=TODAY - timedelta(days=31), **common)
 
         data = self.report()
-        for metric in ['unpaid', 'overdue']:
-            self.assertEqual(data['kpis'][metric], {
-                'amount': None, 'known_amount': '260.00', 'count': 3,
-                'missing_count': 1, 'partial': True,
-            })
-        self.assertEqual(data['kpis']['over30']['amount'], '260.00')
+        self.assertEqual(data['kpis']['unpaid'], {
+            'amount': None, 'known_amount': '660.00', 'count': 5,
+            'missing_count': 1, 'partial': True,
+        })
+        self.assertEqual(data['kpis']['overdue']['amount'], '300.00')
+        self.assertEqual(data['kpis']['overdue']['count'], 1)
+        self.assertEqual(data['kpis']['over30']['known_amount'], '360.00')
+        self.assertIsNone(data['kpis']['over30']['amount'])
+        self.assertEqual(data['kpis']['over60']['amount'], '260.00')
         self.assertEqual(data['kpis']['over90']['amount'], '60.00')
-        self.assertEqual(data['customers'][0]['known_amount'], '260.00')
-        self.assertEqual(data['customers'][0]['overdue']['known_amount'], '260.00')
+        self.assertEqual(data['customers'][0]['known_amount'], '660.00')
+        self.assertEqual(data['customers'][0]['overdue'], data['kpis']['overdue'])
         ageing = {row['id']: row['receivables'] for row in data['ageing']}
         self.assertEqual(ageing['over90']['amount'], '60.00')
-        self.assertEqual(ageing['days_31_60']['amount'], '200.00')
-        self.assertIsNone(ageing['days_1_30']['known_amount'])
+        self.assertEqual(ageing['days_31_60']['known_amount'], '100.00')
+        self.assertIsNone(ageing['days_31_60']['amount'])
+        self.assertEqual(ageing['current']['amount'], '300.00')
         priority = {row['invoice_number']: row['balance'] for row in data['priority_invoices']}
         self.assertEqual(priority, {
-            'FORMULA-PARTIAL': '60.00', 'FORMULA-BLANK-RECEIPT': '200.00',
-            'FORMULA-MISSING-INVOICE': None,
+            'FORMULA-NEW': '100.00', 'FORMULA-PENDING': '200.00', 'FORMULA-OVERDUE': '300.00',
+            'FORMULA-PARTIAL': '60.00', 'FORMULA-MISSING-PARTIAL': None,
         })
+        self.assertEqual({row['payment_status'] for row in data['priority_invoices']},
+                         {'new', 'pending', 'overdue', 'partial'})
         cohorts = {row['month']: row for row in data['paid_unpaid_by_month']}
-        self.assertEqual(cohorts['2026-09']['unpaid']['known_amount'], '260.00')
+        self.assertEqual(cohorts['2026-09']['unpaid'], data['kpis']['unpaid'])
         self.assertEqual(cohorts['2026-09']['paid'], {
-            'amount': '160.00', 'known_amount': '160.00', 'count': 5,
+            'amount': '400.00', 'known_amount': '400.00', 'count': 5,
             'missing_count': 0, 'partial': False,
         })
         monthly = {row['month']: row['receivables'] for row in data['overdue_by_month']}
-        self.assertEqual(monthly['2026-06']['amount'], '60.00')
-        self.assertEqual(monthly['2026-08']['amount'], '200.00')
-        self.assertEqual(data['sources']['receivables']['open_count'], 3)
-        for item, stored in [(partial, '999'), (blank_receipt, '0'), (missing_invoice, '400')]:
+        self.assertEqual(monthly['2026-09']['amount'], '300.00')
+        self.assertEqual(monthly['2026-06']['amount'], '0.00')
+        self.assertEqual(data['sources']['receivables']['open_count'], 5)
+        for item, stored in [(new, Decimal('999')), (partial, Decimal('60')), (missing_partial, None)]:
             item.refresh_from_db()
-            self.assertEqual(item.balance_to_be_received, Decimal(stored))
+            self.assertEqual(item.balance_to_be_received, stored)
+
+    def test_overdue_status_includes_missing_and_future_due_dates_without_changing_ageing(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        self.ar('NO-DUE', '100', status='overdue', due=None)
+        self.ar('FUTURE-DUE', '200', status='overdue', due=TODAY + timedelta(days=40))
+        self.ar('MISSING-AMOUNT', '999', status='overdue', invoice_amount=None,
+                due=TODAY - timedelta(days=31))
+        self.ar('OLD-PENDING', '300', status='pending', due=TODAY - timedelta(days=91))
+        data = self.report()
+        self.assertEqual(data['kpis']['overdue'], {
+            'amount': None, 'known_amount': '300.00', 'count': 3,
+            'missing_count': 1, 'partial': True,
+        })
+        self.assertEqual(data['customers'][0]['overdue'], data['kpis']['overdue'])
+        self.assertEqual(data['kpis']['over90']['amount'], '300.00')
+        self.assertEqual(data['kpis']['over30']['count'], 2)
+        self.assertEqual(data['chart_exclusions']['receivables']['overdue_due_date_unknown'], 1)
+        self.assertEqual(data['chart_exclusions']['receivables']['overdue_outside_window'], 1)
+        self.assertEqual(sum(row['receivables']['count'] for row in data['overdue_by_month']), 1)
+        self.assertEqual(data['kpis']['overdue'], self.report(as_of='2026-06-01')['kpis']['overdue'])
+
+    def test_ageing_uses_due_date_not_invoice_date_or_stored_days(self):
+        self.grant('finance_overview', 'finance_outgoing')
+        self.ar('RECENT-DUE', '10', invoice_date=date(2020, 1, 1), due=TODAY,
+                days_overdue=999)
+        self.ar('OLD-DUE', '20', invoice_date=TODAY, due=TODAY - timedelta(days=91),
+                days_overdue=0, status='partial', invoice_amount=Decimal('100'))
+        self.ar('PARTIAL-ZERO', '0', status='partial', invoice_amount=Decimal('100'),
+                due=TODAY - timedelta(days=100))
+        self.ar('PARTIAL-NEGATIVE', '-1', status='partial', invoice_amount=Decimal('100'),
+                due=TODAY - timedelta(days=100))
+        data = self.report()
+        self.assertEqual(data['kpis']['unpaid']['amount'], '29.00')
+        self.assertEqual(data['kpis']['overdue']['amount'], '0.00')
+        self.assertEqual(data['kpis']['over30']['amount'], '19.00')
+        self.assertEqual(data['kpis']['over60']['amount'], '19.00')
+        self.assertEqual(data['kpis']['over90']['amount'], '19.00')
 
     def test_python_and_database_balance_calculation_agree_without_fallbacks(self):
         from apps.invoice_tracker.models import CustomerInvoice
@@ -222,23 +287,25 @@ class ReceivablesDashboardTests(TestCase):
 
     def test_chart_period_and_reference_date_do_not_fake_historical_balances(self):
         self.grant('finance_overview', 'finance_outgoing')
-        self.ar('OLD', '500', due=date(2024, 1, 1), invoice_date=date(2023, 12, 1))
-        self.ar('CURRENT', '200', due=date(2026, 8, 1), invoice_date=date(2026, 7, 2), actual_payment_received=Decimal('80'))
+        self.ar('OLD', '500', status='overdue', due=date(2024, 1, 1), invoice_date=date(2023, 12, 1))
+        self.ar('CURRENT', '200', status='partial', due=date(2026, 8, 1), invoice_date=date(2026, 7, 2), actual_payment_received=Decimal('80'))
         data = self.report(months=6)
         self.assertEqual(data['kpis']['unpaid']['amount'], '700.00')
         self.assertEqual(len(data['overdue_by_month']), 6)
         self.assertEqual(data['overdue_by_month'][0]['month'], '2026-04')
-        self.assertEqual(data['overdue_by_month'][4]['receivables']['amount'], '200.00')
+        self.assertEqual(data['overdue_by_month'][4]['receivables']['amount'], '0.00')
+        self.assertEqual(data['kpis']['overdue']['amount'], '500.00')
         self.assertEqual(data['chart_exclusions']['receivables']['overdue_outside_window'], 1)
         historical = self.report(as_of='2026-07-15', months=6)
         self.assertEqual(historical['kpis']['unpaid']['amount'], '700.00')
         self.assertEqual(historical['kpis']['overdue']['amount'], '500.00')
-        self.assertIn('Invoice Amount (L) minus Actual Payment Received (AA)', historical['definitions']['balance_basis'])
+        self.assertEqual(historical['kpis']['overdue'], data['kpis']['overdue'])
+        self.assertIn('Balance to be received (Y)', historical['definitions']['balance_basis'])
         self.assertEqual(historical['as_of_date'], '2026-07-15')
 
     def test_paid_unpaid_cohorts_use_invoice_issue_month_and_recorded_receipts(self):
         self.grant('finance_overview', 'finance_outgoing')
-        self.ar('PARTIAL', '60', due=date(2026, 8, 1), invoice_date=date(2026, 7, 15), payment_date=date(2026, 9, 1), actual_payment_received=Decimal('40'))
+        self.ar('PARTIAL', '60', status='partial', due=date(2026, 8, 1), invoice_date=date(2026, 7, 15), payment_date=date(2026, 9, 1), actual_payment_received=Decimal('40'))
         self.ar('PAID', '0', status='paid', invoice_date=date(2026, 7, 1), actual_payment_received=Decimal('100'))
         self.ar('MISSING-PAID', '20', invoice_date=date(2026, 7, 1))
         self.ar('NO-DATE', '15', actual_payment_received=Decimal('5'))
@@ -254,7 +321,7 @@ class ReceivablesDashboardTests(TestCase):
     def test_customer_shares_include_all_customers_and_priority_rows_use_recorded_pm(self):
         self.grant('finance_overview', 'finance_outgoing')
         for index in range(7):
-            self.ar(f'INV-{index}', str((index + 1) * 10), company=f'Company {index}', account=f'Account {index}', pm='Recorded PM' if index == 6 else '', due=TODAY - timedelta(days=index))
+            self.ar(f'INV-{index}', str((index + 1) * 10), status='overdue', company=f'Company {index}', account=f'Account {index}', pm='Recorded PM' if index == 6 else '', due=TODAY - timedelta(days=index))
         data = self.report()
         self.assertEqual(len(data['customers']), 7)
         self.assertEqual(data['customers'][0]['company'], 'Company 6')
@@ -273,8 +340,8 @@ class ReceivablesDashboardTests(TestCase):
     def test_company_is_authoritative_customer_identity_and_grouping_without_account_fallback(self):
         self.grant('finance_overview', 'finance_outgoing')
         due = TODAY - timedelta(days=10)
-        self.ar('BLANK-ACCOUNT', '100', company=' Acme ', account='', due=due)
-        self.ar('CONFLICTING-ACCOUNT', '25', company='Acme', account=' Shared ledger ', due=due)
+        self.ar('BLANK-ACCOUNT', '100', status='overdue', company=' Acme ', account='', due=due)
+        self.ar('CONFLICTING-ACCOUNT', '25', status='overdue', company='Acme', account=' Shared ledger ', due=due)
         self.ar('SAME-ACCOUNT-OTHER-COMPANY', '75', company='Beta', account=' Shared ledger ', due=due)
         self.ar('MISSING-COMPANY', '40', company='', account='Account is not a customer', due=due)
         self.ar('BLANK-COMPANY', None, company='   ', account='Another account', due=due)

@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from apps.rbac.permissions import HasModuleAccess
 from .services.command_center import build_command_center
 from .services.receivables_dashboard import build_receivables_dashboard
-from .services.customer_invoice_register import ORDERINGS, build_customer_invoice_register
+from .services.customer_invoice_register import ORDERINGS, PAYMENT_STATUSES, build_customer_invoice_register
 
 
 class FinanceCommandCenterView(APIView):
@@ -55,6 +55,7 @@ class FinanceReceivablesDashboardView(APIView):
 class CustomerInvoiceRegisterFilters(serializers.Serializer):
     currency = serializers.RegexField(r'^(?:[A-Za-z]{3,4}|UNSPECIFIED)$', default='AED')
     company = serializers.CharField(required=False, allow_blank=True, default='', max_length=256)
+    payment_status = serializers.ChoiceField(choices=PAYMENT_STATUSES, required=False, allow_blank=True, default='')
     page = serializers.IntegerField(min_value=1, default=1)
     page_size = serializers.ChoiceField(choices=[8, 20, 50], default=8)
     ordering = serializers.ChoiceField(choices=ORDERINGS, default='-invoice_date')
