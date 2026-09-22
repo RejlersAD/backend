@@ -222,6 +222,7 @@ class PlanningJob(BaseModel):
         ('calculate', 'Calculate CPM'),
         ('assurance', 'Run Schedule Assurance'),
         ('evidence_bulk', 'Bulk Evidence Review'),
+        ('agreement_setup', 'Analyze Agreement Workspace'),
     ]
     STATUS_CHOICES = [
         ('queued', 'Queued'), ('running', 'Running'), ('succeeded', 'Succeeded'),
@@ -296,6 +297,8 @@ class PlanningAuditEvent(models.Model):
 
 
 # Import relational scheduling models so Django registers them under this app.
+from .agreement_models import AgreementWorkspace  # noqa: E402,F401
+
 from .schedule_models import (  # noqa: E402,F401
     ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate, Schedule,
     ScheduleActivity, ScheduleAssuranceReview, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,

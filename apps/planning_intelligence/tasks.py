@@ -211,6 +211,21 @@ def run_planning_job(self, job_id):
                 project=job.project, actor=job.requested_by, action='workable_plan.completed', entity=job,
                 after={'state': state, 'schedule_version_id': (job.result_data.get('summary') or {}).get('schedule_version_id')},
             )
+        elif job.job_type == 'agreement_setup':
+            from .services.agreement_workspace import analyze_agreement_workspace
+
+            def agreement_progress(entry):
+                update_job_progress(job, min(95, max(5, int(entry.get('percent', 5)))),
+                                    entry.get('message') or 'Analyzing agreement',
+                                    phase=entry.get('phase') or 'agreement')
+
+            workspace = analyze_agreement_workspace(
+                job.project, job.requested_by, file_ids=(job.request_data or {}).get('file_ids'),
+                progress=agreement_progress, job=job,
+            )
+            job.result_data = {'workspace_id': str(workspace.pk), 'version': workspace.version,
+                               'revision': workspace.revision, 'status': workspace.status}
+            job.message = 'Agreement draft is ready. Review source-backed inputs and remaining exceptions.'
         elif job.job_type == 'evidence_bulk':
             from .services.evidence_bulk import run_bulk_evidence_review
 
@@ -289,10 +304,10 @@ def run_planning_job(self, job_id):
         job.error_code = 'intelligence_resume_sources_changed' if isinstance(exc, ResumeSourceChanged) else 'planning_job_failed'
         job.error_message = str(exc) if isinstance(exc, ResumeSourceChanged) else f'Planning job failed. Contact support with job id {job.id}.'
         job.message = 'Source documents changed; start a new analysis' if isinstance(exc, ResumeSourceChanged) else 'Planning job failed'
-        if job.job_type == 'evidence_bulk' and isinstance(exc, EvidenceError):
+        if job.job_type in {'evidence_bulk', 'agreement_setup'} and isinstance(exc, EvidenceError):
             job.error_code = exc.payload['code']
             job.error_message = str(exc)
-            job.message = 'Bulk evidence review needs attention'
+            job.message = 'Agreement analysis needs attention' if job.job_type == 'agreement_setup' else 'Bulk evidence review needs attention'
         job.finished_at = timezone.now()
         job.heartbeat_at = job.finished_at
         job.progress_log = [*(job.progress_log or []), {

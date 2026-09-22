@@ -17,6 +17,7 @@ from decouple import config
 # File categories accepted by the Upload Manager (MODULE 1)
 # ─────────────────────────────────────────────────────────────────────────────
 FILE_CATEGORIES = [
+    ('agreement', 'Agreement / Contract'),
     ('sow', 'Scope of Work'),
     ('wbs', 'WBS Structure'),
     ('mdr', 'Master Deliverable Register'),

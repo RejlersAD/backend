@@ -27,6 +27,7 @@ from .proposal_views import ProposalExportRecordViewSet, TechnicalProposalViewSe
 from .project_setup_views import ProjectSetupAISettingsView, ProjectSetupCreateView, ProjectSetupOptionsView, ProjectSetupPreviewView
 from .simple_planning_views import SimplePlanningView
 from .evidence_views import EvidenceReviewView
+from .agreement_views import AgreementWorkspaceView
 from .planning_profile_views import PlanningProfileView
 from .planning_build_views import PlanningBuildView, PlanningRiskView
 from .operational_control_views import OperationalControlsView
@@ -79,6 +80,11 @@ router.register(r'workflow-overrides', WorkflowTemplateOverrideViewSet, basename
 app_name = 'planning_intelligence'
 
 urlpatterns = [
+    path('agreement-workspaces/create/', AgreementWorkspaceView.as_view(operation='create'), name='agreement-workspace-create'),
+    path('agreement-workspaces/projects/<int:project_id>/', AgreementWorkspaceView.as_view(), name='agreement-workspace'),
+    *[path(f'agreement-workspaces/projects/<int:project_id>/{operation}/',
+           AgreementWorkspaceView.as_view(operation=operation), name=f'agreement-workspace-{operation}')
+      for operation in ('analyze', 'accept')],
     path('projects/<int:project_id>/delay-analysis/', DelayAnalysisView.as_view(), name='delay-analysis'),
     path('projects/<int:project_id>/delay-analysis/cases/<int:case_id>/export/', DelayCaseExportView.as_view(), name='delay-case-export'),
     path('projects/<int:project_id>/operational-controls/', OperationalControlsView.as_view(), name='operational-controls'),
