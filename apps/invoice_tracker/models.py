@@ -8,6 +8,8 @@ Storage:
   - Structured data: PostgreSQL (CustomerInvoice)
   - Original PDFs: AWS S3 via Django storages (InvoiceAttachment.file)
 """
+import uuid
+
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
@@ -181,3 +183,21 @@ class InvoiceAttachment(models.Model):
 
     def __str__(self):
         return f"{self.original_filename or self.file.name} → {self.invoice.invoice_number}"
+
+
+class InvoiceDuplicateResolution(models.Model):
+    """Durable archive of an explicitly reviewed physical duplicate resolution.
+
+    Scalar identities deliberately avoid foreign keys to the legacy register or
+    user table. The archive survives later invoice and user lifecycle changes.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice_id = models.BigIntegerField(db_index=True)
+    actor_id = models.CharField(max_length=255)
+    retained_record = models.JSONField()
+    removed_records = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now, editable=False, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']

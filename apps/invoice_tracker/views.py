@@ -20,10 +20,13 @@ from zipfile import BadZipFile
 
 from openpyxl.utils.exceptions import InvalidFileException
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Sum, Q
+from django.http import Http404
 from django.utils import timezone
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, serializers
 from rest_framework.decorators import action
+from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -59,6 +62,27 @@ class StableInvoiceOrderingFilter(filters.OrderingFilter):
         return ordering
 
 
+class InvoiceIdentityConflict(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_code = 'invoice_identity_conflict'
+    default_detail = {
+        'code': 'invoice_identity_conflict',
+        'detail': 'This invoice ID is shared by multiple records. '
+                  'The records must be reconciled before this invoice can be opened or changed.',
+    }
+
+
+class DuplicateInvoiceQuery(serializers.Serializer):
+    invoice_id = serializers.IntegerField(required=False, min_value=1, max_value=2**63 - 1)
+    page = serializers.IntegerField(default=1, min_value=1)
+    page_size = serializers.IntegerField(default=20, min_value=1, max_value=100)
+
+
+class DuplicateInvoiceSelection(serializers.Serializer):
+    group_token = serializers.CharField(max_length=8192)
+    keep_token = serializers.CharField(max_length=8192)
+
+
 class CustomerInvoiceViewSet(viewsets.ModelViewSet):
     queryset = CustomerInvoice.objects.all().prefetch_related('attachments')
     serializer_class = CustomerInvoiceSerializer
@@ -75,6 +99,23 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
                        'invoice_number', 'balance_to_be_received', 'calculated_receivable_balance', 'id']
     ordering = ['-invoice_date', '-id']
     pagination_class = CustomerInvoicePagination
+
+    def get_object(self):
+        # Legacy restored registers can lack their ID constraint. Check the
+        # unfiltered table: a URL filter must not hide a second row with the
+        # same ID and permit a save/delete that affects both records.
+        value = self.kwargs[self.lookup_url_kwarg or self.lookup_field]
+        try:
+            identities = list(CustomerInvoice._base_manager.filter(pk=value)
+                              .order_by().values_list('pk', flat=True)[:2])
+        except (TypeError, ValueError, DjangoValidationError) as exc:
+            raise Http404 from exc
+        if len(identities) > 1:
+            raise InvoiceIdentityConflict()
+        try:
+            return super().get_object()
+        except CustomerInvoice.MultipleObjectsReturned as exc:
+            raise InvoiceIdentityConflict() from exc
 
     # ── List filtering ─────────────────────────────────────────────
     def get_queryset(self):
@@ -123,6 +164,44 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
             'import': can_create,
             'export': request_action_allowed(request, 'finance_outgoing', 'export'),
         }
+        response = Response(data)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+    @action(detail=False, methods=['get'], url_path='duplicates')
+    def duplicates(self, request):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.duplicate_invoices import DuplicateReviewError, list_duplicate_invoices
+
+        if not request_action_allowed(request, 'finance_outgoing', 'read'):
+            raise PermissionDenied('Read access to customer invoices is required.')
+        query = DuplicateInvoiceQuery(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        try:
+            data = list_duplicate_invoices(request.user, **query.validated_data)
+        except DuplicateReviewError as exc:
+            return Response({'detail': exc.detail}, status=exc.status_code)
+        data['capabilities'] = {
+            'resolve': request_action_allowed(request, 'finance_outgoing', 'delete'),
+        }
+        response = Response(data)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+    @duplicates.mapping.delete
+    def delete_duplicates(self, request):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.duplicate_invoices import DuplicateReviewError, resolve_duplicate_invoices
+
+        if not all(request_action_allowed(request, 'finance_outgoing', action)
+                   for action in ('read', 'delete')):
+            raise PermissionDenied('Read and delete access to customer invoices is required.')
+        selection = DuplicateInvoiceSelection(data=request.data)
+        selection.is_valid(raise_exception=True)
+        try:
+            data = resolve_duplicate_invoices(request.user, **selection.validated_data)
+        except DuplicateReviewError as exc:
+            return Response({'detail': exc.detail}, status=exc.status_code)
         response = Response(data)
         response['Cache-Control'] = 'private, no-store'
         return response
