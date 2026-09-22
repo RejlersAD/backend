@@ -24,12 +24,15 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.http import HttpResponse, JsonResponse
 from django.db import transaction
+from django.db.models import Q
 from django.core.cache import cache
+from django.utils import timezone
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from apps.project_organizer.models import Project
-from .models import HMBMasterTemplateProfile, HMBCaseImportBatch, HMBCaseRecord
+from .models import HMBMasterTemplateProfile, HMBCaseImportBatch, HMBCaseRecord, HMBSourceUpload
+from .services.hmb_storage import HMBStorageError, delete_hmb_source, store_hmb_source
 from .hmb_master_template_parser import (
     analyze_hmb_master_template,
     parse_hmb_case_workbook,
@@ -103,6 +106,17 @@ def _serialize_template_profile(profile: HMBMasterTemplateProfile) -> dict:
         'is_active': profile.is_active,
         'created_at': profile.created_at,
         'updated_at': profile.updated_at,
+    }
+
+
+def _serialize_source_upload(source_upload: HMBSourceUpload) -> dict:
+    return {
+        'id': str(source_upload.id),
+        'upload_kind': source_upload.upload_kind,
+        'original_filename': source_upload.original_filename,
+        'size_bytes': source_upload.size_bytes,
+        'status': source_upload.status,
+        'created_at': source_upload.created_at,
     }
 
 
@@ -329,6 +343,8 @@ def _hmb_preview_file_summary(parsed: dict) -> dict:
         confidence = max(confidence, 0.9)
     return {
         'filename': parsed.get('source_filename', ''),
+        'source_stored': bool(parsed.get('source_upload_id')),
+        'source_upload_id': parsed.get('source_upload_id'),
         'case_name': parsed.get('case_name', ''),
         'detected_format': parsed.get('detected_format', ''),
         'stream_count': parsed.get('stream_count', 0),
@@ -497,17 +513,46 @@ def analyze_hmb_master_template_view(request):
             'is_active': True,
         }
 
-        profile, _created = HMBMasterTemplateProfile.objects.update_or_create(
-            created_by=request.user,
-            file_sha256=file_sha,
-            defaults=profile_defaults,
+        storage_result = store_hmb_source(
+            temp_path,
+            upload_kind=HMBSourceUpload.KIND_MASTER_TEMPLATE,
+            original_filename=template_file.name,
+            project_id=project.project_id if project else None,
+            user_id=request.user.id,
         )
+        storage_key = storage_result.get('key', '')
+        try:
+            with transaction.atomic():
+                profile, _created = HMBMasterTemplateProfile.objects.update_or_create(
+                    created_by=request.user,
+                    project=project,
+                    file_sha256=file_sha,
+                    defaults=profile_defaults,
+                )
+                source_upload = None
+                if storage_result['stored']:
+                    source_upload = HMBSourceUpload.objects.create(
+                        project=project,
+                        template_profile=profile,
+                        uploaded_by=request.user,
+                        upload_kind=HMBSourceUpload.KIND_MASTER_TEMPLATE,
+                        original_filename=template_file.name,
+                        storage_key=storage_key,
+                        file_sha256=storage_result['sha256'],
+                        size_bytes=storage_result['size'],
+                        content_type=storage_result['content_type'],
+                    )
+        except Exception:
+            delete_hmb_source(storage_key)
+            raise
 
         return Response({
             'success': True,
             'message': 'Master template analyzed successfully.',
             'template_profile_id': str(profile.id),
             'template_profile': _serialize_template_profile(profile),
+            'source_upload': _serialize_source_upload(source_upload) if source_upload else None,
+            'source_stored': bool(source_upload),
             'baseline': {
                 key: value
                 for key, value in analysis.get('baseline', {}).items()
@@ -515,6 +560,9 @@ def analyze_hmb_master_template_view(request):
             },
             **analysis,
         })
+    except HMBStorageError as exc:
+        logger.error('[HMB Master Template] storage failed: %s', exc, exc_info=True)
+        return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     except Exception as exc:
         logger.error('[HMB Master Template] analysis failed: %s', exc, exc_info=True)
         return Response(
@@ -534,12 +582,16 @@ def analyze_hmb_master_template_view(request):
 def list_hmb_master_templates_view(request):
     """List persisted HMB master template profiles for the current user."""
     profiles = HMBMasterTemplateProfile.objects.filter(is_active=True)
-    if not _is_admin(request.user):
-        profiles = profiles.filter(created_by=request.user)
-
     project_id = request.query_params.get('project_id')
     if project_id:
-        profiles = profiles.filter(project_id=project_id)
+        project, project_err = _get_accessible_project(request.user, project_id)
+        if project_err:
+            return project_err
+        profiles = profiles.filter(project=project)
+    elif not _is_admin(request.user):
+        profiles = profiles.filter(
+            Q(created_by=request.user) | Q(project__created_by=request.user)
+        ).distinct()
 
     return Response({
         'success': True,
@@ -560,7 +612,11 @@ def retrieve_hmb_master_template_view(request, profile_id):
     except HMBMasterTemplateProfile.DoesNotExist:
         return Response({'error': 'Template profile not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    if not _is_admin(request.user) and profile.created_by_id != getattr(request.user, 'id', None):
+    if profile.project_id:
+        _project, project_err = _get_accessible_project(request.user, profile.project_id)
+        if project_err:
+            return project_err
+    elif not _is_admin(request.user) and profile.created_by_id != getattr(request.user, 'id', None):
         return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
 
     return Response({
@@ -597,6 +653,8 @@ def preview_hmb_case_files_view(request):
         return Response({'error': 'Template profile not found'}, status=status.HTTP_404_NOT_FOUND)
     if template_profile.project_id and template_profile.project_id != project.project_id:
         return Response({'error': 'Template profile does not belong to this project'}, status=status.HTTP_400_BAD_REQUEST)
+    if not template_profile.project_id and not _is_admin(request.user) and template_profile.created_by_id != request.user.id:
+        return Response({'error': 'Access denied for template profile.'}, status=status.HTTP_403_FORBIDDEN)
 
     files = request.FILES.getlist('case_files')
     if not files:
@@ -609,6 +667,7 @@ def preview_hmb_case_files_view(request):
 
     parsed_files = []
     failures = []
+    storage_failed = False
     template_payload = template_profile.analysis_payload or {}
     for file_obj in files:
         filename = file_obj.name or 'HMB input'
@@ -633,8 +692,38 @@ def preview_hmb_case_files_view(request):
                 parsed = _normalise_pdf_hmb(extracted.get('streams', []), filename, template_payload)
             else:
                 parsed = parse_hmb_case_workbook(temp_path, filename, template_payload)
+            storage_result = store_hmb_source(
+                temp_path,
+                upload_kind=HMBSourceUpload.KIND_CASE_FILE,
+                original_filename=filename,
+                project_id=project.project_id,
+                user_id=request.user.id,
+            )
+            source_upload = None
+            storage_key = storage_result.get('key', '')
+            try:
+                if storage_result['stored']:
+                    source_upload = HMBSourceUpload.objects.create(
+                        project=project,
+                        template_profile=template_profile,
+                        uploaded_by=request.user,
+                        upload_kind=HMBSourceUpload.KIND_CASE_FILE,
+                        original_filename=filename,
+                        storage_key=storage_key,
+                        file_sha256=storage_result['sha256'],
+                        size_bytes=storage_result['size'],
+                        content_type=storage_result['content_type'],
+                    )
+            except Exception:
+                delete_hmb_source(storage_key)
+                raise
             parsed['source_filename'] = filename
+            parsed['source_upload_id'] = str(source_upload.id) if source_upload else None
             parsed_files.append(parsed)
+        except HMBStorageError as exc:
+            storage_failed = True
+            logger.error('[HMB Preview] %s storage failed: %s', filename, exc, exc_info=True)
+            failures.append({'filename': filename, 'error': str(exc), 'code': 'storage_failed'})
         except Exception as exc:
             logger.warning('[HMB Preview] %s failed: %s', filename, exc, exc_info=True)
             failures.append({'filename': filename, 'error': str(exc)})
@@ -648,7 +737,7 @@ def preview_hmb_case_files_view(request):
     if not parsed_files:
         return Response(
             {'error': 'No files could be analyzed', 'failures': failures},
-            status=status.HTTP_400_BAD_REQUEST,
+            status=status.HTTP_503_SERVICE_UNAVAILABLE if storage_failed else status.HTTP_400_BAD_REQUEST,
         )
     duplicate_cases = {
         case_name
@@ -769,6 +858,21 @@ def execute_hmb_case_preview_view(request):
         batch.total_records = total_records
         batch.metadata = {'files': file_summaries, 'preview_token': token}
         batch.save(update_fields=['total_records', 'metadata'])
+        source_upload_ids = [
+            parsed.get('source_upload_id') for parsed, _case_name in resolved_files
+            if parsed.get('source_upload_id')
+        ]
+        if source_upload_ids:
+            HMBSourceUpload.objects.filter(
+                id__in=source_upload_ids,
+                project=project,
+                uploaded_by=request.user,
+                status=HMBSourceUpload.STATUS_ANALYZED,
+            ).update(
+                import_batch=batch,
+                status=HMBSourceUpload.STATUS_IMPORTED,
+                imported_at=timezone.now(),
+            )
     cache.delete(cache_key)
     return Response({
         'success': True,
@@ -815,11 +919,10 @@ def import_hmb_case_files_view(request):
         except HMBMasterTemplateProfile.DoesNotExist:
             return Response({'error': 'template_profile_id not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if not _is_admin(request.user) and template_profile.created_by_id != getattr(request.user, 'id', None):
-            return Response({'error': 'Access denied for template profile.'}, status=status.HTTP_403_FORBIDDEN)
-
         if template_profile.project_id and template_profile.project_id != project.project_id:
             return Response({'error': 'template_profile_id does not belong to the selected project.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not template_profile.project_id and not _is_admin(request.user) and template_profile.created_by_id != request.user.id:
+            return Response({'error': 'Access denied for template profile.'}, status=status.HTTP_403_FORBIDDEN)
 
     auto_template_applied = False
     auto_template_scope = ''
@@ -828,8 +931,6 @@ def import_hmb_case_files_view(request):
             is_active=True,
             project=project,
         )
-        if not _is_admin(request.user):
-            profile_qs = profile_qs.filter(created_by_id=getattr(request.user, 'id', None))
         template_profile = profile_qs.order_by('-updated_at').first()
         if template_profile:
             auto_template_applied = True
@@ -936,14 +1037,44 @@ def import_hmb_case_files_view(request):
                 file_summaries.pop()
                 continue
 
-            with transaction.atomic():
-                HMBCaseRecord.objects.filter(
-                    project=project,
-                    template_profile=template_profile,
-                    case_name=case_name,
-                ).delete()
-                HMBCaseRecord.objects.bulk_create(replacement_rows, batch_size=2000)
+            storage_result = store_hmb_source(
+                temp_path,
+                upload_kind=HMBSourceUpload.KIND_CASE_FILE,
+                original_filename=file_obj.name,
+                project_id=project.project_id,
+                user_id=request.user.id,
+            )
+            storage_key = storage_result.get('key', '')
+
+            try:
+                with transaction.atomic():
+                    HMBCaseRecord.objects.filter(
+                        project=project,
+                        template_profile=template_profile,
+                        case_name=case_name,
+                    ).delete()
+                    HMBCaseRecord.objects.bulk_create(replacement_rows, batch_size=2000)
+                    if storage_result['stored']:
+                        HMBSourceUpload.objects.create(
+                            project=project,
+                            template_profile=template_profile,
+                            import_batch=batch,
+                            uploaded_by=request.user,
+                            upload_kind=HMBSourceUpload.KIND_CASE_FILE,
+                            original_filename=file_obj.name,
+                            storage_key=storage_key,
+                            file_sha256=storage_result['sha256'],
+                            size_bytes=storage_result['size'],
+                            content_type=storage_result['content_type'],
+                            status=HMBSourceUpload.STATUS_IMPORTED,
+                            imported_at=timezone.now(),
+                        )
+            except Exception:
+                delete_hmb_source(storage_key)
+                raise
             total_records += len(replacement_rows)
+        except HMBStorageError as exc:
+            failures.append({'filename': file_obj.name, 'error': str(exc), 'code': 'storage_failed'})
         except Exception as exc:
             failures.append({'filename': file_obj.name, 'error': str(exc)})
         finally:
@@ -961,6 +1092,13 @@ def import_hmb_case_files_view(request):
     if failures and not total_records:
         batch.status = 'failed'
     batch.save(update_fields=['total_records', 'metadata', 'status'])
+
+    if not total_records and any(item.get('code') == 'storage_failed' for item in failures):
+        return Response({
+            'error': 'HMB files could not be retained in private storage.',
+            'batch_id': str(batch.id),
+            'failures': failures,
+        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     return Response({
         'success': True,

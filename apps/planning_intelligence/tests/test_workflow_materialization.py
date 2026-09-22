@@ -147,7 +147,7 @@ class WorkflowMaterializationTests(TestCase):
         self.assertEqual(cross.metadata['source_references'], [{'file_id': 3}])
         self.assertEqual(cross.metadata['parent_predecessor_id'], 'a')
 
-    def test_nonexpanded_draft_keeps_existing_flat_nodes_owner_and_fs_behavior(self):
+    def test_nonexpanded_draft_keeps_flat_nodes_owner_and_explicit_relationship(self):
         first = self.parent('a')
         second = self.parent('b', depends_on=['a'], owner='', effort_hours=None,
                              dependency_details=[{'task_id': 'a', 'type': 'SS', 'lag_days': 3}])
@@ -158,7 +158,7 @@ class WorkflowMaterializationTests(TestCase):
         self.assertEqual(version.activities.get(external_id='a').responsible_role, 'Named employee')
         self.assertNotIn('source_deliverable', version.activities.get(external_id='a').metadata)
         relationship = version.relationships.get()
-        self.assertEqual((relationship.relationship_type, relationship.lag_days), ('FS', Decimal('0')))
+        self.assertEqual((relationship.relationship_type, relationship.lag_days), ('SS', Decimal('3')))
 
     def test_invalid_workflow_rolls_back_all_schedule_records(self):
         draft = self.draft()
@@ -227,6 +227,8 @@ class WorkflowPlanningIntegrationTests(TestCase):
             tasks = deepcopy(analysed['tasks'])
             by_file = {row['source_references'][0]['file_id']: row for row in tasks}
             by_file[sources[0].pk]['depends_on'] = [by_file[sources[1].pk]['id']]
+            by_file[sources[0].pk]['dependency_details'] = [
+                {'task_id': by_file[sources[1].pk]['id'], 'type': 'FS', 'lag_days': 0}]
             analysed = self.save(tasks, analysed['revision'], disciplines=analysed['disciplines'])
         preview = self.action('propose-schedule', analysed['revision'], workflow_mode='standard_five')
         applied = self.action('apply-schedule', analysed['revision'], proposal_token=preview['proposal']['token'])

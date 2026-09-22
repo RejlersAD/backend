@@ -192,7 +192,7 @@ class WorkflowSequenceProposalTests(TestCase):
         self.assertEqual(result[1][5]['depends_on'], [])
         self.assertEqual(result[5]['cross_deliverable_relationship_count'], 0)
 
-    def test_survey_gate_keeps_source_requirement_citation_but_remains_inference(self):
+    def test_inferred_survey_gate_does_not_claim_unmapped_source_requirement(self):
         self.context['files'] = [{'id': 19, 'filename': 'Scope.pdf', 'category': 'sow',
                                  'text': 'Prior to commencement of design, site survey documents require review.'}]
         parents, tasks = self.expand(('survey', 'SITE VISIT REPORT', 'general'), ('basis', 'HSE PHILOSOPHY', 'hse'))
@@ -201,7 +201,12 @@ class WorkflowSequenceProposalTests(TestCase):
         self.assertEqual(detail['source'], 'deliverable_sequence')
         self.assertEqual(detail['status'], 'proposed')
         self.assertEqual(detail['evidence_type'], 'planning_inference')
-        self.assertEqual({reference['file_id'] for reference in detail['source_references']}, {19, 20})
+        self.assertEqual({reference['file_id'] for reference in detail['source_references']}, {20})
+        from ..services.simple_schedule_proposal import source_constraints
+        requirement = source_constraints(self.context['files'])[0]
+        self.assertEqual(requirement['kind'], 'constraint_candidate')
+        self.assertFalse(requirement['executable'])
+        self.assertEqual(requirement['source_references'][0]['file_id'], 19)
         self.assertEqual(detail['parent_predecessor_id'], 'survey')
 
     def test_maturity_audits_have_distinct_windows_without_serializing_peer_reports(self):

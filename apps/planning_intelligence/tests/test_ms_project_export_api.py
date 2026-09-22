@@ -11,12 +11,14 @@ from ..models import ScheduleExportRecord, ScheduleBaseline
 from ..services.cpm import calculate_schedule_version
 from ..services.planning_boundaries import freeze_schedule_inputs
 from ..schedule_serializers import ScheduleActivitySerializer, ScheduleVersionSerializer
-from .test_scheduling_engine import ScheduleAPIFixture
+from .test_scheduling_engine import ScheduleAPIFixture, grant_planning_test_actions
 
 
 class MicrosoftProjectExportAPITests(ScheduleAPIFixture):
     def setUp(self):
         super().setUp()
+        # Reach the object lookup so this assertion checks project isolation.
+        grant_planning_test_actions((self.outsider,), ('export',))
         self.calendar.working_times = {str(day): [{'from': '08:00:00', 'to': '16:00:00'}] for day in range(5)}
         self.calendar.save(update_fields=['working_times', 'updated_at'])
         self.activity('EXP-NATIVE', 2)

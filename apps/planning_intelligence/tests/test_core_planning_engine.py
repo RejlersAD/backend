@@ -46,6 +46,22 @@ class CorePlanningEngineTests(TestCase):
         self.assertEqual(changed['tasks'][1]['dependency_details'][0]['lag_days'], -1)
         self.assertEqual(changed['tasks'][1]['dependency_status'], 'planner')
 
+    def test_direct_start_edit_creates_release_but_explicit_constraint_edit_wins(self):
+        state = self.save([self.task('a', constraint_type='none', constraint_date=None)])
+        tasks = deepcopy(state['tasks'])
+        tasks[0]['planned_start_date'] = '2026-11-16'
+        changed = self.save(tasks, revision=state['revision'])
+        self.assertEqual(changed['tasks'][0]['planned_start_date'], '2026-11-16')
+        self.assertEqual(changed['tasks'][0]['constraint_type'], 'start_no_earlier')
+        self.assertEqual(changed['tasks'][0]['constraint_date'], '2026-11-16')
+        tasks = deepcopy(changed['tasks'])
+        tasks[0].update(planned_start_date='2026-11-18', constraint_type='must_start',
+                        constraint_date='2026-11-17')
+        constrained = self.save(tasks, revision=changed['revision'])
+        self.assertEqual(constrained['tasks'][0]['planned_start_date'], '2026-11-17')
+        self.assertEqual(constrained['tasks'][0]['constraint_type'], 'must_start')
+        self.assertEqual(constrained['tasks'][0]['constraint_date'], '2026-11-17')
+
     def test_manual_hierarchy_groups_deliverables_by_phase_and_survives_reload(self):
         state = self.save([self.task('a', wbs_phase='Design', wbs_deliverable='Approved package'),
                            self.task('b', wbs_phase='Design', wbs_deliverable='Approved package'),

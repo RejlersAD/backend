@@ -20,7 +20,7 @@ from ..services.cpm import calculate_schedule_version
 from ..services.proposal_workflow import submit_for_review, reviewer_decision, approver_decision, reassign_reviewer
 from ..services.schedule_approval import ScheduleApprovalError, approve_schedule_version, decide_schedule_review, can_baseline_schedule
 from ..services.trustworthy_scheduling import run_schedule_assurance, approve_schedule_assurance
-from .test_scheduling_engine import ScheduleFixture
+from .test_scheduling_engine import ScheduleFixture, grant_planning_test_actions
 
 
 def grant_test_approval(users):
@@ -48,6 +48,7 @@ class BusinessApprovalGateTests(ScheduleFixture):
         self.reviewer = User.objects.create_user(username='gatedreview', email='review@example.test')
         self.manager = User.objects.create_user(username='gatedmanager', email='manager@example.test')
         self.admin = User.objects.create_user(username='unassignedadmin', email='admin@example.test', is_staff=True, is_superuser=True)
+        grant_planning_test_actions((self.owner, self.reviewer, self.manager), ('read', 'create', 'update'))
         ProjectMember.objects.create(project=self.enterprise, user=self.reviewer, role='reviewer')
         ProjectMember.objects.create(project=self.enterprise, user=self.manager, role='project_manager')
         module, _ = Module.objects.get_or_create(code='planning_package', defaults={'name': 'Planning'})

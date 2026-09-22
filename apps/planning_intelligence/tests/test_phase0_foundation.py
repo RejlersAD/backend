@@ -23,6 +23,7 @@ from ..serializers import PlanningFileSerializer, PlanningGenerationSerializer
 from ..services import byok_crypto
 from ..services.pipeline import generate_schedule
 from ..tasks import parse_uploaded_planning_file, run_planning_job
+from .test_scheduling_engine import grant_planning_test_actions
 
 
 class Phase0Fixture(TestCase):
@@ -30,6 +31,10 @@ class Phase0Fixture(TestCase):
         self.owner = User.objects.create_user(username='owner', email='owner@example.com', password='test')
         self.viewer = User.objects.create_user(username='viewer', email='viewer@example.com', password='test')
         self.outsider = User.objects.create_user(username='outsider', email='outsider@example.com', password='test')
+        grant_planning_test_actions((self.owner,), ('read', 'create', 'update', 'export'))
+        # Module access must not substitute for the project role or membership.
+        grant_planning_test_actions((self.viewer,), ('read', 'update'))
+        grant_planning_test_actions((self.outsider,), ('read', 'export'))
         self.enterprise_project = Project.objects.create(code='P-001', name='Project One', owner=self.owner)
         ProjectMember.objects.create(project=self.enterprise_project, user=self.viewer, role='viewer')
         self.workspace = PlanningProject.objects.create(

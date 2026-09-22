@@ -3,6 +3,7 @@ from copy import deepcopy
 from unittest.mock import patch
 
 from django.core import signing
+from django.core.cache import cache
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -18,6 +19,9 @@ from .test_work_assignments import WorkAssignmentFixture
 @override_settings(ROOT_URLCONF='apps.planning_intelligence.tests.test_work_assignments')
 class ProjectSetupTests(WorkAssignmentFixture):
     def setUp(self):
+        # Fixture user IDs repeat after rollback; throttle history must not leak
+        # between independent tests or consume another test's request budget.
+        cache.clear()
         super().setUp()
         RoleModule.objects.get_or_create(role=self.role, module=self.module)
         for permission in self.module.permissions.filter(action__in=['read', 'create', 'update'], is_active=True):

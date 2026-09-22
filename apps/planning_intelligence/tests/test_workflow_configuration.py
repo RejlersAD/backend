@@ -6,6 +6,7 @@ from apps.users.models import User
 from apps.core.project_models import Project
 
 from .test_business_approval_gates import grant_test_approval
+from .test_scheduling_engine import grant_planning_test_actions
 
 from ..models import (
     EngineeringDependencyRule, EngineeringDependencyTemplate, PlanningProject,
@@ -40,6 +41,7 @@ class WorkflowConfigurationTests(TestCase):
         self.owner = User.objects.create_user(username='workflow-owner', email='workflow@example.com', password='test')
         self.outsider = User.objects.create_user(username='workflow-outsider', email='outside@example.com', password='test')
         grant_test_approval((self.owner, self.outsider))
+        grant_planning_test_actions((self.owner, self.outsider), ('read', 'create', 'update'))
         enterprise = Project.objects.create(code='WORKFLOW-TEST', name='Workflow Project', owner=self.owner)
         self.project = PlanningProject.objects.create(
             name='Workflow Project', created_by=self.owner, enterprise_project=enterprise,
@@ -325,9 +327,12 @@ class WorkflowConfigurationTests(TestCase):
         }
         result = preview_schedule(self.project, user=self.owner)
 
-        self.assertEqual(result['deliverable_count'], 4)  # Process + PDR + EPC + survey workflow output
-        self.assertGreater(result['activity_count'], result['configured_workflow_activity_count'])
-        self.assertEqual(result['date_authority'], 'relational_cpm')
+        # Intelligence suggestions alone are not uploaded register evidence.
+        self.assertEqual(result['deliverable_count'], 0)
+        self.assertEqual(result['activity_count'], 0)
+        self.assertEqual(result['configured_workflow_activity_count'], 0)
+        self.assertEqual(result['relationship_count'], 0)
+        self.assertEqual(result['date_authority'], 'source_document')
         self.assertEqual(self.project.generations.count(), 0)
 
     def test_generation_rejects_a_stale_wizard_configuration(self):

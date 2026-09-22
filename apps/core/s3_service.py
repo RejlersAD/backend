@@ -47,6 +47,8 @@ class S3Service:
         'backups_reports': 'backups/reports/',
         'logs': 'logs/',
         'mov_documents': 'media/mov_documents/',
+        'hmb_master_templates': 'media/hmb/master-templates/',
+        'hmb_case_files': 'media/hmb/case-files/',
     }
     
     # Keep FOLDERS for backward compatibility

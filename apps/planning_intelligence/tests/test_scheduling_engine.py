@@ -770,9 +770,12 @@ class IntegrationAndEnterpriseAPITests(ScheduleAPIFixture):
             self.assertEqual(len(response['X-Content-SHA256']), 64)
         self.assertEqual(ScheduleExportRecord.objects.filter(version=self.version).count(), 4)
 
-    @override_settings(PLANNING_INTEGRATION_ENCRYPTION_KEY='integration-test-key')
+    @override_settings(
+        PLANNING_INTEGRATION_ENCRYPTION_KEY='integration-test-key',
+        ROOT_URLCONF='apps.planning_intelligence.tests.test_work_assignments',
+    )
     @patch('apps.planning_intelligence.enterprise_views.deliver_schedule_integration.delay')
-    def test_integration_credentials_are_encrypted_and_publish_is_idempotent(self, mocked_delay):
+    def test_integration_credentials_are_encrypted_and_unverified_publish_is_denied(self, mocked_delay):
         endpoint_response = self.client.post(
             '/api/v1/planning-intelligence/integration-endpoints/',
             {
@@ -797,10 +800,13 @@ class IntegrationAndEnterpriseAPITests(ScheduleAPIFixture):
         self.assertEqual(endpoint_response.status_code, 201)
         self.assertTrue(endpoint_response.data['secret_configured'])
         self.assertNotIn('top-secret-value', endpoint.secret_encrypted)
-        self.assertEqual(first.status_code, 202)
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(IntegrationDelivery.objects.count(), 1)
-        mocked_delay.assert_called_once()
+        # Publish is an approval operation. Module access cannot bypass the
+        # requirement for a declared, verified business approval route.
+        self.assertEqual(first.status_code, 403, first.data)
+        self.assertEqual(second.status_code, 403, second.data)
+        self.assertIn('No verified business approval route', str(first.data['detail']))
+        self.assertFalse(IntegrationDelivery.objects.exists())
+        mocked_delay.assert_not_called()
 
     def test_private_integration_url_is_rejected_by_delivery_guard(self):
         from ..services.integration_delivery import validate_public_https_url

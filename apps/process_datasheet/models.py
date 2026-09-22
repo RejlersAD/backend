@@ -619,6 +619,74 @@ class HMBCaseImportBatch(models.Model):
         return f"{self.project_id} · {self.source_file_count} file(s)"
 
 
+class HMBSourceUpload(models.Model):
+    """Private S3 provenance for an accepted HMB source workbook or document."""
+
+    KIND_MASTER_TEMPLATE = 'master_template'
+    KIND_CASE_FILE = 'case_file'
+    KIND_CHOICES = [
+        (KIND_MASTER_TEMPLATE, 'Master template'),
+        (KIND_CASE_FILE, 'Case file'),
+    ]
+    STATUS_ANALYZED = 'analyzed'
+    STATUS_IMPORTED = 'imported'
+    STATUS_CHOICES = [
+        (STATUS_ANALYZED, 'Analyzed'),
+        (STATUS_IMPORTED, 'Imported'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='hmb_source_uploads',
+    )
+    template_profile = models.ForeignKey(
+        HMBMasterTemplateProfile,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='source_uploads',
+    )
+    import_batch = models.ForeignKey(
+        HMBCaseImportBatch,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='source_uploads',
+    )
+    uploaded_by = models.ForeignKey(
+        User,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name='hmb_source_uploads',
+    )
+    upload_kind = models.CharField(max_length=24, choices=KIND_CHOICES, db_index=True)
+    original_filename = models.CharField(max_length=255)
+    storage_key = models.CharField(max_length=1024, unique=True)
+    file_sha256 = models.CharField(max_length=64, db_index=True)
+    size_bytes = models.BigIntegerField(default=0)
+    content_type = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ANALYZED, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    imported_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'process_hmb_source_uploads'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['project', '-created_at'], name='hmb_project_created_idx'),
+            models.Index(fields=['template_profile', 'status'], name='hmb_template_status_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.upload_kind} · {self.original_filename}"
+
+
 class HMBCaseRecord(models.Model):
     """Normalized long-format rows extracted from uploaded HMB case workbooks."""
 

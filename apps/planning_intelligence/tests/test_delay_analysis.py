@@ -20,7 +20,7 @@ def reference(count=2, *, chain=False, milestone=False):
                                      for key in range(2, count + 1)]
     forecast = forecast_operational_schedule(baseline, observations, '2026-10-07')['forecast']
     return {'baseline': baseline, 'observations': observations, 'data_date': '2026-10-07',
-            'forecast': forecast, 'rule_version': 'operational-controls/1.0', 'report_id': 22}
+            'forecast': forecast, 'rule_version': 'operational-controls/1.1', 'report_id': 22}
 
 
 def event(key='E1', activities=None, **values):
@@ -217,11 +217,13 @@ class DelayAnalysisTests(unittest.TestCase):
             self.assertEqual(error.exception.code, code)
 
     def test_reference_rule_and_published_forecast_mismatch_stop_comparison(self):
-        source = reference()
-        source['rule_version'] = 'old-engine'
-        result = analyze_delay_case(source, [event()], [change()], [])
-        self.assertEqual(result['impact']['status'], 'unavailable')
-        self.assertEqual(result['issues'][0]['code'], 'reference_rule_version_unsupported')
+        for version in ('operational-controls/1.0', 'operational-controls/future', 'old-engine'):
+            with self.subTest(version=version):
+                source = reference()
+                source['rule_version'] = version
+                result = analyze_delay_case(source, [event()], [change()], [])
+                self.assertEqual(result['impact']['status'], 'unavailable')
+                self.assertEqual(result['issues'][0]['code'], 'reference_rule_version_unsupported')
         source = reference()
         source['forecast']['activities'][0]['total_float_days'] = 999
         result = analyze_delay_case(source, [event()], [change()], [])

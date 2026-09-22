@@ -19,6 +19,8 @@ This release evaluates **forward remaining-work sensitivity** from a published d
 
 The reference forecast must be reproducible from the frozen baseline and published observations using the supported operational forecast version. If it is not, comparative results are unavailable. Published history is not silently recalculated using a different engine. Later corrections to the selected reporting period are disclosed; the selected historical reference is retained until the planner deliberately creates another case.
 
+The current sensitivity rule is `delay-recovery-sensitivity/1.1`, accepting published `operational-controls/1.1` reports. Earlier and unknown forecast versions remain unavailable for new comparisons; existing reviewed results retain their original rule and snapshot.
+
 The engine supports the existing whole-working-day calendar model and FS, SS, FF and SF relationships with signed whole-day lags. It preserves actual starts and finishes, warns about out-of-sequence execution, and rejects cyclic or contradictory scenario edits. Unsupported calendars, missing remaining-work data and missing timing evidence remain unavailable. Contract overrun and additional impact relative to the reference are reported separately.
 
 Paths include reachable activities, activities whose timing changed, typed driving edges and bounded witness paths. Witnesses are capped at 30, path nodes at 10,000 and edges at 20,000, with omitted counts disclosed. The engine does not enumerate every possible path in a large network.

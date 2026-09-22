@@ -33,6 +33,7 @@ class DelayCaseTests(TestCase):
         self.ops.setUp()
         self.client = self.ops.client
         self.owner, self.manager, self.outsider = self.ops.owner, self.ops.manager, self.ops.outsider
+        grant_planning_test_actions((self.owner, self.outsider), ('export',))
         self.project, self.baseline = self.ops.project, self.ops.baseline
         self.a, self.b = self.ops.a, self.ops.b
         self.url = f'/api/v1/planning-intelligence/projects/{self.project.pk}/delay-analysis/'
@@ -149,7 +150,7 @@ class DelayCaseTests(TestCase):
         ledger_count = CostLedgerEntry.objects.count()
         case = self.case(event, scenarios=[{'id': 'recover', 'name': 'Reviewed remaining effort',
             'changes': [self.change(event, before='5', value='3')]}])
-        self.assertEqual(case['run']['result']['impact']['net_finish_shift_calendar_days'], 2)
+        self.assertEqual(case['run']['result']['impact']['net_finish_shift_calendar_days'], 2, case['run']['result'])
         self.assertEqual(case['run']['result']['scenarios'][0]['net_finish_shift_calendar_days'], 0)
         case = self.approve(self.submit(case))
         self.assertEqual(case['status'], 'approved')
