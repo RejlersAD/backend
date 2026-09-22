@@ -40,6 +40,18 @@ def _input_fingerprint(version):
     })
 
 
+def _wbs_fingerprint(version):
+    return canonical_fingerprint(list(version.wbs_nodes.filter(is_deleted=False).order_by('code').values(
+        'code', 'name', 'parent_id', 'level', 'sort_order', 'discipline')))
+
+
+def planner_inputs_current(version, snapshot):
+    # Existing activity-only revisions predate the optional WBS fingerprint.
+    return (_input_fingerprint(version) == snapshot.get('input_fingerprint')
+            and ('wbs_input_fingerprint' not in snapshot
+                 or _wbs_fingerprint(version) == snapshot['wbs_input_fingerprint']))
+
+
 def can_edit_gantt(project, actor, version=None):
     from .master_schedule import _write
     if not _write(project, actor):
@@ -112,7 +124,7 @@ def edit_gantt(project, actor, data):
     if not can_edit_gantt(project, actor, version):
         _error('Create an editable revision before changing an approved or submitted schedule.', 'gantt_read_only')
     prior_snapshot = version.evidence_input_snapshot or {}
-    if prior_snapshot.get('schema') == SCHEMA and _input_fingerprint(version) != prior_snapshot.get('input_fingerprint'):
+    if prior_snapshot.get('schema') == SCHEMA and not planner_inputs_current(version, prior_snapshot):
         _error('The planner revision changed outside the Gantt editor. Reconcile the changed inputs before editing.',
                'planner_revision_inputs_changed')
     tasks = _version_tasks(version)
@@ -230,7 +242,7 @@ def planner_revision_readiness(version):
             issues.append(_issue('planner_revision_source_changed', 'The original schedule inputs changed. Review the current source before calculating.'))
         parent_readiness = accepted_input_validation(parent)
         issues.extend(deepcopy(parent_readiness['issues']))
-    if _input_fingerprint(version) != snapshot.get('input_fingerprint'):
+    if not planner_inputs_current(version, snapshot):
         issues.append(_issue('planner_revision_inputs_changed', 'Planner inputs changed outside the reviewed Gantt edit. Reload and reconcile this revision.'))
     for activity in version.activities.filter(is_deleted=False):
         if (activity.metadata or {}).get('duration_pending'):
