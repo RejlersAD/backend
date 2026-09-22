@@ -211,6 +211,22 @@ def run_planning_job(self, job_id):
                 project=job.project, actor=job.requested_by, action='workable_plan.completed', entity=job,
                 after={'state': state, 'schedule_version_id': (job.result_data.get('summary') or {}).get('schedule_version_id')},
             )
+        elif job.job_type == 'evidence_bulk':
+            from .services.evidence_bulk import run_bulk_evidence_review
+
+            def evidence_progress(entry):
+                update_job_progress(job, min(95, max(5, int(entry.get('progress', 5)))),
+                                    entry.get('message') or 'Reviewing source evidence',
+                                    phase=entry.get('phase') or 'evidence', details=entry.get('details'))
+
+            job.result_data = run_bulk_evidence_review(
+                job.project, job.requested_by, dict(job.request_data or {}),
+                progress_callback=evidence_progress, job=job,
+            )
+            counts = job.result_data.get('counts') or {}
+            accepted = counts.get('accepted_verified', 0) + counts.get('accepted_ai', 0)
+            remaining = counts.get('unresolved', 0)
+            job.message = f'Bulk review completed: {accepted} values accepted; {remaining} issues need input'
         elif job.job_type == 'calculate':
             from .models import ScheduleVersion
             from .services.cpm import calculate_schedule_version
@@ -268,10 +284,15 @@ def run_planning_job(self, job_id):
     except Exception as exc:  # noqa: BLE001
         logger.exception('Planning job %s failed', job_id)
         from .services.document_intelligence import ResumeSourceChanged
+        from .services.evidence_graph import EvidenceError
         job.status = 'failed'
         job.error_code = 'intelligence_resume_sources_changed' if isinstance(exc, ResumeSourceChanged) else 'planning_job_failed'
         job.error_message = str(exc) if isinstance(exc, ResumeSourceChanged) else f'Planning job failed. Contact support with job id {job.id}.'
         job.message = 'Source documents changed; start a new analysis' if isinstance(exc, ResumeSourceChanged) else 'Planning job failed'
+        if job.job_type == 'evidence_bulk' and isinstance(exc, EvidenceError):
+            job.error_code = exc.payload['code']
+            job.error_message = str(exc)
+            job.message = 'Bulk evidence review needs attention'
         job.finished_at = timezone.now()
         job.heartbeat_at = job.finished_at
         job.progress_log = [*(job.progress_log or []), {
