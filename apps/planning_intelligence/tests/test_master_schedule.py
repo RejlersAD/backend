@@ -123,6 +123,34 @@ class MasterScheduleTests(TestCase):
         self.assertTrue(response.data['permissions']['can_generate_plan'])
         self.assertFalse(self.read(version_id=version_id)['permissions']['can_generate_plan'])
 
+    def test_generation_access_matches_read_only_build_lookup_without_ready_profile(self):
+        state = self.activate()
+        self.assertFalse(state['permissions']['can_edit'])
+        self.assertTrue(state['permissions']['can_generate_plan'])
+        self.assertFalse(state['planning_profile']['valid'])
+        url = f'/api/v1/planning-intelligence/projects/{self.project.pk}/planning-builds/'
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['permissions']['can_preview'])
+        self.assertTrue(response.data['permissions']['can_apply'])
+        self.assertFalse(response.data['options']['profile']['valid'])
+        self.assertFalse([query for query in queries if query['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
+
+        reviewer = User.objects.create_user(username='build-lookup-reader', email='build-lookup-reader@example.test')
+        grant_test_approval((reviewer,))
+        ProjectMember.objects.create(project=self.project.enterprise_project, user=reviewer, role='reviewer')
+        self.client.force_authenticate(reviewer)
+        self.assertFalse(self.read()['permissions']['can_generate_plan'])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data['permissions']['can_preview'])
+        self.assertFalse(response.data['permissions']['can_apply'])
+        response = self.client.post(url, {'evidence_revision': self.graph.revision,
+            'profile_selection_revision': 1, 'options': {}, 'reason': 'Attempt by read-only member.'}, format='json')
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(ScheduleVersion.objects.filter(schedule__project=self.project).count(), 1)
+
     def test_activation_conflict_rolls_back_materialization(self):
         self.approve_inputs()
         PlanningProject.objects.filter(pk=self.project.pk).update(master_schedule_revision=2)

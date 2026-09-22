@@ -133,6 +133,21 @@ class PlanningBuildTests(TestCase):
             preview_planning_build(self.project, self.reviewer, evidence_revision=self.graph.revision,
                 profile_selection_revision=1, options={}, reason='Read only')
 
+    def test_read_only_member_cannot_apply_an_owners_ready_build(self):
+        build = self.preview()
+        self.assertTrue(serialize_planning_build(build)['ready_to_apply'], build.issues)
+        self.client.force_authenticate(self.reviewer)
+        response = self.client.post(
+            f'/api/v1/planning-intelligence/projects/{self.project.pk}/planning-builds/{build.pk}/apply/',
+            {'fingerprint': build.fingerprint, 'master_revision': 0, 'reason': 'Attempt by read-only member.'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertFalse(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
+        self.project.refresh_from_db()
+        self.assertIsNone(self.project.master_schedule_version_id)
+        self.assertEqual(self.project.master_schedule_revision, 0)
+
     def test_changed_source_or_selected_profile_prevents_apply(self):
         build = self.preview()
         self.file.extracted_text += '\n3|PROCUREMENT|Additional package'
