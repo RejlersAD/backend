@@ -611,3 +611,4 @@ from .salary_models import (
 # only from URL/view modules makes migration detection depend on import order.
 from .payroll_workflow import PayrollWorkflow, WorkflowNotificationLog
 from .reporting_models import ExecutiveFinancePeriod
+from .receivables_source_models import ReceivablesSourceSnapshot, ReceivablesSourceRow

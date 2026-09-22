@@ -267,6 +267,8 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_trustworthy_inputs.py
 !apps/planning_intelligence/tests/test_operational_reliability.py
 !apps/planning_intelligence/tests/test_document_intelligence.py
+!apps/planning_intelligence/tests/test_generic_document_coverage.py
+!apps/planning_intelligence/tests/test_document_evidence_api.py
 !apps/planning_intelligence/tests/test_planning_scope_inputs.py
 !apps/planning_intelligence/tests/test_file_upload_dispatch.py
 !apps/planning_intelligence/tests/test_work_breakdown.py
@@ -274,28 +276,12 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_work_assignment_history.py
 !apps/planning_intelligence/tests/test_manual_work_breakdown.py
 !apps/planning_intelligence/tests/test_simple_planning.py
+!apps/planning_intelligence/tests/test_source_schedule_preview.py
 !apps/planning_intelligence/tests/test_source_schedule_verification.py
 !apps/planning_intelligence/tests/test_simple_workflow_expansion.py
 !apps/planning_intelligence/tests/test_workflow_materialization.py
 !apps/planning_intelligence/tests/test_simple_draft_float.py
 !apps/planning_intelligence/tests/test_simple_schedule_checks.py
-!apps/planning_intelligence/tests/test_workflow_sequence_proposal_api.py
-!apps/planning_intelligence/tests/test_workflow_sequence_proposal.py
-!apps/planning_intelligence/tests/test_reference_schedule_text.py
-!apps/planning_intelligence/tests/test_printed_schedule_verification.py
-!apps/planning_intelligence/tests/test_project_setup.py
-!apps/planning_intelligence/tests/test_project_setup_byok.py
-!apps/project_control/tests/test_epc_*.py
-
-!docs/executive-invoice-performance.md
-
-# Private Finance aggregates are provisioned separately from application code.
-apps/finance/data/invoice_performance_summary.json
-
-# Planning release regression suites and documentation.
-!apps/planning_intelligence/tests/test_generic_document_coverage.py
-!apps/planning_intelligence/tests/test_document_evidence_api.py
-!apps/planning_intelligence/tests/test_source_schedule_preview.py
 !apps/planning_intelligence/tests/test_fixed_horizon_proposal.py
 !apps/planning_intelligence/tests/test_source_timing_constraints.py
 !apps/planning_intelligence/tests/test_structured_schedule_evidence.py
@@ -330,7 +316,14 @@ apps/finance/data/invoice_performance_summary.json
 !docs/identity-and-source-linking.md
 !docs/planning-export-boundaries.md
 !docs/evidence-planning-architecture.md
+!apps/planning_intelligence/tests/test_workflow_sequence_proposal_api.py
+!apps/planning_intelligence/tests/test_workflow_sequence_proposal.py
+!apps/planning_intelligence/tests/test_reference_schedule_text.py
 !apps/planning_intelligence/tests/test_reference_schedule_geometry.py
+!apps/planning_intelligence/tests/test_printed_schedule_verification.py
+!apps/planning_intelligence/tests/test_project_setup.py
+!apps/planning_intelligence/tests/test_project_setup_byok.py
+!apps/project_control/tests/test_epc_*.py
 !apps/planning_intelligence/tests/test_delay_cases.py
 !apps/planning_intelligence/tests/test_delay_analysis.py
 !apps/planning_intelligence/tests/test_delay_exports.py
@@ -343,5 +336,10 @@ apps/finance/data/invoice_performance_summary.json
 !apps/planning_intelligence/tests/test_resource_planning.py
 !apps/planning_intelligence/tests/test_planning_risk_impacts.py
 !docs/core-planning-engine.md
+!docs/executive-invoice-performance.md
 !apps/planning_intelligence/tests/test_source_schedule_logic.py
 !apps/core/tests/tests_project_portfolio.py
+
+# Private Finance aggregates are provisioned separately from application code.
+apps/finance/data/invoice_performance_summary.json
+!docs/receivables-source.md

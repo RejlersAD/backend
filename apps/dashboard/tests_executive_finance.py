@@ -197,35 +197,61 @@ class ExecutiveFinanceTests(TestCase):
         self.assertEqual(actual['customers'][0]['company'], 'Acme')
         self.assertEqual(actual['sources']['payables']['status'], 'unavailable')
         self.assertEqual(len(actual['overdue_by_month']), 6)
-        self.assertIn('Invoice Amount (L) minus Actual Payment Received (AA)', actual['definitions']['balance_basis'])
+        self.assertIn('Invoice Amount (L)', actual['definitions']['balance_basis'])
+        self.assertIn('Partial invoices use the recorded Balance to be received (Y)', actual['definitions']['balance_basis'])
         self.assertFalse(actual['currency_conversion_applied'])
 
     @override_settings(ROOT_URLCONF=__name__)
-    def test_executive_and_finance_overdue_use_l_less_aa_with_stale_y(self):
+    def test_executive_and_finance_share_status_based_amounts_and_due_date_ageing(self):
         self.grant('executive_dashboard', 'finance_overview', 'finance_outgoing')
-        self.invoice('PARTIAL', '9999', invoice_amount=Decimal('1000'),
-                     actual_payment_received=Decimal('300'), company='Acme')
-        self.invoice('BLANK-RECEIPT', '0', invoice_amount=Decimal('200'), company='Acme')
-        self.invoice('UNKNOWN-INVOICE', '8888', invoice_amount=None,
-                     grand_total=Decimal('8888'), company='Acme')
-        self.invoice('SETTLED', '7777', invoice_amount=Decimal('50'),
-                     actual_payment_received=Decimal('50'), company='Acme')
+        self.invoice('PARTIAL', '70', payment_status='partial', invoice_amount=Decimal('1000'),
+                     actual_payment_received=Decimal('300'), company='Acme',
+                     due_date=TODAY - timedelta(days=91), days_overdue=0)
+        self.invoice('PENDING-PAST-DUE', '0', invoice_amount=Decimal('200'),
+                     actual_payment_received=Decimal('60'), company='Acme', days_overdue=0)
+        self.invoice('OVERDUE-FUTURE-DUE', '999', payment_status='overdue',
+                     invoice_amount=Decimal('100'), actual_payment_received=Decimal('100'),
+                     due_date=TODAY + timedelta(days=1), company='Acme')
+        self.invoice('OVERDUE-UNKNOWN', '8888', payment_status='overdue', invoice_amount=None,
+                     grand_total=Decimal('8888'), due_date=None, company='Acme')
+        self.invoice('NEW', '999', payment_status='new', invoice_amount=Decimal('30'),
+                     due_date=TODAY, company='Acme')
+        for status in ('paid', 'cancelled', 'credit_note', 'unrecognized'):
+            self.invoice('EXCLUDED-' + status, '7777', payment_status=status, company='Acme')
         self.invoice('OTHER-CURRENCY', '50', currency='USD', company='Acme')
         self.invoice('OTHER-COMPANY', '60', company='Other')
 
         executive = self.report(company='Acme')
         finance = self.report(FINANCE_RECEIVABLES_URL, company='Acme')
         self.assertEqual(executive, finance)
-        self.assertEqual(executive['kpis']['overdue'], {
-            'amount': None, 'known_amount': '900.00', 'count': 3,
+        self.assertEqual(executive['kpis']['unpaid'], {
+            'amount': None, 'known_amount': '400.00', 'count': 5,
             'missing_count': 1, 'partial': True,
         })
-        self.assertEqual(executive['kpis']['over30']['known_amount'], '900.00')
-        self.assertEqual(executive['kpis']['over90']['amount'], '0.00')
-        self.assertEqual(executive['customers'][0]['known_amount'], '900.00')
-        self.assertEqual({row['invoice_number']: row['balance'] for row in executive['priority_invoices']}, {
-            'PARTIAL': '700.00', 'BLANK-RECEIPT': '200.00', 'UNKNOWN-INVOICE': None,
+        self.assertEqual(executive['kpis']['overdue'], {
+            'amount': None, 'known_amount': '100.00', 'count': 2,
+            'missing_count': 1, 'partial': True,
         })
+        self.assertEqual(executive['kpis']['over30']['amount'], '270.00')
+        self.assertEqual(executive['kpis']['over90']['amount'], '70.00')
+        self.assertEqual(executive['customers'][0]['known_amount'], '400.00')
+        self.assertEqual(executive['customers'][0]['overdue'], executive['kpis']['overdue'])
+        self.assertEqual({row['invoice_number']: row['balance'] for row in executive['priority_invoices']}, {
+            'PARTIAL': '70.00', 'PENDING-PAST-DUE': '200.00', 'OVERDUE-FUTURE-DUE': '100.00',
+            'OVERDUE-UNKNOWN': None, 'NEW': '30.00',
+        })
+        self.assertEqual(executive['chart_exclusions']['receivables']['overdue_due_date_unknown'], 1)
+        ageing = {row['id']: row['receivables'] for row in executive['ageing']}
+        self.assertEqual(ageing['current']['amount'], '130.00')
+        self.assertEqual(ageing['days_31_60']['amount'], '200.00')
+        self.assertEqual(ageing['over90']['amount'], '70.00')
+        self.assertIsNone(ageing['unknown_due_date']['known_amount'])
+
+        earlier = self.report(company='Acme', as_of=(TODAY - timedelta(days=2)).isoformat())
+        self.assertEqual(earlier['kpis']['overdue'], executive['kpis']['overdue'])
+        self.assertEqual(earlier['kpis']['unpaid'], executive['kpis']['unpaid'])
+        self.assertEqual(earlier['kpis']['over30']['amount'], '70.00')
+        self.assertEqual(earlier['kpis']['over90']['amount'], '0.00')
         self.assertFalse(executive['currency_conversion_applied'])
 
     def test_register_pagination_sorting_and_totals_match_finance_builder(self):
