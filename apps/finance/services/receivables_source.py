@@ -9,7 +9,6 @@ from django.db import transaction
 from openpyxl import load_workbook
 
 from apps.finance.receivables_source_models import ReceivablesSourceRow, ReceivablesSourceSnapshot
-from apps.invoice_tracker.models import CustomerInvoice
 from .workbook_summary_snapshot import FOOTER_LABELS, _cell_currency, _cell_kind, _text
 
 
@@ -154,11 +153,10 @@ def import_receivables_source(path, *, sheet='External Invoice ', first_row=6, l
         created = snapshot is None
         if created:
             snapshot = ReceivablesSourceSnapshot.objects.create(**metadata, reconciliation=reconciliation)
-            ids = Counter(row['invoice_number'] for row in rows)
-            unique_numbers = [number for number, count in ids.items() if count == 1]
-            links = dict(CustomerInvoice.objects.filter(invoice_number__in=unique_numbers).values_list('invoice_number', 'pk'))
-            records = [ReceivablesSourceRow(snapshot=snapshot, updated_at=snapshot.imported_at,
-                                            register_invoice_id=links.get(row['invoice_number']), **row)
+            # Workbook facts are independent of operational invoice identities.
+            # Matching numbers cannot establish a reliable link in a legacy
+            # register that may contain duplicate IDs or invoice numbers.
+            records = [ReceivablesSourceRow(snapshot=snapshot, updated_at=snapshot.imported_at, **row)
                        for row in rows]
             ReceivablesSourceRow.objects.bulk_create(records, batch_size=250)
         elif snapshot.row_count != len(rows) or snapshot.rows.count() != len(rows):
