@@ -80,13 +80,16 @@ class SimplePlanningTests(TestCase):
         return response.data
 
     def test_no_documents_or_ai_credentials_required_and_get_has_no_writes(self):
-        self.assertEqual(self.read()['state'], 'inputs')
+        state = self.read()
+        self.assertEqual(state['state'], 'inputs')
+        self.assertTrue(state['permissions']['can_generate_plan'])
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state, {})
         with patch('apps.planning_intelligence.services.claude_client.call_claude') as ai:
             plan = self.action('analyse', 0)
         ai.assert_not_called()
         self.assertEqual(plan['state'], 'review')
+        self.assertTrue(plan['permissions']['can_generate_plan'])
         self.assertEqual(plan['tasks'], [])
         self.assertFalse(self.project.intelligence_runs.exists())
         self.assertFalse(self.project.schedules.exists())
