@@ -68,6 +68,7 @@ class WorkflowSequenceProposalAPITests(TestCase):
         state = deepcopy(self.project.simple_planning_state)
         context, _ = proposal_context(self.project, state, _calendar_record(self.project))
         context['workflow_mode'] = 'standard_five'
+        context['duration_policy'] = 'legacy_template'  # Fixture recreates the old saved template values.
         parents, tasks, _ = expand_workflow_deliverables(state['tasks'], context, state['tasks'])
         self.assertTrue(all(task.get('planned_start_date') is None for task in tasks))
         self.assertEqual(sum(len(task['depends_on']) for task in tasks), len(parents) * 4)
@@ -83,26 +84,25 @@ class WorkflowSequenceProposalAPITests(TestCase):
         basis = stages['Electrical Design Basis']
         drawing = stages['Electrical Layout Drawing']
         peer = stages['Cable Routing Drawing']
-        self.assertLess(survey['IFR']['planned_start_date'], basis['IFR']['planned_start_date'])
-        self.assertLess(basis['IFR']['planned_start_date'], drawing['IFR']['planned_start_date'])
+        self.assertIsNone(survey['IFR']['planned_start_date'])
+        self.assertIsNone(basis['IFR']['planned_start_date'])
+        self.assertIsNone(drawing['IFR']['planned_start_date'])
         self.assertEqual(drawing['IFR']['planned_start_date'], peer['IFR']['planned_start_date'])
-        self.assertIn(survey['FINAL_ISSUE']['id'], basis['IFR']['depends_on'])
-        self.assertIn(basis['FINAL_ISSUE']['id'], drawing['IFR']['depends_on'])
-        self.assertIn(basis['FINAL_ISSUE']['id'], peer['IFR']['depends_on'])
+        # The MDR contains titles, not a predecessor network. Do not add inferred
+        # survey/basis/drawing gates and misrepresent them as source logic.
+        self.assertEqual(basis['IFR']['depends_on'], [])
+        self.assertEqual(drawing['IFR']['depends_on'], [])
+        self.assertEqual(peer['IFR']['depends_on'], [])
         self.assertNotIn(drawing['FINAL_ISSUE']['id'], peer['IFR']['depends_on'])
         self.assertNotIn(peer['FINAL_ISSUE']['id'], drawing['IFR']['depends_on'])
         audit_dates = [stages[f'Design Audit at {percent}%']['IFR']['planned_start_date']
                        for percent in (30, 60, 90)]
-        self.assertEqual(audit_dates, sorted(set(audit_dates)))
-        gate = next(link for link in basis['IFR']['dependency_details']
-                    if link['task_id'] == survey['FINAL_ISSUE']['id'])
-        self.assertEqual((gate['type'], gate['lag_days']), ('FS', 0))
-        self.assertEqual(gate['source'], 'deliverable_sequence')
-        self.assertEqual(gate['status'], 'proposed')
-        self.assertEqual(gate['evidence_type'], 'planning_inference')
-        self.assertIn('planned_start_date', survey['IFR']['schedule_generated_fields'])
+        self.assertEqual(audit_dates, [None, None, None])
+        self.assertEqual(basis['IFR']['dependency_details'], [])
+        self.assertNotIn('planned_start_date', survey['IFR']['schedule_generated_fields'])
+        self.assertTrue(all(task['duration_days'] is None for task in plan['tasks']))
 
-    def test_fresh_register_preview_has_phase_windows_sparse_gates_and_no_writes(self):
+    def test_fresh_register_preview_has_no_guessed_phase_windows_or_durations_and_no_writes(self):
         self.project.refresh_from_db()
         before = deepcopy(self.project.simple_planning_state)
         with CaptureQueriesContext(connection) as queries:
@@ -116,10 +116,11 @@ class WorkflowSequenceProposalAPITests(TestCase):
         self.assertTrue(all(task['source_references'][0]['file_id'] == self.register.pk for task in plan['tasks']))
         self.assertEqual(plan['source_verification']['document_register']['expected_count'], len(self.TITLES))
         self.assertEqual(plan['source_verification']['document_register']['matched_count'], len(self.TITLES))
-        self.assertEqual(plan['scheduling_status']['state'], 'proposed')
-        self.assertEqual(preview['proposal']['sequence_summary']['internal_relationship_count'], len(self.TITLES) * 4)
-        self.assertGreaterEqual(preview['proposal']['sequence_summary']['cross_deliverable_relationship_count'], 3)
-        self.assertTrue(all(task['calculation_basis'] == 'draft_cpm' for task in plan['tasks']))
+        self.assertEqual(sum(len(task['depends_on']) for task in plan['tasks']), len(self.TITLES) * 4)
+        self.assertEqual(preview['proposal']['duration_review']['missing_source_count'], len(self.TITLES) * 5)
+        self.assertIsNone(preview['proposal']['finish_date'])
+        self.assertEqual(preview['proposal']['target_finish_date'], '2026-09-04')
+        self.assertTrue(all(task['calculation_basis'] is None for task in plan['tasks']))
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state, before)
         self.assertFalse(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
@@ -203,7 +204,7 @@ class WorkflowSequenceProposalAPITests(TestCase):
         self.assertEqual(assigned.due_date.isoformat(), '2026-08-20')
         self.assertEqual(sum(bool(task.get('assignee_id')) for task in applied['tasks']), 1)
 
-    def test_saved_start_and_duration_edits_recalculate_successor_dates_and_float(self):
+    def test_saved_manual_duration_does_not_invent_missing_successor_dates_or_float(self):
         applied = self.apply(self.preview(self.analysed['revision']))
         before = self.stage_map(applied)['Electrical Layout Drawing']
         edited = deepcopy(applied['tasks'])
@@ -214,11 +215,11 @@ class WorkflowSequenceProposalAPITests(TestCase):
         after = self.stage_map(saved)['Electrical Layout Drawing']
         self.assertEqual(after['IFR']['planned_start_date'], '2026-08-03')
         self.assertEqual(after['IFR']['duration_days'], 15)
-        self.assertGreater(after['COMPANY_REVIEW']['planned_start_date'], before['COMPANY_REVIEW']['planned_start_date'])
-        self.assertGreater(after['FINAL_ISSUE']['planned_finish_date'], before['FINAL_ISSUE']['planned_finish_date'])
-        self.assertLess(after['IFR']['total_float_days'], before['IFR']['total_float_days'])
-        self.assertLess(after['FINAL_ISSUE']['total_float_days'], 0)
-        self.assertTrue(after['FINAL_ISSUE']['is_critical'])
+        self.assertIsNone(after['COMPANY_REVIEW']['planned_start_date'])
+        self.assertIsNone(after['FINAL_ISSUE']['planned_finish_date'])
+        self.assertIsNone(after['IFR']['total_float_days'])
+        self.assertIsNone(after['FINAL_ISSUE']['total_float_days'])
+        self.assertIsNone(after['FINAL_ISSUE']['is_critical'])
         self.assertEqual([task['id'] for task in saved['tasks']], [task['id'] for task in applied['tasks']])
         self.assertEqual(len(saved['deliverables']), len(self.TITLES))
         reloaded = self.stage_map(self.read())['Electrical Layout Drawing']
@@ -270,4 +271,4 @@ class WorkflowSequenceProposalAPITests(TestCase):
         self.assertIn(first_id, proposed[second_id]['depends_on'])
         self.assertIn(second_id, proposed[first_final]['depends_on'])
         self.assertEqual(len(proposed), len(self.TITLES) * 5)
-        self.assertTrue(all(task['calculated'] for task in proposed.values()))
+        self.assertTrue(all(not task['calculated'] for task in proposed.values()))

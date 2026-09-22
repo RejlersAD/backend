@@ -8,6 +8,8 @@ from ..models import ScheduleReview, ScheduleVersion
 from .audit import record_event
 from .trustworthy_scheduling import current_assurance
 from .source_schedule_verification import reference_schedule_blocker
+from .schedule_check_details import apply_timing_warning_policy
+from .planning_boundaries import accepted_input_validation, calculation_inputs_current
 
 
 class ScheduleApprovalError(ValueError):
@@ -61,6 +63,18 @@ def require_simple_plan_source_import(version):
         raise ScheduleApprovalError(source_blocker['message'], code=source_blocker['code'], files=source_blocker['files'])
 
 
+def require_accepted_schedule_inputs(version):
+    readiness = accepted_input_validation(version)
+    if not readiness['ready_for_approval']:
+        raise ScheduleApprovalError(
+            'Resolve the evidence and accepted-input issues before schedule approval.',
+            code='planning_inputs_not_accepted', issues=readiness['issues'],
+        )
+    if not calculation_inputs_current(version):
+        raise ScheduleApprovalError('Planning evidence or calendar inputs changed after calculation. Recalculate the accepted inputs before approval.',
+                                    code='calculation_inputs_stale')
+
+
 def can_decide_schedule_review(review, user, *, decision='approved'):
     if not active_approval_user(user) or not approval_access(user, 'planning_package'):
         return False
@@ -86,7 +100,8 @@ def can_approve_schedule(version, user, *, allow_unapproved_assurance=False):
             or not version.calculated_at
             or version.governance_reviews.filter(is_deleted=False, status='pending').exists()):
         return False
-    if _simple_plan_source_blocker(version):
+    if (_simple_plan_source_blocker(version) or not accepted_input_validation(version)['ready_for_approval']
+            or not calculation_inputs_current(version)):
         return False
     assurance = current_assurance(version)
     return bool(assurance and not assurance.is_deleted and not assurance.blockers
@@ -100,7 +115,8 @@ def can_baseline_schedule(version, user):
             or version.governance_items.filter(priority='critical', is_deleted=False)
             .exclude(status__in=['closed', 'implemented', 'rejected']).exists()):
         return False
-    if _simple_plan_source_blocker(version):
+    if (_simple_plan_source_blocker(version) or not accepted_input_validation(version)['ready_for_approval']
+            or not calculation_inputs_current(version)):
         return False
     assurance = current_assurance(version)
     return bool(assurance and not assurance.is_deleted and assurance.status == 'approved' and not assurance.blockers)
@@ -111,6 +127,7 @@ def approve_schedule_version(version, user, *, route='direct', review_id=None):
     version = lock_schedule_version(version)
     require_schedule_authority(version, user)
     require_simple_plan_source_import(version)
+    require_accepted_schedule_inputs(version)
     if version.schedule.is_deleted or version.schedule.project.is_deleted:
         raise ScheduleApprovalError('This schedule is archived.', code='schedule_archived')
     if version.status != 'calculated' or not version.calculated_at:
@@ -127,7 +144,7 @@ def approve_schedule_version(version, user, *, route='direct', review_id=None):
         )
     generation = version.source_generation
     critical_findings = [
-        item for item in (generation.validation or []) if item.get('severity') == 'critical'
+        item for item in (generation.validation or []) if apply_timing_warning_policy(item).get('severity') == 'critical'
     ] if generation else []
     unconfirmed_gates = [
         item for item in (generation.logic_matrix or [])

@@ -7,7 +7,7 @@ from apps.core.project_models import Project, ProjectMember
 from apps.users.models import User
 
 from ..models import GovernanceItem, PlanningAuditEvent, ScheduleVersion
-from .test_scheduling_engine import ScheduleFixture
+from .test_scheduling_engine import ScheduleFixture, grant_planning_test_actions
 
 
 class RiskChangeControlAPITests(ScheduleFixture):
@@ -15,6 +15,8 @@ class RiskChangeControlAPITests(ScheduleFixture):
         super().setUp()
         enterprise = Project.objects.create(name='Risk controlled project', code='RISK-001', owner=self.owner)
         self.reviewer = User.objects.create_user(username='risk-reviewer', email='risk-reviewer@example.com', password='test')
+        grant_planning_test_actions((self.owner, self.reviewer, self.outsider), ('read', 'create', 'update'))
+        grant_planning_test_actions((self.outsider,), ('approve',))
         ProjectMember.objects.create(project=enterprise, user=self.reviewer, role='reviewer')
         self.project.enterprise_project = enterprise
         self.project.save(update_fields=['enterprise_project', 'updated_at'])

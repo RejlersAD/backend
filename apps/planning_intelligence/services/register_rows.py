@@ -7,7 +7,6 @@ Excel parses, but labels their provenance as extracted lines, not worksheet rows
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
 import io
 import re
 import unicodedata
@@ -21,16 +20,6 @@ _LEGACY_REGISTER_ROW = re.compile(
     r'(?P<existing>NEW|EXISTING)\s+(?P<class>\d{1,3})\s+(?P<revision>[A-Z0-9]{1,8})(?:\s.*)?$',
     re.I,
 )
-_DOCUMENT_WORDS = {
-    'report', 'reports', 'study', 'studies', 'drawing', 'drawings', 'diagram', 'diagrams',
-    'plan', 'plans', 'procedure', 'procedures', 'assessment', 'specification', 'specifications',
-    'list', 'schedule', 'matrix', 'calculation', 'calculations', 'philosophy', 'datasheet',
-    'sheet', 'sheets', 'register', 'review', 'dossier',
-}
-_AREA_ENDINGS = {
-    'island', 'plant', 'site', 'area', 'zone', 'field', 'terminal', 'platform',
-    'facility', 'station', 'complex', 'yard', 'offshore', 'onshore',
-}
 
 
 def _text(value):
@@ -47,6 +36,8 @@ def _words(value):
 
 def normalize_register_discipline(value):
     """Keep an original label separately; HVAC must remain its own discipline."""
+    if not value or not str(value).strip():
+        return 'not_specified'
     normalized = _words(value)
     mappings = (
         ('hvac', 'hvac'), ('civil', 'civil'), ('structural', 'civil'),
@@ -60,13 +51,16 @@ def normalize_register_discipline(value):
         if re.search(r'\b' + re.escape(term) + (r'\w*\b' if term in {'instrument', 'telecom', 'project control'} else r'\b'), normalized):
             return code
     ascii_value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode()
-    return re.sub(r'[^a-z0-9]+', '_', ascii_value.casefold()).strip('_')[:64] or 'general'
+    return re.sub(r'[^a-z0-9]+', '_', ascii_value.casefold()).strip('_')[:64] or 'not_specified'
 
 
 def _header_role(value):
     name = _words(value)
     if name in {'discipline', 'discipline name', 'discipline code', 'department'}:
         return 'discipline_label'
+    for dimension in ('phase', 'package', 'area'):
+        if name in {dimension, dimension + ' name', dimension + ' code'}:
+            return dimension + '_label'
     if name in {
         'sl no', 'slno', 's no', 'sr no', 'sr', 'serial no', 'serial number',
         'item', 'item no', 'item number', 'no', 'number',
@@ -106,6 +100,7 @@ class _RegisterTable:
     def __init__(self):
         self.columns = None
         self.column_count = 0
+        self.header_cells = []
         self.discipline = ''
 
     def row(self, values, *, collapsed=False):
@@ -114,9 +109,20 @@ class _RegisterTable:
         if header:
             self.columns = header
             self.column_count = len(cells)
+            self.header_cells = cells[:]
             return None
         if not self.columns or not any(cells):
             return None
+
+        # These assertions describe literal cells only. Display-only inherited
+        # discipline labels and collapsed legacy columns are never evidence.
+        explicit_dimensions = {}
+        if len(cells) == self.column_count:
+            for dimension in ('discipline', 'phase', 'package', 'area'):
+                index = self.columns.get(dimension + '_label')
+                if index is not None and cells[index]:
+                    explicit_dimensions[dimension] = {'value': cells[index], 'column': index + 1,
+                                                      'header': self.header_cells[index]}
 
         nonempty = [cell for cell in cells if cell]
         if len(nonempty) == 1:
@@ -158,6 +164,7 @@ class _RegisterTable:
             'register_item': int(serial) if serial.isdigit() else serial or None,
             'document_number': document_number,
             'document_revision': get('document_revision'),
+            'explicit_dimensions': explicit_dimensions,
         }
 
 
@@ -248,8 +255,8 @@ def extract_legacy_register_rows(text):
 
     This is deliberately separate from header detection: callers can retain the
     historical PDF-only workflow while including these rows beside an explicit
-    spreadsheet register. Repeated location columns follow the existing parser's
-    conservative suffix rule; shared document-title endings are never removed.
+    spreadsheet register. Without column boundaries, retain the full title/area
+    text and expose its ambiguity instead of guessing which words to remove.
     """
     matches = []
     for line in re.finditer(r'^.*$', text or '', re.M):
@@ -258,23 +265,9 @@ def extract_legacy_register_rows(text):
             matches.append((line, match))
     if not matches:
         return []
-    suffix_counts = defaultdict(int)
-    for _line, match in matches:
-        tokens = match.group('title_area').split()
-        for size in range(1, min(5, len(tokens))):
-            suffix_counts[' '.join(tokens[-size:]).casefold()] += 1
-    threshold = max(2, int(len(matches) * .5))
-    suffixes = [suffix for suffix, count in suffix_counts.items()
-                if count >= threshold and len(suffix.split()) >= 2
-                and not set(suffix.split()).intersection(_DOCUMENT_WORDS)
-                and suffix.split()[-1] in _AREA_ENDINGS
-                and suffix.split()[0] not in {'for', 'of', 'in', 'on', 'at', 'to'}]
-    area_suffix = max(suffixes, key=lambda value: len(value.split()), default='')
     rows = []
     for line, match in matches:
         title = re.sub(r'\s+', ' ', match.group('title_area')).strip()
-        if area_suffix and title.casefold().endswith(' ' + area_suffix):
-            title = title[:-(len(area_suffix) + 1)].strip()
         label = match.group('discipline').strip()
         line_number = text[:line.start()].count('\n') + 1
         locator = {'line': line_number}
@@ -282,6 +275,7 @@ def extract_legacy_register_rows(text):
             locator['page'] = text[:line.start()].count('\f') + 1
         rows.append({
             'name': title, 'original_title': title,
+            'title_boundary_status': 'ambiguous', 'source_layout': 'collapsed_register',
             'discipline': normalize_register_discipline(label), 'discipline_label': label,
             'register_item': int(match.group('item')),
             'document_number': match.group('number').strip(),

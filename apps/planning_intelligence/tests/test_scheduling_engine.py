@@ -415,7 +415,7 @@ class MaterializationAndAPITests(ScheduleAPIFixture):
         self.assertEqual(response.data['code'], 'schedule_assurance_blocked')
         self.assertEqual(response.data['unconfirmed_gate_count'], 1)
 
-    def test_contract_overrun_blocks_phase3_assurance_approval(self):
+    def test_contract_overrun_warns_without_blocking_phase3_assurance_approval(self):
         self.project.planned_end_date = dt.date(2026, 8, 24)
         self.project.save(update_fields=['planned_end_date', 'updated_at'])
         self.activity('LATE', 3)
@@ -423,10 +423,53 @@ class MaterializationAndAPITests(ScheduleAPIFixture):
 
         review = run_schedule_assurance(self.version)
 
-        self.assertEqual(review.status, 'draft')
-        self.assertTrue(any(row['code'] == 'contract_finish_overrun' for row in review.blockers))
-        with self.assertRaisesMessage(ValueError, 'Resolve all critical'):
-            approve_schedule_assurance(self.version, self.owner)
+        self.assertEqual(review.status, 'ready')
+        self.assertEqual(review.blockers, [])
+        self.assertTrue(any(row['code'] == 'contract_finish_overrun' for row in review.warnings))
+        approved = approve_schedule_assurance(self.version, self.owner)
+        self.assertEqual(approved.status, 'approved')
+
+    def test_legacy_generation_timing_warning_allows_baseline_but_integrity_still_blocks(self):
+        self.project.planned_end_date = dt.date(2026, 8, 24)
+        self.project.save(update_fields=['planned_end_date', 'updated_at'])
+        generation = PlanningGeneration.objects.create(
+            project=self.project, version=1, generated_by=self.owner,
+            validation=[{'rule': 'negative_float', 'severity': 'critical', 'message': 'Legacy timing finding'}],
+        )
+        self.version.source_generation = generation
+        self.version.save(update_fields=['source_generation', 'updated_at'])
+        self.activity('LATE', 3)
+        calculate_schedule_version(self.version)
+        review = run_schedule_assurance(self.version)
+        review.blockers = [dict(row, severity='critical') for row in review.warnings
+                           if row['code'] in {'negative_float', 'contract_finish_overrun'}]
+        review.warnings, review.status = [], 'draft'
+        review.save(update_fields=['blockers', 'warnings', 'status'])
+        approve_schedule_assurance(self.version, self.owner)
+        review.refresh_from_db()
+        self.assertEqual(review.blockers, [])
+        self.assertEqual(review.status, 'approved')
+        client = APIClient()
+        client.force_authenticate(self.owner)
+        url = f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/'
+        generation.validation.append({'rule': 'deliverable_coverage', 'severity': 'critical', 'message': 'Missing scope'})
+        generation.save(update_fields=['validation'])
+        response = client.post(url + 'approve/')
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data['critical_finding_count'], 1)
+        generation.validation.pop()
+        generation.save(update_fields=['validation'])
+        response = client.post(url + 'approve/')
+        self.assertEqual(response.status_code, 200, response.data)
+        response = client.post(url + 'baseline/', {'name': 'Warning accepted'}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.version.refresh_from_db()
+        self.assertEqual(self.version.status, 'baselined')
+        self.assertEqual(self.version.calculated_finish, dt.date(2026, 8, 26))
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.planned_end_date, dt.date(2026, 8, 24))
+        generation.refresh_from_db()
+        self.assertEqual(generation.validation[0]['severity'], 'critical')
 
     def test_progress_update_builds_evm_forecast_and_s_curve(self):
         activity = self.activity('A', 2)
@@ -727,9 +770,12 @@ class IntegrationAndEnterpriseAPITests(ScheduleAPIFixture):
             self.assertEqual(len(response['X-Content-SHA256']), 64)
         self.assertEqual(ScheduleExportRecord.objects.filter(version=self.version).count(), 4)
 
-    @override_settings(PLANNING_INTEGRATION_ENCRYPTION_KEY='integration-test-key')
+    @override_settings(
+        PLANNING_INTEGRATION_ENCRYPTION_KEY='integration-test-key',
+        ROOT_URLCONF='apps.planning_intelligence.tests.test_work_assignments',
+    )
     @patch('apps.planning_intelligence.enterprise_views.deliver_schedule_integration.delay')
-    def test_integration_credentials_are_encrypted_and_publish_is_idempotent(self, mocked_delay):
+    def test_integration_credentials_are_encrypted_and_unverified_publish_is_denied(self, mocked_delay):
         endpoint_response = self.client.post(
             '/api/v1/planning-intelligence/integration-endpoints/',
             {
@@ -754,10 +800,13 @@ class IntegrationAndEnterpriseAPITests(ScheduleAPIFixture):
         self.assertEqual(endpoint_response.status_code, 201)
         self.assertTrue(endpoint_response.data['secret_configured'])
         self.assertNotIn('top-secret-value', endpoint.secret_encrypted)
-        self.assertEqual(first.status_code, 202)
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(IntegrationDelivery.objects.count(), 1)
-        mocked_delay.assert_called_once()
+        # Publish is an approval operation. Module access cannot bypass the
+        # requirement for a declared, verified business approval route.
+        self.assertEqual(first.status_code, 403, first.data)
+        self.assertEqual(second.status_code, 403, second.data)
+        self.assertIn('No verified business approval route', str(first.data['detail']))
+        self.assertFalse(IntegrationDelivery.objects.exists())
+        mocked_delay.assert_not_called()
 
     def test_private_integration_url_is_rejected_by_delivery_guard(self):
         from ..services.integration_delivery import validate_public_https_url

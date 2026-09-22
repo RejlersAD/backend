@@ -143,7 +143,7 @@ class ProjectSetupBYOKTests(WorkAssignmentFixture):
         self.assertEqual(decrypt_api_key(other.api_key_encrypted), 'other-person-private-key')
         self.assertEqual(ProjectSetupAISettings.objects.get(user=self.owner).model, 'gpt-4o-mini')
 
-    def test_every_settings_method_requires_project_setup_access(self):
+    def test_every_settings_method_requires_planning_edit_access(self):
         self.stored()
         anonymous = APIClient()
         for client in [anonymous, self.worker_client]:
@@ -151,6 +151,18 @@ class ProjectSetupBYOKTests(WorkAssignmentFixture):
                 response = getattr(client, method)(self.url, {'api_key': self.secret, 'model': 'gpt-4o'}, format='json')
                 self.assertIn(response.status_code, [401, 403], response.data)
         self.assertEqual(ProjectSetupAISettings.objects.count(), 1)
+
+    def test_existing_project_planner_can_manage_personal_key_without_creation_rights(self):
+        RolePermission.objects.filter(role=self.role, permission__action='create').delete()
+        cache.clear()
+        result, _, _ = self.save_settings()
+        self.assertEqual(result.status_code, 200, result.data)
+        status = self.client.get(self.url)
+        self.assertEqual(status.status_code, 200, status.data)
+        self.assertTrue(status.data['ai_settings']['key_configured'])
+        self.assertNotIn(self.secret, str(status.data))
+        creation_options = self.client.get(self.base + 'options/')
+        self.assertEqual(creation_options.status_code, 403, creation_options.data)
 
     def test_model_and_key_validation_happens_before_provider_call(self):
         with patch('openai.OpenAI') as client:

@@ -52,14 +52,14 @@ class TrustworthyInputsTests(TestCase):
         run, _ = run_document_intelligence(self.project, user=self.user, files=[mdr])
         basis = build_schedule_basis(run)
         visual = basis.deliverables.get(document_number='PJ-ABC-CIV-0001')
-        self.assertEqual(visual.canonical_name, 'Visual Inspection Report')
-        self.assertEqual(visual.original_title, 'VISUAL INSPECTION REPORT')
+        self.assertEqual(visual.canonical_name, 'VISUAL INSPECTION REPORT MUBARRAZ ISLAND')
+        self.assertEqual(visual.original_title, 'VISUAL INSPECTION REPORT MUBARRAZ ISLAND')
         self.assertEqual(visual.document_revision, 'A')
         self.assertTrue(visual.source_references[0]['locator']['line'])
         self.assertEqual(basis.deliverables.filter(document_number='PJ-ABC-CIV-0001').count(), 1)
         ndt = basis.deliverables.get(document_number='PJ-ABC-CIV-0002')
-        self.assertEqual(ndt.canonical_name, 'NDT Findings Report')
-        self.assertEqual(ndt.original_title, 'NDT FINDINGS REPORT')
+        self.assertEqual(ndt.canonical_name, 'NDT FINDINGS REPORT MUBARRAZ ISLAND')
+        self.assertEqual(ndt.original_title, 'NDT FINDINGS REPORT MUBARRAZ ISLAND')
         self.assertEqual(ndt.document_revision, 'B')
 
     def test_shared_title_words_are_not_mistaken_for_an_area_column(self):
@@ -81,7 +81,7 @@ class TrustworthyInputsTests(TestCase):
         for number, original in expected.items():
             self.assertEqual(basis.deliverables.get(document_number=number).original_title, original)
 
-    def test_repeated_register_rows_deduplicate_without_merging_different_document_numbers(self):
+    def test_repeated_register_rows_remain_distinct_until_identity_review(self):
         mdr = self._file('mdr', 'duplicates.txt', '\n'.join([
             'MASTER DELIVERABLE REGISTER',
             '1 CIVIL & STRUCTURAL PJ-ABC-CIV-0001 VISUAL INSPECTION REPORT WEST ISLAND NEW 1 A',
@@ -90,10 +90,11 @@ class TrustworthyInputsTests(TestCase):
         ]))
         run, _ = run_document_intelligence(self.project, user=self.user, files=[mdr])
         basis = build_schedule_basis(run)
-        self.assertEqual(basis.deliverables.count(), 2)
+        self.assertEqual(basis.deliverables.count(), 3)
+        self.assertEqual(len(set(basis.deliverables.values_list('canonical_key', flat=True))), 3)
         self.assertEqual(set(basis.deliverables.values_list('document_number', flat=True)), {'PJ-ABC-CIV-0001', 'PJ-ABC-CIV-0002'})
-        self.assertEqual(set(basis.deliverables.values_list('canonical_name', flat=True)), {'Visual Inspection Report'})
-        self.assertEqual(set(basis.deliverables.values_list('original_title', flat=True)), {'VISUAL INSPECTION REPORT'})
+        self.assertEqual(set(basis.deliverables.values_list('canonical_name', flat=True)), {'VISUAL INSPECTION REPORT WEST ISLAND'})
+        self.assertEqual(set(basis.deliverables.values_list('original_title', flat=True)), {'VISUAL INSPECTION REPORT WEST ISLAND'})
 
     def test_conflicts_and_unreviewed_deliverables_block_approval(self):
         run = DocumentIntelligenceRun.objects.create(
@@ -115,7 +116,7 @@ class TrustworthyInputsTests(TestCase):
             description='Dates disagree.',
         )
         IntelligenceFact.objects.create(
-            run=run, fact_type='deliverable', key='civil:test',
+            run=run, fact_type='deliverable', key='civil:test', extraction_method='manual',
             value={'discipline': 'civil', 'name': 'Test Report'},
             normalized_value='test report', confidence=.9,
         )
@@ -132,7 +133,16 @@ class TrustworthyInputsTests(TestCase):
         deliverable.save(update_fields=['status'])
         refresh_basis_readiness(basis)
         basis.refresh_from_db()
-        self.assertTrue(basis.readiness['ready'])
+        self.assertFalse(basis.readiness['ready'])
+        # Closing a conflict label alone does not select an accepted value.
+        first.status, first.reviewed_by, first.reviewed_at = 'confirmed', self.user, timezone.now()
+        first.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
+        second.status = 'rejected'
+        second.save(update_fields=['status'])
+        run.facts.filter(fact_type='deliverable').update(status='confirmed', reviewed_by=self.user, reviewed_at=timezone.now())
+        reviewed_basis = build_schedule_basis(run)
+        self.assertTrue(reviewed_basis.readiness['ready'])
+        self.assertEqual(reviewed_basis.effective_date, datetime.date(2026, 1, 1))
 
     def test_approved_basis_is_the_generation_scope(self):
         run = DocumentIntelligenceRun.objects.create(
@@ -140,7 +150,7 @@ class TrustworthyInputsTests(TestCase):
             started_at=timezone.now(), finished_at=timezone.now(), requested_by=self.user,
         )
         IntelligenceFact.objects.create(
-            run=run, fact_type='deliverable', key='civil:confirmed',
+            run=run, fact_type='deliverable', key='civil:confirmed', extraction_method='manual',
             value={'discipline': 'civil', 'name': 'Confirmed Report'},
             normalized_value='confirmed report', confidence=.9, status='confirmed',
         )

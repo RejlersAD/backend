@@ -1,4 +1,4 @@
-"""A blocked plan explains its repair using stable activity IDs before submit."""
+"""Integrity checks block; timing risks stay visible through approval and baseline."""
 from copy import deepcopy
 from datetime import date
 
@@ -6,9 +6,9 @@ from django.db import connection
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 
-from ..models import CalendarException, ScheduleReview, ScheduleVersion, WorkCalendar
+from ..models import CalendarException, ScheduleBaseline, ScheduleReview, ScheduleVersion, WorkCalendar
 from ..services.cpm import calculate_schedule_version
-from ..services.trustworthy_scheduling import run_schedule_assurance
+from ..services.trustworthy_scheduling import current_assurance, run_schedule_assurance
 from ..services.work_breakdown import materialize_work_breakdown
 from . import test_simple_planning as fixture
 
@@ -44,7 +44,7 @@ class SimpleScheduleChecksTests(TestCase):
         version.refresh_from_db()
         return run_schedule_assurance(version, requested_by=self.owner)
 
-    def test_readonly_checks_match_submit_and_authoritative_calendar_calculation(self):
+    def test_readonly_timing_warnings_match_authoritative_calendar_calculation(self):
         self.set_finish(date(2026, 11, 12))
         calendar = WorkCalendar.objects.create(
             project=self.project, name='Project calendar', is_default=True, working_weekdays=[0, 1, 2, 3, 4],
@@ -57,9 +57,10 @@ class SimpleScheduleChecksTests(TestCase):
             plan = self.read()
         self.assertFalse([row['sql'] for row in queries
                           if row['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
-        self.assertFalse(plan['permissions']['can_submit'])
+        self.assertTrue(plan['permissions']['can_submit'])
+        self.assertEqual(plan['blockers'], [])
         self.assertEqual(plan['revision'], saved['revision'])
-        expected = {row['code']: row for row in plan['blockers']}
+        expected = {row['code']: row for row in plan['warnings']}
         self.assertEqual(expected['negative_float']['task_ids'], ['a', 'b'])
         self.assertEqual(expected['negative_float']['minimum_float_days'], -1)
         overrun = expected['contract_finish_overrun']
@@ -67,46 +68,99 @@ class SimpleScheduleChecksTests(TestCase):
         self.assertEqual(overrun['target_finish_date'], '2026-11-12')
         self.assertEqual(overrun['forecast_finish_date'], '2026-11-13')
         self.assertEqual(overrun['variance_working_days'], 1)
-        self.assertEqual(self.submit_error(saved['revision']), expected)
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state, before)
         self.assertFalse(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
         self.assertFalse(ScheduleReview.objects.exists())
         assurance = self.authoritative_checks()
-        actual = {row['code']: row for row in assurance.blockers}
+        self.assertEqual(assurance.blockers, [])
+        self.assertEqual(assurance.status, 'ready')
+        actual = {row['code']: row for row in assurance.warnings}
         for code in expected:
             for key in ('task_ids', 'field', 'resolution', 'target_finish_date', 'forecast_finish_date',
                         'minimum_float_days', 'variance_working_days'):
                 self.assertEqual(actual[code].get(key), expected[code].get(key), (code, key))
             self.assertEqual([row['task_id'] for row in actual[code]['affected_activities']], expected[code]['task_ids'])
+            self.assertEqual(actual[code]['severity'], 'warning')
+            self.assertFalse(actual[code]['blocking'])
 
     def test_real_duration_correction_clears_checks_and_allows_submission(self):
         self.set_finish(date(2026, 11, 10))
         saved = self.save([self.task('a', duration_days=2), self.task('b', duration_days=3, depends_on=['a'])])
-        self.submit_error(saved['revision'])
+        self.assertTrue(any(row['code'] == 'negative_float' for row in saved['warnings']))
         corrected = self.save([self.task('a', duration_days=2), self.task('b', duration_days=1, depends_on=['a'])],
                               revision=saved['revision'])
         self.assertEqual(corrected['blockers'], [])
+        self.assertFalse(any(row['code'] in {'negative_float', 'contract_finish_overrun'} for row in corrected['warnings']))
         self.assertTrue(corrected['permissions']['can_submit'])
         submitted = self.action('submit', corrected['revision'])
         self.assertEqual(submitted['state'], 'submitted')
         self.assertEqual(ScheduleReview.objects.get().status, 'pending')
         self.assertEqual(self.project.planned_end_date, date(2026, 11, 10))
 
-    def test_every_affected_activity_is_returned_when_more_than_25_are_blocked(self):
+    def test_every_affected_activity_is_returned_when_more_than_25_have_timing_warnings(self):
         self.set_finish(date(2026, 11, 9))
         ids = [f'late-{index}' for index in range(31)]
         saved = self.save([self.task(key, duration_days=3) for key in ids])
         for plan in (saved, self.read()):
-            for finding in plan['blockers']:
+            findings = [row for row in plan['warnings'] if row['code'] in {'negative_float', 'contract_finish_overrun'}]
+            self.assertEqual(len(findings), 2)
+            for finding in findings:
                 self.assertEqual(finding['task_ids'], ids)
                 self.assertEqual(finding['task_count'], 31)
                 self.assertEqual(len(finding['affected_activities']), 31)
-        for finding in self.submit_error(saved['revision']).values():
-            self.assertEqual(finding['task_ids'], ids)
-        for finding in self.authoritative_checks().blockers:
+        for finding in self.authoritative_checks().warnings:
+            if finding['code'] not in {'negative_float', 'contract_finish_overrun'}:
+                continue
             self.assertEqual(finding['task_ids'], ids)
             self.assertEqual(len(finding['affected_activities']), 31)
+
+    def test_timing_warnings_allow_submit_approve_and_publish_without_changing_source_dates(self):
+        self.set_finish(date(2026, 11, 10))
+        saved = self.save([self.task('a', duration_days=2), self.task('b', duration_days=3, depends_on=['a'])])
+        submitted = self.action('submit', saved['revision'])
+        self.assertEqual(submitted['state'], 'submitted')
+        self.assertEqual(submitted['blockers'], [])
+        expected = {'negative_float', 'contract_finish_overrun'}
+        self.assertTrue(expected.issubset({row['code'] for row in submitted['warnings']}))
+        published = self.action('approve-publish', submitted['revision'], name='Reviewed timing risk')
+        self.assertEqual(published['state'], 'baselined')
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.planned_end_date, date(2026, 11, 10))
+        baseline = ScheduleBaseline.objects.get()
+        assurance = baseline.snapshot['schedule_assurance']
+        self.assertEqual(assurance['blockers'], [])
+        self.assertTrue(expected.issubset({row['code'] for row in assurance['warnings']}))
+        version = baseline.source_version
+        activities = {row.external_id: row for row in version.activities.all()}
+        self.assertEqual(float(activities['a'].duration_days), 2)
+        self.assertEqual(float(activities['b'].duration_days), 3)
+        self.assertEqual(activities['b'].planned_finish, date(2026, 11, 12))
+        self.assertLess(activities['b'].total_float_days, 0)
+
+    def test_legacy_timing_blockers_become_advisory_without_database_writes_on_read(self):
+        self.set_finish(date(2026, 11, 10))
+        self.save([self.task('a', duration_days=5)])
+        assurance = self.authoritative_checks()
+        timing = [dict(row, severity='critical') for row in assurance.warnings
+                  if row['code'] in {'negative_float', 'contract_finish_overrun'}]
+        assurance.blockers, assurance.warnings, assurance.status = timing, [], 'draft'
+        assurance.save(update_fields=['blockers', 'warnings', 'status'])
+        with CaptureQueriesContext(connection) as queries:
+            current = current_assurance(assurance.version)
+        self.assertFalse([row['sql'] for row in queries
+                          if row['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
+        self.assertEqual(current.status, 'ready')
+        self.assertEqual(current.blockers, [])
+        self.assertEqual({row['code'] for row in current.warnings}, {'negative_float', 'contract_finish_overrun'})
+        assurance.refresh_from_db()
+        self.assertEqual(assurance.status, 'draft')
+        self.assertEqual(assurance.blockers, timing)
+        assurance.blockers.append({'code': 'dependency_cycle', 'severity': 'critical', 'message': 'Fix cycle'})
+        assurance.save(update_fields=['blockers'])
+        current = current_assurance(assurance.version)
+        self.assertEqual(current.status, 'draft')
+        self.assertEqual([row['code'] for row in current.blockers], ['dependency_cycle'])
 
     def test_start_to_finish_is_shown_before_submission_without_changing_the_link(self):
         saved = self.save([self.task('a'), self.task('b', depends_on=['a'])])

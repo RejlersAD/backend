@@ -48,6 +48,14 @@ def materialize_generation(generation, *, requested_by=None):
         latest_run = existing.calculation_runs.filter(is_deleted=False).first()
         return existing, latest_run, []
 
+    engine = (generation.intelligence or {}).get('schedule_engine') or {}
+    if engine.get('policy') == 'document_driven' and not engine.get('ready_for_calculation'):
+        # Keep an incomplete evidence snapshot available for review. Missing
+        # durations are not zero/one-day tasks and no default calendar is valid.
+        return None, None, generation.validation or [{
+            'code': 'source_information_not_specified', 'severity': 'warning',
+            'message': 'Review the source evidence and Not Specified fields before calculating a schedule.'}]
+
     project = generation.project
     overrides = project.calendar_overrides or {}
     calendar, _ = WorkCalendar.objects.get_or_create(
@@ -154,6 +162,7 @@ def materialize_generation(generation, *, requested_by=None):
                 'recurrence': item.get('recurrence'),
                 'recurrence_occurrence': item.get('recurrence_occurrence'),
                 'source_references': item.get('source_references') or [],
+                'evidence_entity_id': item.get('evidence_entity_id') or str(item.get('id') or ''),
                 'source_start': item.get('start_date'),
                 'source_finish': item.get('finish_date'),
                 'date_authority': 'relational_cpm',
@@ -191,6 +200,7 @@ def materialize_generation(generation, *, requested_by=None):
                     'generation_dependency_id': predecessor_data.get('generation_dependency_id'),
                     'rationale': predecessor_data.get('rationale', ''),
                     'source_references': predecessor_data.get('source_references') or [],
+                    'lag_unit': predecessor_data.get('lag_unit'),
                 },
             ))
             seen_relationships.add(key)

@@ -16,7 +16,9 @@ class DeliverableMatchingTests(SimpleTestCase):
         # without changing projects, analysis history or uploaded documents.
         source = PlanningFile(id=41, category='sow', extracted_text=text)
         rows = {'run': DocumentIntelligenceRun(id=23), 'facts': [], '_seen': set()}
-        _extract_file_facts(rows, source)
+        # Compatibility vocabulary scanner is opt-in and not used by live
+        # document-driven extraction. These tests cover its token boundaries.
+        _extract_file_facts(rows, source, include_catalogue_deliverables=True)
         return [fact for fact in rows['facts'] if fact.fact_type == 'deliverable']
 
     def assert_no_piping_specification(self, text):
@@ -25,7 +27,8 @@ class DeliverableMatchingTests(SimpleTestCase):
         self.assertNotIn(PIPING_SPECIFICATION, detected['mentioned_in_source'])
         self.assertNotIn(PIPING_SPECIFICATION, [fact.value['name'] for fact in self.extract(text)])
         # Catalogue suggestions remain available; they are not source evidence.
-        self.assertIn(PIPING_SPECIFICATION, detected['deliverables'])
+        self.assertNotIn(PIPING_SPECIFICATION, detected['deliverables'])
+        self.assertIn(PIPING_SPECIFICATION, detected['suggested_deliverables'])
 
     def test_electrical_bulk_standard_is_not_piping_scope_evidence(self):
         self.assert_no_piping_specification(
@@ -63,7 +66,8 @@ class DeliverableMatchingTests(SimpleTestCase):
                 self.assertEqual(fact.source_file_id, 41)
                 self.assertEqual(fact.source_locator['matched_term'], phrase)
                 self.assertEqual(fact.source_locator['line'], 2)
-                self.assertEqual(fact.source_locator['page'], 52)
+                self.assertEqual(fact.source_locator['page'], 1)
+                self.assertEqual(fact.source_locator['printed_page'], 52)
                 self.assertEqual(fact.source_locator['character_start'], text.index(phrase))
                 self.assertIn(' '.join(phrase.split()), fact.source_excerpt)
 

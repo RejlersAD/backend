@@ -76,6 +76,7 @@ def call_claude(
     tokens_input = 0
     tokens_output = 0
     result_text = None
+    stop_reason = None
 
     try:
         import anthropic
@@ -94,6 +95,7 @@ def call_claude(
             block.text for block in response.content if getattr(block, 'type', None) == 'text'
         ).strip()
         usage = getattr(response, 'usage', None)
+        stop_reason = getattr(response, 'stop_reason', None)
         tokens_input = getattr(usage, 'input_tokens', 0) or 0
         tokens_output = getattr(usage, 'output_tokens', 0) or 0
         success = bool(result_text)
@@ -121,6 +123,7 @@ def call_claude(
         'tokens_input': tokens_input,
         'tokens_output': tokens_output,
         'latency_ms': latency_ms,
+        'stop_reason': stop_reason,
     }
 
 

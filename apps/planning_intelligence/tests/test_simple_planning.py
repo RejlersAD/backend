@@ -108,7 +108,7 @@ class SimplePlanningTests(TestCase):
             plan = self.action('analyse', 0)
         ai.assert_not_called()
         self.assertEqual([task['title'] for task in plan['tasks']], expected)
-        self.assertTrue(all(task['duration_source'] == 'proposed' for task in plan['tasks']))
+        self.assertTrue(all(task['duration_source'] == 'missing_source' and task['duration_days'] is None for task in plan['tasks']))
         self.assertTrue(all(task['depends_on'] == [] for task in plan['tasks']))
         self.assertEqual(len({task['id'] for task in plan['tasks']}), 220)
         intelligence = self.project.intelligence_runs.get()
@@ -230,14 +230,18 @@ class SimplePlanningTests(TestCase):
         self.assertEqual(baseline.snapshot, snapshot)
         self.assertEqual(ScheduleBaseline.objects.count(), 1)
 
-    def test_contract_overrun_cannot_create_a_submitted_or_approved_version(self):
+    def test_contract_overrun_warns_and_can_be_submitted_without_extending_project_dates(self):
         saved = self.save([self.task(duration_days=100)])
+        target = self.project.planned_end_date
         response = self.client.post(self.url + 'submit/', {'revision': saved['revision']}, format='json')
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data['code'], 'simple_plan_schedule_blocked')
-        self.assertFalse(ScheduleVersion.objects.exists())
-        self.assertFalse(ScheduleReview.objects.exists())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['state'], 'submitted')
+        self.assertIn('negative_float', {row['code'] for row in response.data['warnings']})
+        self.assertTrue(ScheduleVersion.objects.exists())
+        self.assertTrue(ScheduleReview.objects.exists())
         self.assertFalse(ScheduleBaseline.objects.exists())
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.planned_end_date, target)
 
     def test_manual_draft_import_preserves_assignment_ids_and_unmanaged_work(self):
         employee = EmployeeMaster.objects.create(user=self.reviewer, employee_number='SIMPLE-EMP', employee_code='SIMPLE-EMP',
@@ -284,12 +288,18 @@ class SimplePlanningTests(TestCase):
         response = self.client.get(self.url, {'version_id': version.pk})
         self.assertEqual(response.status_code, 200, response.data)
         self.assertTrue(response.data['viewing_history'])
-        self.assertFalse(any(response.data['permissions'].values()))
+        self.assertFalse(any(response.data['permissions'][key] for key in
+            ('can_edit', 'can_assign', 'can_submit', 'can_approve_publish', 'can_reopen')))
+        # Explicit selection is permitted; merely reading this history did not
+        # select it or grant permission to edit the displayed version.
+        self.assertTrue(response.data['permissions']['can_select_version'])
+        self.project.refresh_from_db()
+        self.assertIsNone(self.project.master_schedule_version_id)
         self.assertEqual(response.data['tasks'][0]['title'], 'Test application')
         self.assertEqual(response.data['versions'][0]['version_number'], version.version)
         self.assertEqual(self.client.get(self.url, {'version_id': 99999999}).status_code, 404)
 
-    def test_reanalysis_reuses_source_task_ids_and_immediately_withdraws_removed_assignments(self):
+    def test_reanalysis_preserves_work_only_for_same_source_version_and_keeps_old_history(self):
         employee = EmployeeMaster.objects.create(user=self.reviewer, employee_number='REBUILD-EMP', employee_code='REBUILD-EMP',
                                                 emp_code='REBUILD-EMP', email=self.reviewer.email, first_name='Reviewer',
                                                 last_name='Engineer', employment_status='active', join_date=date(2026, 1, 1))
@@ -306,15 +316,21 @@ class SimplePlanningTests(TestCase):
         first.status, first.progress_percent = 'in_progress', 35
         first.save(update_fields=['status', 'progress_percent'])
         second = ProjectTask.objects.get(source_key=f'wbs:{self.project.pk}:{original_ids[1]}')
+        unchanged = self.action('analyse', saved['revision'], rebuild=True)
+        self.assertEqual([task['id'] for task in unchanged['tasks']], original_ids)
+        self.assertEqual(unchanged['tasks'][0]['project_task_id'], first.pk)
+        self.assertEqual(unchanged['tasks'][0]['progress_percent'], 35)
         source.extracted_text = 'SL. NO.|DISCIPLINE|DOCUMENT TITLE\n1|ELECTRICAL|LAYOUT FAR-0'
         source.save(update_fields=['extracted_text', 'updated_at'])
-        rebuilt = self.action('analyse', saved['revision'], rebuild=True)
-        self.assertEqual([task['id'] for task in rebuilt['tasks']], original_ids[:1])
-        self.assertEqual(rebuilt['tasks'][0]['project_task_id'], first.pk)
-        self.assertEqual(rebuilt['tasks'][0]['progress_percent'], 35)
+        rebuilt = self.action('analyse', unchanged['revision'], rebuild=True)
+        self.assertEqual(len(rebuilt['tasks']), 1)
+        self.assertNotIn(rebuilt['tasks'][0]['id'], original_ids)
+        self.assertIsNone(rebuilt['tasks'][0].get('project_task_id'))
+        self.assertFalse(rebuilt['tasks'][0].get('assignee_id'))
         first.refresh_from_db()
         second.refresh_from_db()
-        self.assertFalse(first.is_deleted)
+        self.assertTrue(first.is_deleted)
+        self.assertEqual(first.progress_percent, 35)
         self.assertTrue(second.is_deleted)
 
     def test_duplicate_baseline_name_is_a_friendly_conflict_without_partial_approval(self):
@@ -351,10 +367,11 @@ class SimplePlanningTests(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data['code'], 'simple_plan_legacy_revision_required')
 
-    def test_missing_duration_can_be_proposed_from_effort_on_save(self):
+    def test_missing_duration_is_not_invented_from_effort_on_save(self):
         saved = self.save([self.task(duration_days=None, effort_hours=24)])
-        self.assertEqual(saved['tasks'][0]['duration_days'], 3)
-        self.assertEqual(saved['tasks'][0]['duration_source'], 'proposed')
+        self.assertIsNone(saved['tasks'][0]['duration_days'])
+        self.assertIsNone(saved['tasks'][0]['planned_finish_date'])
+        self.assertFalse(saved['calculation_available'])
 
     def test_analysis_source_race_rolls_back_without_claiming_new_inputs_were_analysed(self):
         from ..services.document_intelligence import run_document_intelligence
@@ -546,16 +563,16 @@ class SimplePlanningTests(TestCase):
         self.assertEqual([task['title'] for task in plan['tasks']], [task['title'] for task in original])
         rows = {task['id']: task for task in plan['tasks']}
         self.assertEqual(rows['drawing-a']['source_references'], original[1]['source_references'])
-        self.assertEqual(rows['drawing-a']['depends_on'], ['basis'])
-        self.assertEqual(rows['drawing-b']['depends_on'], ['basis'])
+        self.assertEqual(rows['drawing-a']['depends_on'], [])
+        self.assertEqual(rows['drawing-b']['depends_on'], [])
         self.assertEqual(rows['drawing-a']['planned_start_date'], rows['drawing-b']['planned_start_date'])
-        self.assertEqual(rows['closeout']['planned_finish_date'], '2026-09-04')
-        self.assertEqual(rows['weekly']['planned_finish_date'], '2026-09-04')
-        self.assertEqual(proposal['proposal']['finish_date'], '2026-09-04')
+        self.assertIsNone(rows['closeout']['planned_finish_date'])
+        self.assertIsNone(rows['weekly']['planned_finish_date'])
+        self.assertIsNone(proposal['proposal']['finish_date'])
         self.assertGreater(proposal['proposal']['changed_count'], 0)
-        self.assertEqual(plan['scheduling_status']['state'], 'proposed')
-        self.assertTrue(all(task['is_critical'] is not None and task['total_float_days'] is not None for task in plan['tasks']))
-        self.assertEqual(plan['calculation_basis'], 'draft_cpm')
+        self.assertTrue(all(task['is_critical'] is None and task['total_float_days'] is None for task in plan['tasks']))
+        self.assertIsNone(plan['calculation_basis'])
+        self.assertTrue(all(task['duration_days'] is None for task in plan['tasks']))
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state, {})
         self.assertEqual(self.project.manual_work_breakdown, before)
@@ -572,11 +589,10 @@ class SimplePlanningTests(TestCase):
         rows = {task['id']: task for task in applied['tasks']}
         self.assertEqual(rows['manual']['duration_days'], 5)
         self.assertEqual(rows['manual']['duration_source'], 'planner')
-        self.assertEqual(rows['manual']['planned_start_date'], '2026-08-20')
+        self.assertIsNone(rows['manual']['planned_start_date'])  # Unknown predecessor prevents a computed date.
         self.assertEqual(rows['manual']['depends_on'], ['drawing-a'])
         self.assertEqual(rows['manual']['due_date'], '2026-12-10')
-        self.assertEqual(rows['effort']['duration_days'], 3)
-        self.assertEqual(applied['scheduling_status']['state'], 'proposed')
+        self.assertIsNone(rows['effort']['duration_days'])
         self.assertEqual(applied['revision'], 1)
         self.assertIsNone(applied['version_id'])
         self.assertFalse(ScheduleBaseline.objects.exists())
@@ -589,8 +605,8 @@ class SimplePlanningTests(TestCase):
             for field in ('schedule_rationale', 'dependency_rationales', 'schedule_phase', 'schedule_generated_fields'):
                 task.pop(field, None)
         saved = self.save(edited, revision=1)
-        self.assertTrue(saved['tasks'][1]['schedule_rationale'])
-        self.assertEqual(saved['tasks'][1]['dependency_rationales']['basis']['status'], 'proposed')
+        self.assertEqual(saved['tasks'][1]['duration_review_status'], 'missing_source')
+        self.assertEqual(saved['tasks'][1]['duration_evidence'], None)
 
     def test_schedule_proposal_template_and_calendar_changes_invalidate_token(self):
         self.proposal_draft()
@@ -598,7 +614,7 @@ class SimplePlanningTests(TestCase):
         stage = WorkflowStage.objects.create(template=template, sequence=1, code='DESIGN', name='Design', duration_days=7)
         calendar = WorkCalendar.objects.create(project=self.project, name='Default', working_weekdays=[0, 1, 2, 3, 4], is_default=True)
         preview = self.action('propose-schedule', 0)
-        self.assertEqual(next(task for task in preview['plan']['tasks'] if task['id'] == 'drawing-a')['duration_days'], 7)
+        self.assertIsNone(next(task for task in preview['plan']['tasks'] if task['id'] == 'drawing-a')['duration_days'])
         stage.duration_days = 8
         stage.save(update_fields=['duration_days'])
         response = self.client.post(self.url + 'apply-schedule/', {'revision': 0, 'proposal_token': preview['proposal']['token']}, format='json')
@@ -624,10 +640,10 @@ class SimplePlanningTests(TestCase):
         preview = self.action('propose-schedule', 0)
         constraints = preview['proposal']['source_constraints']
         self.assertIn(10, [row['value'] for row in constraints if row['kind'] == 'review_days'])
-        self.assertEqual({row['value'] for row in constraints if row['kind'] == 'relative_weeks'}, {24, 28})
+        self.assertEqual({row['value'] for row in constraints if row['kind'] == 'relative_weeks'}, {28})
         self.assertTrue(all(row['anchor_status'] == 'unconfirmed' for row in constraints if row['kind'] == 'relative_weeks'))
         self.assertTrue(all(row['source_references'][0]['locator']['line'] > 0 for row in constraints))
-        self.assertTrue(any('award' in warning for warning in preview['proposal']['warnings']))
+        self.assertTrue(all(row['anchor_status'] == 'unconfirmed' for row in constraints if row['kind'] == 'relative_weeks'))
         self.assertEqual(preview['plan']['project']['end_date'], '2026-09-04')
         self.assertFalse(any('2026-07-21' in row['message'] for row in constraints))
 
@@ -659,19 +675,19 @@ class SimplePlanningTests(TestCase):
         self.assertTrue(any('after the registered target' in warning for warning in preview['proposal']['warnings']))
         self.assertEqual(next(task for task in preview['plan']['tasks'] if task['id'] == 'late')['planned_start_date'], '2026-09-07')
 
-    def test_schedule_proposal_audit_windows_are_distinct_and_row_order_does_not_create_logic(self):
+    def test_schedule_proposal_does_not_guess_audit_windows_from_percentages_or_row_order(self):
         self.proposal_draft([self.task(f'audit-{value}', title=f'HSE AUDIT ({value}%)', discipline='hse', effort_hours=None,
                                        duration_days=5, duration_source='proposed') for value in (30, 60, 90)])
         first = self.action('propose-schedule', 0)
         dates = [task['planned_finish_date'] for task in first['plan']['tasks'] if task['id'].startswith('audit-')]
-        self.assertEqual(len(set(dates)), 3)
+        self.assertTrue(all(value is None for value in dates))
         self.project.manual_work_breakdown['tasks'].reverse()
         self.project.save(update_fields=['manual_work_breakdown'])
         second = self.action('propose-schedule', 0)
         by_id = lambda response: {task['id']: (task['planned_start_date'], task['planned_finish_date'], task['depends_on']) for task in response['plan']['tasks']}
         self.assertEqual(by_id(first), by_id(second))
 
-    def test_schedule_proposal_places_register_and_project_setup_before_engineering(self):
+    def test_schedule_proposal_does_not_invent_setup_sequence_from_titles(self):
         self.proposal_draft([self.task(f'setup-{index}', title=title, discipline='general', effort_hours=None,
                                        duration_days=5, duration_source='proposed') for index, title in enumerate([
                                            'MASTER DELIVERABLE REGISTER', 'Engineering Deliverable Register',
@@ -679,11 +695,11 @@ class SimplePlanningTests(TestCase):
         preview = self.action('propose-schedule', 0)
         rows = {task['id']: task for task in preview['plan']['tasks']}
         for index in range(5):
-            self.assertEqual(rows[f'setup-{index}']['schedule_phase'], 'mobilization')
-            self.assertEqual(rows[f'setup-{index}']['planned_start_date'], '2026-01-06')
-            self.assertLess(rows[f'setup-{index}']['planned_start_date'], rows['drawing-a']['planned_start_date'])
+            self.assertIsNone(rows[f'setup-{index}']['planned_start_date'])
+            self.assertIsNone(rows[f'setup-{index}']['duration_days'])
+            self.assertEqual(rows[f'setup-{index}']['depends_on'], [])
 
-    def test_schedule_proposal_apply_updates_assigned_due_dates_without_replacing_employee_progress(self):
+    def test_schedule_proposal_preserves_started_employee_task_dates_duration_and_progress(self):
         self.proposal_draft()
         employee = EmployeeMaster.objects.create(user=self.reviewer, employee_number='PROP-EMP', employee_code='PROP-EMP',
                                                 emp_code='PROP-EMP', email=self.reviewer.email, first_name='Reviewer',
@@ -702,7 +718,9 @@ class SimplePlanningTests(TestCase):
         self.assertEqual(task['project_task_id'], assigned.pk)
         self.assertEqual(task['progress_percent'], 30)
         self.assertEqual(assigned.status, 'in_progress')
-        self.assertNotEqual(assigned.due_date, previous_due)
+        self.assertEqual(assigned.due_date, previous_due)
+        self.assertEqual(task['duration_days'], tasks[1]['duration_days'])
+        self.assertEqual(task['planned_start_date'], tasks[1]['planned_start_date'])
         self.assertEqual(assigned.due_date.isoformat(), task['planned_finish_date'])
 
     def test_schedule_proposal_apply_rolls_back_if_sources_change_during_assignment_sync(self):
@@ -741,25 +759,25 @@ class SimplePlanningTests(TestCase):
         def warnings(plan):
             return {item['code']: item for item in plan['warnings'] if isinstance(item, dict)}
 
-        self.assertEqual(warnings(applied)['schedule_target_overrun']['task_count'], 2)
+        self.assertEqual(warnings(applied)['contract_finish_overrun']['task_count'], 2)
         self.assertIn('schedule_award_anchor_unconfirmed', warnings(applied))
         self.assertTrue(any(item.get('code', '').startswith('schedule_proposal_assumption_') for item in applied['assumptions']))
         self.project.refresh_from_db()
         self.project.simple_planning_state['warnings'] = [{'code': 'existing_assurance', 'message': 'Existing assurance warning'}]
         self.project.save(update_fields=['simple_planning_state'])
         reloaded = self.read()
-        self.assertEqual(warnings(reloaded)['schedule_target_overrun']['task_count'], 2)
+        self.assertEqual(warnings(reloaded)['contract_finish_overrun']['task_count'], 2)
         self.assertIn('existing_assurance', warnings(reloaded))
         edited = deepcopy(reloaded['tasks'])
         next(task for task in edited if task['id'] == 'late-a')['planned_start_date'] = '2026-08-03'
         changed = self.save(edited, revision=reloaded['revision'])
-        self.assertEqual(warnings(changed)['schedule_target_overrun']['task_count'], 1)
-        self.assertEqual(warnings(changed)['schedule_target_overrun']['task_ids'], ['late-b'])
+        self.assertEqual(warnings(changed)['contract_finish_overrun']['task_count'], 1)
+        self.assertEqual(warnings(changed)['contract_finish_overrun']['task_ids'], ['late-b'])
         fixed = deepcopy(changed['tasks'])
         next(task for task in fixed if task['id'] == 'late-b')['planned_start_date'] = '2026-08-10'
         final = self.save(fixed, revision=changed['revision'])
-        self.assertNotIn('schedule_target_overrun', warnings(final))
-        self.assertNotIn('schedule_target_overrun', warnings(self.read()))
+        self.assertNotIn('contract_finish_overrun', warnings(final))
+        self.assertNotIn('contract_finish_overrun', warnings(self.read()))
         self.assertIn('schedule_award_anchor_unconfirmed', warnings(final))
         schedule = Schedule.objects.create(project=self.project, name='Historical plan', code='HISTORY', planned_start=date(2026, 1, 6))
         version = ScheduleVersion.objects.create(schedule=schedule, version=1)
@@ -771,7 +789,7 @@ class SimplePlanningTests(TestCase):
         self.assertNotIn('schedule_award_anchor_unconfirmed', warnings(historical.data))
         self.assertFalse(any(item.get('code', '').startswith('schedule_proposal_assumption_') for item in historical.data['assumptions']))
 
-    def _assert_reference_upload_blocks_lossy_actions(self, category, filename, text):
+    def _assert_reference_upload_allows_review_but_blocks_publication(self, category, filename, text):
         source = PlanningFile.objects.create(
             project=self.project, category=category, original_filename=filename,
             file='test/reference-without-storage', parse_status='done', extracted_text=text,
@@ -785,14 +803,18 @@ class SimplePlanningTests(TestCase):
         for operation in ('analyse', 'propose-schedule', 'submit'):
             with self.subTest(operation=operation), CaptureQueriesContext(connection) as queries:
                 response = self.client.post(self.url + operation + '/', {
-                    'revision': saved['revision'], **({'rebuild': True} if operation == 'analyse' else {}),
+                    'revision': saved['revision'],
                 }, format='json')
-            self.assertEqual(response.status_code, 409, response.data)
             if operation == 'submit':
+                self.assertEqual(response.status_code, 409, response.data)
                 self.assertEqual(response.data['code'], 'simple_plan_incomplete')
                 self.assertIn('reference_schedule_not_imported', [row['code'] for row in response.data['blockers']])
             else:
-                self.assertEqual(response.data['code'], 'reference_schedule_not_imported')
+                self.assertEqual(response.status_code, 200, response.data)
+                review = response.data['plan'] if operation == 'propose-schedule' else response.data
+                self.assertEqual({row['id'] for row in review['tasks']}, {row['id'] for row in saved['tasks']})
+                self.assertEqual(review['source_verification']['schedule_reference']['status'], 'not_imported')
+                self.assertFalse(review['permissions']['can_submit'])
             self.assertFalse(any(query['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')) for query in queries))
             self.project.refresh_from_db()
             self.assertEqual(self.project.simple_planning_state, before)
@@ -801,17 +823,99 @@ class SimplePlanningTests(TestCase):
             self.assertFalse(self.project.schedules.exists())
             self.assertFalse(self.project.schedule_bases.exists())
 
-    def test_reference_schedule_category_blocks_lossy_analysis_proposal_and_submission(self):
-        self._assert_reference_upload_blocks_lossy_actions('reference_schedule', 'Approved schedule.pdf', 'Original schedule report.')
+        # A requested rebuild of an unsupported source is not permission to
+        # delete existing work merely because extraction recovered no rows.
+        # Analysis may record evidence diagnostics, or decline the replacement;
+        # either outcome must retain the actual saved task values and identity.
+        with patch('apps.planning_intelligence.services.claude_client.call_claude', return_value=None):
+            rebuilt = self.client.post(self.url + 'analyse/', {
+                'revision': saved['revision'], 'rebuild': True,
+            }, format='json')
+        self.assertIn(rebuilt.status_code, (200, 409), rebuilt.data)
+        self.project.refresh_from_db()
+        retained = self.project.simple_planning_state['tasks']
+        self.assertEqual({row['id'] for row in retained}, {row['id'] for row in before['tasks']})
+        self.assertEqual([(row['title'], row['duration_days'], row['duration_source']) for row in retained],
+                         [(row['title'], row['duration_days'], row['duration_source']) for row in before['tasks']])
+        self.assertFalse(self.project.schedules.exists())
+        self.assertFalse(ScheduleBaseline.objects.filter(schedule__project=self.project).exists())
 
-    def test_native_reference_schedule_blocks_lossy_analysis_proposal_and_submission(self):
-        self._assert_reference_upload_blocks_lossy_actions('other', 'Original schedule.XER', 'ERMHDR\t8.4\n%T\tTASK\n')
+    def test_reference_schedule_category_allows_review_but_blocks_unverified_submission(self):
+        self._assert_reference_upload_allows_review_but_blocks_publication('reference_schedule', 'Approved schedule.pdf', 'Original schedule report.')
 
-    def test_embedded_schedule_columns_block_lossy_analysis_proposal_and_submission(self):
-        self._assert_reference_upload_blocks_lossy_actions(
+    def test_native_reference_schedule_allows_review_but_blocks_unverified_submission(self):
+        self._assert_reference_upload_allows_review_but_blocks_publication('other', 'Original schedule.XER', 'ERMHDR\t8.4\n%T\tTASK\n')
+
+    def test_embedded_schedule_columns_allow_review_but_block_unverified_submission(self):
+        self._assert_reference_upload_allows_review_but_blocks_publication(
             'sow', 'Scope with schedule appendix.pdf',
             'Appendix\nActivity ID\nActivity Name\nOriginal Duration\nStart\nFinish\nA010\nMobilization\n',
         )
+
+    def test_rebuild_replaces_previous_source_values_without_mixing_old_values_and_new_evidence(self):
+        from ..services.simple_planning import _retain_saved_work
+        reference = {'file_id': 12, 'locator': {'line': 3}}
+        previous = self.task('source-task', title='Test equipment', duration_days=5,
+                             duration_source='source_document', source_activity_id='ACT-2',
+                             source_references=[reference], source_title='Test equipment',
+                             depends_on=['before'],
+                             dependency_details=[{'task_id': 'before', 'type': 'FS', 'lag_days': 0, 'source': 'source_document'}],
+                             duration_evidence={'values': {'original_duration_days': 5}})
+        current = self.task('source-task', title='Test equipment', duration_days=3,
+                            duration_source='source_document', source_activity_id='ACT-2',
+                            source_references=[reference], depends_on=['after'],
+                            dependency_details=[{'task_id': 'after', 'type': 'SS', 'lag_days': 2, 'source': 'source_document'}],
+                            duration_evidence={'values': {'original_duration_days': 3}})
+        proposed = [self.task('before'), self.task('after'), current]
+        _retain_saved_work([previous], proposed)
+        self.assertEqual(current['duration_days'], 3)
+        self.assertEqual(current['duration_evidence']['values']['original_duration_days'], 3)
+        self.assertEqual(current['depends_on'], ['after'])
+        self.assertEqual(current['dependency_details'][0]['task_id'], 'after')
+
+    def test_document_milestone_missing_duration_remains_unspecified_when_seeded(self):
+        from ..services.simple_planning import _seed_task
+        task = _seed_task({'id': 'source-milestone', 'title': 'Acceptance', 'is_milestone': True,
+                           'evidence_policy': 'document_driven', 'duration_days': None,
+                           'duration_source': 'missing_source'})
+        self.assertIsNone(task['duration_days'])
+        self.assertEqual(task['duration_source'], 'missing_source')
+
+    def test_started_work_retains_its_value_and_old_evidence_with_new_source_conflict(self):
+        from ..services.simple_planning import _retain_saved_work
+        old = self.task('source-task', title='Inspect equipment', duration_days=5,
+                        duration_source='source_document', status='in_progress',
+                        duration_evidence={'values': {'original_duration_days': 5}})
+        current = self.task('source-task', title='Inspect equipment', duration_days=3,
+                            duration_source='source_document', evidence_policy='document_driven',
+                            duration_evidence={'values': {'original_duration_days': 3}})
+        _retain_saved_work([old], [current])
+        self.assertEqual(current['duration_days'], 5)
+        self.assertEqual(current['duration_evidence']['values']['original_duration_days'], 5)
+        self.assertEqual(current['duration_comparison_evidence']['values']['original_duration_days'], 3)
+        self.assertEqual(current['duration_review_status'], 'conflict')
+
+    def test_rebuild_does_not_retain_known_template_guesses_over_current_source_facts(self):
+        from ..services.simple_planning import _retain_saved_work
+        for old_source in ('proposed', 'template', 'default'):
+            with self.subTest(old_source=old_source):
+                old = self.task('source-task', title='Inspect equipment', duration_days=9,
+                                duration_source=old_source, depends_on=['before'],
+                                schedule_generated_fields=['duration_days', 'depends_on'],
+                                dependency_details=[{'task_id': 'before', 'type': 'FS', 'lag_days': 0,
+                                                     'source': 'deliverable_sequence', 'status': 'proposed'}])
+                current = self.task('source-task', title='Inspect equipment', duration_days=3,
+                                    duration_source='source_document', evidence_policy='document_driven',
+                                    depends_on=['after'],
+                                    dependency_details=[{'task_id': 'after', 'type': 'SS', 'lag_days': 2,
+                                                         'source': 'source_document'}],
+                                    duration_evidence={'values': {'original_duration_days': 3}})
+                proposed = [self.task('before'), self.task('after'), current]
+                _retain_saved_work([old], proposed)
+                self.assertEqual(current['duration_days'], 3)
+                self.assertEqual(current['duration_source'], 'source_document')
+                self.assertEqual(current['depends_on'], ['after'])
+                self.assertEqual(current['dependency_details'][0]['task_id'], 'after')
 
     def test_reference_schedule_blocks_current_simple_direct_approval_but_not_independent_manual_version(self):
         from ..services.cpm import calculate_schedule_version

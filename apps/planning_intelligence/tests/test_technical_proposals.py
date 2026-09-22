@@ -4,6 +4,8 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.users.models import User
+from apps.core.project_models import Project, ProjectMember
+from .test_scheduling_engine import grant_planning_test_actions
 
 from ..models import (
     PlanningGeneration, PlanningProject, ProposalExportRecord, ProposalWorkflowTask, Schedule,
@@ -25,9 +27,18 @@ class TechnicalProposalAPITests(TestCase):
         self.approver = User.objects.create_user(
             username='proposal-approver', email='approver@example.com', password='test', is_staff=True,
         )
+        grant_planning_test_actions((self.owner,), ('read', 'create', 'update', 'export'))
+        grant_planning_test_actions((self.reviewer, self.approver), ('read', 'update', 'approve', 'export'))
+        grant_planning_test_actions((self.outsider,), ('read', 'update', 'approve'))
+        enterprise = Project.objects.create(code='PROPOSAL-TEST', name='Proposal authorities', owner=self.owner)
+        # Staff status is not accountable authority. Both nominated approvers
+        # hold explicit project roles; the outsider remains outside the project.
+        for user in (self.reviewer, self.approver):
+            ProjectMember.objects.create(project=enterprise, user=user, role='project_manager')
         self.project = PlanningProject.objects.create(
             name='Mubarraz Accommodation Inspection Schedule', client='ADNOC Offshore',
             phase='FEED', effective_date=dt.date(2026, 8, 24), created_by=self.owner,
+            enterprise_project=enterprise,
         )
         self.generation = PlanningGeneration.objects.create(
             project=self.project, version=1, generated_by=self.owner,

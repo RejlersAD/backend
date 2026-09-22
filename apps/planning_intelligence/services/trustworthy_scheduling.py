@@ -10,7 +10,10 @@ from django.utils import timezone
 
 from ..models import ScheduleAssuranceReview
 from .cpm import WorkdayCalendar
-from .schedule_check_details import activity_check_rows, enrich_schedule_findings, relationship_check_rows
+from .schedule_check_details import (
+    TIMING_WARNING_CODES, activity_check_rows, apply_timing_warning_policy,
+    enrich_schedule_findings, relationship_check_rows,
+)
 
 
 def _finding(code, severity, message, **details):
@@ -82,7 +85,7 @@ def _network_validation(version, activities, relationships):
     if missing_evidence:
         findings.append(_finding('missing_activity_evidence', 'warning', f'{len(missing_evidence)} activities have no source-reference metadata.', activities=missing_evidence[:25]))
     if negative_float:
-        findings.append(_finding('negative_float', 'critical', f'{len(negative_float)} activities have negative float against the contractual finish.', activities=negative_float))
+        findings.append(_finding('negative_float', 'warning', f'{len(negative_float)} activities have negative float against the contractual finish.', activities=negative_float))
     if not findings:
         findings.append(_finding('network_integrity', 'pass', 'Network integrity checks passed.'))
     return {
@@ -247,8 +250,13 @@ def run_schedule_assurance(version, *, requested_by=None):
     resources = _resource_validation(version, activities)
     comparison = _change_comparison(version, activities, relationships)
     findings = network['findings'] + resources['findings']
+    for risk in version.planning_risks.exclude(status__in=['mitigated', 'closed']):
+        if risk.owner_id is None or risk.priority is None or risk.priority in {'high', 'critical'}:
+            findings.append(_finding('planning_risk_review', 'warning',
+                f'Risk requires project review: {risk.title}', risk_id=risk.pk, risk_status=risk.status,
+                risk_priority=risk.priority, action='Review the risk register, assign an owner and record the response.'))
     if contract.get('available') and not contract.get('fits_contract'):
-        findings.append(_finding('contract_finish_overrun', 'critical', f"Forecast exceeds contractual finish by {contract['variance_calendar_days']} calendar days."))
+        findings.append(_finding('contract_finish_overrun', 'warning', f"Forecast exceeds contractual finish by {contract['variance_calendar_days']} calendar days."))
     tasks = activity_check_rows(activities)
     links = relationship_check_rows(relationships)
     calendar = WorkdayCalendar(version.schedule.default_calendar, version.schedule.planned_start)
@@ -277,6 +285,22 @@ def current_assurance(version):
         status__in=['draft', 'ready', 'approved'], calculated_state_at=version.calculated_at,
         input_fingerprint=assurance_state_fingerprint(version),
     ).first()
+    if review:
+        # Apply the current approval policy without rewriting a historical review
+        # on a GET. Keep its dates, evidence and calculated-state fingerprint.
+        findings = [apply_timing_warning_policy(row) for row in (review.blockers or [])]
+        warnings = [apply_timing_warning_policy(row) for row in (review.warnings or [])]
+        warning_codes = {row.get('code') for row in warnings}
+        warnings.extend(row for row in findings if row.get('severity') == 'warning' and row.get('code') not in warning_codes)
+        review.blockers = [row for row in findings
+                           if (row.get('code') or row.get('rule')) not in TIMING_WARNING_CODES]
+        review.warnings = warnings
+        for field in ('network_validation', 'resource_validation'):
+            content = dict(getattr(review, field) or {})
+            content['findings'] = [apply_timing_warning_policy(row) for row in content.get('findings') or []]
+            setattr(review, field, content)
+        if review.status == 'draft' and findings and not review.blockers:
+            review.status = 'ready'
     return review
 
 
@@ -299,5 +323,6 @@ def approve_schedule_assurance(version, user):
     review.status = 'approved'
     review.approved_by = user
     review.approved_at = timezone.now()
-    review.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+    review.save(update_fields=['status', 'approved_by', 'approved_at', 'blockers', 'warnings',
+                               'network_validation', 'resource_validation', 'updated_at'])
     return review

@@ -25,6 +25,8 @@ class PreviewConfirmationTests(DocumentIntelligenceFixture):
             RolePermission.objects.create(role=self.role, permission=permission)
         for user in (self.owner, self.outsider):
             profile, _ = UserProfile.objects.get_or_create(user=user, defaults={'organization': organization})
+            # Isolate this role from grants installed by migration seed data.
+            UserRole.objects.filter(user_profile=profile).delete()
             UserRole.objects.create(user_profile=profile, role=self.role)
         self.file = self.source('scope.txt', 'sow', 'Electrical drawings and a HAZOP study.')
         self.raw = {
@@ -114,7 +116,10 @@ class PreviewConfirmationTests(DocumentIntelligenceFixture):
         self.assertEqual(response.data['code'], 'intelligence_sources_changed')
         restored = self.client.get(self.run_url).data
         self.assertFalse(restored['preview_confirmation']['is_current'])
-        self.assertEqual(restored['intelligence']['detected_project_name'], self.raw['detected_project_name'])
+        self.assertIsNone(restored['intelligence']['detected_project_name'])
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.summary['base_intelligence'], self.raw)
+        self.assertFalse(self.run.facts.filter(fact_type='project_name').exists())
 
     def test_pending_new_upload_prevents_confirmation(self):
         pending = self.source('mdr.csv', 'mdr', 'Document,Discipline')

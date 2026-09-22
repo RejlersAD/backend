@@ -135,13 +135,14 @@ class RegisterRowExtractionTests(TestCase):
             '2 HVAC ABC-HV-002 Ventilation layout North Island EXISTING 2 C\n'
         )
         self.assertEqual([row['name'] for row in spreadsheet + pdf], [
-            'PROJECT PLAN', 'Foundation drawing', 'Ventilation layout',
+            'PROJECT PLAN', 'Foundation drawing North Island', 'Ventilation layout North Island',
         ])
         self.assertEqual(pdf[1]['discipline'], 'hvac')
         self.assertEqual(pdf[1]['document_number'], 'ABC-HV-002')
         self.assertEqual(pdf[1]['document_revision'], 'C')
         self.assertEqual(pdf[1]['source_line'], 2)
         self.assertIn('North Island', pdf[1]['source_excerpt'])
+        self.assertEqual(pdf[1]['title_boundary_status'], 'ambiguous')
 
     def test_legacy_pdf_shared_document_title_endings_are_retained(self):
         rows = extract_legacy_register_rows(
@@ -194,7 +195,7 @@ class RegisterRowExtractionTests(TestCase):
         stream.seek(0)
         rows = extract_workbook_register_rows(stream)
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[1]['discipline'], 'general')
+        self.assertEqual(rows[1]['discipline'], 'not_specified')
         self.assertEqual(rows[1]['source_locator'], {'sheet': 'Other', 'row': 2})
         self.assertIsNone(rows[1]['register_item'])
 

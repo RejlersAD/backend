@@ -16,7 +16,7 @@ from .models import (
 
 
 ALLOWED_PLANNING_EXTENSIONS = {
-    '.pdf', '.docx', '.xlsx', '.xlsm', '.csv', '.txt', '.md', '.xer',
+    '.pdf', '.docx', '.xlsx', '.xlsm', '.csv', '.tsv', '.txt', '.md', '.xer',
     '.png', '.jpg', '.jpeg', '.tif', '.tiff',
 }
 

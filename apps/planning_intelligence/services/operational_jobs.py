@@ -31,7 +31,7 @@ def generation_fingerprint(project, request_data):
         'id', 'updated_at', 'size_bytes', 'confidence_score',
     ))
     return canonical_fingerprint({
-        'operation': 'generate-v5', 'project_id': project.id,
+        'operation': 'generate-v6-document-evidence', 'project_id': project.id,
         'project_updated_at': project.updated_at, 'basis_id': getattr(basis, 'id', None),
         'basis_updated_at': getattr(basis, 'updated_at', None), 'plan_id': getattr(plan, 'id', None),
         'plan_updated_at': getattr(plan, 'updated_at', None),
@@ -71,7 +71,7 @@ def generation_plan_build_fingerprint(basis):
         id__in=basis.source_run.source_file_ids, is_deleted=False,
     ).order_by('id').values('id', 'parse_status', 'updated_at'))
     return canonical_fingerprint({
-        'operation': 'build-generation-plan-v4', 'project_id': basis.project_id,
+        'operation': 'build-generation-plan-v5-document-evidence', 'project_id': basis.project_id,
         'basis_id': basis.id, 'basis_version': basis.version, 'basis_status': basis.status,
         'basis_updated_at': basis.updated_at, 'deliverables': deliverables, 'source_files': source_files,
     })
@@ -92,18 +92,36 @@ def workable_plan_fingerprint(project, request_data):
 
 
 def schedule_state_fingerprint(version):
+    from ..evidence_models import EvidenceGraph
+    from .evidence_graph import input_fingerprint
+    from .planning_boundaries import BOUNDARY_RULE_VERSION, CALCULATION_RULE_VERSION
+    from ..schedule_serializers import WorkCalendarSerializer
     activities = list(version.activities.filter(is_deleted=False).order_by('id').values(
-        'id', 'external_id', 'duration_days', 'calendar_id', 'constraint_type', 'constraint_date',
+        'id', 'external_id', 'duration_days', 'calendar_id', 'constraint_type', 'constraint_date', 'metadata',
     ))
     relationships = list(version.relationships.filter(is_deleted=False).order_by('id').values(
         'id', 'predecessor_id', 'successor_id', 'relationship_type', 'lag_days', 'updated_at',
     ))
     schedule = version.schedule
+    calendar_ids = {row['calendar_id'] for row in activities if row['calendar_id'] is not None}
+    if schedule.default_calendar_id:
+        calendar_ids.add(schedule.default_calendar_id)
+    calendars = WorkCalendarSerializer(schedule.project.work_calendars.filter(pk__in=calendar_ids).order_by('pk'), many=True).data
+    graph = EvidenceGraph.objects.filter(project=schedule.project).first()
+    current_sources = input_fingerprint(schedule.project)
     return canonical_fingerprint({
-        'operation': 'calculate-v4', 'version_id': version.id,
+        'operation': 'calculate-v5-evidence-boundary', 'version_id': version.id,
+        'boundary_rule': BOUNDARY_RULE_VERSION, 'calculation_rule': CALCULATION_RULE_VERSION,
         'planned_start': schedule.planned_start, 'contractual_finish': schedule.project.planned_end_date,
         'calendar_id': schedule.default_calendar_id,
+        'planning_build_id': version.planning_build_id,
+        'planning_profile_selection': _build_profile_selection(version),
         'calendar_updated_at': getattr(schedule.default_calendar, 'updated_at', None),
+        'calendars': calendars,
+        'evidence_graph_revision': graph.revision if graph else None,
+        'graph_source_fingerprint': graph.source_fingerprint if graph else None,
+        'current_source_fingerprint': current_sources,
+        'graph_stale': graph is None or graph.source_fingerprint != current_sources,
         'activities': activities, 'relationships': relationships,
     })
 
@@ -122,7 +140,16 @@ def assurance_state_fingerprint(version):
         'contractual_finish': version.schedule.project.planned_end_date,
         'resources': resources, 'assignments': assignments,
         'parent_version_id': version.parent_version_id,
+        'risks': list(version.planning_risks.order_by('pk').values('id', 'revision', 'status', 'priority', 'owner_id')),
     })
+
+
+def _build_profile_selection(version):
+    if not version.planning_build_id:
+        return None
+    from .planning_profiles import planning_profile_selection
+    selection = planning_profile_selection(version.schedule.project)
+    return {key: selection.get(key) for key in ('revision', 'profile_id', 'content_fingerprint', 'valid')}
 
 
 def update_job_progress(job, progress, message, *, phase=None, details=None):

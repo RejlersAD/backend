@@ -144,21 +144,37 @@ class ProjectSerializer(serializers.ModelSerializer):
 class ProjectListSerializer(serializers.ModelSerializer):
     """Lightweight project list serializer"""
     owner_name = serializers.SerializerMethodField()
-    team_size = serializers.IntegerField(read_only=True)
+    owner_id = serializers.ReadOnlyField()
+    creator_name = serializers.SerializerMethodField()
+    portfolio = serializers.SerializerMethodField()
+    team_size = serializers.SerializerMethodField()
     is_overdue = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Project
         fields = [
             'id', 'name', 'code', 'status', 'priority', 'progress',
-            'start_date', 'end_date', 'owner_name', 'team_size',
-            'is_overdue', 'created_at'
+            'start_date', 'end_date', 'owner_id', 'owner_name', 'team_size',
+            'client_name', 'creator_name', 'portfolio',
+            'is_overdue', 'created_at', 'updated_at',
         ]
 
     def get_owner_name(self, obj):
         if obj.owner:
             return f"{obj.owner.first_name} {obj.owner.last_name}".strip() or obj.owner.email
         return "Unassigned"
+
+    def get_creator_name(self, obj):
+        # core.Project records an owner, but not its creator. They are not interchangeable.
+        return None
+
+    def get_portfolio(self, obj):
+        return self.context.get('portfolio', {}).get(obj.pk)
+
+    def get_team_size(self, obj):
+        if hasattr(obj, '_portfolio_team_size'):
+            return obj._portfolio_team_size
+        return obj.team_size
 
 
 # ========================================

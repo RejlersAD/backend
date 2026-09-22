@@ -90,6 +90,11 @@ class PlanningProject(BaseModel):
     manual_work_breakdown = models.JSONField(default=dict, blank=True)
     # Independent revision-guarded planning canvas; legacy drafts remain intact.
     simple_planning_state = models.JSONField(default=dict, blank=True)
+    # Explicitly selected relational version; NULL preserves the existing draft.
+    master_schedule_version = models.ForeignKey(
+        'ScheduleVersion', on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+    )
+    master_schedule_revision = models.PositiveIntegerField(default=0)
 
     scope_summary = models.TextField(blank=True, default='')
     exclusions = models.TextField(blank=True, default='')
@@ -321,3 +326,13 @@ from .workflow_models import (  # noqa: E402,F401
     EngineeringDependencyRule, EngineeringDependencyTemplate, ProjectScheduleConfiguration,
     ScheduleDefaultProposal, WorkflowStage, WorkflowTemplate, WorkflowTemplateOverride,
 )
+
+from .evidence_models import (  # noqa: E402,F401
+    EvidenceDecision, EvidenceDocumentVersion, EvidenceEdge, EvidenceGraph, EvidenceNode,
+)
+
+from .planning_profile_models import PlanningProfile, ProjectPlanningProfileSelection  # noqa: E402,F401
+from .planning_build_models import PlanningBuild  # noqa: E402,F401
+from .planning_register_models import PlanningRiskRecord  # noqa: E402,F401
+from .operational_control_models import OperationalControlReport, OperationalEarningPolicy  # noqa: E402,F401
+from .delay_models import DelayAnalysisCase, DelayAnalysisRun, DelayEvent  # noqa: E402,F401

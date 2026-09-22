@@ -25,6 +25,21 @@ def _validate_version_access(serializer, version):
 
 
 class CalendarExceptionSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        from .services.calendar_intervals import interval_error
+        value = lambda key, default=None: attrs.get(key, getattr(self.instance, key, default))
+        intervals = value('working_times', [])
+        if intervals and not value('is_working', False):
+            raise serializers.ValidationError({'working_times': 'Nonworking exceptions cannot contain working intervals.'})
+        hours = value('working_hours')
+        if hours is not None and (hours < 0 or hours > 24 or (not value('is_working', False) and hours != 0)):
+            raise serializers.ValidationError({'working_hours': 'Supply hours from 0 to 24; nonworking exceptions must have zero hours.'})
+        calendar = value('calendar')
+        error = interval_error(intervals, value('working_hours') or (calendar.hours_per_day if calendar else None))
+        if error:
+            raise serializers.ValidationError({'working_times': error})
+        return attrs
+
     class Meta:
         model = CalendarException
         fields = '__all__'
@@ -44,7 +59,7 @@ class WorkCalendarSerializer(serializers.ModelSerializer):
         model = WorkCalendar
         fields = [
             'id', 'project', 'name', 'working_weekdays', 'hours_per_day', 'timezone',
-            'is_default', 'exceptions', 'created_at', 'updated_at',
+            'is_default', 'working_times', 'exceptions', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -54,6 +69,15 @@ class WorkCalendarSerializer(serializers.ModelSerializer):
         if len(value) != len(set(value)):
             raise serializers.ValidationError('Working weekdays must be unique.')
         return sorted(value)
+
+    def validate(self, attrs):
+        from .services.calendar_intervals import calendar_intervals_error
+        calendar = {key: attrs.get(key, getattr(self.instance, key, default)) for key, default in
+                    [('working_weekdays', []), ('hours_per_day', 8), ('working_times', {})]}
+        error = calendar_intervals_error(calendar)
+        if error:
+            raise serializers.ValidationError({'working_times': error})
+        return attrs
 
     def get_exceptions(self, obj):
         return CalendarExceptionSerializer(obj.exceptions.filter(is_deleted=False), many=True).data
@@ -191,6 +215,13 @@ class ActivityRelationshipSerializer(serializers.ModelSerializer):
 
 
 class ScheduleResourceSerializer(serializers.ModelSerializer):
+    can_edit = serializers.SerializerMethodField()
+
+    def get_can_edit(self, obj):
+        from .services.resource_planning import resource_is_locked
+        request = self.context.get('request')
+        return bool(request and can_write_project(request.user, obj.project) and not resource_is_locked(obj))
+
     class Meta:
         model = ScheduleResource
         fields = '__all__'
@@ -202,8 +233,39 @@ class ScheduleResourceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('You cannot modify resources for this project.')
         return value
 
+    def validate(self, attrs):
+        from .services.resource_planning import resource_is_locked, validate_cost_write
+        if self.instance and resource_is_locked(self.instance):
+            raise serializers.ValidationError('This resource is used by an immutable schedule. Create a new resource code for revised planning.')
+        if self.instance and attrs.get('project', self.instance.project).pk != self.instance.project_id:
+            raise serializers.ValidationError({'project': 'Resources cannot be moved to another project.'})
+        value = lambda field, default=None: attrs.get(field, getattr(self.instance, field, default))
+        for field in ('unit_cost', 'capacity_units_per_day'):
+            if value(field, 0) < 0:
+                raise serializers.ValidationError({field: 'Use a nonnegative value.'})
+        rate, unit = value('productivity_rate'), value('productivity_unit', '')
+        if (rate is None) != (not bool(unit)):
+            raise serializers.ValidationError({'productivity_rate': 'Specify both the productivity rate and output unit, or leave both blank.'})
+        if self.instance and self.instance.assignments.filter(is_deleted=False, planned_output_quantity__isnull=False).exists():
+            if rate is None or unit != self.instance.productivity_unit or value('unit') != self.instance.unit:
+                raise serializers.ValidationError('Allocated output quantities use these units. Remove those output quantities before changing units or clearing productivity.')
+        validate_cost_write(self, attrs, 'unit_cost', value('project'))
+        return attrs
+
+    def to_representation(self, instance):
+        from .services.resource_planning import mask_resource_costs
+        return mask_resource_costs(super().to_representation(instance), self.context.get('request'), instance.project)
+
 
 class ActivityAssignmentSerializer(serializers.ModelSerializer):
+    required_units = serializers.SerializerMethodField()
+
+    def get_required_units(self, obj):
+        if obj.planned_output_quantity is None or not obj.resource.productivity_rate:
+            return None
+        from decimal import Decimal, ROUND_UP
+        return str((obj.planned_output_quantity / obj.resource.productivity_rate).quantize(Decimal('0.01'), rounding=ROUND_UP))
+
     class Meta:
         model = ActivityAssignment
         fields = '__all__'
@@ -213,8 +275,14 @@ class ActivityAssignmentSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         activity = attrs.get('activity', getattr(self.instance, 'activity', None))
         resource = attrs.get('resource', getattr(self.instance, 'resource', None))
+        if self.instance:
+            _validate_mutable_version(self.instance.activity.version)
+            if activity.pk != self.instance.activity_id or resource.pk != self.instance.resource_id:
+                raise serializers.ValidationError('Remove this allocation and create another to change its activity or resource.')
         _validate_mutable_version(activity.version)
         _validate_version_access(self, activity.version)
+        if activity.is_deleted or resource.is_deleted:
+            raise serializers.ValidationError('Choose an active activity and resource.')
         if resource.project_id != _project_for_version(activity.version).id:
             raise serializers.ValidationError('Resource and activity must belong to the same project.')
         duplicate = ActivityAssignment.objects.filter(
@@ -224,7 +292,19 @@ class ActivityAssignmentSerializer(serializers.ModelSerializer):
             duplicate = duplicate.exclude(pk=self.instance.pk)
         if duplicate.exists():
             raise serializers.ValidationError('This resource is already assigned to the activity.')
+        for field in ('planned_units', 'budgeted_hours', 'budgeted_cost'):
+            if attrs.get(field, getattr(self.instance, field, 0)) < 0:
+                raise serializers.ValidationError({field: 'Use a nonnegative value.'})
+        quantity = attrs.get('planned_output_quantity', getattr(self.instance, 'planned_output_quantity', None))
+        if quantity is not None and not resource.productivity_rate:
+            raise serializers.ValidationError({'planned_output_quantity': 'Specify this resource productivity rate and output unit first.'})
+        from .services.resource_planning import validate_cost_write
+        validate_cost_write(self, attrs, 'budgeted_cost', _project_for_version(activity.version))
         return attrs
+
+    def to_representation(self, instance):
+        from .services.resource_planning import mask_resource_costs
+        return mask_resource_costs(super().to_representation(instance), self.context.get('request'), instance.resource.project)
 
 
 class ScheduleBaselineSerializer(serializers.ModelSerializer):
@@ -372,6 +452,10 @@ class DailyFieldUpdateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         instance = self.instance
         activity = attrs.get('activity') or (instance.activity if instance else None)
+        if instance and activity and (activity.pk != instance.activity_id or activity.version_id != instance.version_id):
+            raise serializers.ValidationError({'activity': 'A field report cannot be moved to another activity or schedule version. Create a new report for that activity.'})
+        if activity:
+            _validate_version_access(self, activity.version)
         report_date = attrs.get('report_date') or (instance.report_date if instance else None)
         actual_start = attrs.get('actual_start', instance.actual_start if instance else None)
         actual_finish = attrs.get('actual_finish', instance.actual_finish if instance else None)

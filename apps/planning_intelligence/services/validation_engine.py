@@ -22,10 +22,10 @@ def _issue(rule: str, severity: str, message: str, activity_id: str | None = Non
 def validate(project, wbs: list, activities: list, eddr: list, intelligence: dict) -> list:
     issues: list[dict] = []
 
-    # 1. No negative float.
+    # 1. Preserve negative float as a feasibility warning; never extend dates.
     negative_float = [a for a in activities if (a.get('total_float_days') or 0) < 0]
     if negative_float:
-        issues.append(_issue('negative_float', 'critical',
+        issues.append(_issue('negative_float', 'warning',
                               f'{len(negative_float)} activities have negative total float.'))
     else:
         issues.append(_issue('negative_float', 'pass', 'No activities with negative total float.'))

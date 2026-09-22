@@ -112,7 +112,20 @@ def _finish_date(calendar, start_index, duration):
 def _constraint_bound(calendar, activity, duration):
     if activity.constraint_type == 'none' or not activity.constraint_date:
         return None, None
-    point = calendar.index_of(activity.constraint_date)
+    constraint_date = activity.constraint_date
+    if activity.constraint_type in {'must_start', 'must_finish'} and not calendar.is_working(constraint_date):
+        raise SchedulingError(
+            'An exact-date constraint falls on a nonworking day. Review the constraint or explicitly approve a working calendar exception.',
+            code='constraint_nonworking_date',
+            issues=[{'code': 'constraint_nonworking_date', 'activity': activity.external_id,
+                     'constraint': activity.constraint_type, 'constraint_date': constraint_date.isoformat(),
+                     'severity': 'error', 'blocks': ['calculation', 'approval', 'export']}],
+        )
+    if activity.constraint_type in {'start_no_later', 'finish_no_later'}:
+        # An upper bound on Sunday means no later than the preceding working
+        # day; rounding forward would grant time the accepted constraint forbids.
+        constraint_date = calendar.on_or_before(constraint_date)
+    point = calendar.index_of(constraint_date)
     if activity.constraint_type in ('finish_no_later', 'must_finish') and duration:
         point -= duration - 1
     if activity.constraint_type in ('start_no_earlier',):
@@ -171,6 +184,17 @@ def calculate_schedule_version(version, *, requested_by=None):
             if not activities:
                 raise SchedulingError('The schedule version has no activities.', code='empty_schedule')
 
+            if version.status in {'approved', 'baselined', 'superseded'}:
+                raise SchedulingError('Create a new revision to calculate an approved or baselined schedule.', code='immutable_schedule')
+            from .planning_boundaries import accepted_input_validation, freeze_schedule_inputs
+            readiness = accepted_input_validation(version)
+            if not readiness['ready_for_calculation']:
+                raise SchedulingError(
+                    'Resolve the accepted-input checks before calculating this schedule.',
+                    code='planning_inputs_not_accepted', issues=readiness['issues'],
+                )
+            accepted_inputs = freeze_schedule_inputs(version)
+
             calendar = WorkdayCalendar(schedule.default_calendar, schedule.planned_start)
             nodes = {activity.pk: NetworkActivity(activity, _duration(activity)) for activity in activities}
             incoming = defaultdict(list)
@@ -191,6 +215,10 @@ def calculate_schedule_version(version, *, requested_by=None):
                 incoming[relationship.successor_id].append((relationship.predecessor_id, weight))
                 outgoing[relationship.predecessor_id].append((relationship.successor_id, weight))
                 indegree[relationship.successor_id] += 1
+
+            if any(item['code'] == 'relationship_outside_version' for item in issues):
+                raise SchedulingError('A dependency references an activity outside this schedule version.',
+                                      code='relationship_outside_version', issues=issues)
 
             queue = deque(pk for pk, degree in indegree.items() if degree == 0)
             order = []
@@ -289,6 +317,8 @@ def calculate_schedule_version(version, *, requested_by=None):
             version.calculated_at = timezone.now()
             version.calculated_finish = finish_date
             version.save(update_fields=['status', 'calculated_at', 'calculated_finish', 'updated_at'])
+            from .planning_boundaries import source_date_comparisons
+            issues.extend(source_date_comparisons(version, activities=updates))
             run.status = 'succeeded'
             run.finished_at = timezone.now()
             run.activity_count = len(activities)
@@ -299,6 +329,13 @@ def calculate_schedule_version(version, *, requested_by=None):
                 'status', 'finished_at', 'activity_count', 'critical_activity_count',
                 'project_finish', 'issues', 'updated_at',
             ])
+            from .audit import record_event
+            record_event(
+                project=schedule.project, actor=requested_by, action='schedule.calculated_inputs', entity=run,
+                after={'version_id': version.pk, 'input_sha256': accepted_inputs['sha256'],
+                       'project_finish': finish_date.isoformat()},
+                metadata={'accepted_inputs': accepted_inputs},
+            )
         return run
     except Exception as exc:
         run.status = 'failed'

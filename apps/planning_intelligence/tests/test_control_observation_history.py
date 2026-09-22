@@ -20,12 +20,13 @@ from ..models import (
 )
 from ..schedule_serializers import ScheduleControlSnapshotSerializer
 from ..services.project_controls import capture_control_snapshot
-from .test_scheduling_engine import ScheduleFixture
+from .test_scheduling_engine import ScheduleFixture, grant_planning_test_actions
 
 
 class ControlObservationHistoryTests(ScheduleFixture):
     def setUp(self):
         super().setUp()
+        grant_planning_test_actions((self.owner,), ('read', 'create', 'update'))
         self.data_date = dt.date(2026, 8, 25)
         self.task = self.activity(
             'A', 4, planned_start=dt.date(2026, 8, 24), planned_finish=dt.date(2026, 8, 27),
