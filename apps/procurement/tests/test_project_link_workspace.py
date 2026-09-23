@@ -1,10 +1,11 @@
 """Project Links lists and guarded, audited PO connections."""
 
 from decimal import Decimal
+from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.db import connection
+from django.db import connection, transaction
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import include, path
@@ -128,6 +129,41 @@ class ProjectLinkWorkspaceTests(TestCase):
         self.assertEqual(self.client.get(BASE + 'link-workspace/', {'link_status': 'unlinked'}).data['purchase_orders']['count'], 1)
         data = self.client.get(BASE + 'link-workspace/', {'project_id': self.alpha.pk}).data
         self.assertEqual(data['purchase_orders']['results'][0]['id'], str(self.linked.pk))
+
+    @skipUnless(connection.vendor == 'postgresql', 'PostgreSQL legacy project schema regression')
+    def test_legacy_unique_project_id_without_primary_key_can_list_and_select_orders(self):
+        zero = Project.objects.create(code='5900999', name='Project without purchase orders')
+        zero_scope = self.make_scope('5900999-Project without purchase orders', zero)
+        self.client.force_authenticate(self.root)
+        # Match the synchronized schema described by procurement migration 0035.
+        # A temporary shadow preserves the real table and its FK dependencies.
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE TEMPORARY TABLE core_project (LIKE public.core_project INCLUDING DEFAULTS) ON COMMIT DROP')
+            cursor.execute('INSERT INTO pg_temp.core_project SELECT * FROM public.core_project')
+            cursor.execute('CREATE UNIQUE INDEX legacy_project_id_unique ON pg_temp.core_project (id)')
+            cursor.execute("SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'pg_temp.core_project'::regclass AND contype = 'p'")
+            self.assertEqual(cursor.fetchone()[0], 0)
+        try:
+            with transaction.atomic():
+                response = self.client.get(BASE + 'link-workspace/', {
+                    'page': 1, 'page_size': 15, 'search': '', 'link_status': 'unlinked',
+                })
+                self.assertEqual(response.status_code, 200, response.data)
+                counts = {row['id']: row['purchase_order_count'] for row in response.data['projects']}
+                self.assertEqual(counts[str(self.alpha_scope.pk)], 1)
+                self.assertEqual(counts[str(self.beta_scope.pk)], 1)  # Includes the cancelled order.
+                self.assertEqual(counts[str(zero_scope.pk)], 0)
+                self.assertEqual(response.data['purchase_orders']['count'], 1)
+                self.assertEqual(response.data['purchase_orders']['results'][0]['id'], str(self.unlinked.pk))
+                selected = self.client.get(BASE + 'link-workspace/', {
+                    'scope_id': self.beta_scope.pk, 'link_status': 'linked',
+                })
+                self.assertEqual(selected.status_code, 200, selected.data)
+                self.assertEqual(selected.data['purchase_orders']['count'], 1)
+                self.assertEqual(selected.data['purchase_orders']['results'][0]['id'], str(self.cancelled.pk))
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute('DROP TABLE pg_temp.core_project')
 
     def test_read_is_bounded_and_does_not_mutate_business_records(self):
         before = list(PurchaseOrder.objects.order_by('pk').values())
