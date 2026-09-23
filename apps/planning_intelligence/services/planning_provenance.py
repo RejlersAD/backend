@@ -80,6 +80,11 @@ def annotate_plan_provenance(project, state):
             else:
                 result[field] = _label('unknown', 'not_recorded')
         source = task.get('duration_source')
+        if task.get('activity_name_basis') and result['title']['type'] == 'unknown':
+            generated = task.get('activity_name_original') == task.get('title')
+            result['title'] = _label('proposal' if generated else 'planner',
+                'requires_review' if generated else 'declared', task.get('source_references'),
+                naming_basis=task['activity_name_basis'])
         if result['duration_days']['type'] == 'unknown':
             if source in {'proposed', 'template', 'workflow_template', 'default', 'estimated', 'estimate', 'ai'}:
                 result['duration_days'] = _label('proposal', 'requires_review')

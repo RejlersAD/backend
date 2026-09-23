@@ -345,3 +345,7 @@ system_activity_dump.sql
 # Private Finance aggregates are provisioned separately from application code.
 apps/finance/data/invoice_performance_summary.json
 !docs/receivables-source.md
+!apps/planning_intelligence/tests/test_enterprise_schedule.py
+!apps/planning_intelligence/tests/test_enterprise_schedule_integration.py
+!apps/planning_intelligence/tests/test_enterprise_workflows.py
+!docs/enterprise-scheduling.md

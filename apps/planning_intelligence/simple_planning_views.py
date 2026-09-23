@@ -29,7 +29,7 @@ class SimplePlanActionSerializer(serializers.Serializer):
     approver_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
     name = serializers.CharField(max_length=255, allow_blank=True, default='')
     proposal_token = serializers.CharField(max_length=4096, required=False)
-    workflow_mode = serializers.ChoiceField(choices=['source_only', 'standard_five'], required=False)
+    workflow_mode = serializers.ChoiceField(choices=['source_only', 'standard_five', 'enterprise'], required=False)
     version_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
     requirement_scope = serializers.ChoiceField(choices=['all'], default='all')
 
