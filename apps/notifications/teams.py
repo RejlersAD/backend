@@ -30,6 +30,11 @@ def _absolute_action_url(action_url):
 def build_approval_assignment_payload(notification, context=None):
     """Build the stable JSON contract consumed by the RADAI Power Automate flow."""
     context = context or {}
+    metadata = getattr(notification, 'metadata', None) or {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    entity_type = str(context.get('entity_type') or metadata.get('entity_type') or '')
+    entity_id = str(context.get('entity_id') or metadata.get('entity_id') or '')
+    request_number = teams_plain_text(context.get('request_number') or metadata.get('request_number'), default='', max_length=300)
     message_title = teams_plain_text(context.get('title'), default='New approval request assigned', max_length=300)
     event_type = str(context.get('event_type') or 'approval_assignment')
     request_name = teams_plain_text(context.get('request_name') or notification.title, default='Approval request', max_length=300)
@@ -47,7 +52,12 @@ def build_approval_assignment_payload(notification, context=None):
     recipient_email = str(getattr(notification.recipient, 'email', '') or '').strip()
     facts = [
         {'title': 'Request', 'value': request_name},
-        {'title': 'PO Number', 'value': po_number},
+        *([
+            {'title': 'PR Number', 'value': request_number or 'Not specified'},
+            {'title': 'Related PO Number', 'value': po_number},
+        ] if entity_type == 'purchase_recommendation' else [
+            {'title': 'PO Number', 'value': po_number},
+        ]),
         {'title': 'Project Name', 'value': project_name},
         {'title': 'Project Code', 'value': project_id},
         {'title': 'Service', 'value': service},
@@ -69,6 +79,9 @@ def build_approval_assignment_payload(notification, context=None):
         # the following Flow-bot action can address recipient_email directly.
         'type': 'message',
         'event_type': event_type,
+        'entity_type': entity_type,
+        'entity_id': entity_id,
+        'request_number': request_number,
         'recipient_email': recipient_email,
         'recipient_name': recipient_name,
         'title': message_title,

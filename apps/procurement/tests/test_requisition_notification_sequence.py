@@ -63,6 +63,7 @@ class RequisitionNotificationSequenceTests(SimpleTestCase):
         self.notification_filter = self.start_patch(
             'apps.notifications.models.Notification.objects.filter',
         )
+        self.notification_filter.return_value.exclude.return_value = self.notification_filter.return_value
         self.notification_filter.return_value.values_list.return_value = []
         self.start_patch(f'{SERVICE_PATH}.transaction.on_commit', side_effect=lambda callback: callback())
         self.start_patch(

@@ -28,15 +28,29 @@ def safe_action_url(value):
         return '/notifications'
 
 
+def procurement_notification_target(metadata):
+    """Keep a linked document reference separate from the alert's own record."""
+    if metadata.get('entity_type') == 'purchase_recommendation':
+        return 'pr', metadata.get('pr_id') or metadata.get('entity_id')
+    if metadata.get('entity_type') == 'purchase_order':
+        return 'po', metadata.get('po_id') or metadata.get('entity_id')
+    # Preserve the historical backend interpretation for older notifications.
+    if metadata.get('po_id'):
+        return 'po', metadata['po_id']
+    if metadata.get('pr_id'):
+        return 'pr', metadata['pr_id']
+    return '', None
+
+
 def notification_action_url(notification):
     metadata = getattr(notification, 'metadata', None) or {}
     if isinstance(metadata, dict) and _is_approval_assignment(metadata):
         if metadata.get('enquiry_id'):
             return safe_action_url(f"/admin/enquiries/{metadata['enquiry_id']}")
-        if metadata.get('po_id'):
-            return safe_action_url(f"/procurement/orders/{metadata['po_id']}")
-        if metadata.get('pr_id'):
-            return safe_action_url(f"/procurement/requisitions/{metadata['pr_id']}")
+        record_type, record_id = procurement_notification_target(metadata)
+        if record_id:
+            collection = 'orders' if record_type == 'po' else 'requisitions'
+            return safe_action_url(f'/procurement/{collection}/{record_id}')
     return safe_action_url(getattr(notification, 'action_url', None))
 
 
@@ -194,17 +208,20 @@ def approval_assignment_issue(notification):
             return _proposal_assignment_issue(notification, metadata)
         except (KeyError, TypeError, ValueError, DjangoValidationError, ValidationError):
             return 'approval_context_invalid'
-    if not metadata.get('po_id') and not metadata.get('pr_id'):
+    record_type, record_id = procurement_notification_target(metadata)
+    if not record_type:
         return 'approval_context_unsupported'
+    if not record_id:
+        return 'approval_context_invalid'
     try:
         expected_level = int(metadata['approval_level'])
         recipient = notification.recipient
-        if metadata.get('po_id'):
+        if record_type == 'po':
             from apps.procurement.models import PurchaseOrder
             from apps.procurement.services import purchase_order_approvals as approvals
             from apps.procurement.services.approval_eligibility import MODULE_PO, eligible_stage_assignee
 
-            order = PurchaseOrder.objects.filter(pk=metadata['po_id']).first()
+            order = PurchaseOrder.objects.filter(pk=record_id).first()
             if order is None or not approvals.can_approve(order, recipient):
                 return 'approval_no_longer_assigned'
             for index, entry in approvals._active_entries(order.approval_log or []):
@@ -224,7 +241,7 @@ def approval_assignment_issue(notification):
             from apps.procurement.services.requisition_workflow import RequisitionWorkflowService as approvals
             from apps.procurement.services.approval_eligibility import MODULE_PR, eligible_stage_assignee
 
-            requisition = PurchaseRequisition.objects.filter(pk=metadata['pr_id']).first()
+            requisition = PurchaseRequisition.objects.filter(pk=record_id).first()
             if requisition is None or not approvals.can_approve(requisition, recipient):
                 return 'approval_no_longer_assigned'
             workflow = approvals._workflow(requisition)

@@ -159,6 +159,16 @@ total, with no additional tax calculation or assumed VAT treatment.
 
 ## Approval notification sequence
 
+- Purchase Recommendations and Purchase Orders send independent RADAI and Teams
+  notifications for their own active approval levels. Linking a PO to a PR does
+  not combine their notification rows, delivery tracking, or read/delete state.
+- Procurement payloads identify their own `entity_type` (`purchase_recommendation`
+  or `purchase_order`), `entity_id`, and `request_number`. Existing `pr_id` and
+  `po_id` metadata remains supported. Titles explicitly name the document type;
+  a recommendation shows its PR number and labels a linked PO as a related record.
+- Preview navigation and delivery revalidation use the explicit document type.
+  A linked reference cannot redirect a recommendation alert to its PO. Older
+  notifications without a type retain the backend's PO-first interpretation.
 - Only the lowest unresolved numeric level receives actionable notifications:
   Level 0, then Level 1, Level 2, and the remaining configured levels through CEO.
 - All approvers at the same level must approve before the next level is notified.

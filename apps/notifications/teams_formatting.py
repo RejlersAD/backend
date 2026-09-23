@@ -23,7 +23,7 @@ _HTML_TAGS = _BLOCK_TAGS | _HIDDEN_TAGS | _VOID_TAGS | {
     'var', 'video', 'audio',
 }
 _PREVIEW_SUFFIX = '… (Open Request for full text)'
-TEAMS_EMPHASIZED_FIELDS = frozenset({'PO Number', 'Project Code', 'Value'})
+TEAMS_EMPHASIZED_FIELDS = frozenset({'PR Number', 'PO Number', 'Project Code', 'Value'})
 
 
 class _VisibleText(HTMLParser):

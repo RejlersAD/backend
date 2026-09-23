@@ -261,6 +261,64 @@ class RequisitionWorkflowService:
         return recipient
 
     @classmethod
+    def _stage_assignment_issue(cls, stage):
+        """Explain a rejected assignment without repairing identity or access.
+
+        The resolver remains authoritative. This diagnostic is used only after
+        it rejects a stage, and follows its email-first account lookup.
+        """
+        from apps.hr_core.models import EmployeeMaster
+        from apps.rbac.action_policy import record_workflow_not_denied
+        from apps.rbac.approval_eligibility import approval_access
+        from .approval_eligibility import (
+            is_employee_selected_pr_stage, position_matches_stage, stage_positions,
+        )
+
+        assigned_email = cls._stage_email(stage)
+        assigned_id = stage.get('user_id') or stage.get('approver_id')
+        if not assigned_email and not assigned_id:
+            return 'missing_assignment', 'no employee account is assigned.'
+        lookup = {'email__iexact': assigned_email} if assigned_email else {'pk': assigned_id}
+        users = get_user_model().objects
+        try:
+            recipient = users.select_related('rbac_profile').get(**lookup, is_active=True)
+        except MultipleObjectsReturned:
+            return 'ambiguous_account', 'the assigned email matches multiple active accounts; resolve the duplicate accounts.'
+        except ObjectDoesNotExist:
+            if users.filter(**lookup).exists():
+                return 'inactive_account', 'the assigned employee account is inactive.'
+            return 'missing_account', 'the assigned employee account could not be found.'
+        except (ValueError, TypeError):
+            return 'missing_account', 'the assigned employee account identifier is invalid.'
+
+        if not cls._actor_is_active(recipient):
+            return 'inactive_account', 'the assigned employee account or access profile is inactive or deleted.'
+        profile = getattr(recipient, 'rbac_profile', None)
+        if profile is None:
+            return 'missing_access_profile', 'the assigned employee has no access profile for purchase requisition approval.'
+        if profile.locked_until and profile.locked_until > timezone.now():
+            return 'locked_account', 'the assigned employee account is temporarily locked.'
+
+        employee = EmployeeMaster.objects.filter(user_id=recipient.pk).first()
+        if employee is not None and employee.employment_status not in ('active', 'probation', 'notice_period'):
+            return 'inactive_employee', 'the assigned employee does not have an active employment status.'
+        selected_employee = is_employee_selected_pr_stage(stage)
+        permitted = (
+            record_workflow_not_denied(recipient, MODULE_PR, 'approve')
+            if selected_employee else approval_access(recipient, MODULE_PR)
+        )
+        if not permitted:
+            return 'missing_approval_permission', 'the assigned employee does not have permission to approve this purchase requisition.'
+        if not selected_employee:
+            if employee is None:
+                return 'missing_employee_record', 'the assigned account has no official HR employee record to verify its approval position.'
+            if not stage_positions(stage):
+                return 'unrecognized_business_position', 'this approval stage has no recognized business position; review its configuration.'
+            if not position_matches_stage(recipient, stage):
+                return 'business_position_mismatch', 'the assigned employee\'s official HR position does not match this approval stage.'
+        return 'assignment_changed', 'the assignment or approval eligibility changed; refresh and review the assigned employee.'
+
+    @classmethod
     def _notify_level(
         cls, pr, workflow, level, force=False, previous_approver='', previous_level=None,
         reassigned_recipient_ids=None,
@@ -328,6 +386,10 @@ class RequisitionWorkflowService:
                 recipient_id__in=set(current_recipients),
                 metadata__pr_id=str(pr_id),
                 metadata__approval_level=level,
+            ).exclude(
+                # A PO may refer to this PR without being a PR approval alert.
+                # Checking key existence also retains untyped legacy rows.
+                metadata__has_key='entity_type', metadata__entity_type='purchase_order',
             )
             if not force:
                 already_notified_ids = set(existing_requests.values_list('recipient_id', flat=True))
@@ -344,18 +406,18 @@ class RequisitionWorkflowService:
                 NotificationService.create_notification(
                     recipient=recipient,
                     title=(
-                        f'PR {pr_number} approval evidence requested again'
-                        if force else f'PR {pr_number} requires your approval'
+                        f'Purchase Recommendation {pr_number} approval evidence requested again'
+                        if force else f'Purchase Recommendation {pr_number} requires your approval'
                     ),
                     message=(
                         f'Please review and record your Level {level} decision for converted '
-                        f'Purchase Requisition {pr_number}.'
+                        f'Purchase Recommendation {pr_number}.'
                         if force else
                         (
-                            f'Level {previous_level} ({previous_approver}) is approved. Purchase Requisition '
+                            f'Level {previous_level} ({previous_approver}) is approved. Purchase Recommendation '
                             f'{pr_number} is now waiting for your Level {level} decision.'
                             if previous_approver else
-                            f'Purchase Requisition {pr_number} is waiting for your Level {level} decision.'
+                            f'Purchase Recommendation {pr_number} is waiting for your Level {level} decision.'
                         )
                     ),
                     category='APPROVAL',
@@ -365,6 +427,9 @@ class RequisitionWorkflowService:
                     send_teams=True,
                     teams_context=teams_context,
                     metadata={
+                        'entity_type': 'purchase_recommendation',
+                        'entity_id': str(pr_id),
+                        'request_number': pr_number,
                         'pr_id': str(pr_id),
                         'pr_number': pr_number,
                         'event_type': 'approval_assignment',
@@ -664,14 +729,20 @@ class RequisitionWorkflowService:
         if not unresolved:
             raise ValidationError({'error': 'This requisition has no missing approval decisions.'})
 
-        missing_assignees = [
-            stage.get('role') or stage.get('stage') or f'Stage {index + 1}'
-            for index, stage in unresolved
-            if cls._resolve_stage_user(stage) is None
-        ]
-        if missing_assignees:
+        assignment_errors = []
+        for index, stage in unresolved:
+            if cls._resolve_stage_user(stage) is None:
+                code, reason = cls._stage_assignment_issue(stage)
+                assignment_errors.append({
+                    'stage': stage.get('role') or stage.get('stage') or f'Stage {index + 1}',
+                    'code': code,
+                    'reason': reason,
+                })
+        if assignment_errors:
+            details = ' '.join(f"{issue['stage']}: {issue['reason']}" for issue in assignment_errors)
             raise ValidationError({
-                'error': f"Assign an active employee before resending: {', '.join(missing_assignees)}."
+                'error': f'Cannot resend approvals. {details}',
+                'approval_assignment_errors': assignment_errors,
             })
 
         requested_at = timezone.now().isoformat()
