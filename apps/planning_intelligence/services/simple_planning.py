@@ -1099,7 +1099,8 @@ def _retain_saved_work(previous, proposed, *, additional_task_ids=()):
                 task[key] = deepcopy(original.get(key) or ([] if key == 'dependency_details' else {} if key == 'dependency_rationales' else 'not_specified'))
         name_baseline = original.get('activity_name_original') or original.get('source_title')
         planner_renamed = bool(name_baseline and original['title'] != name_baseline)
-        if planner_renamed or (original.get('activity_naming_version') and not task.get('activity_naming_version')):
+        if (planner_renamed or original.get('activity_name_basis') == 'source_context_review'
+                or (original.get('activity_naming_version') and not task.get('activity_naming_version'))):
             task['title'] = original['title']
             for key in ACTIVITY_IDENTITY_FIELDS:
                 if key in original:
