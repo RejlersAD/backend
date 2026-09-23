@@ -87,7 +87,8 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         before = PurchaseOrder.objects.values().get(pk=order.pk)
         text = self.text(self.preview(fake, order_id=str(order.pk)))
         self.assertNotIn('Recorded signer', text)
-        self.assertIn('Approval pending', text)
+        self.assertIn('Approval not requested', text)
+        self.assertIn('No approver assigned', text)
         self.assertEqual(PurchaseOrder.objects.values().get(pk=order.pk), before)
 
     def test_uploaded_attachment_is_merged_in_memory_and_cannot_supply_storage_keys(self):

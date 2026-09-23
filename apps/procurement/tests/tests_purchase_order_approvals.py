@@ -105,7 +105,7 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         self.assertEqual(len(pending_entries_for(level_one, [order])), 1)
 
     @patch('apps.procurement.services.purchase_order_approvals._active_profiles')
-    def test_linked_po_removes_jarmo_management_approval(self, active_profiles):
+    def test_linked_po_preserves_its_assigned_management_approval(self, active_profiles):
         jarmo = self._profile('jarmo-id', 'Jarmo Suominen', 'jarmo@example.com', 'Management')
         active_profiles.return_value = {'jarmo-id': jarmo}
         serializer = PurchaseOrderSerializer(instance=SimpleNamespace(
@@ -119,8 +119,10 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
             'user_id': 'jarmo-id',
         }]})
 
-        self.assertEqual(attrs['approval_log'], [])
-        self.assertEqual(attrs['management_approver'], '')
+        self.assertEqual(len(attrs['approval_log']), 1)
+        self.assertEqual(attrs['approval_log'][0]['user_id'], 'jarmo-id')
+        self.assertEqual(attrs['approval_log'][0]['status'], 'Pending')
+        self.assertEqual(attrs['management_approver'], 'Jarmo Suominen')
 
     def test_core_project_multipart_normalization_keeps_open_attachments(self):
         upload = TemporaryUploadedFile(

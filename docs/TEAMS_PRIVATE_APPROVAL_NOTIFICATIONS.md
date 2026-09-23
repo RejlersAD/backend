@@ -159,6 +159,25 @@ total, with no additional tax calculation or assumed VAT treatment.
 
 ## Approval notification sequence
 
+New native Purchase Orders must contain an eligible assigned PO approval stage.
+Linking a PR no longer removes the PO's Final Management Sign-off. The standard
+form exposes that existing signatory selection and retains the configured CEO;
+the backend continues to validate the employee's official position and PO
+approval permission. Mohamad's operations title is eligible for VP Delivery
+only. Existing unassigned native drafts can be configured through that same
+form, and saving the assignment queues the PO request once.
+
+PR-to-PO conversion validates the existing default final signatory before
+creating the PO. It retains source PR decisions as explicitly external history
+and opens a separate pending PO sign-off, with notifications queued after
+commit. It does not turn source PR decisions into recorded PO signatures.
+Historical source-document imports retain their evidence-only behavior.
+
+Native PO association preserves unfinished PR approvals. The PR becomes
+converted only after its own final approval completes. An unassigned draft's
+PDF/DOCX now says "Approval not requested / No approver assigned"; a genuinely
+assigned pending stage retains "Approval pending / Not yet approved".
+
 - Purchase Recommendations and Purchase Orders send independent RADAI and Teams
   notifications for their own active approval levels. Linking a PO to a PR does
   not combine their notification rows, delivery tracking, or read/delete state.
@@ -178,7 +197,7 @@ total, with no additional tax calculation or assumed VAT treatment.
   go only to users outside the configured approval chain.
 - The existing conditional CEO rule is preserved: PRs with PO applicable omit
   the PR CEO stage; PRs without a PO retain it. PO notifications follow the PO's
-  configured management stage. These changes do not add or reassign approvers.
+  configured management stage. Existing PR approvers are not reassigned.
 - Legacy PR assignment-update notices do not suppress a later actionable alert.
 - Opening the Teams message does not approve the request or mark its RADAI
   notification read. Decisions remain in RADAI.

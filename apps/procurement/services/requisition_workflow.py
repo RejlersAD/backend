@@ -632,6 +632,18 @@ class RequisitionWorkflowService:
             pr.status = 'converted' if evidence_recovery else 'approved'
             pr.approved_by = actor
             pr.approved_at = approved_at
+            orders = getattr(pr, 'purchase_orders', None)
+            if not evidence_recovery and orders is not None:
+                # Native PO association keeps the PR in review until its own
+                # last decision. The PR is already locked; do not invert the
+                # PR-before-PO lock order merely to read the current link.
+                linked_order = orders.order_by('-created_at', '-pk').first()
+                if linked_order:
+                    from .procurement_lifecycle import PREVIOUS_STATUS
+                    pr.price_remarks_data = dict(pr.price_remarks_data or {})
+                    pr.price_remarks_data[PREVIOUS_STATUS] = 'approved'
+                    pr.po_number_reference = linked_order.po_number
+                    pr.status = 'converted'
         else:
             next_index, next_stage = min(
                 remaining_current_level or unresolved,
