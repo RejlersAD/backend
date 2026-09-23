@@ -23,6 +23,7 @@ _HTML_TAGS = _BLOCK_TAGS | _HIDDEN_TAGS | _VOID_TAGS | {
     'var', 'video', 'audio',
 }
 _PREVIEW_SUFFIX = '… (Open Request for full text)'
+TEAMS_EMPHASIZED_FIELDS = frozenset({'PO Number', 'Project Code', 'Value'})
 
 
 class _VisibleText(HTMLParser):
@@ -136,3 +137,19 @@ def teams_card_text(value):
     """Keep user punctuation literal in Adaptive Card Markdown only."""
     escaped = re.sub(r'([\\`*_\[\]])', r'\\\1', value)
     return escaped.replace('\n', '\n\n')
+
+
+def teams_html_message(title, facts, action_url):
+    """Compact Flow-bot HTML with only server-owned markup and escaped values."""
+    def text(value):
+        return html.escape(value, quote=True).replace('\n', '<br>')
+
+    lines = [f'<b>{text(title)}</b>']
+    for fact in facts:
+        label, value = text(fact['title']), text(fact['value'])
+        if fact['title'] in TEAMS_EMPHASIZED_FIELDS:
+            lines.append(f'<b>{label}: {value}</b>')
+        else:
+            lines.append(f'<b>{label}:</b> {value}')
+    lines.append(f'<a href="{html.escape(action_url, quote=True)}">Open Request</a>')
+    return '<p>' + '<br>'.join(lines) + '</p>'
