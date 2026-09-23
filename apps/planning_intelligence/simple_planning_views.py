@@ -16,6 +16,7 @@ from .services.simple_planning import (
     reopen_plan, save_plan, submit_plan,
 )
 from .work_breakdown_serializers import ManualWorkBreakdownSaveSerializer
+from .services.programmatic_requirements import create_programmatic_draft
 
 
 class SimplePlanSaveSerializer(ManualWorkBreakdownSaveSerializer):
@@ -30,6 +31,7 @@ class SimplePlanActionSerializer(serializers.Serializer):
     proposal_token = serializers.CharField(max_length=4096, required=False)
     workflow_mode = serializers.ChoiceField(choices=['source_only', 'standard_five'], required=False)
     version_id = serializers.IntegerField(min_value=1, allow_null=True, required=False)
+    requirement_scope = serializers.ChoiceField(choices=['all'], default='all')
 
 
 class SourceSchedulePreviewSerializer(serializers.Serializer):
@@ -37,6 +39,16 @@ class SourceSchedulePreviewSerializer(serializers.Serializer):
     offset = serializers.IntegerField(min_value=0, max_value=1000000, default=0)
     limit = serializers.IntegerField(min_value=1, max_value=200, default=100)
     search = serializers.CharField(max_length=250, allow_blank=True, default='')
+
+
+class ParallelLogicReviewSerializer(serializers.Serializer):
+    revision = serializers.IntegerField(min_value=0)
+    fingerprint = serializers.RegexField(r'^[a-f0-9]{64}$')
+    group_id = serializers.RegexField(r'^[a-f0-9]{64}$')
+    rationale = serializers.CharField(min_length=20, max_length=5000)
+    capacity_basis = serializers.CharField(min_length=20, max_length=5000)
+    duration_basis = serializers.CharField(min_length=20, max_length=5000)
+    max_parallel_deliverables = serializers.IntegerField(min_value=1, max_value=100000)
 
 
 class SourceScheduleImportPreviewSerializer(serializers.Serializer):
@@ -119,19 +131,29 @@ class SimplePlanningView(APIView):
     patch = put
 
     def post(self, request, project_id):
-        if self.operation == 'edit-activity':
-            from .gantt_serializers import GanttEditSerializer
+        if self.operation in {'edit-activity', 'edit-row'}:
+            from .gantt_serializers import GanttEditSerializer, GanttRowEditSerializer
             from .services.gantt_editing import edit_gantt
+            from .services.gantt_rows import edit_gantt_row
             project = self.project(request, project_id)
             if request.query_params.get('version_id') or request.data.get('viewing_history'):
                 return Response({'error': 'Return to the current draft before editing activities.',
                                  'code': 'simple_plan_history_read_only'}, status=409)
-            serializer = GanttEditSerializer(data=request.data)
+            serializer = (GanttRowEditSerializer if self.operation == 'edit-row' else GanttEditSerializer)(data=request.data)
             serializer.is_valid(raise_exception=True)
-            return self.perform(lambda: edit_gantt(project, request.user, serializer.validated_data))
+            operation = edit_gantt_row if self.operation == 'edit-row' else edit_gantt
+            return self.perform(lambda: operation(project, request.user, serializer.validated_data))
         if not self.operation or self.operation == 'source-preview':
             raise MethodNotAllowed('POST')
         project = self.project(request, project_id)
+        if self.operation == 'confirm-parallel-logic':
+            from .services.schedule_logic_review import confirm_parallel_logic
+            if request.query_params.get('version_id') or request.data.get('version_id') or request.data.get('viewing_history'):
+                return Response({'error': 'Return to the current editable schedule before reviewing parallel work.',
+                                 'code': 'simple_plan_history_read_only'}, status=409)
+            serializer = ParallelLogicReviewSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            return self.perform(lambda: confirm_parallel_logic(project, request.user, serializer.validated_data))
         if self.operation in {'preview-source-logic', 'apply-source-logic'}:
             from .services.source_schedule_logic import preview_source_logic, apply_source_logic
             if request.query_params.get('version_id') or request.data.get('viewing_history'):
@@ -165,6 +187,12 @@ class SimplePlanningView(APIView):
         serializer = SimplePlanActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        if self.operation == 'programmatic-draft':
+            if request.query_params.get('version_id') or request.data.get('version_id') or request.data.get('viewing_history'):
+                return Response({'error': 'Return to the current editable draft before creating activities.',
+                                 'code': 'simple_plan_history_read_only'}, status=409)
+            return self.perform(lambda: create_programmatic_draft(project, request.user,
+                revision=data['revision'], requirement_scope=data['requirement_scope']))
         if self.operation == 'select-version':
             if 'version_id' not in data:
                 raise serializers.ValidationError({'version_id': 'Select a schedule version or null for the working draft.'})

@@ -31,3 +31,18 @@ class GanttEditSerializer(ActivityEditSerializer):
         elif not data.get('task_id') or not set(data) & {'duration_days', 'timing_edit', 'dependency_details'}:
             raise serializers.ValidationError('Choose an activity and a duration, date or dependency change.')
         return data
+
+
+class GanttRowEditSerializer(serializers.Serializer):
+    revision = serializers.IntegerField(min_value=0)
+    kind = serializers.ChoiceField(choices=['activity', 'wbs', 'deliverable', 'discipline'])
+    id = serializers.CharField(max_length=160)
+    action = serializers.ChoiceField(choices=['rename', 'delete'])
+    title = serializers.CharField(max_length=500, required=False)
+
+    def validate(self, data):
+        if data['action'] == 'rename' and not data.get('title'):
+            raise serializers.ValidationError({'title': 'Enter the new name.'})
+        if data['kind'] != 'activity' and len(data.get('title', '')) > 255:
+            raise serializers.ValidationError({'title': 'Group names cannot exceed 255 characters.'})
+        return data

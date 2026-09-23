@@ -4,6 +4,13 @@ from hashlib import sha256
 
 def manual_wbs(tasks):
     nodes, paths, assignments = [], {}, {}
+    identities = {}
+    for task in tasks:
+        phase, deliverable = task.get('wbs_phase', '').strip(), task.get('wbs_deliverable', '').strip()
+        if phase and task.get('wbs_phase_id'):
+            identities[(phase,)] = task['wbs_phase_id']
+        if phase and deliverable and task.get('wbs_deliverable_id'):
+            identities[(phase, deliverable)] = task['wbs_deliverable_id']
     phase_count, deliverable_counts = 0, {}
     for task in tasks:
         phase = task.get('wbs_phase', '').strip()
@@ -14,6 +21,7 @@ def manual_wbs(tasks):
         if phase_path not in paths:
             phase_count += 1
             paths[phase_path] = _node(phase_path, None, f'P{phase_count}', phase, 'phase', len(nodes))
+            paths[phase_path]['id'] = identities.get(phase_path, paths[phase_path]['id'])
             nodes.append(paths[phase_path])
         node = paths[phase_path]
         if deliverable:
@@ -22,6 +30,7 @@ def manual_wbs(tasks):
                 deliverable_counts[phase] = deliverable_counts.get(phase, 0) + 1
                 paths[path] = _node(path, node['id'], f"{node['code']}.D{deliverable_counts[phase]}",
                                     deliverable, 'deliverable', len(nodes))
+                paths[path]['id'] = identities.get(path, paths[path]['id'])
                 nodes.append(paths[path])
             node = paths[path]
         assignments[task['id']] = node['id']

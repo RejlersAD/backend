@@ -105,7 +105,7 @@ urlpatterns = [
     path('projects/<int:project_id>/simple-plan/', SimplePlanningView.as_view(), name='simple-plan'),
     *[path(f'projects/<int:project_id>/simple-plan/{operation}/',
            SimplePlanningView.as_view(operation=operation), name=f'simple-plan-{operation}')
-      for operation in ('analyse', 'submit', 'approve-publish', 'reopen', 'edit-activity', 'propose-schedule', 'apply-schedule', 'select-version', 'calculate', 'validate', 'source-preview', 'preview-source-import', 'apply-source-import', 'preview-source-logic', 'apply-source-logic', 'propose-intelligent-sequence', 'apply-intelligent-sequence')],
+      for operation in ('analyse', 'programmatic-draft', 'submit', 'approve-publish', 'reopen', 'edit-activity', 'edit-row', 'confirm-parallel-logic', 'propose-schedule', 'apply-schedule', 'select-version', 'calculate', 'validate', 'source-preview', 'preview-source-import', 'apply-source-import', 'preview-source-logic', 'apply-source-logic', 'propose-intelligent-sequence', 'apply-intelligent-sequence')],
     path('project-setup/ai-settings/', ProjectSetupAISettingsView.as_view(), name='project-setup-ai-settings'),
     path('project-setup/options/', ProjectSetupOptionsView.as_view(), name='project-setup-options'),
     path('project-setup/preview/', ProjectSetupPreviewView.as_view(), name='project-setup-preview'),

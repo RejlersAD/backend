@@ -91,13 +91,13 @@ SYSTEM = (
 
 @sensitive_variables()
 def _provider(project, actor, payload):
-    from . import claude_client
+    from . import project_ai
     from .project_setup_ai import _personal_settings
     personal_connection = _personal_settings(actor) is not None
-    if not personal_connection and claude_client.get_claude_config(project):
-        result = claude_client.call_claude(project, system_prompt=SYSTEM,
+    if not personal_connection and project_ai.get_project_ai_config(project):
+        result = project_ai.call_project_ai(project, system_prompt=SYSTEM,
             user_prompt=json.dumps({'schema': _schema(), **payload}), max_tokens=14000,
-            feature='planning_sequence_proposal', user=actor)
+            feature='planning_sequence_proposal', user=actor, json_output=True)
         if not result or result.get('stop_reason') in {'max_tokens', 'model_context_window_exceeded'}:
             _error('AI could not finish this sequence proposal. Check the project AI connection and retry.',
                    'intelligent_sequence_ai_unavailable', 503)

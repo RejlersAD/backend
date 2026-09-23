@@ -134,14 +134,19 @@ def assurance_state_fingerprint(version):
         'assignments__id', 'assignments__resource_id', 'assignments__planned_units',
         'assignments__budgeted_hours', 'assignments__updated_at',
     ))
-    return canonical_fingerprint({
+    payload = {
         'operation': 'assurance-v4', 'version_id': version.id,
         'calculated_at': version.calculated_at, 'calculated_finish': version.calculated_finish,
         'contractual_finish': version.schedule.project.planned_end_date,
         'resources': resources, 'assignments': assignments,
         'parent_version_id': version.parent_version_id,
         'risks': list(version.planning_risks.order_by('pk').values('id', 'revision', 'status', 'priority', 'owner_id')),
-    })
+    }
+    reviews = list(version.logic_reviews.order_by('pk').values('id', 'fingerprint', 'group_id',
+        'rationale', 'capacity_basis', 'duration_basis', 'max_parallel_deliverables', 'reviewed_by_id'))
+    if reviews:
+        payload['logic_reviews'] = reviews
+    return canonical_fingerprint(payload)
 
 
 def _build_profile_selection(version):

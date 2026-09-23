@@ -15,7 +15,7 @@ from ..config import (
     CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS,
     DISCIPLINE_DEFAULT_DELIVERABLES, DEFAULT_HSE_STUDIES,
 )
-from . import claude_client
+from . import project_ai
 from .deliverable_matching import find_deliverable_match
 from .register_rows import extract_legacy_register_rows, extract_register_rows
 from .planning_fact_extraction import (
@@ -103,11 +103,15 @@ def _validated_ai_claim(claim, chunk):
     return validated_claim(claim, chunk)
 
 
-def _augment_with_claude(intelligence, files, project, user, *, resume_state=None, checkpoint_callback=None):
+def _augment_with_ai(intelligence, files, project, user, *, resume_state=None, checkpoint_callback=None):
     intelligence.update(ai_augmented=False, ai_provider_used=None, ai_evidence_facts=[])
+    configuration = project_ai.get_project_ai_config(project)
     chunks = list(source_chunks(files))
     manifest = [{key: value for key, value in chunk.items() if key != 'text'} for chunk in chunks]
-    fingerprint = hashlib.sha256(json.dumps({'schema': ASSERTION_SCHEMA_VERSION, 'chunks': manifest}, sort_keys=True).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps({
+        'schema': ASSERTION_SCHEMA_VERSION, 'chunks': manifest,
+        'provider': project_ai.project_provider(project), 'model': (configuration or {}).get('model'),
+    }, sort_keys=True).encode()).hexdigest()
     checkpoint = deepcopy(resume_state or {})
     if checkpoint.get('source_fingerprint') != fingerprint:
         checkpoint = {}
@@ -123,7 +127,7 @@ def _augment_with_claude(intelligence, files, project, user, *, resume_state=Non
         'schema_version': ASSERTION_SCHEMA_VERSION, 'source_fingerprint': fingerprint,
     }
     intelligence['ai_processing_coverage'] = coverage
-    if not claude_client.get_claude_config(project):
+    if not configuration:
         coverage['chunks_skipped'] = len(chunks)
         coverage['reason'] = 'No project AI provider is configured.'
         coverage['chunks'] = [{**unit, 'status': 'skipped', 'reason': 'provider_not_configured'} for unit in manifest]
@@ -146,12 +150,13 @@ def _augment_with_claude(intelligence, files, project, user, *, resume_state=Non
             coverage['chunks_skipped'] += 1
             coverage['chunks'].append(unit)
             continue
+        provider_error = {}
         try:
             if cached:
                 parsed, result = previous['response'], {}
             else:
                 calls += 1
-                result = claude_client.call_claude(
+                result = project_ai.call_project_ai(
                     project, system_prompt=_CLAUDE_SYSTEM_PROMPT,
                     user_prompt=json.dumps({'source_file_id': chunk['source_file_id'],
                                             'character_start': chunk['character_start'], 'source_text': chunk['text'],
@@ -160,13 +165,15 @@ def _augment_with_claude(intelligence, files, project, user, *, resume_state=Non
                                             'assertion_schemas': {kind: {'required': sorted(required), 'optional': sorted(optional)}
                                                                   for kind, (required, optional) in STRUCTURED_FACT_FIELDS.items()}}),
                     max_tokens=CLAUDE_INTELLIGENCE_MAX_TOKENS,
-                    feature='document_intelligence', user=user,
+                    feature='document_intelligence', user=user, json_output=True, error_details=provider_error,
                 )
                 parsed = json.loads(result['text']) if result else None
             if not isinstance(parsed, dict) or not isinstance(parsed.get('facts'), list):
                 raise ValueError('Invalid extraction shape')
         except Exception:
             unit['status'] = 'failed'
+            if provider_error:
+                unit['error'] = provider_error
             coverage['chunks_failed'] += 1
             coverage['chunks'].append(unit)
             continue
@@ -199,7 +206,7 @@ def _augment_with_claude(intelligence, files, project, user, *, resume_state=Non
     coverage['calls_this_pass'] = calls
     intelligence['ai_checkpoint'] = {'schema_version': ASSERTION_SCHEMA_VERSION, 'source_fingerprint': fingerprint, 'chunks': saved}
     intelligence['ai_augmented'] = bool(coverage['chunks_processed'] or coverage['chunks_partial'])
-    intelligence['ai_provider_used'] = 'anthropic' if intelligence['ai_augmented'] else None
+    intelligence['ai_provider_used'] = configuration['provider'] if intelligence['ai_augmented'] else None
     intelligence['ai_review'] = {'review_summary': '\n'.join(summaries), 'additional_notes': '', 'field_evidence': {}}
     for kind, output in [('project_name', 'detected_project_name'), ('effective_date', 'detected_effective_date_text'), ('duration_months', 'detected_duration_months')]:
         candidates = [claim for claim in intelligence['ai_evidence_facts'] if claim['type'] == kind]
@@ -240,7 +247,7 @@ def analyze_project(files_qs, project=None, user=None, *, allow_ai=True, resume_
         'notes': ['Source-backed extraction requires review. Reading source text does not verify that every requirement or relationship has been understood.'],
     }
     if allow_ai:
-        _augment_with_claude(intelligence, files, project, user, resume_state=resume_state, checkpoint_callback=checkpoint_callback)
+        _augment_with_ai(intelligence, files, project, user, resume_state=resume_state, checkpoint_callback=checkpoint_callback)
     else:
         intelligence.update(ai_augmented=False, ai_provider_used=None, ai_evidence_facts=[],
                             ai_processing_coverage={'status': 'not_run', 'reason': 'AI review was not requested.', 'semantic_coverage_verified': False})

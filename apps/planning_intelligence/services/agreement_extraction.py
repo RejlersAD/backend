@@ -13,7 +13,7 @@ import io
 import json
 import re
 
-from . import claude_client
+from . import project_ai
 from .parsers import extract_text_with_coverage
 from ..config import MAX_FILE_BYTES
 
@@ -623,11 +623,11 @@ def extract_agreement_workspace(project, files, *, user=None, progress=None):
                 except ValueError:
                     pass
     coverage['chunks_total'] = len(chunks)
-    config = claude_client.get_claude_config(project)
+    config = project_ai.get_project_ai_config(project)
     page_parts = Counter((manifest['file_id'], row['page']) for manifest, chunk in chunks for row in chunk)
     analyzed_pages = Counter()
     if not config:
-        warnings.append(_warn('ai_unavailable', 'Enable the project Anthropic connection to analyze the full agreement; only explicit labeled facts were recovered.'))
+        warnings.append(_warn('ai_unavailable', 'Enable the project AI connection to analyze the full agreement; only explicit labeled facts were recovered.'))
     else:
         for index, (manifest, chunk) in enumerate(chunks):
             if index >= MAX_AI_CHUNKS:
@@ -636,8 +636,8 @@ def extract_agreement_workspace(project, files, *, user=None, progress=None):
             _progress(progress, phase='analyzing', processed=index, total=len(chunks), percent=25 + int(65 * index / max(1, len(chunks))), message=f'Analyzing source section {index + 1} of {len(chunks)}')
             prompt = json.dumps({'schema': FIELD_SCHEMAS, 'filename': manifest['filename'],
                                  'physical_pages': [{'page': row['page'], 'text': row['text']} for row in chunk]}, ensure_ascii=False)
-            response = claude_client.call_claude(project, system_prompt=SYSTEM_PROMPT, user_prompt=prompt,
-                                                 max_tokens=12000, feature='agreement_workspace', user=user)
+            response = project_ai.call_project_ai(project, system_prompt=SYSTEM_PROMPT, user_prompt=prompt,
+                                                 max_tokens=12000, feature='agreement_workspace', user=user, json_output=True)
             if response is None:
                 warnings.append(_warn('ai_request_failed', 'Document analysis paused because the AI service did not return a response. Completed evidence is retained.', chunks_remaining=len(chunks) - index))
                 break

@@ -58,6 +58,14 @@ def _review(version):
 
 
 def master_plan_state(project, actor, *, version_id=None):
+    from .schedule_logic_state import enrich_logic_quality
+    state = _master_plan_state(project, actor, version_id=version_id)
+    selected_id = version_id or project.master_schedule_version_id
+    version = _version(project, selected_id) if selected_id else None
+    return enrich_logic_quality(project, state, version)
+
+
+def _master_plan_state(project, actor, *, version_id=None):
     from .simple_planning import plan_state
     from .planning_provenance import annotate_plan_provenance
     from .planning_profiles import planning_profile_selection
@@ -276,6 +284,10 @@ def _clone(version, actor):
         if row.activity_id in activity_map], batch_size=500)
     from .planning_registers import clone_risks
     clone_risks(version, clone)
+    if 'wbs_input_fingerprint' in clone.evidence_input_snapshot:
+        from .gantt_editing import _wbs_fingerprint
+        clone.evidence_input_snapshot['wbs_input_fingerprint'] = _wbs_fingerprint(clone)
+        clone.save(update_fields=['evidence_input_snapshot'])
     return clone
 
 
