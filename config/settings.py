@@ -218,6 +218,7 @@ INSTALLED_APPS = [
     'apps.onboarding',           # Onboarding & Offboarding — employee lifecycle management (joining, exit, equipment, documents)
     'apps.site_visits',          # Site Visit Tracking — GPS-based attendance for off-site engineers
     'apps.dashboard',             # Personal Dashboard — role-scoped data bundles + AI insights
+    'apps.portfolio',             # Dated POC workbook snapshots and SharePoint synchronization
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -1117,6 +1118,18 @@ CELERY_BEAT_SCHEDULE = {
 # populates the app registry, and none of these config.py files import
 # models — they only build crontab() schedules — so it's safe this early.
 # ─────────────────────────────────────────────────────────────────────────────
+# Portfolio credentials stay server-side. A sharing link can be resolved once;
+# the scheduled reader uses stable drive/item identifiers.
+PORTFOLIO_SYNC_ENABLED = config('PORTFOLIO_SYNC_ENABLED', default=False, cast=bool)
+PORTFOLIO_SYNC_INTERVAL_SECONDS = config('PORTFOLIO_SYNC_INTERVAL_SECONDS', default=3600, cast=int)
+PORTFOLIO_REPORT_STALE_DAYS = config('PORTFOLIO_REPORT_STALE_DAYS', default=7, cast=int)
+PORTFOLIO_SHAREPOINT_TENANT_ID = config('PORTFOLIO_SHAREPOINT_TENANT_ID', default='')
+PORTFOLIO_SHAREPOINT_CLIENT_ID = config('PORTFOLIO_SHAREPOINT_CLIENT_ID', default='')
+PORTFOLIO_SHAREPOINT_CLIENT_SECRET = config('PORTFOLIO_SHAREPOINT_CLIENT_SECRET', default='')
+PORTFOLIO_SHAREPOINT_DRIVE_ID = config('PORTFOLIO_SHAREPOINT_DRIVE_ID', default='')
+PORTFOLIO_SHAREPOINT_ITEM_ID = config('PORTFOLIO_SHAREPOINT_ITEM_ID', default='')
+PORTFOLIO_SHAREPOINT_URL = config('PORTFOLIO_SHAREPOINT_URL', default='')
+
 for _app_config_module in (
     'apps.timesheet.config',
     'apps.project_control.config',
@@ -1130,6 +1143,10 @@ for _app_config_module in (
         CELERY_BEAT_SCHEDULE.update(getattr(_mod, 'BEAT_SCHEDULE', {}))
     except Exception as _e:
         print(f'[CELERY BEAT] WARNING: failed to load schedule from {_app_config_module}: {_e}')
+
+from apps.portfolio.schedule import portfolio_beat_schedule
+CELERY_BEAT_SCHEDULE.update(portfolio_beat_schedule(
+    enabled=PORTFOLIO_SYNC_ENABLED, interval_seconds=PORTFOLIO_SYNC_INTERVAL_SECONDS))
 
 # ==============================================================================
 # End of Celery Configuration
