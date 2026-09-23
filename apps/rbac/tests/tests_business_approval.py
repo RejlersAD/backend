@@ -155,3 +155,39 @@ class BusinessApprovalTests(TestCase):
         document.refresh_from_db()
         self.assertEqual(document.verified_by_id, self.actor.pk)
         self.assertEqual(self.client.post(url, {}, format='json').status_code, 403)
+
+    def test_pending_document_queue_returns_serialized_pending_items_to_designated_reviewer(self):
+        document = self.document()
+        verified = self.document()
+        ProfileDocument.objects.filter(pk=verified.pk).update(verification_status='verified')
+        inactive = self.document()
+        ProfileDocument.objects.filter(pk=inactive.pk).update(is_active=False)
+        response = self.client.get(
+            '/api/v1/rbac/profile-documents/pending-verification/',
+            {'page_size': 100, 'verification_status__in': 'pending'},
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(len(response.data['results']), 1)
+        item = response.data['results'][0]
+        self.assertEqual(str(item['id']), str(document.pk))
+        self.assertEqual(item['user_email'], self.owner.email)
+        self.assertTrue(item['can_review'])
+        self.assertEqual(item['verification_status'], 'pending')
+        count = self.client.get('/api/v1/rbac/profile-documents/pending-verification/?count_only=true')
+        self.assertEqual(count.data, {'count': 1})
+
+    def test_pending_document_queue_denies_superadmin_without_designated_business_position(self):
+        self.document()
+        self.client.force_authenticate(self.admin)
+        response = self.client.get('/api/v1/rbac/profile-documents/pending-verification/')
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertIn('designated HR or Administration positions', str(response.data['detail']))
+
+    def test_pending_document_queue_denies_reviewer_after_approval_permission_revocation(self):
+        for permission in self.module.permissions.filter(action='approve'):
+            UserPermissionOverride.objects.create(
+                user_profile=self.actor.rbac_profile, permission=permission, allowed=False,
+            )
+        response = self.client.get('/api/v1/rbac/profile-documents/pending-verification/')
+        self.assertEqual(response.status_code, 403, response.data)

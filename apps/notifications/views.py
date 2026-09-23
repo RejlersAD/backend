@@ -11,7 +11,7 @@ from django.utils import timezone
 from django.db.models import Q, Count
 from django.shortcuts import get_object_or_404
 from django.core.cache import cache
-from django.db import connection
+from django.db import connection, transaction
 import logging
 
 from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog, WebPushSubscription
@@ -41,7 +41,7 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
     list: Get all notifications for current user
     retrieve: Get specific notification
     mark_as_read: Mark notification(s) as read
-    mark_all_read: Mark all notifications as read
+    mark_all_as_read: Mark all notifications as read
     unread_count: Get count of unread notifications
     stats: Get notification statistics
     """
@@ -87,6 +87,60 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
         if self.action == 'list':
             return NotificationListSerializer
         return NotificationSerializer
+
+    def _unread_notifications(self):
+        return Notification.objects.filter(
+            recipient_id=self.request.user.pk, is_read=False, status='SENT',
+        ).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+
+    def _invalidate_unread_count(self):
+        cache_key = f'notification_unread_count_{self.request.user.pk}'
+        cache.delete(cache_key)
+        # Another request can repopulate the cache before an enclosing
+        # transaction commits. Remove that stale value after commit as well.
+        if connection.in_atomic_block:
+            transaction.on_commit(lambda: cache.delete(cache_key))
+
+    def _mark_notifications_as_read(self, notification_ids=None, *, auto_read=False):
+        notifications = Notification.objects.filter(
+            recipient_id=self.request.user.pk, is_read=False,
+        )
+        if notification_ids:
+            notifications = notifications.filter(pk__in=notification_ids)
+        with transaction.atomic():
+            # Serialize overlapping individual/bulk actions so a retry does
+            # not create duplicate read logs or alter the original read time.
+            ids = list(notifications.order_by('pk').select_for_update().values_list('pk', flat=True))
+            if ids:
+                now = timezone.now()
+                Notification.objects.filter(pk__in=ids).update(
+                    is_read=True, read_at=now, status='READ', updated_at=now,
+                )
+                NotificationLog.objects.bulk_create([
+                    NotificationLog(
+                        notification_id=notification_id, action='READ',
+                        details={
+                            'auto_read': auto_read,
+                            'bulk_operation': not auto_read,
+                            'user_id': self.request.user.pk,
+                        },
+                    ) for notification_id in ids
+                ])
+        self._invalidate_unread_count()
+        return len(ids)
+
+    def _mark_read_response(self, count):
+        return Response({
+            'status': 'success',
+            'marked_read': count,
+            'unread_count': self._unread_notifications().count(),
+            'message': f'{count} notification(s) marked as read',
+        })
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            instance.delete()
+        self._invalidate_unread_count()
     
     def retrieve(self, request, *args, **kwargs):
         """Get notification and optionally mark as read"""
@@ -95,15 +149,8 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
         # Auto-mark as read when retrieved
         auto_read = request.query_params.get('auto_read', 'true')
         if auto_read.lower() == 'true' and not instance.is_read:
-            instance.mark_as_read()
-            
-            # Log action
-            NotificationLog.objects.create(
-                notification=instance,
-                action='READ',
-                details={'auto_read': True, 'user_id': request.user.pk}
-            )
-            cache.delete(f'notification_unread_count_{request.user.pk}')
+            self._mark_notifications_as_read([instance.pk], auto_read=True)
+            instance.refresh_from_db()
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -121,42 +168,12 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
         
         notification_ids = serializer.validated_data.get('notification_ids', [])
         
-        if notification_ids:
-            # Mark specific notifications
-            notifications = Notification.objects.filter(
-                id__in=notification_ids,
-                recipient=request.user,
-                is_read=False
-            )
-        else:
-            # Mark all unread notifications
-            notifications = Notification.objects.filter(
-                recipient=request.user,
-                is_read=False
-            )
-        
-        count = 0
-        for notification in notifications:
-            notification.mark_as_read()
-            count += 1
-            
-            # Log action
-            NotificationLog.objects.create(
-                notification=notification,
-                action='READ',
-                details={'bulk_operation': True, 'user_id': request.user.pk}
-            )
-        
-        # Invalidate cache after marking as read
-        cache_key = f'notification_unread_count_{request.user.id}'
-        cache.delete(cache_key)
-        logger.debug(f'[Notification] Cache invalidated for user {request.user.id}')
-        
-        return Response({
-            'status': 'success',
-            'marked_read': count,
-            'message': f'{count} notification(s) marked as read'
-        })
+        return self._mark_read_response(self._mark_notifications_as_read(notification_ids))
+
+    @action(detail=False, methods=['post'])
+    def mark_all_as_read(self, request):
+        """Mark the authenticated recipient's inbox read, including later pages."""
+        return self._mark_read_response(self._mark_notifications_as_read())
     
     @action(detail=False, methods=['get'])
     def unread_count(self, request):
@@ -179,18 +196,9 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
             return Response(cached_result)
         
         try:
-            # Get current time once
-            now = timezone.now()
-            
             # Single optimized query using the compound index (notif_unread_opt)
             # Index: ['recipient', 'is_read', 'status', 'expires_at']
-            base_queryset = Notification.objects.filter(
-                recipient_id=user_id,  # Use _id for direct FK comparison
-                is_read=False,
-                status='SENT'
-            ).filter(
-                Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-            )
+            base_queryset = self._unread_notifications()
             
             # Get total count efficiently
             total = base_queryset.count()
@@ -323,16 +331,15 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
     def archive(self, request, pk=None):
         """Archive a notification"""
         notification = self.get_object()
-        notification.status = 'ARCHIVED'
-        notification.save()
-        
-        # Log action
-        NotificationLog.objects.create(
-            notification=notification,
-            action='ARCHIVED',
-            details={'user_id': request.user.pk},
-        )
-        cache.delete(f'notification_unread_count_{request.user.pk}')
+        with transaction.atomic():
+            notification.status = 'ARCHIVED'
+            notification.save(update_fields=['status', 'updated_at'])
+            NotificationLog.objects.create(
+                notification=notification,
+                action='ARCHIVED',
+                details={'user_id': request.user.pk},
+            )
+        self._invalidate_unread_count()
         
         return Response({
             'status': 'success',
