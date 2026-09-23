@@ -103,6 +103,70 @@ class PortfolioUploadTests(TestCase):
         self.assertEqual(self.post('import', token='unused').status_code, 403)
         self.assertFalse(PortfolioSource.objects.exists())
 
+    def promote_with_role_only(self):
+        self.grant_upload()
+        self.user.is_staff = False
+        self.user.is_superuser = False
+        self.user.save(update_fields=['is_staff', 'is_superuser'])
+        role, _ = Role.objects.get_or_create(
+            code='super_admin', defaults={'name': 'Super Administrator', 'level': 1},
+        )
+        UserRole.objects.create(user_profile=self.profile, role=role)
+        return role
+
+    def test_promoted_super_administrator_can_upload_without_django_admin_flags(self):
+        self.promote_with_role_only()
+        self.assertTrue(self.profile.is_super_admin())
+        self.assertTrue(can_upload_workbook(self.user))
+        report = self.client.get(self.base)
+        self.assertEqual(report.status_code, 200, report.data)
+        self.assertTrue(report.data['can_upload'])
+        self.assertIsNone(report.data['source'])
+        token = self.preview()
+        response = self.post('import', token=token)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['activated'])
+        revenue = self.client.get(self.base + 'revenue/')
+        self.assertEqual(revenue.status_code, 200, revenue.data)
+        self.assertTrue(revenue.data['scope']['full_source'])
+        self.assertEqual(revenue.data['scope']['row_count'], 1)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_staff)
+        self.assertFalse(self.user.is_superuser)
+
+    def test_role_only_super_administrator_still_honors_each_explicit_deny(self):
+        self.promote_with_role_only()
+        token = self.preview()
+        for module, action in (
+            ('executive_dashboard', 'read'), ('project_control', 'read'), ('project_control', 'update'),
+        ):
+            with self.subTest(module=module, action=action):
+                permission = Permission.objects.get(module__code=module, action=action, is_active=True)
+                override = UserPermissionOverride.objects.create(
+                    user_profile=self.profile, permission=permission, allowed=False,
+                )
+                self.assertFalse(can_upload_workbook(self.user))
+                self.assertEqual(self.post('preview').status_code, 403)
+                self.assertEqual(self.post('import', token=token).status_code, 403)
+                override.delete()
+        self.assertFalse(PortfolioSource.objects.exists())
+
+    def test_inactive_or_revoked_super_administrator_role_cannot_upload(self):
+        role = self.promote_with_role_only()
+        token = self.preview()
+        role.is_active = False
+        role.save(update_fields=['is_active'])
+        self.assertFalse(can_upload_workbook(self.user))
+        self.assertFalse(self.client.get(self.base).data['can_upload'])
+        self.assertEqual(self.post('import', token=token).status_code, 403)
+        role.is_active = True
+        role.save(update_fields=['is_active'])
+        UserRole.objects.filter(user_profile=self.profile, role=role).delete()
+        self.assertFalse(can_upload_workbook(self.user))
+        self.assertEqual(self.post('preview').status_code, 403)
+        self.assertEqual(self.post('import', token=token).status_code, 403)
+        self.assertFalse(PortfolioSource.objects.exists())
+
     def test_changed_file_and_missing_or_tampered_token_cannot_publish(self):
         self.grant_upload()
         token = self.preview()

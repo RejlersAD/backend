@@ -29,10 +29,13 @@ flowchart LR
    the file and last upload time. Workbook management stays on Project Links;
    Executive Project Portfolio does not show a separate workbook section.
 
-The upload action requires a RADAI staff administrator or superuser with
-Executive Dashboard **View**, Project Control **View** and Project Control
-**Edit** access. Explicit denials still apply. SharePoint permissions are
-separate. Readers can still view the previously published workbook.
+The upload action requires a RADAI staff administrator, Django superuser, or
+active **Super Administrator** role with Executive Dashboard **View**, Project
+Control **View** and Project Control **Edit** access. Promoting an existing
+account to Super Administrator does not require changing its Django staff
+flags. Explicit denials still apply. Inactive or revoked roles do not grant
+upload access. SharePoint permissions are separate. Readers can still view
+the previously published workbook.
 The upload publishes the shared portfolio source for all authorized readers;
 it is not a private attachment.
 
