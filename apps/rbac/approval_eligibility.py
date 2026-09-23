@@ -57,7 +57,8 @@ POSITION_TITLES.update({
     'manager_projects': {'Manager of Projects', 'Projects Manager', 'Head of Projects'},
     'head_operations_project_delivery': {'Head of Operations and Project Delivery',
                                          'VP Operations', 'VP Delivery', 'Vice President Operations',
-                                         'Vice President Project Delivery'},
+                                         'Vice President Project Delivery',
+                                         'Chief Operating Officer & VP, Head of Operations & Project Delivery'},
     'ceo': {'CEO', 'Chief Executive Officer'},
 })
 POSITION_GROUPS = {

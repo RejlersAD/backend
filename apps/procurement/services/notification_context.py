@@ -58,7 +58,11 @@ def requisition_teams_context(pr, *, approval_level=None):
     issuer = getattr(pr, 'issued_by', None)
     currency = _text(getattr(pr, 'currency', None), default='')
     return {
-        'request_name': f'Purchase Requisition {pr.pr_number}',
+        'title': 'Purchase Recommendation approval required',
+        'entity_type': 'purchase_recommendation',
+        'entity_id': str(getattr(pr, 'pk', '') or ''),
+        'request_number': pr.pr_number,
+        'request_name': f'Purchase Recommendation {pr.pr_number}',
         'po_number': _text(po_number, getattr(pr, 'po_number_reference', None), default='Not issued'),
         **_requisition_project(pr),
         'description': _text(getattr(pr, 'description_reason', None), getattr(pr, 'product_service', None)),
@@ -83,6 +87,10 @@ def purchase_order_teams_context(order, *, approval_level=None):
     creator = getattr(order, 'created_by', None)
     currency = _text(getattr(order, 'currency', None), default='')
     return {
+        'title': 'Purchase Order approval required',
+        'entity_type': 'purchase_order',
+        'entity_id': str(getattr(order, 'pk', '') or ''),
+        'request_number': order.po_number,
         'request_name': f'Purchase Order {order.po_number}',
         'po_number': order.po_number,
         'project_name': _text(getattr(project, 'name', None), getattr(legacy_project, 'project_name', None),

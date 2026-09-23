@@ -253,6 +253,9 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
             continue
         metadata = {
             'event_type': 'approval_assignment',
+            'entity_type': 'purchase_order',
+            'entity_id': str(order.id),
+            'request_number': order.po_number,
             'po_id': str(order.id),
             'po_number': order.po_number,
             'approval_stage': entry.get('stage'),
@@ -266,6 +269,10 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
             metadata__approval_stage=entry.get('stage'),
             metadata__approval_level=_entry_level(entry, index),
             metadata__requires_action=True,
+        ).exclude(
+            # A PR may refer to this PO without being a PO approval alert.
+            # Checking key existence also retains untyped legacy rows.
+            metadata__has_key='entity_type', metadata__entity_type='purchase_recommendation',
         )
         if entry.get('assignment_id'):
             previous_notifications = previous_notifications.filter(
@@ -278,7 +285,7 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
         NotificationService.create_notification(
             recipient=recipient,
             sender=order.created_by,
-            title=f'PO {order.po_number} requires your approval',
+            title=f'Purchase Order {order.po_number} requires your approval',
             message=(
                 f'Level {previous_level} ({previous_approver}) is approved. Purchase Order '
                 f'{order.po_number} is now waiting for your {entry.get("stage")} decision.'
@@ -333,6 +340,9 @@ def notify_purchase_order_created(order):
             continue
         metadata = {
             'event_type': 'po_created',
+            'entity_type': 'purchase_order',
+            'entity_id': str(order.id),
+            'request_number': order.po_number,
             'po_id': str(order.id),
             'po_number': order.po_number,
             'recipient_role': role,
