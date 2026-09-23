@@ -13,10 +13,31 @@ with these values:
   submitter, and `Open Request` link. Alternatively, post the supplied Adaptive
   Card from `attachments[0].content` to the same private recipient.
 
+## Rich-text descriptions and readable previews
+
+The backend converts saved rich text to readable text before building the
+webhook fields, plain message, and Adaptive Card. Pasted editor tags, attributes,
+comments, scripts, and hidden elements are removed; paragraphs, lists, table
+cells, and visible text remain readable. Empty editor content falls back to the
+next available procurement description. Saved PR and PO content is unchanged.
+
+Description previews are limited to 1,500 characters, services to 700, and other
+display fields to 300. Longer values end with `… (Open Request for full text)`.
+The request link opens the saved record. The Adaptive Card escapes Markdown
+punctuation separately so identifiers such as `RAD-PRJ-PUR-0480_2026` stay literal.
+Top-level webhook fields remain plain text, with the existing field names and
+types; `project_id` continues to contain the displayed project code.
+
+An existing flow using these webhook fields receives cleaned text after the
+backend deploys, without changing its layout. Keep the HTML escaping in the
+Flow-bot template: the normalized values are text, not trusted HTML. Previously
+delivered Teams messages are not rewritten. Automated regression tests use
+mocked delivery and do not post messages to recipient chats.
+
 ## Update an existing Power Automate flow
 
-The flow is managed outside this repository. Deploying the backend alone does
-not update a flow that builds its own message from individual fields.
+The flow is managed outside this repository. Deploying the backend updates its
+incoming field values, but does not change a custom message layout in the flow.
 
 1. In the private Flow-bot action, replace the old message layout using the HTML
    template below. For a plain layout, use the request body's `message` dynamic
@@ -93,7 +114,7 @@ Example request body sent by RADAI:
   "submitted_by": "Requester Name",
   "action_label": "Open Request",
   "action_url": "https://radai.ae/approvals?tab=procurement",
-  "message": "New approval request assigned\nRequest: Purchase Order RAD-PRJ-PUR-0117_2026\nPO Number: RAD-PRJ-PUR-0117_2026\nProject Name: Engineering services project\nProject ID: RAD-PRJ-2026-0042\nService: Design review and verification\nDescription: Engineering design assurance services\nVendor: Example Supplier LLC\nValue: AED 12,500.00\nApproval Level: Level 0\nSubmitted By: Requester Name\nOpen Request: https://radai.ae/approvals?tab=procurement",
+  "message": "New approval request assigned\n\nRequest: Purchase Order RAD-PRJ-PUR-0117_2026\n\nPO Number: RAD-PRJ-PUR-0117_2026\n\nProject Name: Engineering services project\n\nProject Code: RAD-PRJ-2026-0042\n\nService: Design review and verification\n\nDescription: Engineering design assurance services\n\nVendor: Example Supplier LLC\n\nValue: AED 12,500.00\n\nApproval Level: Level 0\n\nSubmitted By: Requester Name\n\nOpen Request: https://radai.ae/approvals?tab=procurement",
   "notification_id": "...",
   "attachments": [
     {

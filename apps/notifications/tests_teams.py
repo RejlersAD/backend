@@ -56,7 +56,7 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
         self.assertIn('Service: Engineering software renewal', payload['message'])
         self.assertIn('Description: Engineering software renewal', payload['message'])
         self.assertIn('Project Name: Onboarding Enhancement phase 2', payload['message'])
-        self.assertIn('Project ID: RAD-PRJ-2026-0042', payload['message'])
+        self.assertIn('Project Code: RAD-PRJ-2026-0042', payload['message'])
         for key, value in {
             'PO Number': 'PO-2026-0042',
             'Vendor': 'Engineering Supplier',

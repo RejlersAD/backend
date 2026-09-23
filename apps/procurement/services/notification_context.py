@@ -2,11 +2,17 @@
 
 from decimal import Decimal, InvalidOperation
 
+from apps.notifications.teams_formatting import teams_plain_text
 from .employee_display import employee_display_name
 
 
 def _text(*values, default='Not specified'):
-    return next((str(value).strip() for value in values if value is not None and str(value).strip()), default)
+    # Empty rich-text editor markup must not hide a meaningful fallback field.
+    for value in values:
+        text = teams_plain_text(value, default='', max_length=None)
+        if text:
+            return text
+    return default
 
 
 def _value(amount, currency):
