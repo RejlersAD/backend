@@ -14,6 +14,10 @@ and receipt acceptance. Cancellation remains available without manufacturing an
 approval; cancelled/completed orders cannot be reopened by an ordinary status
 change.
 
+Copied purchase recommendation history is kept as source evidence. It neither
+approves the PO nor locks its commercial terms. A converted PO starts its own
+assigned approval request, and that independent route must finish before issue.
+
 Older recorded named/assigned approvals remain historical evidence. A signed
 source must refer to the linked stored document and its verified evidence;
 unresolved reconciliation issues cannot authorize a lifecycle change. Historical
