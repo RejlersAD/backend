@@ -237,6 +237,8 @@ class PurchaseRequisitionLinkApprovalGuardsTests(TestCase):
                     'pr_reference': str(pr.pk), 'vendor': str(self.vendor.pk),
                     'po_number': pr.pr_number.replace('-PR-', '-PUR-'), 'title': 'Native linked PO',
                     'total_amount': '100.00', 'vat_percentage': '0.00', 'category': 'other',
+                    'approval_log': [{'stage': 'Final Management Sign-off', 'level': 0,
+                                      'user_id': str(self.ceo.pk)}],
                 }, format='json')
                 self.assertEqual(response.status_code, 201, response.data)
                 pr.refresh_from_db()

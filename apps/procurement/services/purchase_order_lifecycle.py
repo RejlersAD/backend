@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition
 from .approval_integrity import purchase_order_signature_issue, stage_signature_issue
+from .purchase_order_content import is_requisition_approval_history
 
 
 PROGRESSED_STATUSES = ('sent', 'acknowledged', 'in_progress', 'partially_received', 'completed')
@@ -60,6 +61,10 @@ def require_purchase_order_approval(order):
     pending or rejected internal assignment.
     """
     rows = getattr(order, 'approval_log', None)
+    if isinstance(rows, list):
+        # Source PR decisions document the recommendation's separate workflow;
+        # only an actual PO route can authorize issuing or completing the PO.
+        rows = [row for row in rows if not is_requisition_approval_history(row)]
     if not isinstance(rows, list) or not rows:
         raise ValidationError({'status': 'Complete a purchase order approval route before progressing this order.'})
     for row in rows:

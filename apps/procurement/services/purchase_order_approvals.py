@@ -147,13 +147,31 @@ def is_finance_profile(profile):
 
 def _jarmo_user():
     User = get_user_model()
-    return User.objects.filter(
+    candidates = list(User.objects.filter(
         is_active=True,
         first_name__iexact='Jarmo',
         last_name__iexact='Suominen',
         rbac_profile__status='active',
         rbac_profile__is_deleted=False,
-    ).first()
+    )[:2])
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def default_management_assignment():
+    """Use the existing PO final signatory, without borrowing PR decisions."""
+    recipient = _jarmo_user()
+    if recipient is None:
+        raise ValidationError({'error': (
+            'The configured PO final signatory could not be resolved to one active employee. '
+            'Select an eligible final signatory in the Purchase Order form before creating this order.'
+        )})
+    stage = {'stage': MANAGEMENT_STAGE, 'level': 0, 'user_id': str(recipient.pk)}
+    if not eligible_stage_assignee(recipient, stage, MODULE_PO):
+        raise ValidationError({'error': (
+            'The configured PO final signatory must have the official CEO position and '
+            'Purchase Order approval permission. Review the employee assignment before conversion.'
+        )})
+    return normalize_assignments([stage], require_core=False, require_management=True)
 
 
 def normalize_assignments(approval_log, existing_log=None, require_core=True, require_management=False):

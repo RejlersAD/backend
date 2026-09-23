@@ -58,11 +58,24 @@ def mark_requisition_converted(pr, po_number):
     pr.save(update_fields=['status', 'po_applicable', 'po_number_reference', 'price_remarks_data', 'updated_at'])
 
 
+def associate_requisition_order(pr, po_number):
+    """Record a native PO link without ending an unfinished PR approval.
+
+    Callers hold the PR lock. Reviewed historical imports deliberately retain
+    their separate, explicit ``mark_requisition_converted`` behavior.
+    """
+    if canonicalize_pr_status(pr.status) in {'approved', 'converted'}:
+        mark_requisition_converted(pr, po_number)
+    elif pr.po_number_reference != po_number:
+        pr.po_number_reference = po_number
+        pr.save(update_fields=['po_number_reference', 'updated_at'])
+
+
 def reconcile_requisition_orders(pr, removed_po_number):
     """Removing a PO must not grant an approval the recommendation never had."""
     remaining = pr.purchase_orders.order_by('-created_at', '-pk').first()
     if remaining:
-        mark_requisition_converted(pr, remaining.po_number)
+        associate_requisition_order(pr, remaining.po_number)
         return
     metadata = dict(pr.price_remarks_data or {})
     previous = metadata.pop(PREVIOUS_STATUS, None)

@@ -425,14 +425,33 @@ def _approval_display(order):
     if not approved_date and approved_at:
         approved_date = (timezone.localtime(approved_at) if timezone.is_aware(approved_at) else approved_at).date()
     recorded = bool(name and approved_date)
-    pending = str(getattr(order, 'status', '') or '').lower() in {'draft', 'pending_approval'}
+    status_code = str(getattr(order, 'status', '') or '').strip().lower()
+    # A draft alone does not establish an approval request. Only an assigned
+    # internal PO route can be pending; linked PR/source evidence is history.
+    assigned_stages = [
+        row for row in (getattr(order, 'approval_log', None) or [])
+        if isinstance(row, dict)
+        and not row.get('external') and not row.get('evidence_document_id')
+        and row.get('source') != 'signed_purchase_requisition_pdf'
+        and any(str(row.get(key) or '').strip() for key in (
+            'user_id', 'approver_id', 'user_email', 'approver_email', 'email',
+        ))
+    ]
+    decisions = {str(row.get('status') or 'pending').strip().lower() for row in assigned_stages}
+    pending = (
+        status_code in {'draft', 'pending_approval', 'sent', 'acknowledged', 'in_progress', 'partially_received'}
+        and bool(decisions & {'pending', 'in_review', 'under_review'})
+        and not decisions & {'rejected', 'not_approved', 'declined'}
+    )
+    unassigned = status_code in {'draft', 'pending_approval'} and not assigned_stages
     status_display = getattr(order, 'get_status_display', None)
     status = status_display() if callable(status_display) else str(getattr(order, 'status', '') or 'Not recorded').replace('_', ' ').title()
     return {
         'recorded': recorded, 'status': status,
-        'heading': 'Approved by:' if recorded else 'Approval pending:' if pending else 'Approval record:',
-        'name': name if recorded else JARMO_NAME if pending else 'Not recorded',
-        'title': str(getattr(order, 'approved_by_title', '') or '') if recorded else JARMO_TITLE if pending else '',
+        'heading': ('Approved by:' if recorded else 'Approval pending:' if pending
+                    else 'Approval not requested:' if unassigned else 'Approval record:'),
+        'name': name if recorded else JARMO_NAME if pending or unassigned else 'Not recorded',
+        'title': str(getattr(order, 'approved_by_title', '') or '') if recorded else JARMO_TITLE if pending or unassigned else '',
         'date': approved_date if recorded else None,
     }
 

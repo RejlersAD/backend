@@ -65,11 +65,25 @@ def _field_value(field, value):
     return _canonical(value)
 
 
+def is_requisition_approval_history(row):
+    """Recognize server-owned PR history, which never approves PO terms.
+
+    Assignment normalization does not accept these source markers from a
+    client. A reviewed PR signer may retain a user ID in historical evidence,
+    so the external flag and exact source distinguish it from a PO assignment.
+    """
+    return (
+        isinstance(row, dict) and row.get('external') is True
+        and row.get('source') in ('purchase_requisition', 'signed_purchase_requisition_pdf')
+    )
+
+
 def commercial_edit_locked(order):
     if any(getattr(order, field, None) for field in ('approved_at', 'approved_date', 'approval_signature')):
         return True
     return any(
         isinstance(row, dict) and str(row.get('status') or '').strip().lower() == 'approved'
+        and not is_requisition_approval_history(row)
         for row in (getattr(order, 'approval_log', None) or [])
     )
 
@@ -103,6 +117,7 @@ def purchase_order_content_issue(order):
     fingerprints = [
         row['content_fingerprint'] for row in (getattr(order, 'approval_log', None) or [])
         if isinstance(row, dict) and str(row.get('status') or '').strip().lower() == 'approved'
+        and not is_requisition_approval_history(row)
         and row.get('content_fingerprint')
     ]
     if fingerprints and any(value != purchase_order_content_fingerprint(order) for value in fingerprints):

@@ -67,7 +67,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         self.assertNotIn('Saved narrative', text)
         self.assertEqual(PurchaseOrder.objects.values().get(pk=order.pk), before)
 
-    def test_new_editor_cover_keeps_contact_blank_and_shows_projects_and_pending_ceo(self):
+    def test_new_editor_cover_keeps_contact_blank_and_shows_projects_and_unsigned_ceo(self):
         snapshot = {
             'po_number': 'RAD-PRJ-PUR-0126_SEP2026', 'vendor': str(self.vendor.pk),
             'title': 'Three-project engineering scope', 'total_amount': '100.00',
@@ -88,7 +88,8 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
             self.assertIn('590001, 590002, 590003', cover)
             self.assertIn('Jarmo Suominen', cover)
             self.assertIn('CEO, Rejlers Abu Dhabi', cover)
-            self.assertIn('Approval pending:', cover)
+            self.assertIn('Approval not requested:', cover)
+            self.assertNotIn('Approval pending:', cover)
             self.assertNotIn('Approved by:', cover)
             self.assertNotIn('Untrusted client signer', cover)
             self.assertEqual(cover.count('Seller Reference Contact'), 1)
@@ -98,7 +99,8 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         self.assertIn('590001, 590002, 590003', text)
         self.assertIn('Jarmo Suominen', text)
         self.assertIn('CEO, Rejlers Abu Dhabi', text)
-        self.assertIn('Approval pending:', text)
+        self.assertIn('Approval not requested:', text)
+        self.assertNotIn('Approval pending:', text)
         self.assertNotIn('Approved by:', text)
         self.assertNotIn('Untrusted client signer', text)
         self.assertRegex(text, r'Contact Person:\s+Phone / Email:')
@@ -125,7 +127,8 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         before = PurchaseOrder.objects.values().get(pk=order.pk)
         text = self.text(self.preview(fake, order_id=str(order.pk)))
         self.assertNotIn('Recorded signer', text)
-        self.assertIn('Approval pending', text)
+        self.assertIn('Approval not requested', text)
+        self.assertIn('Jarmo Suominen', text)
         self.assertEqual(PurchaseOrder.objects.values().get(pk=order.pk), before)
 
     def test_uploaded_attachment_is_merged_in_memory_and_cannot_supply_storage_keys(self):
