@@ -127,4 +127,3 @@ class GeminiFailureRecoveryTests(SimpleTestCase):
         self.assertIsNone(outcome['ai_http_status'])
         self.assertIn('temporarily unavailable', outcome['message'])
         self.assertNotIn(self.key, json.dumps(outcome))
-
