@@ -56,12 +56,19 @@ def build_project_link_workspace(params, user):
     query = WorkspaceQuerySerializer(data=params)
     query.is_valid(raise_exception=True)
     values = query.validated_data
-    canonical = list(Project.objects.annotate(
-        order_count=Count('purchase_orders'),
-    ).order_by('code', 'id').values(
+    canonical = list(Project.objects.order_by('code', 'id').values(
         'id', 'code', 'name', 'status', 'client_name', 'currency',
-        'order_count', 'procurement_project__id', 'is_deleted',
+        'procurement_project__id', 'is_deleted',
     ))
+    # Some synchronized databases enforce project IDs with a unique index,
+    # without a PRIMARY KEY constraint (see procurement migration 0035).
+    # Count orders independently: PostgreSQL cannot infer the project columns
+    # from GROUP BY project.id on those databases.
+    order_counts = dict(PurchaseOrder.objects.filter(
+        enterprise_project__isnull=False,
+    ).order_by().values('enterprise_project_id').annotate(
+        order_count=Count('pk'),
+    ).values_list('enterprise_project_id', 'order_count'))
     by_id = {project['id']: project for project in canonical}
     by_code = {project['code']: project for project in canonical}
     scopes = visible_folder_scopes(user)
@@ -96,7 +103,7 @@ def build_project_link_workspace(params, user):
             'status': project['status'] if project else '',
             'client_name': project['client_name'] if project else '',
             'currency': project['currency'] if project else '',
-            'purchase_order_count': project['order_count'] if project else 0,
+            'purchase_order_count': order_counts.get(project['id'], 0) if project else 0,
             'procurement_project_id': str(project['procurement_project__id'])
             if project and project['procurement_project__id'] else None,
             'can_prepare': not error and bool(project or may_create),
