@@ -101,6 +101,20 @@ class EmployeeProfileSyncTests(TestCase):
         self.employee.refresh_from_db()
         self.assertEqual(self.employee.employment_status, 'suspended')
 
+    def test_partial_profile_position_update_syncs_only_the_saved_field(self):
+        self.employee.department = 'Authoritative HR Department'
+        self.employee.save(update_fields=['department'])
+        # The profile object predates the HR department change. Its other
+        # attributes are not part of the requested position update.
+        self.profile.department = 'Old Department'
+        self.profile.job_title = 'Procurement Manager'
+        self.profile.save(update_fields=['job_title'])
+
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.designation, 'Procurement Manager')
+        self.assertEqual(self.employee.job_title_uae, 'Procurement Manager')
+        self.assertEqual(self.employee.department, 'Authoritative HR Department')
+
     def test_employee_list_does_not_defer_serialized_canonical_fields(self):
         """Keep list serialization from reintroducing one query per employee."""
         view = UserProfileViewSet()

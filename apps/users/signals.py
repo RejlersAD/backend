@@ -73,7 +73,7 @@ AUTO_SYNC_CONFIG = {
 # ═════════════════════════════════════════════════════════════════════════════
 
 @receiver(post_save, sender=UserProfile)
-def sync_userprofile_to_biometric(sender, instance, created, **kwargs):
+def sync_userprofile_to_biometric(sender, instance, created, raw=False, update_fields=None, **kwargs):
     """
     When UserProfile is created/updated, sync to BiometricUserMaster.
     
@@ -83,13 +83,24 @@ def sync_userprofile_to_biometric(sender, instance, created, **kwargs):
         3. Get or create matching BiometricUserMaster
         4. Sync fields based on source_of_truth rules
     """
-    if not AUTO_SYNC_CONFIG['enabled']:
+    if raw or not AUTO_SYNC_CONFIG['enabled']:
         return
     
     if not AUTO_SYNC_CONFIG['sync_directions']['user_to_biometric']:
         return
+
+    if not created and update_fields is not None:
+        persisted_fields = {'employee_id', 'department', 'job_title', 'user', 'user_id'}
+        if persisted_fields.isdisjoint(update_fields):
+            # Signature/security saves must not create a biometric record from
+            # stale profile defaults and send those values back into HR data.
+            return
     
     try:
+        if not created and update_fields is not None:
+            # Even a relevant partial save may carry unsaved/stale values in
+            # other fields. Biometric defaults must use persisted values.
+            instance = sender.objects.select_related('user').get(pk=instance.pk)
         user = instance.user
         
         # Step 1: Ensure employee_id exists
@@ -220,7 +231,7 @@ def sync_biometric_to_userprofile(sender, instance, created, **kwargs):
         if updated:
             for field, value in updates.items():
                 setattr(profile, field, value)
-            profile.save()
+            profile.save(update_fields=[*updates, 'updated_at'])
             logger.info(f"[AUTO-SYNC] Updated UserProfile {profile.user.email}: {list(updates.keys())}")
     
     except Exception as e:
