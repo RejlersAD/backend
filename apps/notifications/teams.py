@@ -8,7 +8,9 @@ from django.conf import settings
 
 from .models import Notification, NotificationLog
 from .delivery import absolute_action_url, delivery_issue, notification_action_url
-from .teams_formatting import teams_card_text, teams_plain_text
+from .teams_formatting import (
+    TEAMS_EMPHASIZED_FIELDS, teams_card_text, teams_html_message, teams_plain_text,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ def build_approval_assignment_payload(notification, context=None):
     if approval_level is not None:
         facts.append({'title': 'Approval Level', 'value': f'Level {approval_level}'})
     facts.append({'title': 'Submitted By', 'value': submitted_by})
-    plain_message = '\n\n'.join([
+    plain_message = '\n'.join([
         message_title,
         *(f"{fact['title']}: {fact['value']}" for fact in facts),
         f'Open Request: {action_url}',
@@ -84,6 +86,7 @@ def build_approval_assignment_payload(notification, context=None):
         'action_label': teams_plain_text(notification.action_label, default='Open Request', max_length=300),
         'action_url': action_url,
         'message': plain_message,
+        'message_html': teams_html_message(message_title, facts, action_url),
         'notification_id': str(notification.pk),
     }
     payload['attachments'] = [{
@@ -101,13 +104,20 @@ def build_approval_assignment_payload(notification, context=None):
                     'size': 'Medium',
                     'wrap': True,
                 },
-                {
-                    'type': 'FactSet',
-                    'facts': [
-                        {'title': fact['title'], 'value': teams_card_text(fact['value'])}
-                        for fact in facts
-                    ],
-                },
+                *[
+                    {
+                        'type': 'RichTextBlock',
+                        'spacing': 'None',
+                        'inlines': [
+                            {'type': 'TextRun', 'text': f"{fact['title']}: ", 'weight': 'Bolder'},
+                            {
+                                'type': 'TextRun', 'text': fact['value'],
+                                'weight': 'Bolder' if fact['title'] in TEAMS_EMPHASIZED_FIELDS else 'Default',
+                            },
+                        ],
+                    }
+                    for fact in facts
+                ],
             ],
             'actions': [{
                 'type': 'Action.OpenUrl',

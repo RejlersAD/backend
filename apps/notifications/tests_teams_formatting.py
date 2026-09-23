@@ -276,7 +276,7 @@ class TeamsFormattedPayloadTests(SimpleTestCase):
             payload['attachments'][0]['content']['actions'][0]['url'], payload['action_url'],
         )
 
-    def test_card_escapes_markdown_without_changing_plain_purchase_order_number(self):
+    def test_card_keeps_user_punctuation_literal_in_text_runs(self):
         context = {
             'request_name': 'Purchase Order RAD-PRJ-PUR-0480_2026',
             'po_number': 'RAD-PRJ-PUR-0480_2026',
@@ -284,15 +284,52 @@ class TeamsFormattedPayloadTests(SimpleTestCase):
         }
         payload = build_approval_assignment_payload(self.notification(), context)
         facts = {
-            fact['title']: fact['value']
-            for fact in payload['attachments'][0]['content']['body'][1]['facts']
+            row['inlines'][0]['text'].removesuffix(': '): row['inlines'][1]['text']
+            for row in payload['attachments'][0]['content']['body'][1:]
         }
         self.assertEqual(payload['po_number'], 'RAD-PRJ-PUR-0480_2026')
         self.assertIn('RAD-PRJ-PUR-0480_2026', payload['message'])
-        self.assertIn(r'0480\_2026', facts['PO Number'])
-        self.assertIn(r'\*Vendor\*', facts['Description'])
-        self.assertIn(r'\[portal\]', facts['Description'])
+        self.assertEqual(facts['PO Number'], context['po_number'])
+        self.assertEqual(facts['Description'], context['description'])
         self.assertEqual(payload['description'], context['description'])
+
+    def test_compact_messages_emphasize_labels_and_key_purchase_order_details(self):
+        payload = build_approval_assignment_payload(self.notification(), {
+            'title': 'New purchase order created',
+            'po_number': 'RAD-PRJ-PUR-0480_2026',
+            'project_id': '5901205', 'value': 'AED 89,512.50',
+            'approval_level': 0,
+        })
+        self.assertNotIn('\n\n', payload['message'])
+        html = payload['message_html']
+        self.assertEqual(html.count('<p>'), 1)
+        self.assertEqual(html.count('</p>'), 1)
+        self.assertNotIn('<br><br>', html)
+        for line in (
+            '<b>New purchase order created</b>',
+            '<b>PO Number: RAD-PRJ-PUR-0480_2026</b>',
+            '<b>Project Code: 5901205</b>', '<b>Value: AED 89,512.50</b>',
+            '<b>Approval Level:</b> Level 0', '<b>Submitted By:</b> Firaol Akawak Nemomsa',
+        ):
+            self.assertIn(line, html)
+        for row in payload['attachments'][0]['content']['body'][1:]:
+            self.assertEqual(row['spacing'], 'None')
+            label, value = row['inlines']
+            self.assertEqual(label['weight'], 'Bolder')
+            emphasized = label['text'] in {'PO Number: ', 'Project Code: ', 'Value: '}
+            self.assertEqual(value['weight'], 'Bolder' if emphasized else 'Default')
+
+    def test_html_preview_escapes_text_and_link_without_hiding_visible_engineering_notation(self):
+        notification = self.notification()
+        notification.action_url = '/procurement/orders/po-1?mode="view"&source=teams'
+        payload = build_approval_assignment_payload(notification, {
+            'description': 'Use <DN50> pipe & "special" fittings.\nIssue drawings.',
+        })
+        html = payload['message_html']
+        self.assertIn('Use &lt;DN50&gt; pipe &amp; &quot;special&quot; fittings.<br>Issue drawings.', html)
+        self.assertNotIn('<DN50>', html)
+        self.assertIn('href="https://www.radai.ae/procurement/orders/po-1?mode=&quot;view&quot;&amp;source=teams"', html)
+        self.assertNotIn('Approval Level:', html)
 
     def test_empty_markup_receives_semantic_fallbacks(self):
         payload = build_approval_assignment_payload(self.notification(), {

@@ -64,7 +64,10 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
             'Approval Level': 'Level 0',
         }.items():
             self.assertIn(f'{key}: {value}', payload['message'])
-        facts = {fact['title']: fact['value'] for fact in payload['attachments'][0]['content']['body'][1]['facts']}
+        facts = {
+            row['inlines'][0]['text'].removesuffix(': '): row['inlines'][1]['text']
+            for row in payload['attachments'][0]['content']['body'][1:]
+        }
         self.assertEqual(facts['PO Number'], payload['po_number'])
         self.assertEqual(facts['Service'], payload['service'])
         self.assertEqual(facts['Vendor'], payload['vendor'])
@@ -95,8 +98,8 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
             payload['attachments'][0]['content']['body'][0]['text'],
             'New purchase order created',
         )
-        facts = payload['attachments'][0]['content']['body'][1]['facts']
-        self.assertNotIn('Approval Level', [fact['title'] for fact in facts])
+        rows = payload['attachments'][0]['content']['body'][1:]
+        self.assertNotIn('Approval Level: ', [row['inlines'][0]['text'] for row in rows])
 
     def test_missing_po_and_optional_details_have_explicit_fallbacks(self):
         payload = build_approval_assignment_payload(self._notification())
