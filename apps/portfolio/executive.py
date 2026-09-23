@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from apps.rbac.action_policy import module_action_allowed
 from .access import can_upload_workbook
-from .reporting import _visible_rows
+from .scope import IDENTITY, workbook_scope
 
 logger = logging.getLogger(__name__)
 CENT = Decimal('0.01')
@@ -28,13 +28,13 @@ METRICS = (
     ('total_poc_risk', 'Total POC risk', 'poc_risk', 'poc_risk_aed',
      'Positive POC overclaim exposure in the primary POC section; resource-deputation cells have a different meaning.'),
 )
-IDENTITY = ('project_code', 'subproject_code', 'title', 'business_unit', 'client', 'pm', 'pc', 'scope_type')
 PROJECT_FIELDS = ('contract_value_aed', 'recognized_revenue_aed', 'poc_pct', 'eddr_pct', 'target_margin_pct',
                   'forecast_margin_pct', 'ld_exposure_aed', 'prolongation_cost_aed')
 DEFINITIONS = [item[4] for item in METRICS] + [
-    'All monetary values are saved workbook AED amounts; no currency conversion is applied.',
+    'Workbook monetary values are saved AED amounts. Connected invoices retain their recorded currencies; no currency conversion is applied.',
     'Blank or invalid facts remain missing. A known subtotal is not a complete total.',
-    'Uploaded project and subproject identities form this register independently of the operational project register.',
+    'Workbook identities are reconciled to registered projects by exact project codes. Unmatched or ambiguous identities require review; reporting does not create or update operational records.',
+    'Connected departmental records retain their own permissions, source dates and currencies. Workbook forecasts do not replace recorded invoices, approvals or project progress.',
     'Capacity and published PM KPI scores are workbook-wide facts and are withheld for row filters or limited access.',
 ]
 
@@ -311,6 +311,7 @@ def _empty(status, *, enabled=False, description=''):
             'projects': {'rows': [], 'total_rows': None, 'returned_rows': 0, 'truncated': False},
             'risks': {'rows': [], 'total_rows': None, 'totals': {}, 'status': status, 'missing_count': None},
             'invoicing': {'rows': [], 'totals': {}, 'status': status},
+            'connections': {'rows': [], 'totals': {}, 'status': status},
             'pm_performance': {'rows': [], 'status': status},
             'capacity': {'rows': [], 'status': status, 'unit': 'manhours'},
             'definitions': DEFINITIONS, 'description': description}
@@ -329,18 +330,9 @@ def build_revenue_dashboard(user, *, search='', pm='', business_unit='', client=
                 empty['can_upload'] = can_upload_workbook(user)
                 return empty
             snapshot = source.active_snapshot
-            full_source = can_upload_workbook(user)
-            queryset = snapshot.rows.all() if full_source else _visible_rows(snapshot, user)
-            all_rows = list(queryset.order_by('project_code', 'subproject_code').values())
-            choices = {key: sorted({row[field] for row in all_rows if row[field]}, key=str.casefold)
-                       for key, field in (('business_units', 'business_unit'), ('clients', 'client'), ('project_managers', 'pm'))}
-            rows = all_rows
-            for field, term in (('pm', pm), ('business_unit', business_unit), ('client', client)):
-                if term:
-                    rows = [row for row in rows if row[field].casefold() == term.casefold()]
-            if search:
-                rows = [row for row in rows if any(search.casefold() in (row.get(field) or '').casefold() for field in IDENTITY)]
-            filtered = bool(search or pm or business_unit or client)
+            scope = workbook_scope(snapshot, user, search=search, pm=pm, business_unit=business_unit, client=client)
+            full_source, all_rows, rows = scope['full_source'], scope['all_rows'], scope['rows']
+            choices, filtered = scope['filters'], scope['filtered']
             allow_global = full_source and not filtered
             metrics = _metrics(rows)
             reconciliation = snapshot.reconciliation or {}
@@ -380,6 +372,14 @@ def build_revenue_dashboard(user, *, search='', pm='', business_unit='', client=
                                 metric.update(value=_amount(saved), basis='cached_workbook_summary')
                         else:
                             summary_mismatches.append(summary_key)
+            try:
+                from .connections import build_project_connections
+                with transaction.atomic():
+                    connections = build_project_connections(user, rows, limit=limit, offset=offset)
+            except Exception:
+                logger.exception('Portfolio project connections unavailable')
+                connections = {'status': 'error', 'rows': [], 'totals': {},
+                               'description': 'Recorded project connections could not be loaded. Refresh to retry.'}
             return {
                 'enabled': True, 'status': 'unavailable' if not rows else 'partial' if stale or source.last_error or summary_mismatches or any(item['status'] == 'partial' for item in kpis) else 'available',
                 'currency': 'AED', 'period': snapshot.reporting_date.isoformat()[:7],
@@ -392,6 +392,7 @@ def build_revenue_dashboard(user, *, search='', pm='', business_unit='', client=
                           'full_source': full_source, 'filtered': filtered, 'accessible_rows': len(all_rows),
                           'row_count': count, 'project_count': len({row['project_code'] for row in rows})},
                 'can_upload': full_source, 'kpis': kpis, 'filters': choices,
+                'connections': connections,
                 'breakdowns': {'business_unit': _breakdown(rows, 'business_unit'),
                                'client': _breakdown(rows, 'client'), 'project_manager': _breakdown(rows, 'pm')},
                 'forecast': _forecast(rows, _month(snapshot.reporting_date)),

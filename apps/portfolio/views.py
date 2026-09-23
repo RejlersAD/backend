@@ -6,13 +6,14 @@ from pathlib import Path
 from django.core import signing
 from django.db import DatabaseError, transaction
 from rest_framework import serializers
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.action_policy import module_action_allowed
 from .access import CanUploadPortfolioWorkbook
 from .importer import PortfolioSnapshotChanged, import_workbook
 from .models import PortfolioSource
@@ -58,6 +59,47 @@ class PortfolioRevenueView(PortfolioWorkbookView):
         response = Response(build_revenue_dashboard(request.user, **filters.validated_data))
         response['Cache-Control'] = 'private, no-store'
         return response
+
+
+class OutgoingInvoiceFilters(WorkbookFilters):
+    snapshot_id = serializers.IntegerField(required=False, min_value=1)
+
+
+class PortfolioOutgoingInvoicesView(PortfolioWorkbookView):
+    """Live, read-only outgoing invoices for the authorized workbook project scope."""
+
+    def get(self, request):
+        from .recorded_invoices import build_recorded_invoices
+        from .scope import workbook_scope
+
+        if not all(module_action_allowed(request.user, module, 'read')
+                   for module in ('project_control', 'finance_outgoing')):
+            raise PermissionDenied('Project Control and Outgoing Invoices read access are required.')
+        filters = OutgoingInvoiceFilters(data=request.query_params)
+        filters.is_valid(raise_exception=True)
+        values = dict(filters.validated_data)
+        expected_snapshot = values.pop('snapshot_id', None)
+        limit, offset = values.pop('limit', 50), values.pop('offset', 0)
+        try:
+            with transaction.atomic():
+                source = PortfolioSource.objects.select_related('active_snapshot').filter(key='poc').first()
+                if source is None or source.active_snapshot is None:
+                    return _private_response({'status': 'unavailable', 'source_snapshot_id': None,
+                                              'description': 'Import a portfolio workbook to connect recorded invoices.',
+                                              'rows': [], 'project_groups': [], 'totals_by_currency': [], 'coverage': {}})
+                snapshot = source.active_snapshot
+                if expected_snapshot is not None and expected_snapshot != snapshot.pk:
+                    return _private_response({'status': 'error', 'code': 'source_changed',
+                                              'detail': 'Portfolio source changed. Refresh the portfolio to reload connected invoices.'}, status=409)
+                scope = workbook_scope(snapshot, request.user, **values)
+                report = build_recorded_invoices(request.user, scope['rows'], full_source=scope['full_source'],
+                                                 limit=limit, offset=offset)
+                report.update(source_snapshot_id=snapshot.pk, workbook_reporting_date=snapshot.reporting_date.isoformat())
+                return _private_response(report, status=503 if report.get('status') == 'error' else 200)
+        except Exception:
+            logger.exception('Recorded portfolio invoices unavailable')
+            return _private_response({'status': 'error', 'detail': 'Connected outgoing invoices could not be loaded. Try again shortly.',
+                                      'rows': [], 'project_groups': [], 'totals_by_currency': [], 'coverage': {}}, status=503)
 
 
 def _upload(request):

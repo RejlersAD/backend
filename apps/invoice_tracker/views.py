@@ -25,6 +25,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Sum, Q
+from django.db.models.functions import Trim, Upper
 from django.http import Http404
 from django.utils import timezone
 from rest_framework import viewsets, status, filters, serializers
@@ -157,6 +158,14 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
                 Q(rad_project_no__icontains=project) |
                 Q(project_name__icontains=project) |
                 Q(project_id__icontains=project)
+            )
+
+        project_exact = params.get('project_exact')
+        if project_exact is not None:
+            if not project_exact.strip(' ') or len(project_exact) > 128:
+                raise serializers.ValidationError({'project_exact': 'Provide one valid project number.'})
+            qs = qs.annotate(exact_project_number=Upper(Trim('rad_project_no'))).filter(
+                exact_project_number=project_exact.strip(' ').upper(),
             )
 
         from .services.collections import filter_collection_queryset

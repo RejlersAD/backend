@@ -12,7 +12,7 @@ from .executive_views import (
 )
 from .work_hub import WorkHubView
 from .work_hub_tasks import WorkHubTaskView
-from apps.portfolio.views import PortfolioRevenueView, PortfolioWorkbookImportView, PortfolioWorkbookPreviewView, PortfolioWorkbookView
+from apps.portfolio.views import PortfolioOutgoingInvoicesView, PortfolioRevenueView, PortfolioWorkbookImportView, PortfolioWorkbookPreviewView, PortfolioWorkbookView
 
 urlpatterns = [
     path('work-hub/', WorkHubView.as_view(), name='work-hub'),
@@ -20,6 +20,7 @@ urlpatterns = [
     path('executive/', ExecutiveDashboardView.as_view(), name='executive-dashboard'),
     path('executive/portfolio-workbook/', PortfolioWorkbookView.as_view(), name='executive-portfolio-workbook'),
     path('executive/portfolio-workbook/revenue/', PortfolioRevenueView.as_view(), name='executive-portfolio-revenue'),
+    path('executive/portfolio-workbook/outgoing-invoices/', PortfolioOutgoingInvoicesView.as_view(), name='executive-portfolio-outgoing-invoices'),
     path('executive/portfolio-workbook/preview/', PortfolioWorkbookPreviewView.as_view(), name='executive-portfolio-workbook-preview'),
     path('executive/portfolio-workbook/import/', PortfolioWorkbookImportView.as_view(), name='executive-portfolio-workbook-import'),
     path('executive/receivables/', ExecutiveReceivablesDashboardView.as_view(), name='executive-receivables'),
