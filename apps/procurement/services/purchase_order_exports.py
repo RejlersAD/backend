@@ -37,6 +37,7 @@ from reportlab.platypus import (
 from reportlab.lib.utils import ImageReader
 
 from .approval_integrity import purchase_order_signature_issue
+from .purchase_order_project_display import purchase_order_project_reference
 from .purchase_order_approval_artwork import (
     approval_image_stream as _signature_stream,
     approval_stamp_stream,
@@ -410,6 +411,13 @@ def _pdf_page(canvas, document, order, page_number=None):
     canvas.restoreState()
 
 
+def _project_display(order):
+    reference = purchase_order_project_reference(order)
+    contacts = getattr(order, 'contact_persons', None)
+    explicitly_selected = isinstance(contacts, dict) and 'project_selections' in contacts
+    return reference or ('—' if explicitly_selected else 'Multiple Projects')
+
+
 def _approval_display(order):
     name = str(getattr(order, 'approved_by_name', '') or '').strip()
     approved_date = getattr(order, 'approved_date', None)
@@ -423,8 +431,8 @@ def _approval_display(order):
     return {
         'recorded': recorded, 'status': status,
         'heading': 'Approved by:' if recorded else 'Approval pending:' if pending else 'Approval record:',
-        'name': name if recorded else 'Not yet approved' if pending else 'Not recorded',
-        'title': str(getattr(order, 'approved_by_title', '') or '') if recorded else '',
+        'name': name if recorded else JARMO_NAME if pending else 'Not recorded',
+        'title': str(getattr(order, 'approved_by_title', '') or '') if recorded else JARMO_TITLE if pending else '',
         'date': approved_date if recorded else None,
     }
 
@@ -508,7 +516,7 @@ def _main_pdf(order):
     commercial = Table([[pair_rows([
         ('Payment Terms', getattr(order, 'payment_terms', None), False),
         ('Payment Mode', getattr(order, 'payment_mode', None), False),
-        ('Project', getattr(order, 'project_number', None) or getattr(order, 'rad_project_no', None) or 'Multiple Projects', True),
+        ('Project', _project_display(order), True),
     ]), '', pair_rows([
         ('Delivery terms', getattr(order, 'delivery_terms', None), False),
         ('Delivery date', _date_text(getattr(order, 'expected_delivery', None)), False),
@@ -587,7 +595,6 @@ def _main_pdf(order):
         approved.append(Paragraph(escape(signature_issue), preview))
     raw_seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
     raw_contact_person = str(getattr(order, 'seller_contact_person', '') or '').strip()
-    confirmation_contact = raw_contact_person or raw_seller_reference
     confirmation_reference = (
         raw_seller_reference
         if raw_contact_person and raw_seller_reference != raw_contact_person
@@ -598,7 +605,7 @@ def _main_pdf(order):
         ('Date', _date_text(getattr(order, 'confirmation_date', None))),
         ('Seller Name', _value(getattr(vendor, 'name', None))),
         ('Seller Ref. no', _value(confirmation_reference)),
-        ('Contact Person', _value(confirmation_contact)),
+        ('Contact Person', raw_contact_person),
         ('Phone Number', _value(getattr(order, 'seller_phone', None))),
         ('Fax', _value(getattr(order, 'seller_fax', None))),
         ('Email', _value(getattr(order, 'seller_email', None))),
@@ -1041,7 +1048,7 @@ def build_purchase_order_docx(order):
     commercial_rows = (
         ('Payment Terms', getattr(order, 'payment_terms', None), 'Delivery terms', getattr(order, 'delivery_terms', None)),
         ('Payment Mode', getattr(order, 'payment_mode', None), 'Delivery date', _date_text(getattr(order, 'expected_delivery', None))),
-        ('Project', getattr(order, 'project_number', None) or getattr(order, 'rad_project_no', None) or 'Multiple Projects', 'Marking', getattr(order, 'marking', None) or order.po_number),
+        ('Project', _project_display(order), 'Marking', getattr(order, 'marking', None) or order.po_number),
     )
     for row, values in zip(commercial.rows, commercial_rows):
         for index, value in enumerate(values):
@@ -1132,6 +1139,7 @@ def build_purchase_order_docx(order):
         f'Order Confirmation:\nWe acknowledge receipt of your documents and will perform according to this PO.\n\n'
         f'Seller Signature: ____________________\n\nDate: {_date_text(getattr(order, "confirmation_date", None))}\n\n'
         f'Seller information: {_value(getattr(vendor, "name", None))}\n\n'
+        f'Contact Person: {str(getattr(order, "seller_contact_person", "") or "").strip()}\n\n'
         f'Phone / Email: {" / ".join(filter(None, (str(getattr(order, "seller_phone", "") or ""), str(getattr(order, "seller_email", "") or "")))) or "â€”"}', size=7,
     )
     document.add_page_break()

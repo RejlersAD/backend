@@ -28,14 +28,34 @@ class ProcurementDeleteConflict(APIException):
         super().__init__({'error': message})
 
 
+def po_applicable_after_link(pr):
+    """A document association must not change an established approval route.
+
+    Keep the explicit choice throughout native review, including before its
+    first decision. Draft and external source-document registrations can still
+    establish that a PO applies when linking their documents.
+    """
+    status = canonicalize_pr_status(getattr(pr, 'status', ''))
+    workflow = getattr(pr, 'approval_workflow_config', None) or []
+    native_rows = [row for row in workflow if isinstance(row, dict)
+                   and not row.get('external') and not row.get('evidence_document_id')]
+    has_decision = any(str(row.get('status') or 'pending').strip().lower()
+                       not in {'pending', 'in_review'} for row in native_rows)
+    if status in {'submitted', 'in_review'} or (native_rows and (status != 'draft' or has_decision)):
+        return bool(getattr(pr, 'po_applicable', False))
+    return True
+
+
 def mark_requisition_converted(pr, po_number):
+    """Record a PO link; only an already approved PR is converted by it."""
     metadata = dict(pr.price_remarks_data or {})
-    if canonicalize_pr_status(pr.status) != 'converted':
-        metadata[PREVIOUS_STATUS] = canonicalize_pr_status(pr.status)
+    if canonicalize_pr_status(pr.status) == 'approved':
+        metadata[PREVIOUS_STATUS] = 'approved'
+        pr.status = 'converted'
+    pr.po_applicable = po_applicable_after_link(pr)
     pr.price_remarks_data = metadata
-    pr.status = 'converted'
     pr.po_number_reference = po_number
-    pr.save(update_fields=['status', 'po_number_reference', 'price_remarks_data', 'updated_at'])
+    pr.save(update_fields=['status', 'po_applicable', 'po_number_reference', 'price_remarks_data', 'updated_at'])
 
 
 def reconcile_requisition_orders(pr, removed_po_number):

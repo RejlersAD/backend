@@ -645,6 +645,9 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
         updated['approver'] = approved_by_name
     updated.update(signature_verified=signature_verified, stamp_verified=stamp_verified,
                    signature_visible=evidence['signature_visible'], approval_evidence_complete=signature_verified)
+    if signature_verified and (existing is None or existing.get('signature_verified') is not True):
+        from .purchase_order_content import purchase_order_content_fingerprint
+        updated['content_fingerprint'] = purchase_order_content_fingerprint(po)
     if updated != existing:
         if existing is not None:
             evidence_log[evidence_log.index(existing)] = updated
@@ -663,6 +666,49 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
         'signature_verified': signature_verified, 'stamp_verified': stamp_verified,
         **evidence, 'extracted_data': source, 'workflow_issues': workflow_issues, 'mapping_issues': [],
     }
+
+
+def _lock_import_relationships(po_number, source_number, *, originating_pr=None):
+    """Lock every observed PR before the PO, including implicit source links."""
+    from .procurement_lifecycle import ProcurementDeleteConflict
+
+    order_query = PurchaseOrder.objects.filter(
+        Q(po_number=po_number) | Q(po_number=source_number),
+    ).annotate(
+        canonical_first=Case(When(po_number=po_number, then=Value(0)), default=Value(1), output_field=IntegerField()),
+    ).order_by('canonical_first', 'pk')
+    observed = order_query.only('pk', 'pr_reference_id').first()
+    if originating_pr:
+        # The public entrypoint already holds this PR. Never acquire another
+        # PR after that lock just to discover an incompatible existing link.
+        if observed and observed.pr_reference_id not in (None, originating_pr.pk):
+            raise ProcurementDeleteConflict('This purchase order is already linked to another recommendation. Its existing link was kept.')
+        candidate_ids = []
+        pr_ids = {originating_pr.pk}
+    else:
+        source_query = PurchaseRequisition.objects.filter(
+            Q(po_number_reference__iexact=source_number) | Q(po_number_reference__iexact=po_number),
+        ).order_by('pk')
+        candidate_ids = list(source_query.values_list('pk', flat=True)[:2])
+        pr_ids = set(candidate_ids)
+        if observed and observed.pr_reference_id:
+            pr_ids.add(observed.pr_reference_id)
+    locked_prs = {pr.pk: pr for pr in PurchaseRequisition.objects.select_for_update()
+                  .filter(pk__in=pr_ids).order_by('pk')}
+    if set(locked_prs) != pr_ids:
+        raise ProcurementDeleteConflict('A matching recommendation changed. Refresh and retry the upload.')
+    if not originating_pr and list(source_query.values_list('pk', flat=True)[:2]) != candidate_ids:
+        raise ProcurementDeleteConflict('The matching recommendations changed. Refresh and retry the upload.')
+    po = order_query.select_for_update().first()
+    if ((po.pk if po else None) != (observed.pk if observed else None)
+            or (po and po.pr_reference_id != observed.pr_reference_id)):
+        raise ProcurementDeleteConflict('The linked recommendation changed. Refresh and retry the upload.')
+    pr = (
+        locked_prs[originating_pr.pk] if originating_pr else
+        locked_prs[po.pr_reference_id] if po and po.pr_reference_id else
+        locked_prs[candidate_ids[0]] if len(candidate_ids) == 1 else None
+    )
+    return po, pr
 
 
 def _import_signed_po_pdf(
@@ -690,11 +736,7 @@ def _import_signed_po_pdf(
     if not verified:
         raise SignedPOImportError(message)
 
-    po = PurchaseOrder.objects.select_for_update().filter(
-        Q(po_number=po_number) | Q(po_number=source_number)
-    ).annotate(
-        canonical_first=Case(When(po_number=po_number, then=Value(0)), default=Value(1), output_field=IntegerField()),
-    ).order_by("canonical_first").first()
+    po, pr = _lock_import_relationships(po_number, source_number, originating_pr=originating_pr)
     retained_document = None
     if po:
         if not allow_existing_update:
@@ -725,10 +767,6 @@ def _import_signed_po_pdf(
     )
     signature_verified, stamp_verified = evidence['signature_verified'], evidence['stamp_verified']
     approved_by_name, approved_by_title, approved_date = (evidence[key] for key in ('approved_by_name', 'approved_by_title', 'approved_date'))
-    candidates = list(PurchaseRequisition.objects.filter(
-        Q(po_number_reference__iexact=source_number) | Q(po_number_reference__iexact=po_number)
-    )[:2])
-    pr = originating_pr or (po.pr_reference if po and po.pr_reference_id else candidates[0] if len(candidates) == 1 else None)
     extraction_review_issues = _extraction_review_issues(fields)
     reconciliation_issues = list(extraction_review_issues)
     if pr:
@@ -880,6 +918,7 @@ def _import_signed_po_pdf(
     evidence_url = f"{document.s3_url}#page=1"
     po.approval_signature = evidence_url if signature_verified else ""
     po.approval_stamp = evidence_url if stamp_verified else ""
+    from .purchase_order_content import purchase_order_content_fingerprint
     po.approval_log = [{
         "stage": "Signed PO document approval",
         "approver": approved_by_name,
@@ -890,6 +929,7 @@ def _import_signed_po_pdf(
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,
         'signature_visible': evidence['signature_visible'], 'approval_evidence_complete': signature_verified,
+        **({'content_fingerprint': purchase_order_content_fingerprint(po)} if signature_verified else {}),
     }]
     attachment = {
         "type": "signed_purchase_order_pdf",
@@ -931,8 +971,6 @@ def _import_signed_po_pdf(
 
     if pr and not originating_pr:
         from .procurement_lifecycle import mark_requisition_converted
-        pr.po_applicable = True
-        pr.save(update_fields=['po_applicable'])
         mark_requisition_converted(pr, po_number)
 
     workflow_issues = []
@@ -944,7 +982,7 @@ def _import_signed_po_pdf(
     ]
     if pr and pending_pr_approvals:
         workflow_issues.append(
-            "The historical PR is linked and converted, but RADAI does not contain its individual internal approval/signature evidence."
+            "The PR is linked, but RADAI does not contain its individual internal approval/signature evidence."
         )
     workflow_issues.extend(evidence['approval_evidence_issues'])
     if not stamp_verified:

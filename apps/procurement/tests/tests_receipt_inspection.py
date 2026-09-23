@@ -282,7 +282,9 @@ class ReceiptInspectionTests(TestCase):
     def test_existing_accept_reject_contract_and_pending_only_decision_capability(self):
         self.grant()
         self.grant('approve')
-        accepted = self.receipt('ACCEPT')
+        accepted = self.receipt('ACCEPT', po_values={'approval_log': [{
+            'stage': 'Recorded approval', 'approver': 'Historical approver', 'status': 'Approved',
+        }]})
         response = self.client.post(BASE + str(accepted.pk) + '/accept/', {}, format='json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['status'], 'accepted')

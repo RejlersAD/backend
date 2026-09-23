@@ -13,6 +13,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import PurchaseOrder, PurchaseRequisition
+from .procurement_lifecycle import po_applicable_after_link
 
 
 def verify_originating_po_link(pr, po_id, user):
@@ -230,8 +231,9 @@ def reconcile_pr_po_link(pr, *, extracted_fields=None):
             po.pr_reference = locked_pr
             po.save(update_fields=["pr_reference", "updated_at"])
         changed = []
-        if not getattr(locked_pr, "po_applicable", False):
-            locked_pr.po_applicable = True
+        po_applicable = po_applicable_after_link(locked_pr)
+        if getattr(locked_pr, "po_applicable", False) != po_applicable:
+            locked_pr.po_applicable = po_applicable
             changed.append("po_applicable")
         if not getattr(locked_pr, "po_number_reference", ""):
             locked_pr.po_number_reference = po.po_number
@@ -281,7 +283,7 @@ def link_selected_purchase_order(pr, purchase_order_id, *, actor=None):
             po.pr_reference = locked_pr
             po.save(update_fields=["pr_reference", "updated_at"])
         changed = []
-        for field, value in (("po_applicable", True), ("po_number_reference", po.po_number)):
+        for field, value in (("po_applicable", po_applicable_after_link(locked_pr)), ("po_number_reference", po.po_number)):
             if getattr(locked_pr, field, None) != value:
                 setattr(locked_pr, field, value)
                 changed.append(field)

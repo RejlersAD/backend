@@ -351,3 +351,4 @@ apps/finance/data/invoice_performance_summary.json
 !apps/planning_intelligence/tests/test_enterprise_schedule_integration.py
 !apps/planning_intelligence/tests/test_enterprise_workflows.py
 !docs/enterprise-scheduling.md
+!docs/PROCUREMENT_APPROVAL_CONTROLS.md

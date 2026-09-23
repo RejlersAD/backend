@@ -102,6 +102,26 @@ class ExplicitVATAPITests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual((response.data['total_price'],response.data['net_total_excl_vat']), ('100.00','95.24'))
 
+    def test_pr_unconfirmed_edit_preserves_explicit_net_and_total_without_tax_inference(self):
+        response = self.patch_record('requisitions', self.pr, {
+            'net_total_excl_vat': '200.00', 'total_price': '217.50',
+        })
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['total_price'], response.data['net_total_excl_vat']), ('217.50', '200.00'))
+        self.assertEqual(response.data['vat_basis'], 'unconfirmed')
+
+    def test_pr_saved_confirmed_basis_survives_plain_saves_and_price_edits(self):
+        self.pr.vat_basis = 'inclusive'
+        self.pr.total_price, self.pr.net_total_excl_vat = Decimal('100'), Decimal('95.24')
+        self.pr.save(update_fields=['vat_basis', 'total_price', 'net_total_excl_vat'])
+        unchanged = self.patch_record('requisitions', self.pr, {'notes': 'Saved commercial note'})
+        self.assertEqual(unchanged.status_code, 200, unchanged.data)
+        self.assertEqual((unchanged.data['total_price'], unchanged.data['net_total_excl_vat']), ('100.00', '95.24'))
+        updated = self.patch_record('requisitions', self.pr, {'entered_amount': '200'})
+        self.assertEqual(updated.status_code, 200, updated.data)
+        self.assertEqual((updated.data['total_price'], updated.data['net_total_excl_vat']), ('200.00', '190.48'))
+        self.assertEqual(updated.data['vat_basis'], 'inclusive')
+
     def test_model_save_has_no_automatic_financial_recalculation(self):
         order = self.order(total_amount='71.89', tax_amount='3.28', vat_percentage='12.37')
         order.title = 'Background metadata update'

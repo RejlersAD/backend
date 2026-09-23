@@ -884,7 +884,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                     'rating': vendor.rating,
                     'past_orders': past_orders,
                     'icv_certified': vendor.is_icv_certified,
-                    'icv_percentage': float(vendor.icv_percentage) if vendor.icv_percentage else None,
+                    'icv_percentage': float(vendor.icv_percentage) if vendor.icv_percentage is not None else None,
                     'adnoc_approved': vendor.adnoc_approved,
                     'reasons': reasons,
                 })
@@ -945,7 +945,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 'email': vendor.email,
                 'rating': vendor.rating,
                 'status': vendor.status,
-                'icv_percentage': float(vendor.icv_percentage) if vendor.icv_percentage else None,
+                'icv_percentage': float(vendor.icv_percentage) if vendor.icv_percentage is not None else None,
                 'icv_expiry_date': vendor.icv_expiry_date.strftime('%Y-%m-%d') if vendor.icv_expiry_date else None,
                 'is_icv_certified': vendor.is_icv_certified,
                 'adnoc_approved': vendor.adnoc_approved,
@@ -1426,19 +1426,24 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
-        pr = self.get_object()
-        workflow = request.data.get('approval_workflow_config')
-        if workflow is not None and canonicalize_pr_status(pr.status) == 'draft':
-            self._enforce_owner_mutation(pr)
-            serializer = self.get_serializer(
-                pr,
-                data={'approval_workflow_config': workflow},
-                partial=True,
-            )
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-        pr = RequisitionWorkflowService.submit(pk, request.user)
-        return Response(self._build_requisition_response(pr))
+        """Explicitly start approval after a saved draft has been confirmed."""
+        from django.db import transaction
+
+        with transaction.atomic():
+            observed = self.get_object()
+            pr = PurchaseRequisition.objects.select_for_update().get(pk=observed.pk)
+            workflow = request.data.get('approval_workflow_config')
+            if workflow is not None and canonicalize_pr_status(pr.status) == 'draft':
+                self._enforce_owner_mutation(pr)
+                serializer = self.get_serializer(
+                    pr,
+                    data={'approval_workflow_config': workflow},
+                    partial=True,
+                )
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+            pr = RequisitionWorkflowService.submit(pk, request.user)
+            return Response(self._build_requisition_response(pr))
 
     @action(detail=True, methods=['post'])
     def convert_to_po(self, request, pk=None):
@@ -2494,45 +2499,37 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def send_to_vendor(self, request, pk=None):
-        po = self.get_object()
-        
-        if po.status != 'draft':
-            return Response(
-                {'error': 'Only draft POs can be sent'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        from django.db import transaction
+        from .services.purchase_order_lifecycle import lock_purchase_order, validate_purchase_order_transition
 
-        verified, message = PurchaseOrderNumberService.verify(
-            po.po_number,
-            po.pr_reference.pr_number if po.pr_reference_id else None,
-        )
-        if not verified:
-            return Response(
-                {'error': f'PO number verification failed: {message}'},
-                status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            po = lock_purchase_order(self.get_object())
+            if po.status != 'draft':
+                raise ValidationError({'error': 'Only draft POs can be sent'})
+            validate_purchase_order_transition(po, 'sent')
+            verified, message = PurchaseOrderNumberService.verify(
+                po.po_number,
+                po.pr_reference.pr_number if po.pr_reference_id else None,
             )
-        
-        po.status = 'sent'
-        po.save()
-        
-        serializer = self.get_serializer(po)
-        return Response(serializer.data)
+            if not verified:
+                raise ValidationError({'error': f'PO number verification failed: {message}'})
+            po.status = 'sent'
+            po.save(update_fields=['status', 'updated_at'])
+            return Response(self.get_serializer(po).data)
     
     @action(detail=True, methods=['post'])
     def acknowledge(self, request, pk=None):
-        po = self.get_object()
-        
-        if po.status != 'sent':
-            return Response(
-                {'error': 'Only sent POs can be acknowledged'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        po.status = 'acknowledged'
-        po.save()
-        
-        serializer = self.get_serializer(po)
-        return Response(serializer.data)
+        from django.db import transaction
+        from .services.purchase_order_lifecycle import lock_purchase_order, validate_purchase_order_transition
+
+        with transaction.atomic():
+            po = lock_purchase_order(self.get_object())
+            if po.status != 'sent':
+                raise ValidationError({'error': 'Only sent POs can be acknowledged'})
+            validate_purchase_order_transition(po, 'acknowledged')
+            po.status = 'acknowledged'
+            po.save(update_fields=['status', 'updated_at'])
+            return Response(self.get_serializer(po).data)
     @action(detail=True, methods=['get'], url_path='receiving-summary')
     def receiving_summary(self, request, pk=None):
         po = self.get_object()
@@ -2648,19 +2645,29 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return Response(response_data)
 
     @action(detail=True, methods=['post'])
-    @guarded_business_approval('procurement_receipts')
     def accept(self, request, pk=None):
-        receipt = self.get_object()
-        if receipt.status != 'pending':
-            raise ValidationError({'error': 'Only pending receipts can be accepted.'})
-        receipt.status = 'accepted'
-        receipt.quality_check_passed = True
-        receipt.save(update_fields=['status', 'quality_check_passed', 'updated_at'])
-        po = receipt.purchase_order
-        po.status = 'completed'
-        po.actual_delivery = timezone.localdate()
-        po.save(update_fields=['status', 'actual_delivery', 'updated_at'])
-        return Response(self.get_serializer(receipt).data)
+        from django.db import transaction
+        from apps.rbac.approval_eligibility import require_configured_approval
+        from .services.purchase_order_lifecycle import lock_purchase_order, validate_purchase_order_transition
+
+        with transaction.atomic():
+            observed = self.get_object()
+            po = lock_purchase_order(observed.purchase_order)
+            receipt = Receipt.objects.select_for_update().get(pk=observed.pk)
+            if receipt.purchase_order_id != po.pk:
+                raise ValidationError({'error': 'The receipt order changed. Refresh before accepting it.'})
+            require_configured_approval(request.user, 'procurement_receipts', receipt, 'accept')
+            if receipt.status != 'pending':
+                raise ValidationError({'error': 'Only pending receipts can be accepted.'})
+            validate_purchase_order_transition(po, 'completed')
+            receipt.status = 'accepted'
+            receipt.quality_check_passed = True
+            receipt.save(update_fields=['status', 'quality_check_passed', 'updated_at'])
+            po.status = 'completed'
+            po.actual_delivery = timezone.localdate()
+            po.save(update_fields=['status', 'actual_delivery', 'updated_at'])
+            receipt.purchase_order = po
+            return Response(self.get_serializer(receipt).data)
     
     @action(detail=True, methods=['post'])
     @guarded_business_approval('procurement_receipts')

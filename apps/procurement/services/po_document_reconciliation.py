@@ -184,7 +184,7 @@ def reconcile_saved_po_document(document_id, request, mapping):
         data = {
             'po_number': number, 'pr_reference': str(pr.pk), 'vendor': str(vendor.pk),
             'title': str(fields['summary'])[:300], 'description': fields['summary'],
-            'category': pr.category or 'other', 'status': 'sent' if signature else 'draft',
+            'category': pr.category or 'other', 'status': 'draft',
             'total_amount': total, 'tax_amount': tax, 'currency': currency,
             'vat_percentage': (tax * Decimal('100') / total).quantize(Decimal('0.01')),
             'project_number': fields.get('project_number') or pr.project or '',
@@ -218,6 +218,14 @@ def reconcile_saved_po_document(document_id, request, mapping):
         approved_by_title=fields.get('approved_by_title') or '',
         approved_date=fields.get('approved_date') or '', retained_document=document,
     )
+    if not existing and signature:
+        from .purchase_order_lifecycle import validate_purchase_order_transition
+
+        # Establish the verified source first. The ordinary serializer cannot
+        # create progressed orders without approval evidence.
+        validate_purchase_order_transition(order, 'sent')
+        order.status = 'sent'
+        order.save(update_fields=['status', 'updated_at'])
     metadata = dict(document.extracted_data or {})
     metadata.update(reconciled_by=str(request.user.pk), reconciled_at=timezone.now().isoformat())
     document.extracted_data = metadata

@@ -14,6 +14,7 @@ from .purchase_order_numbering import PurchaseOrderNumberService
 from .requisition_status import canonicalize_pr_status
 from .employee_display import normalize_ceo_workflow
 from .pr_document_reconciliation import compare_existing_pr
+from .purchase_order_project_display import requisition_project_reference
 
 
 class RequisitionConversionService:
@@ -207,6 +208,9 @@ class RequisitionConversionService:
             requester_name = pr.issued_by.get_full_name() or pr.issued_by.email
 
         pricing_data = pr.price_remarks_data if isinstance(pr.price_remarks_data, dict) else {}
+        project_reference = requisition_project_reference(pr)
+        if len(project_reference) > PurchaseOrder._meta.get_field('project_number').max_length:
+            raise ValidationError({'project_number': 'The combined project numbers exceed 100 characters. Shorten the project references before conversion.'})
         confirmed_financials = {}
         item_amount = total_amount
         if getattr(pr, 'vat_basis', 'unconfirmed') in {'exclusive', 'inclusive', 'none'} and pr.net_total_excl_vat is not None:
@@ -226,7 +230,7 @@ class RequisitionConversionService:
             vendor=vendor,
             seller_reference=vendor.contact_person or '',
             seller_license_no=pr.supplier_business_id or vendor.trade_license_number or '',
-            seller_contact_person=vendor.contact_person or '',
+            seller_contact_person='',
             seller_phone=vendor.phone or '',
             seller_email=vendor.email or '',
             seller_address=vendor.address or '',
@@ -236,7 +240,7 @@ class RequisitionConversionService:
             total_amount=total_amount,
             currency=pr.currency or 'USD',
             payment_terms=str(pricing_data.get('payment_terms') or ''),
-            project_number=pr.project or '',
+            project_number=project_reference,
             project_manager=pr.pm_name.get_full_name() if pr.pm_name else '',
             budget=pr.estimated_budget,
             items=cls._items(pr, item_amount),
