@@ -52,12 +52,14 @@ WORKFLOW_FIELDS = ('parent_deliverable_id', 'deliverable', 'workflow_stage_code'
                    'workflow_stage_sequence', 'workflow_template_id', 'workflow_template_code', 'workflow_template_version',
                    'responsible_role', 'workflow_responsible_party', 'activity_type', 'is_milestone',
                    'workflow_progress_weight', 'workflow_release_gate', 'source_parent_values', 'source_deliverable')
+ACTIVITY_IDENTITY_FIELDS = ('planning_activity_id', 'activity_name_basis', 'activity_name_original',
+                            'activity_naming_version', 'activity_name_review_flags')
 SOURCE_FIELDS = ('source_activity_id', 'source_evidence', 'dependency_status', 'source_missing_fields', 'duration_unit',
                  'evidence_policy', 'duration_policy', 'evidence_entity_id', 'identity_review',
                  'source_evidence_history', 'source_evidence_review', 'sequence_review_required', 'dependency_review_reason',
                  'planned_start_date_source', 'planned_finish_date_source', 'date_authority', 'planner_timing',
                  'requirement_id', 'requirement_value', 'requirement_status', 'selection_basis',
-                 'needs_review', 'review_flags', 'proposal_timing')
+                 'needs_review', 'review_flags', 'proposal_timing', 'source_title', *ACTIVITY_IDENTITY_FIELDS)
 
 
 def _milestone(task):
@@ -158,7 +160,11 @@ def _version_tasks(version):
         'workflow_stage': (row.metadata or {}).get('workflow_stage_code') or (row.metadata or {}).get('workflow_stage'), 'activity_id': row.pk,
         **{key: (row.metadata or {})[key] for key in (*WORKFLOW_FIELDS, *SOURCE_FIELDS) if key in (row.metadata or {})},
         'external_id': row.external_id, 'wbs_node_id': row.wbs_node_id,
-        'activity_code': row.external_id, 'activity_code_source': 'schedule_activity',
+        'activity_code': ((row.metadata or {}).get('source_activity_id')
+                          or (row.metadata or {}).get('planning_activity_id') or row.external_id),
+        'activity_code_source': ('source_document' if (row.metadata or {}).get('source_activity_id')
+                                 else 'planning_activity_id' if (row.metadata or {}).get('planning_activity_id')
+                                 else 'schedule_activity'),
         'sort_order': row.sort_order,
         'wbs_code': row.wbs_node.code if row.wbs_node else '',
         'constraint_type': row.constraint_type, 'constraint_date': row.constraint_date.isoformat() if row.constraint_date else None,
@@ -324,9 +330,13 @@ def _canvas_metadata(project, state, version, activities):
     for index, task in enumerate(state['tasks']):
         activity = activities.get(task['id'])
         if activity:
-            activity_code = task.get('source_activity_id') or activity.external_id
-            code_source = 'source_document' if task.get('source_activity_id') else 'schedule_activity'
-            if re.fullmatch(r'task-(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})', activity_code, flags=re.I):
+            source_activity_id = task.get('source_activity_id') or (activity.metadata or {}).get('source_activity_id')
+            planning_activity_id = task.get('planning_activity_id') or (activity.metadata or {}).get('planning_activity_id')
+            activity_code = source_activity_id or planning_activity_id or activity.external_id
+            code_source = ('source_document' if source_activity_id else 'planning_activity_id'
+                           if planning_activity_id else 'schedule_activity')
+            if not source_activity_id and not planning_activity_id and re.fullmatch(
+                    r'task-(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})', activity_code, flags=re.I):
                 document_number = task.get('document_number') or (activity.metadata or {}).get('document_number')
                 if document_number:
                     activity_code, code_source = document_number, 'document_number'
@@ -348,8 +358,12 @@ def _canvas_metadata(project, state, version, activities):
             positions[node['id']] = positions.get(node['id'], 0) + 1
             row_code = f"{node['code']}.{positions[node['id']]}" if node.get('kind') else f"{node['sort_order'] + 1}.{positions[node['id']]}"
             task.update(
-                external_id=None, activity_code=task.get('document_number') or row_code,
-                activity_code_source='document_number' if task.get('document_number') else 'draft_wbs',
+                external_id=None,
+                activity_code=(task.get('source_activity_id') or task.get('planning_activity_id')
+                               or task.get('document_number') or row_code),
+                activity_code_source=('source_document' if task.get('source_activity_id')
+                                      else 'planning_activity_id' if task.get('planning_activity_id')
+                                      else 'document_number' if task.get('document_number') else 'draft_wbs'),
                 wbs_node_id=node['id'], wbs_code=row_code, sort_order=index,
                 is_milestone=_milestone(task),
                 activity_type=task.get('activity_type') or 'task',
@@ -373,8 +387,9 @@ def _canvas_metadata(project, state, version, activities):
             parent.update(parent_wbs_node_id=node['id'],
                           activity_code=parent.get('document_number') or f"{node['sort_order'] + 1}.{parent_positions[node['id']]}")
         for child in children:
-            child['activity_code'] = f"{parent.get('activity_code') or parent['id']}-{child['workflow_stage_code']}"
-            child['activity_code_source'] = 'deliverable_workflow'
+            if not child.get('source_activity_id') and not child.get('planning_activity_id'):
+                child['activity_code'] = f"{parent.get('activity_code') or parent['id']}-{child['workflow_stage_code']}"
+                child['activity_code_source'] = 'deliverable_workflow'
     state['deliverable_count'] = len(state.get('deliverables') or [])
     descendants = {node['id']: [] for node in nodes}
     for task in state['tasks']:
@@ -1035,7 +1050,7 @@ def _retain_saved_work(previous, proposed, *, additional_task_ids=()):
     protected = protected_work_ids(previous)
     remapped_ids = {}
     for task in proposed:
-        task['source_title'] = task['title']
+        task.setdefault('source_title', task['title'])
         identity = _source_identity(task)
         candidates = id_candidates.get(task['id'], []) if proposed_ids[task['id']] == 1 else []
         if candidates and (any(_source_identity(row) != identity for row in candidates)
@@ -1054,7 +1069,7 @@ def _retain_saved_work(previous, proposed, *, additional_task_ids=()):
             continue
         remapped_ids[task['id']] = original['id']
         for key in ('id', 'owner', 'assignee_id', 'reviewer', 'reviewer_id', 'task_type', 'priority', 'due_date',
-                    'due_date_source', 'effort_hours', 'acceptance_criteria'):
+                    'due_date_source', 'effort_hours', 'acceptance_criteria', 'planning_activity_id'):
             if key in original:
                 task[key] = deepcopy(original[key])
         source_derived = (original.get('evidence_policy') == 'document_driven'
@@ -1082,8 +1097,14 @@ def _retain_saved_work(previous, proposed, *, additional_task_ids=()):
             task['depends_on'] = deepcopy(original.get('depends_on') or [])
             for key in ('dependency_details', 'dependency_rationales', 'dependency_status'):
                 task[key] = deepcopy(original.get(key) or ([] if key == 'dependency_details' else {} if key == 'dependency_rationales' else 'not_specified'))
-        if original.get('source_title') and original['title'] != original['source_title']:
+        name_baseline = original.get('activity_name_original') or original.get('source_title')
+        planner_renamed = bool(name_baseline and original['title'] != name_baseline)
+        if (planner_renamed or original.get('activity_name_basis') == 'source_context_review'
+                or (original.get('activity_naming_version') and not task.get('activity_naming_version'))):
             task['title'] = original['title']
+            for key in ACTIVITY_IDENTITY_FIELDS:
+                if key in original:
+                    task[key] = deepcopy(original[key])
     ids = {task['id'] for task in proposed} | set(additional_task_ids)
     removed_dependencies = 0
     for task in proposed:
@@ -1349,6 +1370,8 @@ def save_plan(project, actor, data):
         for key in (*WORKFLOW_FIELDS, *SOURCE_FIELDS):
             if key in original:
                 task[key] = deepcopy(original[key])
+            elif key in ACTIVITY_IDENTITY_FIELDS:
+                task.pop(key, None)
         for key in ('wbs_phase', 'wbs_deliverable', 'constraint_type', 'constraint_date'):
             if key not in task and key in original:
                 task[key] = deepcopy(original[key])
@@ -1432,6 +1455,13 @@ def save_plan(project, actor, data):
         if 'schedule_generated_fields' in task:
             task['schedule_generated_fields'] = [field for field in task['schedule_generated_fields'] if task.get(field) == original.get(field)]
             task['dependency_rationales'] = {key: value for key, value in task.get('dependency_rationales', {}).items() if key in task['depends_on']}
+    if state.get('method') == 'programmatic_requirements':
+        from .activity_identifiers import assign_activity_identifiers, project_activity_prefix
+
+        # Register the previous rows first so deletion cannot recycle an ID.
+        registry = assign_activity_identifiers(list(known.values()), state.get('activity_id_registry'),
+                                               prefix=project_activity_prefix(project))
+        state['activity_id_registry'] = assign_activity_identifiers(tasks, registry)
     validate_planner_network(tasks)
     task_by_id = {task['id']: task for task in tasks}
     sequence_edits = []

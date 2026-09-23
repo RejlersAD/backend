@@ -78,8 +78,14 @@ class ProgrammaticRequirementsTests(TestCase):
         self.assertEqual(plan['state'], 'review')
         self.assertEqual(plan['revision'], 1)
         self.assertEqual([task['id'] for task in plan['tasks']], [f'requirement-{fact.pk}' for fact in facts])
-        self.assertEqual([task['title'] for task in plan['tasks']], [fact.value for fact in facts])
+        self.assertEqual([task['source_title'] for task in plan['tasks']], [fact.value for fact in facts])
+        codes = [task['activity_code'] for task in plan['tasks']]
+        self.assertEqual(len(set(codes)), 221)
+        self.assertTrue(all(code.endswith(f'-{(index + 1) * 10:04d}') for index, code in enumerate(codes)))
         for task, fact in zip(plan['tasks'], facts):
+            self.assertNotIn('shall', task['title'].lower())
+            self.assertEqual(task['activity_name_original'], task['title'])
+            self.assertEqual(task['requirement_value'], fact.value)
             self.assertEqual(task['duration_source'], 'proposed')
             self.assertTrue(task['needs_review'])
             self.assertEqual(task['depends_on'], [])
@@ -115,7 +121,7 @@ class ProgrammaticRequirementsTests(TestCase):
         )
         response = self.create_draft()
         self.assertEqual(response.status_code, 200, response.data)
-        matching = [task for task in response.data['tasks'] if task['title'] == facts[0].value]
+        matching = [task for task in response.data['tasks'] if task['source_title'] == facts[0].value]
         self.assertEqual({task['id'] for task in matching}, {f'requirement-{facts[0].pk}', f'requirement-{duplicate.pk}'})
         self.assertEqual(len(response.data['tasks']), 4)
 
@@ -139,10 +145,28 @@ class ProgrammaticRequirementsTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertGreater(len(facts[0].value), 500)
         task = response.data['tasks'][0]
-        self.assertEqual(task['title'], facts[0].value[:500])
+        self.assertTrue(task['title'].startswith('Review '))
+        self.assertLessEqual(len(task['title']), 160)
         self.assertEqual(task['source_title'], facts[0].value)
         self.assertEqual(task['requirement_value'], facts[0].value)
         self.assertEqual(task['acceptance_criteria'], facts[0].value)
+
+    def test_names_follow_source_actions_while_codes_remain_separate_from_wbs(self):
+        self.project.phase = 'FEED'
+        self.project.save(update_fields=['phase'])
+        self.analyse(['The CONTRACTOR shall prepare the cable routing layouts.',
+                      'The order of precedence shall follow the contract.',
+                      'Demolished components shall not be reused.'])
+        plan = self.create_draft().data
+        self.assertEqual(plan['tasks'][0]['title'], 'Prepare cable routing layouts')
+        self.assertEqual(plan['tasks'][1]['title'], 'Review document order of precedence')
+        self.assertIn('no reuse', plan['tasks'][2]['title'].lower())
+        self.assertEqual([task['activity_code'] for task in plan['tasks']],
+                         ['FEED-REQ-0010', 'FEED-REQ-0020', 'FEED-REQ-0030'])
+        self.assertNotEqual(plan['tasks'][0]['activity_code'], plan['tasks'][0]['wbs_code'])
+        self.assertEqual(plan['tasks'][0]['field_provenance']['title']['type'], 'proposal')
+        self.assertEqual([task['activity_code'] for task in self.read()['tasks']],
+                         [task['activity_code'] for task in plan['tasks']])
 
     def test_deliverable_register_is_separate_from_all_requirement_activities(self):
         self.analyse([

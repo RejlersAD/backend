@@ -5,6 +5,8 @@ from datetime import timedelta
 from django.db import transaction
 
 from .document_intelligence import _extraction_source_manifest
+from .activity_identifiers import assign_activity_identifiers, project_activity_prefix
+from .activity_naming import NAMING_VERSION, proposed_activity_name
 from .requirement_activities import extract_requirement_activities
 from .simple_planning import (
     _calendar, _calendar_record, _cancel_review, _error, _fingerprint,
@@ -85,8 +87,12 @@ def create_programmatic_draft(project, actor, *, revision, requirement_scope='al
         references = [{'file_id': source.pk, 'filename': source.original_filename, 'category': source.category,
                        'locator': locator, 'excerpt': fact.source_excerpt,
                        'extracted_text_sha256': hashes[source.pk]}]
+        naming = proposed_activity_name(statement, source_excerpt=fact.source_excerpt,
+            source_locator=locator, source_text=source.extracted_text)
         task = _seed_task({
-            'id': f'requirement-{fact.pk}', 'title': statement[:500],
+            'id': f'requirement-{fact.pk}', 'title': naming['title'],
+            'activity_name_original': naming['title'], 'activity_name_basis': naming['naming_basis'],
+            'activity_naming_version': NAMING_VERSION,
             'source_title': statement, 'acceptance_criteria': statement,
             'discipline': 'requirements', 'task_type': 'task', 'priority': 'medium',
             'requirement_id': fact.pk, 'requirement_value': deepcopy(value), 'requirement_status': fact.status,
@@ -100,6 +106,8 @@ def create_programmatic_draft(project, actor, *, revision, requirement_scope='al
     # in batches. Every occurrence remains a separate activity, including clauses.
     tasks.sort(key=lambda row: (row['source_references'][0]['file_id'],
         row['source_references'][0]['locator'].get('character_start', 0), row['requirement_id']))
+    activity_id_registry = assign_activity_identifiers(tasks, state.get('activity_id_registry'),
+        prefix=project_activity_prefix(project))
     allocate_dates(tasks, working_days)
     extracted = extract_requirement_activities(files)
     deliverables = [deepcopy(row) for row in extracted['tasks'] if row.get('task_type') == 'deliverable']
@@ -126,6 +134,7 @@ def create_programmatic_draft(project, actor, *, revision, requirement_scope='al
         state='review', revision=state['revision'] + 1, tasks=tasks,
         disciplines=[{'code': 'requirements', 'name': 'Requirement statements'}],
         method='programmatic_requirements', evidence_policy='planning_assumptions', duration_policy='planning_assumptions',
+        activity_id_registry=activity_id_registry,
         input_fingerprint=_fingerprint(project), intelligence_run_id=run.pk,
         extraction_summary=deepcopy((run.summary or {}).get('extraction_summary') or {}),
         processing_coverage=deepcopy((run.summary or {}).get('processing_coverage') or {}),
