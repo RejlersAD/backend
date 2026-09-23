@@ -141,8 +141,10 @@ class PurchaseRequisitionLinkApprovalGuardsTests(TestCase):
         decision = self.client.post(f'{BASE}requisitions/{pr.pk}/process_dynamic_approval/', {}, format='json')
         self.assertEqual(decision.status_code, 200, decision.data)
         pr.refresh_from_db()
-        self.assertEqual(pr.status, 'approved')
+        self.assertEqual(pr.status, 'converted')
+        self.assertEqual(pr.price_remarks_data['po_link_previous_status'], 'approved')
         self.assertEqual(pr.approval_workflow_config[-1]['approved_by_id'], str(self.ceo.pk))
+        self.assertTrue(all(row['status'] == 'approved' for row in pr.approval_workflow_config))
 
     def test_automatic_link_preserves_route_before_and_after_first_decision(self):
         for decided in (False, True):
