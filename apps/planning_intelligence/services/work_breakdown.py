@@ -20,6 +20,7 @@ from ..models import (
 from .audit import record_event
 from .preview_confirmation import current_confirmed_preview
 from .manual_wbs import manual_wbs
+from .enterprise_schedule import ENTERPRISE_FIELDS, VERSION as ENTERPRISE_VERSION, validate_enterprise_network
 from .schedule_basis import _as_date, _deliverable_rows
 from .work_assignments import (
     hydrate_assignments, normalize_assignment_fields, sync_assignments, sync_workspace_assignments,
@@ -196,6 +197,12 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
         raise WorkBreakdownConflict('Set and confirm the project start date before continuing to schedule.', 'work_breakdown_start_required')
     source_parents = {row['id']: deepcopy(row) for row in draft.get('deliverables') or []}
     expanded = bool(source_parents)
+    enterprise = any(task.get('generation_method') == ENTERPRISE_VERSION for task in draft['tasks'])
+    if enterprise:
+        try:
+            validate_enterprise_network(draft['tasks'])
+        except ValueError as error:
+            raise WorkBreakdownConflict(str(error), 'enterprise_schedule_quality') from error
     parent_tasks = {key: [] for key in source_parents}
     typed_links = _workflow_relationships(draft['tasks'])
     if expanded:
@@ -253,7 +260,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
     parent_counts = {}
     activities = {}
     resources = {}
-    manual_nodes, manual_assignments = manual_wbs(draft['tasks']) if project.planning_mode == 'manual' and not expanded else ([], {})
+    manual_nodes, manual_assignments = manual_wbs(draft['tasks']) if enterprise or (project.planning_mode == 'manual' and not expanded) else ([], {})
     persisted_manual_nodes = {}
     for item in manual_nodes:
         persisted_manual_nodes[item['id']] = ScheduleWBSNode.objects.create(
@@ -276,9 +283,10 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
             if parent_id not in deliverable_nodes:
                 if source_parent.get('discipline') and source_parent['discipline'] != discipline:
                     raise WorkBreakdownConflict('Workflow stages must retain their source deliverable discipline.', 'workflow_discipline_mismatch')
-                parent_counts[discipline] = parent_counts.get(discipline, 0) + 1
+                parent_counts[node.pk] = parent_counts.get(node.pk, 0) + 1
                 deliverable_node = ScheduleWBSNode.objects.create(
-                    version=version, parent=node, code=f'{node.code.rsplit(".", 1)[0]}.{parent_counts[discipline]}',
+                    version=version, parent=node, code=(f'{node.code}.A{parent_counts[node.pk]}' if enterprise else
+                        f'{node.code.rsplit(".", 1)[0]}.{parent_counts[node.pk]}'),
                     name=source_parent['title'][:255], discipline=discipline,
                     level=node.level + 1, sort_order=index,
                 )
@@ -292,7 +300,7 @@ def materialize_work_breakdown(project, draft, *, actor, start, token, intellige
                 raise WorkBreakdownConflict('Workflow stages must retain their source deliverable discipline.', 'workflow_discipline_mismatch')
         expansion_metadata = {
             key: deepcopy(value) for key, value in task.items()
-            if key.startswith('workflow_') or key in {
+            if key.startswith('workflow_') or key in ENTERPRISE_FIELDS or key in {
                 'parent_deliverable_id', 'deliverable', 'source_title', 'source_parent_values',
                 'responsible_role', 'duration_source', 'due_date_source', 'schedule_rationale',
                 'schedule_phase', 'schedule_generated_fields', 'dependency_rationales',

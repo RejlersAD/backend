@@ -16,7 +16,7 @@ from .generation_plan import FAMILY_TEMPLATE_CODES, classify_deliverable
 from .operational_jobs import canonical_fingerprint
 from .fixed_horizon_proposal import protected_work_ids
 
-ALGORITHM_VERSION = '4-generic-document-evidence'
+ALGORITHM_VERSION = '5-scope-workflow-generation'
 _WINDOWS = {
     'mobilization': (0, .08), 'survey': (.05, .18), 'basis': (.12, .28),
     'study': (.25, .55), 'engineering': (.40, .75), 'review': (.68, .85),
@@ -76,6 +76,8 @@ def proposal_context(project, state, calendar_record):
         'dependency_policy': 'source_or_planner',
         'duration_policy': 'source_only',
     }
+    from .enterprise_schedule import generation_context
+    values['generation_context'] = generation_context(project)
     return values, canonical_fingerprint(values)
 
 

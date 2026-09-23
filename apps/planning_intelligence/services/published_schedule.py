@@ -46,6 +46,7 @@ def published_plan_state(baseline):
     """Pure projection from the persisted snapshot; the caller supplies permissions."""
     from .simple_planning import WORKFLOW_FIELDS, SOURCE_FIELDS
     from .planning_provenance import annotate_published_provenance
+    from .enterprise_schedule import VERSION as ENTERPRISE_VERSION, populate_successors
     frozen = deepcopy(baseline.snapshot)
     inputs = frozen.get('accepted_inputs') or {}
     version = frozen.get('version') or {}
@@ -121,6 +122,8 @@ def published_plan_state(baseline):
             if task['id'] not in parent['workflow_task_ids']:
                 parent['workflow_task_ids'].append(task['id'])
         tasks.append(task)
+    populate_successors(tasks)
+    enterprise = any(task.get('generation_method') == ENTERPRISE_VERSION for task in tasks)
     by_task = {task['id']: task for task in tasks}
     for parent in deliverables.values():
         children = [by_task[key] for key in parent['workflow_task_ids'] if key in by_task]
@@ -160,7 +163,7 @@ def published_plan_state(baseline):
              'wbs_nodes': nodes, 'calendar': calendar_data, 'work_calendar': deepcopy(calendar_data),
              'hierarchy_source': 'published_baseline', 'project_summary': _summary(tasks, calendar),
              'deliverables': list(deliverables.values()), 'deliverable_count': len(deliverables),
-             'workflow_mode': 'standard_five' if deliverables else None,
+             'workflow_mode': ('enterprise' if enterprise else 'standard_five') if deliverables else None,
              'calculation_available': bool(tasks) and all(task['calculated'] for task in tasks),
              'calculation_basis': 'published_baseline', 'stale_inputs': False, 'warnings': warnings, 'blockers': [], 'assumptions': [],
              'source_documents': deepcopy(inputs.get('source_documents') or []),
@@ -177,4 +180,6 @@ def published_plan_state(baseline):
              'assignment_token': f'published-baseline:{baseline.pk}', 'published_snapshot': True,
              'read_only_reason': 'This view preserves the approved baseline. Create a revision to use changed inputs.'}
     annotate_published_provenance(state, frozen)
+    if enterprise:
+        state.update(evidence_policy='planning_assumptions', duration_policy='planning_assumptions')
     return state
