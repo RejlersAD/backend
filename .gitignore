@@ -196,6 +196,7 @@ test_*.py
 !apps/hr_core/tests/test_business_approval_gates.py
 !apps/rbac/tests/test_profile_documents.py
 !apps/sales/tests/test_workflow.py
+!apps/portfolio/tests/*.py
 !apps/rbac/tests/test_organization_catalog_data.py
 *.md
 *.txt
@@ -203,6 +204,7 @@ test_*.py
 !scripts/TIMESHEET_MIRROR_SETUP.md
 !docs/PROJECT_RELATIONSHIP_MIGRATION_REPORT.md
 !docs/project-control-governance.md
+!docs/portfolio-sharepoint.md
 !docs/ORGANIZATION_CATALOG.md
 !docs/BUSINESS_APPROVAL_ELIGIBILITY.md
 scripts/timesheet_mirror.env

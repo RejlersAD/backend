@@ -408,6 +408,12 @@ def build_executive_dashboard(user):
     financial_performance = build_financial_performance(user, context, sections['finance'])
     from .portfolio_performance import build_portfolio_performance
     portfolio_performance = build_portfolio_performance(user, context, sections['project_control'])
+    from apps.portfolio.reporting import build_workbook_report
+    portfolio_performance['workbook'] = build_workbook_report(user, limit=200)
+    from apps.portfolio.executive import build_revenue_dashboard
+    portfolio_performance['revenue_dashboard'] = build_revenue_dashboard(user)
+    portfolio_performance['source'] = ('workbook' if portfolio_performance['revenue_dashboard']['enabled']
+                                       else 'operational')
     from .commercial_performance import build_commercial_performance
     commercial_performance = build_commercial_performance(user, context)
     from .workforce_performance import build_workforce_performance
