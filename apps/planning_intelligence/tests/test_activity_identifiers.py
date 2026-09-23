@@ -139,6 +139,34 @@ class ActivityIdentifierPersistenceTests(TestCase):
         self.assertEqual(proposed['activity_name_original'], previous['activity_name_original'])
         self.assertEqual(proposed['source_title'], previous['source_title'])
 
+    def test_rebuild_retains_source_context_name_only_for_the_same_source_occurrence(self):
+        previous = self.generated_task()
+        previous.update(
+            title='Prepare Train 1 Fire and Gas Mapping Report',
+            activity_name_original='Prepare Train 1 Fire and Gas Mapping Report',
+            activity_name_basis='source_context_review',
+            source_references=[{'file_id': 37, 'extracted_text_sha256': 'source-version-hash',
+                                'locator': {'page': 12, 'line': 7}, 'excerpt': previous['source_title']}],
+        )
+        for same_occurrence in (True, False):
+            with self.subTest(same_occurrence=same_occurrence):
+                proposed = self.generated_task()
+                proposed.update(id='requirement-new-run', source_references=deepcopy(previous['source_references']))
+                if not same_occurrence:
+                    proposed['source_references'][0]['locator']['line'] = 8
+                generic = deepcopy(proposed)
+                _retain_saved_work([previous], [proposed])
+                if same_occurrence:
+                    self.assertEqual(proposed['id'], previous['id'])
+                    self.assertEqual(proposed['title'], previous['title'])
+                    self.assertEqual(proposed['activity_name_original'], previous['activity_name_original'])
+                    self.assertEqual(proposed['activity_name_basis'], 'source_context_review')
+                else:
+                    self.assertEqual(proposed['id'], generic['id'])
+                    self.assertEqual(proposed['title'], generic['title'])
+                    self.assertEqual(proposed['activity_name_basis'], generic['activity_name_basis'])
+                self.assertEqual(proposed['source_title'], previous['source_title'])
+
 
 class ActivityIdentifierAllocationTests(SimpleTestCase):
     def test_reordered_new_row_cannot_take_an_existing_id(self):
@@ -178,3 +206,33 @@ class ActivityIdentifierAllocationTests(SimpleTestCase):
         with self.assertRaisesRegex(ValueError, 'conflicts with its saved identifier'):
             assign_activity_identifiers([{'id': 'one', 'planning_activity_id': 'FEED-REQ-0020'}],
                                         {'allocated': {'one': 'FEED-REQ-0010'}})
+
+    def test_existing_business_id_cannot_collide_with_another_tasks_source_id(self):
+        for existing_id in ('task_metadata', 'registry'):
+            with self.subTest(existing_id=existing_id):
+                tasks = [{'id': 'saved'}, {'id': 'imported', 'source_activity_id': 'feed-req-0010'}]
+                registry = None
+                if existing_id == 'task_metadata':
+                    tasks[0]['planning_activity_id'] = 'FEED-REQ-0010'
+                else:
+                    registry = {'allocated': {'saved': 'FEED-REQ-0010'}}
+                before_tasks, before_registry = deepcopy(tasks), deepcopy(registry)
+                with self.assertRaisesRegex(ValueError, "source activity ID conflicts with another activity's saved planning ID"):
+                    assign_activity_identifiers(tasks, registry)
+                self.assertEqual(tasks, before_tasks)
+                self.assertEqual(registry, before_registry)
+
+    def test_source_id_may_alias_the_same_tasks_business_id(self):
+        tasks = [{'id': 'same', 'planning_activity_id': 'FEED-REQ-0010', 'source_activity_id': 'feed-req-0010'}]
+        before = deepcopy(tasks)
+        registry = assign_activity_identifiers(tasks, {'allocated': {'same': 'FEED-REQ-0010'}})
+        self.assertEqual(tasks, before)
+        self.assertEqual(registry['allocated']['same'], 'FEED-REQ-0010')
+
+    def test_duplicate_authoritative_source_ids_are_rejected_without_changes(self):
+        tasks = [{'id': 'one', 'source_activity_id': 'SOURCE-A010'},
+                 {'id': 'two', 'source_activity_id': 'source-a010'}]
+        before = deepcopy(tasks)
+        with self.assertRaisesRegex(ValueError, 'unique source activity ID'):
+            assign_activity_identifiers(tasks)
+        self.assertEqual(tasks, before)

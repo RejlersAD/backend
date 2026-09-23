@@ -15,6 +15,16 @@ class ActivityNamingTests(unittest.TestCase):
         self.assertEqual(result['naming_basis'], 'source_obligation')
         self.assertTrue(result['needs_review'])
 
+    def test_record_obligations_retain_each_specific_subject(self):
+        for number in (1, 2, 221):
+            with self.subTest(number=number):
+                active = self.name(f'The CONTRACTOR shall record requirement number {number}.')
+                passive = self.name(f'Requirement number {number} shall be recorded by the CONTRACTOR.')
+                self.assertEqual(active['title'], f'Record requirement number {number}')
+                self.assertEqual(passive['title'], active['title'])
+                self.assertEqual(active['naming_basis'], 'source_obligation')
+                self.assertTrue(active['needs_review'])
+
     def test_bounded_excerpt_completes_wrapped_line(self):
         result = self.name('FEED CONTRACTOR shall prepare the site survey',
                            'Prior information. FEED CONTRACTOR shall prepare the site survey report. Next scope.')

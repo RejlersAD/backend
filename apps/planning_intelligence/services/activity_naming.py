@@ -18,7 +18,7 @@ _VERBS = (
     'check|revalidate|collect|submit|update|identify|provide|study|gather|'
     'compile|maintain|augment|mobilize|facilitate|arrange|obtain|follow|'
     'configure|include|finalize|agree|allow|monitor|control|make|liaise|'
-    'propose|refer|familiarise|familiarize|extend|achieve|cover|indicate'
+    'propose|refer|familiarise|familiarize|extend|achieve|cover|indicate|record'
 )
 _PASSIVE = {
     'prepared': 'Prepare', 'developed': 'Develop', 'produced': 'Produce',
@@ -28,7 +28,7 @@ _PASSIVE = {
     'provided': 'Provide', 'studied': 'Study', 'compiled': 'Compile',
     'maintained': 'Maintain', 'configured': 'Configure', 'included': 'Review',
     'finalized': 'Finalize', 'agreed': 'Agree', 'arranged': 'Arrange',
-    'obtained': 'Obtain', 'implemented': 'Review', 'used': 'Confirm use of',
+    'obtained': 'Obtain', 'recorded': 'Record', 'implemented': 'Review', 'used': 'Confirm use of',
     'considered': 'Review', 'organized': 'Organize', 'approved': 'Obtain approval for',
 }
 _DANGLING = re.compile(r'\b(?:a|an|the|and|or|of|for|to|in|with|by|all|any|'

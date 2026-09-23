@@ -54,6 +54,20 @@ def assign_activity_identifiers(tasks, registry=None, *, prefix='FEED-REQ'):
         if folded in owners and owners[folded] != key:
             raise ValueError('Every activity must have a unique planning ID.')
         allocated[key], owners[folded] = existing, key
+    # Source IDs remain authoritative in the Gantt. Reserving their numbers
+    # only for future allocations does not detect a collision with a business
+    # ID that was already assigned to another activity.
+    source_owners = {}
+    for task in tasks:
+        source_id = task.get('source_activity_id')
+        if not source_id:
+            continue
+        key, folded = str(task['id']), str(source_id).casefold()
+        if folded in owners and owners[folded] != key:
+            raise ValueError('A source activity ID conflicts with another activity\'s saved planning ID.')
+        if folded in source_owners and source_owners[folded] != key:
+            raise ValueError('Every activity must have a unique source activity ID.')
+        source_owners[folded] = key
     occupied = set(owners)
     occupied.update(str(task[field]).casefold() for task in tasks
                     for field in ('source_activity_id', 'document_number', 'external_id') if task.get(field))
