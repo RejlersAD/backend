@@ -19,6 +19,7 @@ import re
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, range_boundaries
+from .services.hmb_layout import detect_template_layout, template_sections, section_identity
 
 
 HMB_MASTER_TEMPLATE_CONFIG: Dict[str, Any] = {
@@ -334,6 +335,7 @@ def _parse_phase_property_sheet(ws):
         prop_key = _normalise_key(raw_prop)
         unit = _normalise_text(ws.cell(r, layout['unit_col']).value)
         values = {}
+        cells = {}
         for stream in streams:
             v = ws.cell(r, stream['column_index']).value
             if v in (None, '', '---'):
@@ -341,10 +343,13 @@ def _parse_phase_property_sheet(ws):
             if _is_formula_or_ref_error(v):
                 continue
             values[stream['stream_id']] = v
+            cells[stream['stream_id']] = ws.cell(r, stream['column_index']).coordinate
         rows.setdefault(prop_key, []).append({
             'raw_property': raw_prop,
             'unit': unit,
             'values': values,
+            'cells': cells,
+            'sheet': ws.title,
         })
     return {
         'layout': layout,
@@ -448,17 +453,21 @@ def _parse_normalized_summary_sheet(ws):
             continue
         property_name, unit, section_key = parsed_header
         values = {}
+        cells = {}
         for row in range(2, ws.max_row + 1):
             stream_id = _normalise_text(ws.cell(row, 1).value)
             value = ws.cell(row, col).value
             if not stream_id or value in (None, '', '---') or _is_formula_or_ref_error(value):
                 continue
             values[stream_id] = value
+            cells[stream_id] = ws.cell(row, col).coordinate
         prop_key = _normalise_key(property_name)
         sections[section_key]['rows'].setdefault(prop_key, []).append({
             'raw_property': property_name,
             'unit': unit,
             'values': values,
+            'cells': cells,
+            'sheet': ws.title,
         })
 
     for section in sections.values():
@@ -466,7 +475,7 @@ def _parse_normalized_summary_sheet(ws):
     return sections, stream_ids
 
 
-def _parse_normalized_composition(ws, allowed_streams=None, allowed_components=None):
+def _parse_normalized_composition(ws, allowed_streams=None, allowed_components=None, source_refs=None):
     allowed_streams = set(allowed_streams or [])
     allowed_components = set(_normalise_component(c) for c in (allowed_components or []))
     components = [
@@ -483,61 +492,86 @@ def _parse_normalized_composition(ws, allowed_streams=None, allowed_components=N
             if allowed_components and component not in allowed_components:
                 continue
             value = _to_float(ws.cell(row, col).value)
-            out[(stream_id, component)] = 0.0 if value is None else value
+            if value is not None:
+                out[(stream_id, component)] = value
+                if source_refs is not None:
+                    source_refs[(stream_id, component)] = {'sheet': ws.title, 'cell': ws.cell(row, col).coordinate,
+                        'value': str(ws.cell(row, col).value), 'unit': 'mol frac.', 'status': 'present'}
     return out
 
 
 def _parse_master_case_workbook(wb, source_filename: str, template_profile_payload: Dict[str, Any]):
-    ws = wb['Master']
-    case_name = _canonical_case_name(ws.cell(1, 1).value or source_filename)
-    template_sections = template_profile_payload.get('sections', [])
+    layout = detect_template_layout(wb, 'master')
+    ws = wb[layout['sheet_name']]
+    title = _normalise_text(ws.cell(1, 1).value)
+    case_name = _canonical_case_name(title if re.match(r'^case\b', title, re.I) else source_filename)
+    target_sections = template_profile_payload.get('sections', [])
     template_streams = template_profile_payload.get('stream_columns', [])
     source_columns = {
-        _normalise_text(ws.cell(1, col).value): col
-        for col in range(4, ws.max_column + 1)
-        if _normalise_text(ws.cell(1, col).value)
+        _normalise_text(ws.cell(layout['stream_header_row'], col).value): col
+        for col in range(layout['stream_start_col'], ws.max_column + 1)
+        if _normalise_text(ws.cell(layout['stream_header_row'], col).value)
     }
+    header_values = [ws.cell(layout['stream_header_row'], column).value
+                     for column in range(layout['stream_start_col'], ws.max_column + 1)
+                     if ws.cell(layout['stream_header_row'], column).value not in (None, '')]
+    if len(header_values) != len(source_columns):
+        raise ValueError('Source workbook contains duplicate stream IDs.')
+    source_sections = template_sections(ws, layout)
+    source_properties = {}
+    for section in source_sections:
+        for prop in section['properties']:
+            identity = hmb_property_identity(section['key'], prop['property'], prop['unit'])
+            source_properties.setdefault(identity[:2], []).append(prop)
+    exceptions = {}
     records = []
-    for section in template_sections:
+    for section in target_sections:
         section_label = _normalise_text(section.get('label'))
-        section_key = _normalise_key(section_label).replace(' ', '_')
+        section_key = section_identity(section.get('key') or section_label)
         for prop in section.get('properties', []) or []:
-            row = int(prop.get('row') or 0)
-            if not row:
-                continue
+            target_identity = hmb_property_identity(section_key, prop.get('property'), prop.get('unit'))
+            candidates = source_properties.get(target_identity[:2], [])
             for stream in template_streams:
                 stream_id = _normalise_text(stream.get('stream_id'))
                 col = source_columns.get(stream_id)
                 if not col:
                     continue
+                matching = [candidate for candidate in candidates if _unit_compatible(prop.get('unit'), candidate['unit'])]
+                if not matching:
+                    _push_exception(exceptions, 'unit_mismatches' if candidates else 'unmapped_properties',
+                        {'template_stream': stream_id, 'section': section_label, 'property': prop.get('property')})
+                    continue
+                row = matching[0]['row']
                 value = ws.cell(row, col).value
                 if value in (None, '', '---') or _is_formula_or_ref_error(value):
                     continue
                 records.append({
                     'case_name': case_name,
                     'source_filename': source_filename,
-                    'sheet_name': 'Master',
+                    'sheet_name': ws.title,
                     'section_key': section_key,
                     'section_label': section_label,
-                    'row_index': row,
+                    'row_index': int(prop.get('row') or 0),
                     'property_name': _normalise_text(prop.get('property')),
                     'unit': _normalise_text(prop.get('unit')),
                     'stream_id': stream_id,
                     'source_stream_id': stream_id,
                     'stream_description': _normalise_text(stream.get('description')),
                     'value_text': str(value),
+                    'source_metadata': {'sheet': ws.title, 'cell': ws.cell(row, col).coordinate,
+                                        'value': str(value), 'unit': matching[0]['unit'], 'status': 'present'},
                 })
     matched = {stream_id: stream_id for stream_id in source_columns if stream_id in {
         _normalise_text(stream.get('stream_id')) for stream in template_streams
     }}
     return {
         'case_name': case_name,
-        'sheet_name': 'Master',
+        'sheet_name': ws.title,
         'detected_format': 'master_case',
         'stream_count': len(matched),
         'record_count': len(records),
         'records': records,
-        'exceptions': {},
+        'exceptions': exceptions,
         'stream_mapping': {
             'matched': matched,
             'source_stream_count': len(source_columns),
@@ -769,10 +803,10 @@ def _property_candidates(section_key: str, property_name: str):
         'actual volume flow': ['actual volume flow', 'act. volume flow', 'act. liq. flow', 'act. gas flow'],
         'mass heat capacity': ['mass heat capacity'],
         'cp/cv (gamma)': ['cp/cv (gamma)', 'cp/cv', 'cp/(cp - r)', 'gamma'],
-        'compressibility': ['compressibility', 'z factor', 'cp/(cp - r)'],
-        'mass density': ['mass density', 'liq. mass density (std. cond)'],
+        'compressibility': ['compressibility', 'z factor'],
+        'mass density': ['mass density'],
         'thermal conductivity': ['thermal conductivity'],
-        'viscosity': ['viscosity', 'kinematic viscosity'],
+        'viscosity': ['viscosity'],
     }
     cands = [p]
     cands.extend(aliases.get(p, []))
@@ -844,7 +878,7 @@ def _best_source_row(source_sheet_data: Dict[str, Any], section_key: str, prop_n
     return None, None, None
 
 
-def _parse_composition_all(ws, allowed_streams=None, allowed_components=None):
+def _parse_composition_all(ws, allowed_streams=None, allowed_components=None, source_refs=None):
     allowed_streams = set(allowed_streams or [])
     allowed_components = set(_normalise_component(c) for c in (allowed_components or []))
     headers = [
@@ -860,7 +894,7 @@ def _parse_composition_all(ws, allowed_streams=None, allowed_components=None):
         return {}
 
     out = {}
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         stream_id = _normalise_text(row[idx_stream] if idx_stream < len(row) else '')
         if allowed_streams and stream_id not in allowed_streams:
             continue
@@ -873,11 +907,16 @@ def _parse_composition_all(ws, allowed_streams=None, allowed_components=None):
         if phase != 'overall':
             continue
         mole_frac = _to_float(row[idx_mole_frac] if idx_mole_frac < len(row) else None)
-        out[(stream_id, component)] = 0.0 if mole_frac is None else mole_frac
+        if mole_frac is not None:
+            out[(stream_id, component)] = mole_frac
+            if source_refs is not None:
+                source_refs[(stream_id, component)] = {'sheet': ws.title,
+                    'cell': f'{get_column_letter(idx_mole_frac + 1)}{row_number}',
+                    'value': str(row[idx_mole_frac]), 'unit': 'mol frac.', 'status': 'present'}
     return out
 
 
-def _parse_composition_overall(ws, allowed_streams=None, allowed_components=None):
+def _parse_composition_overall(ws, allowed_streams=None, allowed_components=None, source_refs=None):
     allowed_streams = set(allowed_streams or [])
     allowed_components = set(_normalise_component(c) for c in (allowed_components or []))
 
@@ -914,7 +953,11 @@ def _parse_composition_overall(ws, allowed_streams=None, allowed_components=None
             continue
         for sid, col in col_by_stream.items():
             value = _to_float(ws.cell(r, col).value)
-            out[(sid, comp_key)] = 0.0 if value is None else value
+            if value is not None:
+                out[(sid, comp_key)] = value
+                if source_refs is not None:
+                    source_refs[(sid, comp_key)] = {'sheet': ws.title, 'cell': ws.cell(r, col).coordinate,
+                        'value': str(ws.cell(r, col).value), 'unit': 'mol frac.', 'status': 'present'}
     return out
 
 
@@ -934,11 +977,29 @@ def analyze_hmb_master_template(workbook_path: str) -> Dict[str, Any]:
         workbook_bytes = workbook_file.read()
     wb = load_workbook(BytesIO(workbook_bytes), data_only=False)
     values_wb = load_workbook(BytesIO(workbook_bytes), data_only=True)
-    cfg = HMB_MASTER_TEMPLATE_CONFIG
+    cfg = dict(HMB_MASTER_TEMPLATE_CONFIG)
 
     sheet_name = cfg['sheet_name'] if cfg['sheet_name'] in wb.sheetnames else wb.sheetnames[0]
     ws = wb[sheet_name]
     values_ws = values_wb[sheet_name]
+    if any(re.match(r'^CASE\s+[ABC]', _to_text(ws.cell(4, column).value), re.I)
+           for column in range(4, ws.max_column + 1)):
+        wb.close()
+        values_wb.close()
+        raise ValueError('This is a final comparison template. Select Master.xlsx for stream mapping.')
+
+    try:
+        layout = detect_template_layout(wb, 'master')
+        cfg.update(layout)
+        sheet_name = layout['sheet_name']
+        ws = wb[sheet_name]
+        values_ws = values_wb[sheet_name]
+        detected_sections = template_sections(ws, layout)
+        cfg['sections'] = detected_sections
+    except ValueError:
+        wb.close()
+        values_wb.close()
+        raise
 
     header_row = cfg['stream_header_row']
     desc_row = cfg['stream_description_row']
@@ -953,8 +1014,14 @@ def analyze_hmb_master_template(workbook_path: str) -> Dict[str, Any]:
             'column_index': col,
             'column_letter': ws.cell(header_row, col).column_letter,
             'stream_id': stream_id,
-            'description': _to_text(ws.cell(desc_row, col).value),
+            'description': _to_text(ws.cell(desc_row, col).value) if desc_row else '',
         })
+
+    identifiers = [stream['stream_id'] for stream in stream_columns]
+    if not identifiers or len(identifiers) != len(set(identifiers)):
+        wb.close()
+        values_wb.close()
+        raise ValueError('Master stream IDs must be non-empty and unique.')
 
     section_summaries: List[Dict[str, Any]] = []
     normalized_preview: List[Dict[str, Any]] = []
@@ -964,7 +1031,8 @@ def analyze_hmb_master_template(workbook_path: str) -> Dict[str, Any]:
 
     for section in cfg['sections']:
         properties = []
-        for row in range(section['start_row'], section['end_row'] + 1):
+        for detected_property in section['properties']:
+            row = detected_property['row']
             prop = _to_text(ws.cell(row, cfg['property_col']).value)
             if not prop:
                 continue
@@ -1038,6 +1106,7 @@ def analyze_hmb_master_template(workbook_path: str) -> Dict[str, Any]:
 
     result = {
         'template_meta': {
+            'layout': layout,
             'sheet_name': sheet_name,
             'sheet_count': len(wb.sheetnames),
             'case_title': case_title,
@@ -1078,12 +1147,13 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
     wb = load_workbook(BytesIO(workbook_bytes), data_only=True, read_only=False)
     case_name = _extract_case_name(wb, source_filename=source_filename)
 
-    if 'Master' in wb.sheetnames and (template_profile_payload or {}).get('stream_columns'):
-        parsed_master = _parse_master_case_workbook(wb, source_filename, template_profile_payload or {})
-        wb.close()
-        return parsed_master
-
     normalized_summary = _is_normalized_summary_workbook(wb)
+    is_phase_workbook = any(name in wb.sheetnames for name in ('Overall', 'Vapour Phase', 'Liquid Phase', 'Aqueous Phase'))
+    if not normalized_summary and ('Master' in wb.sheetnames or not is_phase_workbook) and (template_profile_payload or {}).get('stream_columns'):
+        try:
+            return _parse_master_case_workbook(wb, source_filename, template_profile_payload)
+        finally:
+            wb.close()
     sheet_map = {
         'general': 'Overall',
         'vapour': 'Vapour Phase',
@@ -1138,21 +1208,25 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
                 allowed_components.append(prop_name)
 
     comp_all = {}
+    composition_sources = {}
     if normalized_summary:
         comp_all = _parse_normalized_composition(
             wb['Mole Fraction'],
+            source_refs=composition_sources,
             allowed_streams=source_stream_ids,
             allowed_components=allowed_components,
         )
     elif 'Composition (Overall)' in wb.sheetnames:
         comp_all = _parse_composition_overall(
             wb['Composition (Overall)'],
+            source_refs=composition_sources,
             allowed_streams=source_stream_ids,
             allowed_components=allowed_components,
         )
     if not comp_all and 'Composition (All)' in wb.sheetnames:
         comp_all = _parse_composition_all(
             wb['Composition (All)'],
+            source_refs=composition_sources,
             allowed_streams=source_stream_ids,
             allowed_components=allowed_components,
         )
@@ -1241,7 +1315,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
 
     for section in template_sections:
         section_label = _normalise_text(section.get('label'))
-        section_key = _normalise_key(section_label).replace(' ', '_')
+        section_key = section_identity(section.get('key') or section_label)
         properties = section.get('properties', []) or []
 
         for source_stream_id in mapped_source_stream_ids:
@@ -1250,6 +1324,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
 
             comp_sum = 0.0
             comp_count = 0
+            comp_missing = False
 
             for prop in properties:
                 prop_name = _normalise_text(prop.get('property'))
@@ -1261,21 +1336,23 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
                 value = None
                 source_unit = ''
                 source_sheet = ''
+                source_metadata = {}
 
                 if section_key == 'composition':
                     source_sheet = 'Mole Fraction' if normalized_summary else 'Composition (All)'
                     comp_key = _normalise_component(prop_name)
                     comp_val = comp_all.get((source_stream_id, comp_key))
                     if comp_val is None:
-                        value = 0.0
-                        _push_exception(exceptions, 'zero_filled_components', {
+                        comp_missing = True
+                        _push_exception(exceptions, 'missing_components', {
                             'template_stream': template_stream_id,
                             'source_stream': source_stream_id,
                             'component': prop_name,
                         })
                     else:
                         value = comp_val
-                    if _normalise_key(prop_name) != 'total':
+                        source_metadata = composition_sources.get((source_stream_id, comp_key), {})
+                    if value is not None and _normalise_key(prop_name) != 'total':
                         comp_sum += float(value)
                         comp_count += 1
                 else:
@@ -1293,6 +1370,12 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
                         value = converted_value
                         if value is None:
                             value = found['values'].get(source_stream_id)
+                        source_sheet = found.get('sheet', source_sheet)
+                        source_metadata = {
+                            'sheet': source_sheet, 'cell': found.get('cells', {}).get(source_stream_id, ''),
+                            'value': str(found['values'].get(source_stream_id)), 'unit': source_unit,
+                            'status': 'converted' if converted_value is not None else 'present',
+                        }
                     else:
                         if first_incompatible is not None:
                             _push_exception(exceptions, 'unit_mismatches', {
@@ -1327,9 +1410,10 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
                     'source_stream_id': source_stream_id,
                     'stream_description': _normalise_text(template_stream.get('description')),
                     'value_text': str(value),
+                    'source_metadata': source_metadata,
                 })
 
-            if section_key == 'composition' and comp_count > 0:
+            if section_key == 'composition' and comp_count > 0 and not comp_missing:
                 if abs(comp_sum - 1.0) > 0.005:
                     _push_exception(exceptions, 'composition_sum_warnings', {
                         'template_stream': template_stream_id,

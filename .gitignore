@@ -170,6 +170,8 @@ test_*.py
 !apps/procurement/tests/test_*.py
 !apps/process_datasheet/tests/test_hmb_template_access.py
 !apps/process_datasheet/tests/test_hmb_storage.py
+!apps/process_datasheet/test_hmb_parser.py
+/private_hmb/
 !apps/project_control/tests/test_estimate_control.py
 !apps/planning_intelligence/tests/test_risk_change_control.py
 !config/test_app_configs.py

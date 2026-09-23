@@ -624,9 +624,11 @@ class HMBSourceUpload(models.Model):
 
     KIND_MASTER_TEMPLATE = 'master_template'
     KIND_CASE_FILE = 'case_file'
+    KIND_OUTPUT_TEMPLATE = 'output_template'
     KIND_CHOICES = [
         (KIND_MASTER_TEMPLATE, 'Master template'),
         (KIND_CASE_FILE, 'Case file'),
+        (KIND_OUTPUT_TEMPLATE, 'Output template'),
     ]
     STATUS_ANALYZED = 'analyzed'
     STATUS_IMPORTED = 'imported'
@@ -711,6 +713,7 @@ class HMBCaseRecord(models.Model):
     property_name = models.CharField(max_length=255, db_index=True)
     unit = models.CharField(max_length=64, blank=True, default='')
     value_text = models.TextField(blank=True, default='')
+    source_metadata = models.JSONField(default=dict, blank=True)
     row_index = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 

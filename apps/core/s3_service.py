@@ -49,6 +49,7 @@ class S3Service:
         'mov_documents': 'media/mov_documents/',
         'hmb_master_templates': 'media/hmb/master-templates/',
         'hmb_case_files': 'media/hmb/case-files/',
+        'hmb_output_templates': 'media/hmb/output-templates/',
     }
     
     # Keep FOLDERS for backward compatibility
