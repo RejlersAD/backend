@@ -31,7 +31,7 @@ METRICS = (
 PROJECT_FIELDS = ('contract_value_aed', 'recognized_revenue_aed', 'poc_pct', 'eddr_pct', 'target_margin_pct',
                   'forecast_margin_pct', 'ld_exposure_aed', 'prolongation_cost_aed')
 DEFINITIONS = [item[4] for item in METRICS] + [
-    'All monetary values are saved workbook AED amounts; no currency conversion is applied.',
+    'Workbook monetary values are saved AED amounts. Connected invoices retain their recorded currencies; no currency conversion is applied.',
     'Blank or invalid facts remain missing. A known subtotal is not a complete total.',
     'Workbook identities are reconciled to registered projects by exact project codes. Unmatched or ambiguous identities require review; reporting does not create or update operational records.',
     'Connected departmental records retain their own permissions, source dates and currencies. Workbook forecasts do not replace recorded invoices, approvals or project progress.',
