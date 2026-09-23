@@ -14,6 +14,9 @@ from .purchase_order_numbering import PurchaseOrderNumberService
 from .requisition_status import canonicalize_pr_status
 from .employee_display import normalize_ceo_workflow
 from .pr_document_reconciliation import compare_existing_pr
+from .purchase_order_approvals import (
+    default_management_assignment, notify_assigned_approvers, notify_purchase_order_created,
+)
 
 
 class RequisitionConversionService:
@@ -106,8 +109,13 @@ class RequisitionConversionService:
         return [
             {
                 'stage': stage.get('stage') or stage.get('role') or f"Stage {index + 1}",
+                'external': True,
+                'source': 'purchase_requisition',
+                'source_pr_id': str(pr.pk),
                 'approver': stage.get('approved_by_name') or stage.get('user_name') or '',
-                'status': str(stage.get('status', 'pending')).title(),
+                'source_status': stage.get('status', 'pending'),
+                'status': ('Approved' if str(stage.get('status', '')).strip().lower()
+                           in {'approved', 'complete', 'completed'} else str(stage.get('status', 'pending')).title()),
                 'date': stage.get('approved_at') or '',
                 'comments': 'Approved on source purchase requisition.',
             }
@@ -202,6 +210,10 @@ class RequisitionConversionService:
         if PurchaseOrder.objects.filter(po_number=po_number).exists():
             raise ValidationError({'error': f'Purchase order number {po_number} is already in use.'})
 
+        # Conversion starts the PO's own approval request. A source PR's
+        # completed history is evidence of that PR, never a PO decision.
+        po_assignments = default_management_assignment()
+
         requester_name = ''
         if pr.issued_by:
             requester_name = pr.issued_by.get_full_name() or pr.issued_by.email
@@ -242,7 +254,8 @@ class RequisitionConversionService:
             items=cls._items(pr, item_amount),
             expected_delivery=pr.required_date,
             scope_of_services=pr.description_reason or '',
-            approval_log=cls._approval_log(pr),
+            approval_log=[*cls._approval_log(pr), *po_assignments],
+            management_approver=po_assignments[-1]['approver'],
             final_approver_notes=pr.purchase_recommendation or '',
             created_by=actor,
             notes=pr.notes or '',
@@ -281,4 +294,6 @@ class RequisitionConversionService:
         if vendor_was_linked:
             update_fields.append('vendor')
         pr.save(update_fields=update_fields)
+        transaction.on_commit(lambda: notify_assigned_approvers(po), robust=True)
+        transaction.on_commit(lambda: notify_purchase_order_created(po), robust=True)
         return pr, po

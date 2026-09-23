@@ -14,6 +14,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
 from apps.procurement.services.purchase_order_exports import (
+    _approval_display,
     _html_blocks,
     build_purchase_order_docx,
     build_purchase_order_pdf,
@@ -25,6 +26,7 @@ class PurchaseOrderExportTests(TestCase):
         order = self._order()
         order.status, order.approved_at = 'draft', None
         order.approved_by_name = 'Preselected Approver'
+        order.approval_log = [{'user_id': 'po-reviewer', 'stage': 'Final Management Sign-off', 'status': 'Pending'}]
         content, _ = build_purchase_order_pdf(order)
         with fitz.open(stream=content, filetype='pdf') as pdf:
             text = '\n'.join(page.get_text() for page in pdf)
@@ -37,6 +39,81 @@ class PurchaseOrderExportTests(TestCase):
         text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
         self.assertIn('Approval pending:', text)
         self.assertNotIn('Preselected Approver', text)
+
+    def test_unassigned_draft_pdf_and_word_do_not_claim_approval_was_requested(self):
+        order = self._order()
+        order.status, order.approved_at = 'draft', None
+        order.approved_by_name = 'Preselected Approver'
+        order.approval_log = []
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertEqual(len(pdf), 3)
+            text = '\n'.join(page.get_text() for page in pdf)
+            self.assertTrue(pdf[0].search_for('Order Confirmation:'))
+            self.assertIn('Approval not requested:', text)
+            self.assertIn('No approver assigned', text)
+            self.assertNotIn('Approval pending:', text)
+            self.assertNotIn('Preselected Approver', text)
+            self.assertNotIn('Approved by:', text)
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        cell = next(cell for table in document.tables for row in table.rows for cell in row.cells
+                    if 'Approval not requested:' in cell.text)
+        self.assertEqual(cell.vertical_alignment, 0)
+        self.assertIn('No approver assigned', cell.text)
+        self.assertNotIn('Preselected Approver', cell.text)
+
+    def test_linked_requisition_approval_and_source_rows_do_not_supply_po_approval(self):
+        order = self._order()
+        order.status, order.approved_at, order.approved_by_name = 'draft', None, ''
+        order.pr_reference = SimpleNamespace(
+            pr_number='PR-APPROVED', status='approved', approved_by_name='PR Signer',
+            approved_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        )
+        order.approval_log = [{
+            'source': 'signed_purchase_requisition_pdf', 'external': True,
+            'user_id': 'pr-reviewer', 'approver': 'PR Signer', 'status': 'Approved',
+            'evidence_document_id': 'retained-pr-source',
+        }]
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            text = '\n'.join(page.get_text() for page in pdf)
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        word_text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+        for rendered in (text, word_text):
+            self.assertIn('Approval not requested:', rendered)
+            self.assertIn('No approver assigned', rendered)
+            self.assertNotIn('PR Signer', rendered)
+            self.assertNotIn('Approved by:', rendered)
+            self.assertNotIn('Approval pending:', rendered)
+
+    def test_pending_status_needs_an_assigned_internal_stage_and_stopped_routes_are_not_pending(self):
+        order = self._order()
+        order.approved_at, order.approved_by_name = None, ''
+        for status in ('draft', 'sent', 'in_progress'):
+            with self.subTest(status=status):
+                order.status = status
+                order.approval_log = [{
+                    'approver_email': 'signer@example.test', 'stage': 'Final Management Sign-off',
+                    'status': 'in_review',
+                }]
+                display = _approval_display(order)
+                self.assertEqual(display['heading'], 'Approval pending:')
+                self.assertEqual(display['name'], 'Not yet approved')
+        order.status = 'draft'
+        for row in (
+            {'status': 'pending', 'stage': 'Final Management Sign-off'},
+            {'status': 'pending', 'user_id': 'pr-reviewer', 'source': 'signed_purchase_requisition_pdf'},
+            {'status': 'pending', 'user_id': 'source-reviewer', 'evidence_document_id': 'source'},
+        ):
+            with self.subTest(row=row):
+                order.approval_log = [row]
+                self.assertEqual(_approval_display(order)['heading'], 'Approval not requested:')
+        order.approval_log = [
+            {'status': 'Rejected', 'user_id': 'first-reviewer'},
+            {'status': 'Pending', 'user_id': 'next-reviewer'},
+        ]
+        self.assertEqual(_approval_display(order)['heading'], 'Approval record:')
 
     def test_pdf_and_docx_flag_mismatched_approval_instead_of_printing_signature(self):
         order = self._order()
@@ -479,6 +556,7 @@ class PurchaseOrderExportTests(TestCase):
     def test_pending_approval_identity_is_higher_and_word_cell_stays_top_aligned(self):
         order = self._realistic_long_contact_order()
         order.status, order.approved_at, order.approved_date = 'draft', None, None
+        order.approval_log = [{'user_id': 'po-reviewer', 'stage': 'Final Management Sign-off', 'status': 'Pending'}]
         content, warnings = build_purchase_order_pdf(order)
         self.assertFalse(warnings)
         with fitz.open(stream=content, filetype='pdf') as pdf:

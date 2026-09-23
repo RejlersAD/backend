@@ -71,11 +71,15 @@ class ProcurementCRUDLifecycleTests(TestCase):
             return self.client.delete(f'{BASE}{kind}/{record.pk}/')
 
     def test_create_edit_delete_order_restores_pr_and_removes_original(self):
+        approver = get_user_model().objects.create_user('crud-po-approver', email='crud-po-approver@example.test')
+        grant_approval(approver)
+        set_position(approver, 'CEO')
         with self.captureOnCommitCallbacks(execute=True), patch('apps.procurement.serializers.notify_assigned_approvers'), patch('apps.procurement.serializers.notify_purchase_order_created'):
             created = self.client.post(f'{BASE}orders/', {
                 'pr_reference': str(self.pr.pk), 'vendor': str(self.vendor.pk),
                 'po_number': 'RAD-PRJ-PUR-0091_2026', 'title': 'Native PO', 'total_amount': '100.00',
                 'vat_percentage': '0.00', 'category': 'other',
+                'approval_log': [{'stage': 'Final Management Sign-off', 'level': 0, 'user_id': str(approver.pk)}],
             }, format='json')
         self.assertEqual(created.status_code, 201, created.data)
         order = PurchaseOrder.objects.get(pk=created.data['id'])
@@ -231,7 +235,7 @@ class ProcurementCRUDLifecycleTests(TestCase):
         other.refresh_from_db()
         self.assertEqual(self.pr.status, 'approved')
         self.assertEqual(self.pr.po_number_reference, '')
-        self.assertEqual(other.status, 'converted')
+        self.assertEqual(other.status, 'draft')
         self.assertEqual(other.po_number_reference, order.po_number)
         self.assertEqual(self.delete('orders', order).status_code, 204)
         other.refresh_from_db()

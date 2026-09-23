@@ -198,6 +198,8 @@ def reconcile_saved_po_document(document_id, request, mapping):
             data.update(financial_values, vat_basis=confirmed['vat_basis'], entered_amount=confirmed['entered_amount'])
         serializer = PurchaseOrderSerializer(data=data, context={
             'request': request, 'defer_requisition_conversion': bool(origin_id),
+            'historical_requisition_conversion': not bool(origin_id),
+            'source_document_import': True,
         })
         serializer.is_valid(raise_exception=True)
         try:

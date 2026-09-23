@@ -22,6 +22,7 @@ from apps.procurement.services.signed_pr_pdf_import import (
 from apps.procurement.views import PurchaseRequisitionViewSet
 from apps.rbac.models import Module, Organization, Permission, UserProfile
 from apps.rbac.module_actions import ensure_module_actions
+from .approval_fixtures import grant_approval, set_position
 
 
 SERVICE = 'apps.procurement.services.signed_pr_pdf_import'
@@ -37,6 +38,12 @@ class SignedPRPdfCreationTests(TestCase):
             username='pdf-reviewer', email='reviewer@example.test',
             first_name='PDF', last_name='Reviewer', is_superuser=True,
         )
+        # Converting a reviewed PR now creates its own pending PO sign-off.
+        self.po_signatory = get_user_model().objects.create_user(
+            username='pdf-po-ceo', email='po-ceo@example.test', first_name='Jarmo', last_name='Suominen',
+        )
+        grant_approval(self.po_signatory)
+        set_position(self.po_signatory, 'CEO')
         self.approvers = {}
         for role in ('pm', 'moe', 'mop', 'vp'):
             self.approvers[role] = get_user_model().objects.create_user(
@@ -336,14 +343,18 @@ class SignedPRPdfCreationTests(TestCase):
         self.assertEqual(first['pr_id'], second['pr_id'])
         self.assertEqual(existing.status, 'approved')
 
-    def test_three_signed_source_rows_can_convert_without_an_extra_radai_approval_route(self):
+    def test_three_signed_pr_source_rows_convert_with_a_separate_pending_po_signoff(self):
         self._use_three_signed_source_rows()
         result = self._import()
         converted_pr, order = RequisitionConversionService.convert(result['pr_id'], self.reviewer)
         self.assertEqual(converted_pr.status, 'converted')
         self.assertEqual(order.pr_reference_id, converted_pr.pk)
-        self.assertEqual([stage['stage'] for stage in order.approval_log], ['PD', 'MoP', 'VP, Op'])
-        self.assertTrue(all(stage['status'] == 'Approved' for stage in order.approval_log))
+        self.assertEqual([stage['stage'] for stage in order.approval_log[:-1]], ['PD', 'MoP', 'VP, Op'])
+        self.assertTrue(all(stage['external'] for stage in order.approval_log[:-1]))
+        self.assertEqual(order.approval_log[-1]['stage'], 'Final Management Sign-off')
+        self.assertEqual(order.approval_log[-1]['status'], 'Pending')
+        self.assertEqual(order.approval_log[-1]['user_id'], str(self.po_signatory.pk))
+        self.assertTrue(all(stage['status'] == 'Approved' for stage in order.approval_log[:-1]))
         self.assertEqual(order.total_amount, Decimal('1250.50'))
         self.assertEqual(PurchaseOrder.objects.count(), 1)
 

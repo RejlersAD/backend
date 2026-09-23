@@ -26,6 +26,17 @@ class FakeRequisition(SimpleNamespace):
 
 class RequisitionConversionServiceTests(SimpleTestCase):
     def setUp(self):
+        self.po_assignment = {
+            'stage': 'Final Management Sign-off', 'level': 0, 'user_id': 'ceo-id',
+            'approver': 'Configured CEO', 'approver_email': 'ceo@example.test', 'status': 'Pending',
+        }
+        assignment = patch('apps.procurement.services.requisition_conversion.default_management_assignment',
+                           return_value=[self.po_assignment])
+        assignment.start()
+        self.addCleanup(assignment.stop)
+        commit = patch('apps.procurement.services.requisition_conversion.transaction.on_commit')
+        self.on_commit = commit.start()
+        self.addCleanup(commit.stop)
         self.actor = SimpleNamespace(id='buyer-1')
         self.issuer = SimpleNamespace(
             email='issuer@example.com',
@@ -133,6 +144,10 @@ class RequisitionConversionServiceTests(SimpleTestCase):
         self.assertEqual(create_data['payment_terms'], 'Net 45')
         self.assertEqual(create_data['items'][0]['total'], 1250.0)
         self.assertEqual(create_data['approval_log'][0]['status'], 'Approved')
+        self.assertEqual(create_data['approval_log'][0]['source'], 'purchase_requisition')
+        self.assertTrue(create_data['approval_log'][0]['external'])
+        self.assertEqual(create_data['approval_log'][-1], self.po_assignment)
+        self.assertEqual(self.on_commit.call_count, 2)
 
     @patch('apps.procurement.services.requisition_conversion.PurchaseOrder.objects')
     def test_unapproved_pr_cannot_be_converted(self, purchase_orders):
