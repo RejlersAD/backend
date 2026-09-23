@@ -32,6 +32,7 @@ from .hmb_extractor_view import (
 )
 
 router = DefaultRouter()
+from .hmb_output_view import hmb_output_template_view, hmb_final_export_view
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
 router.register(r'datasheets', ProcessDatasheetViewSet, basename='datasheet')
 router.register(r'templates', DatasheetTemplateViewSet, basename='datasheet-template')
@@ -41,6 +42,8 @@ router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump
 router.register(r'pump-hydraulic-snapshots', PumpHydraulicSnapshotViewSet, basename='pump-hydraulic-snapshot')
 
 urlpatterns = [
+    path('datasheets/hmb-projects/<uuid:project_id>/output-template/', hmb_output_template_view, name='hmb-output-template'),
+    path('datasheets/hmb-projects/<uuid:project_id>/final-export/', hmb_final_export_view, name='hmb-final-export'),
     # Specific paths MUST come before router.urls to avoid conflicts
     # Smart Datasheet endpoints (unified tool for all 4 types)
     path('datasheets/smart-upload/', smart_datasheet_upload, name='smart-datasheet-upload'),

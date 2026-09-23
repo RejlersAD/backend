@@ -52,6 +52,27 @@ class HMBTemplateAccessTests(TestCase):
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['id'], str(self.profile.id))
 
+    def test_project_preserves_linked_owned_global_master(self):
+        master = HMBMasterTemplateProfile.objects.create(
+            source_filename='Master.xlsx', file_sha256='d' * 64, created_by=self.owner,
+        )
+        HMBCaseImportBatch.objects.create(
+            project=self.project, template_profile=master, imported_by=self.owner,
+            source_file_count=1, total_records=5135,
+        )
+        HMBMasterTemplateProfile.objects.create(
+            source_filename='Private.xlsx', file_sha256='e' * 64, created_by=self.outsider,
+        )
+        request = self.factory.get('/templates/', {'project_id': str(self.project.pk)})
+        force_authenticate(request, user=self.owner)
+        response = list_hmb_master_templates_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['preferred_template_profile_id'], str(master.pk))
+        self.assertEqual(response.data['results'][0]['id'], str(master.pk))
+        self.assertEqual(response.data['count'], 2)
+        master.refresh_from_db()
+        self.assertIsNone(master.project_id)
+
     def test_project_owner_can_retrieve_profile_created_by_another_user(self):
         request = self.factory.get('/api/v1/process-datasheet/datasheets/hmb-master-templates/')
         force_authenticate(request, user=self.owner)
@@ -60,6 +81,20 @@ class HMBTemplateAccessTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['template_profile']['id'], str(self.profile.id))
+
+    def test_case_configuration_is_isolated_per_project(self):
+        from apps.process_datasheet.hmb_extractor_view import _build_hmb_stream_comparison
+        self.profile.analysis_payload = {'stream_columns': [{'stream_id': 'S-001'}], 'sections': []}
+        self.profile.save()
+        second = Project.objects.create(name='Second project', created_by=self.owner)
+        for project, slots in [(self.project, ['Design', 'Turndown']), (second, ['Winter', 'Summer'])]:
+            HMBSourceUpload.objects.create(project=project, uploaded_by=self.owner, upload_kind='output_template',
+                storage_key=f'private/{project.pk}.xlsx', original_filename='Final.xlsx', file_sha256='f' * 64,
+                metadata={'case_slots': slots})
+        result = _build_hmb_stream_comparison(self.project, self.profile, 'S-001')
+        self.assertEqual(result['case_names'], ['Design', 'Turndown'])
+        self.assertNotIn('Winter', result['case_names'])
+        self.assertNotIn('CASE A (1a)', result['case_names'])
 
     def test_outsider_cannot_list_or_retrieve_project_profile(self):
         list_request = self.factory.get(
@@ -206,3 +241,73 @@ class HMBUploadStorageTests(TestCase):
         self.assertEqual(source.status, HMBSourceUpload.STATUS_IMPORTED)
         self.assertIsNotNone(source.imported_at)
         self.assertEqual(source.import_batch, HMBCaseImportBatch.objects.get())
+        retry = self.factory.post('/execute/', {'preview_token': preview_response.data['preview_token']}, format='json')
+        force_authenticate(retry, user=self.user)
+        retried = execute_hmb_case_preview_view(retry)
+        self.assertEqual(retried.status_code, 200)
+        self.assertTrue(retried.data['already_imported'])
+        self.assertEqual(HMBCaseImportBatch.objects.count(), 1)
+        upload = SimpleUploadedFile('case.xlsx', b'case-workbook-content')
+        store.return_value = self.storage_result('media/hmb/case-files/project/retry.xlsx')
+        preview_request = self.factory.post('/preview/', {
+            'case_files': upload, 'project_id': str(self.project.pk), 'template_profile_id': str(profile.pk),
+        }, format='multipart')
+        force_authenticate(preview_request, user=self.user)
+        replacement_preview = preview_hmb_case_files_view(preview_request)
+        self.assertEqual(replacement_preview.status_code, 200)
+        denied = self.factory.post('/execute/', {'preview_token': replacement_preview.data['preview_token']}, format='json')
+        force_authenticate(denied, user=self.user)
+        self.assertEqual(execute_hmb_case_preview_view(denied).status_code, 409)
+        self.assertEqual(HMBCaseImportBatch.objects.count(), 1)
+        from django.core.cache import cache
+        from apps.process_datasheet.hmb_extractor_view import HMB_IMPORT_PREVIEW_CONFIG
+        cache_key = HMB_IMPORT_PREVIEW_CONFIG['cache_prefix'] + replacement_preview.data['preview_token']
+        cached = cache.get(cache_key)
+        cached['files'][0]['exceptions'] = {'unit_mismatches_count': 1}
+        cache.set(cache_key, cached)
+        blocked = self.factory.post('/execute/', {'preview_token': replacement_preview.data['preview_token'], 'replace_existing': True}, format='json')
+        force_authenticate(blocked, user=self.user)
+        self.assertEqual(execute_hmb_case_preview_view(blocked).status_code, 400)
+        self.assertEqual(HMBCaseImportBatch.objects.count(), 1)
+
+    def test_output_template_round_trip_and_project_authorization(self):
+        import io
+        import tempfile
+        from openpyxl import Workbook, load_workbook
+        from django.test import override_settings
+        from apps.process_datasheet.hmb_output_view import hmb_output_template_view, hmb_final_export_view
+        from apps.process_datasheet.models import HMBCaseRecord
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = 'Overall'
+        for coordinate, value in {'A4': 'Phase', 'B4': 'Property', 'C4': 'Unit', 'D4': 'CASE A (1a)', 'A5': 'Overall', 'B5': 'Temperature', 'C5': 'F'}.items():
+            sheet[coordinate] = value
+        content = io.BytesIO()
+        workbook.save(content)
+        profile = HMBMasterTemplateProfile.objects.create(
+            source_filename='Master.xlsx', file_sha256='f' * 64, created_by=self.user,
+            analysis_payload={'stream_columns': [{'stream_id': '1001'}], 'sections': [
+                {'key': 'general', 'label': 'General', 'properties': [{'property': 'Temperature', 'unit': 'F', 'row': 6}]}]},
+        )
+        batch = HMBCaseImportBatch.objects.create(project=self.project, template_profile=profile, imported_by=self.user)
+        HMBCaseRecord.objects.create(batch=batch, project=self.project, template_profile=profile,
+            source_filename='case.xlsx', case_name='CASE A (1a)', stream_id='1001', section_key='general',
+            section_label='General', property_name='Temperature', unit='F', value_text='0')
+        with tempfile.TemporaryDirectory() as directory, override_settings(BASE_DIR=directory, USE_S3=False, DEBUG=True):
+            request = self.factory.post('/output-template/', {'output_template_file': SimpleUploadedFile('Final.xlsx', content.getvalue())}, format='multipart')
+            force_authenticate(request, user=self.user)
+            saved = hmb_output_template_view(request, self.project.pk)
+            self.assertEqual(saved.status_code, 201)
+            request = self.factory.post('/export/', {'template_profile_id': str(profile.pk),
+                'output_template_id': saved.data['output_template']['id'], 'stream_ids': ['1001']}, format='json')
+            force_authenticate(request, user=self.user)
+            result = hmb_final_export_view(request, self.project.pk)
+            self.assertEqual(result.status_code, 200)
+            exported = load_workbook(io.BytesIO(result.content))
+            self.assertEqual(exported['1001']['D5'].value, 0)
+            exported.close()
+            stranger = get_user_model().objects.create_user(username='stranger', email='stranger@example.test')
+            request = self.factory.get('/output-template/')
+            force_authenticate(request, user=stranger)
+            self.assertEqual(hmb_output_template_view(request, self.project.pk).status_code, 403)
