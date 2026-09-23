@@ -8,6 +8,7 @@ from django.conf import settings
 
 from .models import Notification, NotificationLog
 from .delivery import absolute_action_url, delivery_issue, notification_action_url
+from .teams_formatting import teams_card_text, teams_plain_text
 
 
 logger = logging.getLogger(__name__)
@@ -27,26 +28,26 @@ def _absolute_action_url(action_url):
 def build_approval_assignment_payload(notification, context=None):
     """Build the stable JSON contract consumed by the RADAI Power Automate flow."""
     context = context or {}
-    message_title = str(context.get('title') or 'New approval request assigned')
+    message_title = teams_plain_text(context.get('title'), default='New approval request assigned', max_length=300)
     event_type = str(context.get('event_type') or 'approval_assignment')
-    request_name = str(context.get('request_name') or notification.title or 'Approval request')
-    submitted_by = str(context.get('submitted_by') or _display_name(notification.sender))
-    description = str(context.get('description') or 'Not specified')
-    project_name = str(context.get('project_name') or 'Not specified')
-    project_id = str(context.get('project_id') or 'Not specified')
-    po_number = str(context.get('po_number') or 'Not issued')
-    service = str(context.get('service') or description)
-    vendor = str(context.get('vendor') or 'Not specified')
-    value = str(context.get('value') or 'Not specified')
+    request_name = teams_plain_text(context.get('request_name') or notification.title, default='Approval request', max_length=300)
+    submitted_by = teams_plain_text(context.get('submitted_by') or _display_name(notification.sender), max_length=300)
+    description = teams_plain_text(context.get('description'))
+    project_name = teams_plain_text(context.get('project_name'), max_length=300)
+    project_id = teams_plain_text(context.get('project_id'), max_length=300)
+    po_number = teams_plain_text(context.get('po_number'), default='Not issued', max_length=300)
+    service = teams_plain_text(context.get('service'), default=description, max_length=700)
+    vendor = teams_plain_text(context.get('vendor'), max_length=300)
+    value = teams_plain_text(context.get('value'), max_length=300)
     approval_level = context.get('approval_level')
     action_url = _absolute_action_url(notification_action_url(notification))
-    recipient_name = _display_name(notification.recipient)
+    recipient_name = teams_plain_text(_display_name(notification.recipient), max_length=300)
     recipient_email = str(getattr(notification.recipient, 'email', '') or '').strip()
     facts = [
         {'title': 'Request', 'value': request_name},
         {'title': 'PO Number', 'value': po_number},
         {'title': 'Project Name', 'value': project_name},
-        {'title': 'Project ID', 'value': project_id},
+        {'title': 'Project Code', 'value': project_id},
         {'title': 'Service', 'value': service},
         {'title': 'Description', 'value': description},
         {'title': 'Vendor', 'value': vendor},
@@ -55,7 +56,7 @@ def build_approval_assignment_payload(notification, context=None):
     if approval_level is not None:
         facts.append({'title': 'Approval Level', 'value': f'Level {approval_level}'})
     facts.append({'title': 'Submitted By', 'value': submitted_by})
-    plain_message = '\n'.join([
+    plain_message = '\n\n'.join([
         message_title,
         *(f"{fact['title']}: {fact['value']}" for fact in facts),
         f'Open Request: {action_url}',
@@ -77,10 +78,10 @@ def build_approval_assignment_payload(notification, context=None):
         'service': service,
         'vendor': vendor,
         'value': value,
-        'currency': str(context.get('currency') or ''),
+        'currency': teams_plain_text(context.get('currency'), default='', max_length=300),
         'approval_level': approval_level,
         'submitted_by': submitted_by,
-        'action_label': notification.action_label or 'Open Request',
+        'action_label': teams_plain_text(notification.action_label, default='Open Request', max_length=300),
         'action_url': action_url,
         'message': plain_message,
         'notification_id': str(notification.pk),
@@ -95,13 +96,17 @@ def build_approval_assignment_payload(notification, context=None):
             'body': [
                 {
                     'type': 'TextBlock',
-                    'text': payload['title'],
+                    'text': teams_card_text(payload['title']),
                     'weight': 'Bolder',
                     'size': 'Medium',
+                    'wrap': True,
                 },
                 {
                     'type': 'FactSet',
-                    'facts': facts,
+                    'facts': [
+                        {'title': fact['title'], 'value': teams_card_text(fact['value'])}
+                        for fact in facts
+                    ],
                 },
             ],
             'actions': [{
