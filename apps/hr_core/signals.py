@@ -45,13 +45,15 @@ def connect_rbac_profile_signal():
     """Connect lazily to avoid importing RBAC models during app initialization."""
     from apps.rbac.models import UserProfile
 
-    def sync_rbac_profile_to_employee_master(sender, instance, raw=False, **kwargs):
+    def sync_rbac_profile_to_employee_master(sender, instance, raw=False, update_fields=None, **kwargs):
         if raw or instance.is_deleted:
             return
         from apps.hr_core.services import EmployeeService
 
         if EmployeeMaster.objects.filter(user=instance.user).exists():
-            EmployeeService.sync_from_rbac_profile(instance)
+            # A partial save may carry stale values in fields it did not write.
+            # Signature/security edits must not replace HR-maintained positions.
+            EmployeeService.sync_from_rbac_profile(instance, changed_fields=update_fields)
 
     # The handler is local to keep app imports lazy, so connect it strongly.
     post_save.connect(
