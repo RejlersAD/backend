@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -194,8 +195,9 @@ class PaperSpecExtractionService:
     def strip_running_furniture(texts: List[str]) -> List[str]:
         """Remove repeating running headers/footers from per-page text.
 
-        A line is furniture when its digit-normalised form repeats on at least
-        `min_repeat_ratio` of pages within the first/last N non-empty lines,
+        A line is furniture when its whitespace-normalised form repeats on at
+        least two distinct pages and `min_repeat_ratio` of the chunk's pages
+        within the first/last N non-empty lines,
         or when it matches an always-strip pattern. All knobs live in
         config.HEADER_FOOTER_STRIP_CONFIG.
         """
@@ -210,10 +212,8 @@ class PaperSpecExtractionService:
         always  = [re.compile(p, re.IGNORECASE) for p in HF.get("extra_line_patterns", [])]
 
         def _norm(line: str) -> str:
-            """Collapse whitespace and mask digits so 'Page 5 of 181' and
-            'Page 6 of 181' count as the same furniture line."""
+            """Keep source numbers distinct; page counters have explicit patterns."""
             s = re.sub(r"\s+", " ", line).strip()
-            s = re.sub(r"\d+", "#", s)
             return s.lower()
 
         counts: Dict[str, int] = {}
@@ -228,18 +228,21 @@ class PaperSpecExtractionService:
                 seen_on_page.add(key)
                 counts[key] = counts.get(key, 0) + 1
 
-        threshold = max(1, int(round(n_pages * ratio)))
+        threshold = max(2, math.ceil(n_pages * ratio))
         furniture = {k for k, v in counts.items() if v >= threshold}
         if not furniture and not always:
             return texts
 
         cleaned: List[str] = []
         for text in texts:
+            lines = text.splitlines()
+            nonempty_positions = [i for i, ln in enumerate(lines) if ln.strip()]
+            boundary_positions = set(nonempty_positions[:top_n] + nonempty_positions[-bot_n:])
             kept = []
-            for ln in text.splitlines():
+            for position, ln in enumerate(lines):
                 if ln.strip():
                     key = _norm(ln)
-                    if key in furniture or any(p.search(ln.strip()) for p in always):
+                    if (position in boundary_positions and key in furniture) or any(p.search(ln.strip()) for p in always):
                         continue
                 kept.append(ln)
             cleaned.append("\n".join(kept))
