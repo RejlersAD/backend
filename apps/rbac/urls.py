@@ -20,7 +20,10 @@ from .dashboard_views import (
 )
 from .ai_champion_views import AIChampionViewSet
 from apps.users.views_password import change_password
-from .views_admin import provision_all_profiles, check_profile_status, check_admin_status
+from .views_admin import (
+    provision_all_profiles, check_profile_status, check_admin_status,
+    module_catalogue_sync_status, module_catalogue_sync_run,
+)
 from .database_maintenance_views import database_tables, database_table_action
 
 router = DefaultRouter()
@@ -69,6 +72,9 @@ urlpatterns = [
     path('admin/check-status/', check_admin_status, name='admin-check-status'),
     path('admin/provision-profiles/', provision_all_profiles, name='admin-provision-profiles'),
     path('admin/profile-status/', check_profile_status, name='admin-profile-status'),
+    # Module catalogue synchronisation (GET = status, POST = run)
+    path('admin/module-catalogue-sync/', module_catalogue_sync_status, name='admin-module-sync-status'),
+    path('admin/module-catalogue-sync/run/', module_catalogue_sync_run, name='admin-module-sync-run'),
     # Subscription Management (7.3)
     path('subscriptions/', include('apps.rbac.subscription_urls')),
 ]

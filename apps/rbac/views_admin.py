@@ -17,6 +17,50 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Module catalogue synchronisation (super-admin only)
+# ─────────────────────────────────────────────────────────────────────────────
+def _catalogue_sync_payload():
+    """Current catalogue-vs-DB state (shared by status + run endpoints)."""
+    from .rbac_config import ALL_MODULES_CATALOGUE
+    from .models import Module
+    existing = set(Module.objects.values_list('code', flat=True))
+    missing = [
+        {'code': m['code'], 'name': m['name']}
+        for m in ALL_MODULES_CATALOGUE if m['code'] not in existing
+    ]
+    return {
+        'auto_sync_enabled': __import__('os').getenv(
+            'RBAC_AUTO_SYNC_MODULES', '1').strip().lower() not in {'0', 'false', 'off'},
+        'catalogue_count':   len(ALL_MODULES_CATALOGUE),
+        'db_count':          len(existing),
+        'missing':           missing,
+        'in_sync':           not missing,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def module_catalogue_sync_status(request):
+    """GET /api/v1/rbac/admin/module-catalogue-sync/ — current sync state."""
+    return Response(_catalogue_sync_payload())
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def module_catalogue_sync_run(request):
+    """POST /api/v1/rbac/admin/module-catalogue-sync/ — run the sync now.
+    Idempotent; creates missing Module rows + their six standard action
+    permissions (via ensure_module_actions inside _sync_module_catalogue)."""
+    from .models import Module, _sync_module_catalogue
+    before = Module.objects.count()
+    _sync_module_catalogue()
+    after = Module.objects.count()
+    payload = _catalogue_sync_payload()
+    payload['created_count'] = max(0, after - before)
+    return Response(payload)
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def check_admin_status(request):
