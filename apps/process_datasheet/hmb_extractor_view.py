@@ -153,14 +153,22 @@ def _user_has_hmb_team_access(user) -> bool:
 
 def _get_accessible_project(user, project_id: str):
     try:
-        project = Project.objects.get(project_id=project_id)
+        project = Project.objects.select_related('created_by').get(project_id=project_id)
     except Project.DoesNotExist:
         return None, Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if _is_admin(user) or project.created_by_id == getattr(user, 'id', None):
         return project, None
-    if HMB_ACCESS_CONFIG['strategy'] == 'module_team' and _user_has_hmb_team_access(user):
-        return project, None
+    # Team visibility: same rule as the shared project organizer — a user who
+    # shares a collaboration module with the project owner can open the project.
+    if HMB_ACCESS_CONFIG['strategy'] == 'module_team':
+        try:
+            from apps.project_organizer.views import _shares_team_module
+            if _shares_team_module(user, project.created_by):
+                return project, None
+        except Exception:
+            if _user_has_hmb_team_access(user):
+                return project, None
     return None, Response({'error': 'Access denied for this project.'}, status=status.HTTP_403_FORBIDDEN)
 
 

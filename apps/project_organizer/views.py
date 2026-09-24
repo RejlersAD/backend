@@ -20,7 +20,9 @@ project; regular users only see / modify projects they created.
 from __future__ import annotations
 
 import logging
+import os
 
+from django.contrib.auth import get_user_model
 from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -28,6 +30,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import Project, ProjectActivity
+
+User = get_user_model()
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,48 @@ PROJECT_RBAC = {
     'list_limit':     500,
     'activity_limit': 200,
 }
+
+# Project visibility policy (soft-coded). Mirrors the platform's RBAC
+# VisibilityStrategy pattern so every user holding a collaboration module sees
+# the SAME project list as admins — no per-user divergence.
+PROJECT_VISIBILITY = {
+    # 'owner'       → non-admins see only their own projects (legacy).
+    # 'module_team' → non-admins see their own projects PLUS projects whose
+    #                 creator shares one of `team_module_codes` with them.
+    'strategy': os.getenv('PROJECT_VISIBILITY_STRATEGY', 'module_team').strip().lower(),
+    # Modules that confer team-wide project visibility when strategy=module_team.
+    'team_module_codes': [
+        m.strip() for m in os.getenv(
+            'PROJECT_VISIBILITY_TEAM_MODULES',
+            'process_datasheet,spec_customization,piping_pms,pid_analysis',
+        ).split(',') if m.strip()
+    ],
+}
+
+
+def _user_team_module_codes(user) -> set:
+    """All module codes the user currently holds (empty set on failure)."""
+    try:
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
+        if not profile:
+            return set()
+        return {m.code for m in profile.get_all_modules()}
+    except Exception:
+        return set()
+
+
+def _shares_team_module(viewer, owner) -> bool:
+    """True when viewer and project owner share at least one team module."""
+    team = set(PROJECT_VISIBILITY['team_module_codes'])
+    if not team or viewer is None or owner is None:
+        return False
+    viewer_codes = _user_team_module_codes(viewer)
+    if not viewer_codes.intersection(team):
+        return False
+    owner_codes = _user_team_module_codes(owner)
+    return bool(viewer_codes.intersection(owner_codes).intersection(team))
+
 
 ALLOWED_CREATE_FIELDS = {
     'name', 'code', 'client', 'plant', 'discipline',
@@ -105,10 +151,20 @@ def _serialize_activity(a: ProjectActivity) -> dict:
 
 
 def _filtered_queryset(user):
-    qs = Project.objects.all()
-    if not _is_admin(user):
-        qs = qs.filter(created_by=user)
-    return qs
+    qs = Project.objects.select_related('created_by').all()
+    if _is_admin(user):
+        return qs
+    if PROJECT_VISIBILITY['strategy'] == 'module_team':
+        team = set(PROJECT_VISIBILITY['team_module_codes'])
+        if team and _user_team_module_codes(user).intersection(team):
+            # Team members see the same project list as admins — every project
+            # created by any teammate holding a shared collaboration module.
+            teammate_ids = [
+                uid for uid in Project.objects.values_list('created_by_id', flat=True).distinct()
+                if uid and _shares_team_module(user, User.objects.filter(pk=uid).first())
+            ]
+            return qs.filter(Q(created_by=user) | Q(created_by_id__in=teammate_ids))
+    return qs.filter(created_by=user)
 
 
 def _sanitize_payload(data: dict, whitelist: set) -> dict:
@@ -130,12 +186,14 @@ def _sanitize_payload(data: dict, whitelist: set) -> dict:
 def _get_accessible_project(user, project_id):
     """Returns (project, error_response). error_response is None on success."""
     try:
-        p = Project.objects.get(project_id=project_id)
+        p = Project.objects.select_related('created_by').get(project_id=project_id)
     except Project.DoesNotExist:
         return None, Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
-    if not _is_admin(user) and p.created_by_id != getattr(user, 'id', None):
-        return None, Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
-    return p, None
+    if _is_admin(user) or p.created_by_id == getattr(user, 'id', None):
+        return p, None
+    if PROJECT_VISIBILITY['strategy'] == 'module_team' and _shares_team_module(user, p.created_by):
+        return p, None
+    return None, Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
 
 
 # ---------------------------------------------------------------------------
