@@ -1,0 +1,36 @@
+# Focused purchase-recommendation CI imports; versions remain owned by the
+# application's requirements.txt. This does not replace deployment dependencies.
+-c requirements.txt
+
+# Django startup, database access, API authentication and domain task imports.
+Django
+djangorestframework
+django-filter
+djangorestframework-simplejwt
+drf-spectacular
+psycopg2-binary
+python-decouple
+python-dotenv
+dj-database-url
+celery
+requests
+cryptography
+
+# The verified release test settings load the shared functional URL registry.
+# Its import-time document/export dependencies are needed even though these
+# tests do not execute document processing, AI providers or external delivery.
+boto3
+django-storages
+openpyxl
+pillow
+PyPDF2
+python-docx
+python-pptx
+reportlab
+lxml
+networkx
+python-dateutil
+numpy
+pandas
+scipy
+pymupdf
