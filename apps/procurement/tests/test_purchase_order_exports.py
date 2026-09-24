@@ -419,6 +419,12 @@ class PurchaseOrderExportTests(TestCase):
             self.assertNotIn('We, Rejlers', text)
         order.contact_persons['order_introduction'] = ''
         word = Document(BytesIO(build_purchase_order_docx(order)))
+        self.assertFalse(any('We, Rejlers' in p.text for p in word.paragraphs))
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertNotIn('We, Rejlers', pdf[1].get_text())
+        del order.contact_persons['order_introduction']
+        word = Document(BytesIO(build_purchase_order_docx(order)))
         self.assertTrue(any('We, Rejlers International Engineering Solutions (Buyer)' in p.text for p in word.paragraphs))
 
     def test_rich_text_normalization_decodes_entities_and_keeps_blocks(self):
