@@ -101,3 +101,9 @@ commercial fields, stale edits after concurrent approval, signature suppression,
 spreadsheet overwrites, and manual/automatic PR links through final CEO review.
 Functional test settings use disposable databases and suppress external
 delivery. SQLite checks do not certify PostgreSQL row-lock concurrency behavior.
+
+The focused [PostgreSQL concurrency verification](PROCUREMENT_CONCURRENCY_POSTGRESQL.md)
+now covers edit/submit races on separate connections, atomic lock/version/write
+ordering, stale-request rollback, current permissions and optional-token legacy
+behavior. It uses a disposable PostgreSQL 15.18 database and does not certify
+migration history, external delivery or unrelated workflows.
