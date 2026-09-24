@@ -19,6 +19,7 @@ from django.utils import timezone
 from datetime import timedelta
 from apps.core.project_models import Project as CoreProject
 from .services.document_filenames import build_procurement_pdf_filename
+from .services.requisition_word_export import build_purchase_requisition_docx, DOCX_MIME_TYPE
 from .services.employee_display import normalize_ceo_workflow
 from .services.purchase_order_exports import (
     build_purchase_order_docx,
@@ -1504,6 +1505,18 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'message': f'{len(uploaded)} file(s) uploaded successfully',
             'attachments': pr.attachments
         })
+
+    @action(detail=True, methods=['get'], url_path='export-word')
+    def export_word(self, request, pk=None):
+        """Download saved PR data without changing its lifecycle or evidence."""
+        pr = self.get_object()
+        content = build_purchase_requisition_docx(self.get_serializer(pr).data)
+        filename = build_procurement_pdf_filename(pr.pr_number, 'pr', pr.issued_date)[:-4] + '.docx'
+        response = HttpResponse(content, content_type=DOCX_MIME_TYPE)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @action(detail=True, methods=['get'])
     def export_pdf(self, request, pk=None):
