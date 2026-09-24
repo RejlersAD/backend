@@ -4,6 +4,7 @@ from rest_framework.exceptions import ValidationError
 
 
 INTRODUCTION_KEY = 'order_introduction'
+SHOW_INTRODUCTION_KEY = 'show_order_introduction'
 MAX_INTRODUCTION_LENGTH = 10000
 BUYER_NAME = 'Rejlers International Engineering Solutions'
 
@@ -25,6 +26,8 @@ def validate_order_introduction(contacts):
 
 def purchase_order_introduction(order):
     contacts = getattr(order, 'contact_persons', None)
+    if isinstance(contacts, dict) and contacts.get(SHOW_INTRODUCTION_KEY) is False:
+        return ''
     custom = contacts.get(INTRODUCTION_KEY) if isinstance(contacts, dict) else None
     # A saved blank string is an intentional omission. Only untouched legacy
     # records (without a text override) receive the standard introduction.

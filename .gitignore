@@ -355,5 +355,7 @@ apps/finance/data/invoice_performance_summary.json
 !docs/enterprise-scheduling.md
 !docs/PROCUREMENT_APPROVAL_CONTROLS.md
 !docs/PROCUREMENT_CONCURRENCY_POSTGRESQL.md
+!docs/PO_RECEIPT_INVOICE_HANDOFF.md
+!docs/FINANCE_PO_HANDOFF.md
 !config/test_procurement_ci_runner.py
 !requirements-procurement-ci.txt

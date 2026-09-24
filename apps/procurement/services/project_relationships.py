@@ -662,8 +662,17 @@ def resolve_invoice_purchase_order(*, invoice_id, purchase_order_id, allocated_a
         amount = Decimal(str(allocated_amount))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValidationError({'allocated_amount': 'Enter a valid allocation amount.'}) from exc
-    if amount <= 0:
-        raise ValidationError({'allocated_amount': 'Allocation amount must be greater than zero.'})
+    from apps.finance.services.purchase_order_handoff import (
+        invoice_open_for_matching, require_purchase_order_read, validate_new_allocation,
+    )
+    from rest_framework.exceptions import ValidationError as APIValidationError
+    require_purchase_order_read(user)
+    if not invoice_open_for_matching(invoice):
+        raise ValidationError({'invoice_id': 'This invoice is no longer open for purchase order matching.'})
+    try:
+        validate_new_allocation(order, vendor_id=invoice.vendor_id, currency=invoice.currency, amount=amount)
+    except APIValidationError as exc:
+        raise ValidationError(exc.detail) from exc
     invoice_total = invoice.total_amount or invoice.amount or Decimal('0')
     already_allocated = invoice.po_allocations.aggregate(total=Sum('allocated_amount'))['total'] or Decimal('0')
     remaining = max(invoice_total - already_allocated, Decimal('0'))

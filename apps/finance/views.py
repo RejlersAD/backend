@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    permission_action = None
     """
     Invoice management API
     
@@ -82,7 +83,7 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().prefetch_related('po_allocations__purchase_order')
         
         # Filter by status
         status_filter = self.request.query_params.get('status')
@@ -97,13 +98,43 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         # Search
         search = self.request.query_params.get('search')
         if search:
+            from django.db.models import Q
             queryset = queryset.filter(
-                invoice_number__icontains=search
-            ) | queryset.filter(
-                vendor_name__icontains=search
-            )
+                Q(invoice_number__icontains=search) | Q(vendor_name__icontains=search)
+                | Q(po_reference_text__icontains=search)
+                | Q(po_allocations__purchase_order__po_number__icontains=search)
+            ).distinct()
         
         return queryset
+
+    def _purchase_order_handoff(self, request, *, awaiting=False):
+        from .services.purchase_order_handoff import (
+            PurchaseOrderHandoffPagination, order_choice, purchase_order_choices,
+        )
+        orders = purchase_order_choices(request.user, request.query_params, awaiting=awaiting)
+        pagination = PurchaseOrderHandoffPagination()
+        page = pagination.paginate_queryset(orders, request, view=self)
+        return pagination.get_paginated_response([
+            order_choice(order, user=request.user, include_receiving=awaiting, request=request) for order in page
+        ])
+
+    @action(detail=False, methods=['get'], url_path='awaiting-purchase-orders')
+    def awaiting_purchase_orders(self, request):
+        return self._purchase_order_handoff(request, awaiting=True)
+
+    @action(detail=False, methods=['get'], url_path='purchase-order-options')
+    def purchase_order_options(self, request):
+        return self._purchase_order_handoff(request)
+
+    @action(detail=True, methods=['post'], url_path='allocate-purchase-order', permission_action='update')
+    def allocate_purchase_order(self, request, pk=None):
+        from .services.purchase_order_handoff import allocate_purchase_order
+        # Resolve through this view's existing invoice visibility before locking.
+        invoice = self.get_object()
+        result = allocate_purchase_order(invoice.pk, request.user, request.data)
+        invoice.refresh_from_db()
+        invoice._prefetched_objects_cache = {}
+        return Response({**result, 'invoice': self.get_serializer(invoice).data}, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=['post'])
     def upload(self, request):

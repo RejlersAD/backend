@@ -14,6 +14,7 @@ from typing import Any
 
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
@@ -153,7 +154,7 @@ class VendorInvoiceImportService:
         if len(pdf_bytes) > MAX_PDF_BYTES:
             raise ValidationError({'file': 'PDF exceeds the 20 MB limit.'})
 
-    def preview(self, pdf_bytes: bytes, filename: str) -> dict[str, Any]:
+    def preview(self, pdf_bytes: bytes, filename: str, *, user=None) -> dict[str, Any]:
         self.validate_pdf(pdf_bytes, filename)
         source_hash = hashlib.sha256(pdf_bytes).hexdigest()
         duplicate = Invoice.objects.filter(source_file_sha256=source_hash).first()
@@ -170,7 +171,7 @@ class VendorInvoiceImportService:
 
         extracted, confidence, warnings = self._extract_fields(text)
         vendor_suggestions = self._suggest_vendors(extracted)
-        po_suggestions = self._suggest_purchase_orders(extracted, vendor_suggestions)
+        po_suggestions = self._suggest_purchase_orders(extracted, vendor_suggestions, user=user)
         required_fields = ('invoice_number', 'vendor_name', 'invoice_date', 'total_amount', 'currency')
         missing = [field for field in required_fields if not extracted.get(field)]
         warnings.extend(f'{field.replace("_", " ").title()} was not confidently detected.' for field in missing)
@@ -186,20 +187,14 @@ class VendorInvoiceImportService:
             'warnings': list(dict.fromkeys(warnings)),
             'vendor_suggestions': vendor_suggestions,
             'purchase_order_suggestions': po_suggestions,
-            # Complete active master-data options let the reviewer recover when
-            # OCR similarity is low; suggestions remain visually prioritised.
+            # PO discovery is independently authorized and paginated through
+            # purchase-order-options; OCR output never grants procurement access.
             'vendor_options': [
                 {'id': str(vendor.id), 'vendor_code': vendor.vendor_code, 'name': vendor.name}
                 for vendor in Vendor.objects.filter(status='active').only('id', 'vendor_code', 'name').order_by('name')
             ],
-            'purchase_order_options': [
-                {
-                    'id': str(po.id), 'po_number': po.po_number,
-                    'vendor_id': str(po.vendor_id), 'vendor_name': po.vendor.name,
-                    'total_amount': str(po.total_amount), 'currency': po.currency,
-                }
-                for po in PurchaseOrder.objects.exclude(status='cancelled').select_related('vendor').order_by('-created_at')[:500]
-            ],
+            'purchase_order_options': [],
+            'purchase_order_options_url': '/api/v1/finance/invoices/purchase-order-options/',
             'extracted_text': text[:100000],
             'review_contract': {
                 'required_fields': list(required_fields) + ['vendor_id'],
@@ -343,15 +338,20 @@ class VendorInvoiceImportService:
         return sorted(candidates, key=lambda item: item['confidence'], reverse=True)[:5]
 
     def _suggest_purchase_orders(
-        self, extracted: dict[str, Any], vendor_suggestions: list[dict[str, Any]],
+        self, extracted: dict[str, Any], vendor_suggestions: list[dict[str, Any]], *, user=None,
     ) -> list[dict[str, Any]]:
+        from apps.rbac.action_policy import module_action_allowed
+        from .purchase_order_handoff import purchase_order_choices
+        if not module_action_allowed(user, 'procurement_orders', 'read'):
+            return []
         po_ref = _normal(extracted.get('po_reference_text'))
         currency = _clean(extracted.get('currency')).upper()
         total = _decimal(extracted.get('total_amount'), 'total_amount')
         top_vendor_id = vendor_suggestions[0]['id'] if vendor_suggestions and vendor_suggestions[0]['confidence'] >= 70 else None
         results = []
-        queryset = PurchaseOrder.objects.exclude(status='cancelled').select_related('vendor')
-        for po in queryset.order_by('-created_at')[:500]:
+        for po in purchase_order_choices(user, {}):
+            if po.handoff_allocation_issue or po.handoff_remaining <= 0:
+                continue
             reasons, score = [], 0
             if po_ref and po_ref == _normal(po.po_number):
                 score += 65
@@ -362,7 +362,7 @@ class VendorInvoiceImportService:
             if currency and currency == po.currency.upper():
                 score += 5
                 reasons.append('Currency match')
-            remaining = max(Decimal('0'), po.total_amount - po.total_invoiced_amount)
+            remaining = max(Decimal('0'), po.handoff_remaining)
             if total is not None and total <= remaining * Decimal('1.05'):
                 score += 10
                 reasons.append('Amount fits remaining PO value')
@@ -377,6 +377,7 @@ class VendorInvoiceImportService:
             })
         return sorted(results, key=lambda item: item['confidence'], reverse=True)[:10]
 
+    @transaction.atomic
     def save_reviewed(
         self, *, pdf_bytes: bytes, filename: str, reviewed_data: dict[str, Any], user,
         expected_sha256: str = '',
@@ -392,14 +393,19 @@ class VendorInvoiceImportService:
         data = self._validate_review(reviewed_data)
         confirmed_po = None
         if data['confirmed_po_id']:
+            from .purchase_order_handoff import require_purchase_order_read, validate_new_allocation
+            require_purchase_order_read(user)
             if not data['confirm_po_match']:
                 raise ValidationError({'confirm_po_match': 'Explicit confirmation is required before linking a PO.'})
             try:
-                confirmed_po = PurchaseOrder.objects.select_related('vendor').get(pk=data['confirmed_po_id'])
-            except (PurchaseOrder.DoesNotExist, ValueError):
+                confirmed_po = PurchaseOrder.objects.select_for_update().get(pk=data['confirmed_po_id'])
+            except (PurchaseOrder.DoesNotExist, ValueError, DjangoValidationError):
                 raise ValidationError({'confirmed_po_id': 'The selected PO does not exist.'})
-            if confirmed_po.status == 'cancelled':
-                raise ValidationError({'confirmed_po_id': 'A cancelled PO cannot be linked.'})
+            validate_new_allocation(
+                confirmed_po, vendor_id=data['vendor_id'], currency=data['currency'], amount=data['total_amount'],
+            )
+            if Invoice.objects.filter(source_file_sha256=source_hash).exists():
+                raise ValidationError({'file': 'This PDF was already recorded. Refresh the invoice register.'})
 
         try:
             vendor = Vendor.objects.get(pk=data['vendor_id'], status='active')

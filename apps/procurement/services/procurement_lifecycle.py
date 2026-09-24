@@ -140,6 +140,11 @@ def _has_reference(key):
     # Do not remove shared bytes while any saved record still refers to them.
     if PODocument.objects.filter(s3_key=key).exists():
         return True
+    from apps.rbac.models import AuditLog
+    if AuditLog.objects.filter(resource_type='Receipt', action='delete', success=True,
+                               metadata__command='delete_pending_receipt',
+                               changes__before__attachments__icontains=key).exists():
+        return True
     for model, fields in (
         (PurchaseRequisition, ('attachments', 'management_approval_evidence')),
         (PurchaseOrder, ('attachments',)),

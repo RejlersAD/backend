@@ -227,6 +227,22 @@ def operation_action(request, view):
     if explicit:
         return explicit
     operation = getattr(view, 'action', '') or view.__class__.__name__
+    if view.__class__.__module__ == 'apps.procurement.views':
+        # Receiving projections and historical evidence capture have explicit
+        # grants; reconciliation records a pending receipt, never an approval.
+        receipt_actions = {
+            ('ReceiptViewSet', 'available_orders'): 'read',
+            ('ReceiptViewSet', 'reconcile'): 'create',
+            # Delivery confirmation belongs only to the saved recorder. The
+            # command rechecks receipt/PO reads and ownership under its locks;
+            # this does not confer configured technical inspection authority.
+            ('ReceiptViewSet', 'confirm_delivery'): 'create',
+            ('ReceiptViewSet', 'destroy'): 'delete',
+            ('PurchaseOrderViewSet', 'receiving_summary'): 'read',
+        }
+        receiving_action = receipt_actions.get((view.__class__.__name__, operation))
+        if receiving_action:
+            return receiving_action
     if is_onboarding_request(request, view):
         if operation in {'employee_identity_preview', 'employee_manager_options'}:
             return 'create'

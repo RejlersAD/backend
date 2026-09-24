@@ -28,6 +28,51 @@ class PurchaseOrderRichContentTests(TestCase):
         self.assertEqual(warnings, [])
         return fitz.open(stream=content, filetype='pdf'), Document(BytesIO(build_purchase_order_docx(order)))
 
+    def test_scope_defaults_to_twelve_points_and_preserves_authored_sizes(self):
+        pdf, word = self.render(
+            '<p>Default narrative body</p><p><strong>Default strong text</strong></p>'
+            '<ul><li>Default list entry</li></ul>'
+            '<table><tr><td>Default table text</td></tr></table>'
+            '<p style="font-size:10.5pt">Authored smaller text</p>'
+            '<p><span style="font-size:18pt">Authored larger text</span></p>'
+            '<p style="font-size:1.25em">Relative sized text</p>'
+        )
+        expected = {'Default narrative body': 12, 'Default strong text': 12,
+                    'Default list entry': 12, 'Default table text': 12,
+                    'Authored smaller text': 10.5, 'Authored larger text': 18,
+                    'Relative sized text': 15}
+        with pdf:
+            spans = [span for page in pdf for block in page.get_text('dict')['blocks'] if 'lines' in block
+                     for line in block['lines'] for span in line['spans']]
+            for text, size in expected.items():
+                span = next(span for span in spans if span['text'] == text)
+                self.assertAlmostEqual(span['size'], size, msg=text)
+        paragraphs = list(word.paragraphs)
+        for table in word.tables:
+            paragraphs.extend(paragraph for row in table.rows for cell in row.cells for paragraph in cell.paragraphs)
+        for text, size in expected.items():
+            paragraph = next(paragraph for paragraph in paragraphs if paragraph.text == text)
+            self.assertTrue(paragraph.runs, text)
+            for run in paragraph.runs:
+                self.assertAlmostEqual(run.font.size.pt, size, msg=text)
+        self.assertEqual(word.styles['Normal'].font.size.pt, 10.5)
+
+    def test_plain_text_scope_uses_twelve_points_without_rewriting_source(self):
+        narrative = 'Legacy plain scope line\nSecond plain scope line'
+        order = self.order(narrative)
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertFalse(warnings)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            spans = [span for page in pdf for block in page.get_text('dict')['blocks'] if 'lines' in block
+                     for line in block['lines'] for span in line['spans']]
+            for text in narrative.splitlines():
+                self.assertAlmostEqual(next(span for span in spans if span['text'] == text)['size'], 12)
+        word = Document(BytesIO(build_purchase_order_docx(order)))
+        for text in narrative.splitlines():
+            paragraph = next(paragraph for paragraph in word.paragraphs if paragraph.text == text)
+            self.assertTrue(all(run.font.size.pt == 12 for run in paragraph.runs))
+        self.assertEqual(order.description, narrative)
+
     def test_paragraphs_keep_inline_styles_alignment_and_explicit_spacing(self):
         pdf, word = self.render('<h2 style="text-align:center">Scope Heading</h2><p style="text-align:justify;line-height:1.8;margin-bottom:14pt">Normal <strong>Bold Fee</strong> <em>Italic</em> <u>Underlined</u> <s>Removed</s> <span style="font-family:Times New Roman;font-size:18pt;color:#cc1122;background-color:#ffee33">4,386 USD</span></p>')
         spans = [span for page in pdf for block in page.get_text('dict')['blocks'] if 'lines' in block for line in block['lines'] for span in line['spans']]

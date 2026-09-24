@@ -91,16 +91,18 @@ def capabilities(request):
     def allowed(module, action):
         return bool(request and request_action_allowed(request, module, action))
     return {**{action: allowed('procurement_receipts', action)
-               for action in ('create', 'update', 'approve', 'export')},
+               for action in ('create', 'update', 'approve', 'delete', 'export')},
             'read_purchase_orders': allowed('procurement_orders', 'read')}
 
 
 def enrich_receipt(data, receipt, request):
     from apps.rbac.approval_eligibility import require_configured_approval
     from rest_framework.exceptions import PermissionDenied
+    from .receiving import delivery_confirmation, receipt_deletion
 
     po = receipt.purchase_order
     grants = capabilities(request)
+    deletion = receipt_deletion(receipt, request)
     def can_decide(operation):
         if receipt.status != 'pending' or not grants['approve']:
             return False
@@ -115,8 +117,11 @@ def enrich_receipt(data, receipt, request):
         'required_certifications': po.required_certifications,
         'heat_numbers_required': po.heat_numbers_required, 'ndt_requirements': po.ndt_requirements,
         'evidence': receipt_evidence(receipt),
-        'capabilities': {'update': grants['update'], 'accept': can_decide('accept'),
-                         'reject': can_decide('reject_delivery'), 'export': grants['export']},
+        'confirmation': delivery_confirmation(receipt, request),
+        'deletion': deletion,
+        'capabilities': {'update': grants['update'] and receipt.status == 'pending', 'accept': can_decide('accept'),
+                         'reject': can_decide('reject_delivery'), 'export': grants['export'],
+                         'delete': deletion['can_delete']},
     })
     return data
 
@@ -279,7 +284,7 @@ def inspection_summary(queryset, request):
                                     'period_start': month_start.isoformat(), 'period_end': today.isoformat(),
                                     'definition': 'Receipt records dated this calendar month through today, within the selected filters.'},
             'open_inspections': {'status': 'available', 'value': counts['pending'],
-                                 'definition': 'Receipt records with Pending Inspection status.'},
+                                 'definition': 'Pending receipt records awaiting delivery confirmation or configured inspection.'},
             'missing_certificates': {
                 'status': ('partial' if certificates_assessed < total else 'available') if certificates_assessed else 'unavailable',
                 'value': counts['missing_certificates'] if certificates_assessed else None,
@@ -305,9 +310,9 @@ def inspection_summary(queryset, request):
         'scope': {'visibility': 'Authorized shared receipt register', 'summary': 'Filters and search before queue selection',
                   'date_basis': 'Recorded receipt date', 'time_zone': timezone.get_current_timezone_name()},
         'limitations': [
-            'Default true quality flags are not proof an inspection was performed or passed.',
+            'Unknown inspection flags remain null; legacy true flags alone are not proof an inspection was performed or passed.',
             'Certificate and heat-number declarations do not verify attachments or physical items.',
             'NDT requirements use only explicit recorded method declarations; conditional or missing text is unassessed.',
-            'Receipt date is the record creation date; it is not an independently recorded physical arrival time.',
+            'Receipt date is a recorded business date (older records use their creation date); it is not a verified physical arrival timestamp.',
         ],
     }

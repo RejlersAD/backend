@@ -100,7 +100,9 @@ def protect_purchase_order_content(order, changes):
     if 'vendor' in changes:
         changes['vendor_id'] = getattr(changes['vendor'], 'pk', changes['vendor'])
     changed = [
-        field for field in COMMERCIAL_FIELDS if field in changes
+        # Category now selects the goods/service acceptance basis. Protect it
+        # without changing existing po-v1 fingerprints and historical signatures.
+        field for field in (*COMMERCIAL_FIELDS, 'category') if field in changes
         and _field_value(field, changes[field]) != _field_value(field, getattr(order, field, None))
     ]
     if changed:

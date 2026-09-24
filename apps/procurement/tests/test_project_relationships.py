@@ -119,10 +119,21 @@ class ProjectRelationshipDatabaseTests(TestCase):
         )
 
     def test_manual_invoice_po_match_is_audited_and_keeps_receipt_exception(self):
+        from django.contrib.auth import get_user_model
+        from apps.rbac.models import Module, Organization, Permission, UserProfile
+        from apps.rbac.module_actions import ensure_module_actions
+        actor = get_user_model().objects.create_user(
+            'synthetic-reconciliation', email='reconciliation@handoff.example.test', is_superuser=True,
+        )
+        organization = Organization.objects.create(code='SYNTHETIC-RECON', name='Synthetic reconciliation')
+        UserProfile.objects.get_or_create(user=actor, defaults={'organization': organization, 'status': 'active'})
+        module, _ = Module.objects.get_or_create(code='procurement_orders', defaults={'name': 'Orders'})
+        ensure_module_actions(Module, Permission, module_ids=[module.pk])
         order = PurchaseOrder.objects.create(
             po_number='PO-INVOICE-MATCH', vendor=self.vendor, title='Matched order',
             category='other', total_amount=Decimal('600'), currency='AED',
             status='sent', enterprise_project=self.enterprise,
+            approval_log=[{'status': 'approved', 'approver': 'Synthetic historical approver'}],
         )
         invoice = Invoice.objects.create(
             invoice_number='INV-MANUAL-MATCH', vendor=self.vendor,
@@ -133,7 +144,7 @@ class ProjectRelationshipDatabaseTests(TestCase):
 
         result = resolve_invoice_purchase_order(
             invoice_id=invoice.pk, purchase_order_id=order.pk,
-            allocated_amount='250', user=None,
+            allocated_amount='250', user=actor,
             reason='Verified against the supplier invoice copy',
         )
 

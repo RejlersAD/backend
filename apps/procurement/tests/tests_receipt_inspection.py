@@ -1,6 +1,7 @@
 """Receipt read API: authority, queue parity and honest evidence coverage."""
 from datetime import date, datetime, timezone as dt_timezone
 from unittest.mock import patch
+from uuid import uuid4
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -60,7 +61,7 @@ class ReceiptInspectionTests(TestCase):
             data.update(po_values or {})
             po = PurchaseOrder.objects.create(**data)
         item = Receipt.objects.create(receipt_number=number, purchase_order=po, **values)
-        # DateField(auto_now_add) uses date.today, independently of the Django clock.
+        # Keep register fixtures on a fixed business date for period/filter tests.
         Receipt.objects.filter(pk=item.pk).update(receipt_date=date(2026, 9, 14))
         item.receipt_date = date(2026, 9, 14)
         return item
@@ -96,7 +97,7 @@ class ReceiptInspectionTests(TestCase):
         self.assertTrue(all(caps[key] for key in ('create', 'approve', 'update', 'export')))
         self.assertFalse(caps['read_purchase_orders'])
         self.assertEqual(self.get(summary=False)['results'][0]['capabilities'],
-                         {'accept': True, 'reject': True, 'update': True, 'export': True})
+                         {'accept': True, 'reject': True, 'update': True, 'export': True, 'delete': False})
         self.grant(code='procurement_orders')
         self.assertTrue(self.get()['capabilities']['read_purchase_orders'])
         permission = Permission.objects.filter(module__code='procurement_receipts', action='approve').first()
@@ -139,7 +140,7 @@ class ReceiptInspectionTests(TestCase):
         self.grant()
         self.receipt('PENDING-DEFAULT')
         self.receipt('PENDING-ISSUE', dimensional_check_passed=False)
-        self.receipt('ACCEPTED-PASS', status='accepted')
+        self.receipt('ACCEPTED-PASS', status='accepted', quality_check_passed=True)
         self.receipt('ACCEPTED-ISSUE', status='accepted', visual_inspection_passed=False)
         self.receipt('REJECTED-DEFAULT', status='rejected')
         self.receipt('PARTIAL', status='partial')
@@ -282,18 +283,18 @@ class ReceiptInspectionTests(TestCase):
     def test_existing_accept_reject_contract_and_pending_only_decision_capability(self):
         self.grant()
         self.grant('approve')
-        accepted = self.receipt('ACCEPT', po_values={'approval_log': [{
+        accepted = self.receipt('ACCEPT', po_values={'status': 'sent', 'items': [{'quantity': '1', 'unit': 'EA'}], 'approval_log': [{
             'stage': 'Recorded approval', 'approver': 'Historical approver', 'status': 'Approved',
-        }]})
-        response = self.client.post(BASE + str(accepted.pk) + '/accept/', {}, format='json')
+        }]}, items_received=[{'line_number': 1, 'received_qty': '1'}])
+        response = self.client.post(BASE + str(accepted.pk) + '/accept/', {'expected_updated_at': accepted.updated_at.isoformat()}, format='json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['status'], 'accepted')
         self.assertFalse(response.data['capabilities']['accept'])
         accepted.purchase_order.refresh_from_db()
-        self.assertEqual(accepted.purchase_order.status, 'completed')
-        self.assertEqual(accepted.purchase_order.actual_delivery, date(2026, 9, 14))
+        self.assertEqual(accepted.purchase_order.status, 'sent')
+        self.assertIsNone(accepted.purchase_order.actual_delivery)
         rejected = self.receipt('REJECT')
-        response = self.client.post(BASE + str(rejected.pk) + '/reject_delivery/', {'reason': 'Recorded damage'}, format='json')
+        response = self.client.post(BASE + str(rejected.pk) + '/reject_delivery/', {'reason': 'Recorded damage', 'expected_updated_at': rejected.updated_at.isoformat()}, format='json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['inspection_notes'], 'Recorded damage')
         self.assertFalse(response.data['capabilities']['reject'])
@@ -316,12 +317,17 @@ class ReceiptInspectionTests(TestCase):
     def test_create_only_can_record_pending_but_cannot_set_inspection_dispositions(self):
         self.grant()
         self.grant('create')
-        order = self.receipt('ORDER-SOURCE').purchase_order
+        self.grant(code='procurement_orders')
+        order = self.receipt('ORDER-SOURCE', po_values={'status': 'sent', 'items': [{'quantity': '10', 'unit': 'EA'}],
+                             'approval_log': [{'stage': 'Recorded approval', 'approver': 'Historical approver', 'status': 'Approved'}]},
+                             items_received=[{'line_number': 1, 'received_qty': '1'}]).purchase_order
         for disposition in ['accepted', 'rejected', 'partial']:
             with self.subTest(status=disposition):
                 response = self.client.post(BASE, {'purchase_order': str(order.pk), 'status': disposition}, format='json')
                 self.assertEqual(response.status_code, 403)
-        response = self.client.post(BASE, {'purchase_order': str(order.pk)}, format='json')
+        response = self.client.post(BASE, {'purchase_order': str(order.pk), 'operation_key': str(uuid4()),
+                                         'expected_po_updated_at': order.updated_at.isoformat(),
+                                         'items_received': [{'line_id': 'line:1', 'received_qty': '2'}]}, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(response.data['status'], 'pending')
         self.assertEqual(Receipt.objects.count(), 2)
@@ -333,16 +339,16 @@ class ReceiptInspectionTests(TestCase):
         url = BASE + str(item.pk) + '/'
         for disposition in ['accepted', 'rejected', 'partial']:
             self.assertEqual(self.client.patch(url, {'status': disposition}, format='json').status_code, 403)
-        response = self.client.patch(url, {'status': 'pending', 'notes': 'Recorded delivery note'}, format='json')
+        response = self.client.patch(url, {'status': 'pending', 'notes': 'Recorded delivery note', 'expected_updated_at': item.updated_at.isoformat()}, format='json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['notes'], 'Recorded delivery note')
         accepted = self.receipt('ACCEPTED-EDIT', status='accepted')
         accepted_url = BASE + str(accepted.pk) + '/'
         self.assertEqual(self.client.patch(accepted_url, {'status': 'pending'}, format='json').status_code, 403)
         response = self.client.patch(accepted_url, {'status': 'accepted', 'notes': 'Clarification'}, format='json')
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 400)
         rejected = self.receipt('REJECTED-EDIT', status='rejected')
-        self.assertEqual(self.client.patch(BASE + str(rejected.pk) + '/', {'notes': 'Clarification'}, format='json').status_code, 200)
+        self.assertEqual(self.client.patch(BASE + str(rejected.pk) + '/', {'notes': 'Clarification'}, format='json').status_code, 400)
 
     def test_approve_grant_cannot_bypass_named_disposition_actions(self):
         self.grant()

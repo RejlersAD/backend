@@ -46,7 +46,7 @@ def process_vendor_invoice_ocr(self, job_id: str) -> dict:
     job.save(update_fields=['status', 'started_at', 'error_message'])
     try:
         with default_storage.open(job.file_path, 'rb') as handle:
-            result = VendorInvoiceImportService().preview(handle.read(), job.original_filename)
+            result = VendorInvoiceImportService().preview(handle.read(), job.original_filename, user=job.requested_by)
         job.result = result
         job.status = InvoiceOCRJobStatus.COMPLETED
         job.completed_at = timezone.now()

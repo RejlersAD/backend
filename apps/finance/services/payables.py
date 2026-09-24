@@ -37,7 +37,7 @@ def _key(value):
 
 def _item_reference(item):
     return _key(
-        item.get('po_item_reference') or item.get('item_reference') or
+        item.get('line_id') or item.get('po_line_id') or item.get('po_item_reference') or item.get('item_reference') or
         item.get('item_no') or item.get('line_number') or item.get('item') or
         item.get('description')
     )
@@ -54,19 +54,52 @@ def evaluate_three_way_match(allocation: InvoicePurchaseOrderAllocation, *, user
     """Evaluate PO ↔ invoice lines ↔ accepted receipt quantities and values."""
     invoice = allocation.invoice
     po = allocation.purchase_order
+    po.refresh_from_db()
     tolerance = allocation.tolerance_percentage or Decimal('0')
     accepted_receipts = list(po.receipts.filter(status__in=('accepted', 'partial')))
 
     po_items = po.items if isinstance(po.items, list) else []
     invoice_items = list(invoice.structured_line_items.all())
+    po_by_ref, canonical_refs, alias_owners = {}, {}, {}
+    ambiguous_refs = set()
+    for index, item in enumerate(po_items, 1):
+        reference = _item_reference(item)
+        canonical = f'po-line:{index}'
+        number = item.get('line_number') or index
+        aliases = (reference, _key(item.get('id')), _key(item.get('po_line_id')), _key(f'line:{number}'))
+        for alias in filter(None, aliases):
+            if alias in ambiguous_refs:
+                continue
+            if alias in alias_owners and alias_owners[alias] != index:
+                ambiguous_refs.add(alias)
+                po_by_ref.pop(alias, None)
+                canonical_refs.pop(alias, None)
+                continue
+            alias_owners[alias] = index
+            po_by_ref[alias] = item
+            canonical_refs[alias] = canonical
     received_by_ref = defaultdict(Decimal)
+    service_acceptance = []
     for receipt in accepted_receipts:
         for item in receipt.items_received if isinstance(receipt.items_received, list) else []:
-            received_by_ref[_item_reference(item)] += _quantity(
+            if item.get('basis') == 'service_value':
+                service_acceptance.append({
+                    'receipt_number': receipt.receipt_number, 'line_id': item.get('line_id'),
+                    'accepted_amount': item.get('accepted_amount'), 'currency': item.get('uom'),
+                    'value_basis': 'net_excluding_vat',
+                })
+            reference = _item_reference(item)
+            received_by_ref[canonical_refs.get(reference, reference)] += _quantity(
                 item, 'accepted_qty', 'received_qty', 'quantity', 'qty'
             )
-
-    po_by_ref = {_item_reference(item): item for item in po_items if _item_reference(item)}
+    # Several invoice lines may reference the same unambiguous PO line. Their
+    # combined quantity consumes that line's coverage within this invoice.
+    invoice_quantity_by_ref = defaultdict(Decimal)
+    for line in invoice_items:
+        reference = _key(line.po_item_reference or line.line_number or line.description)
+        canonical = canonical_refs.get(reference)
+        if canonical:
+            invoice_quantity_by_ref[canonical] += max(Decimal('0'), line.quantity or Decimal('0'))
     line_checks = []
     line_items_matched = bool(invoice_items and po_items)
     receipt_quantities_matched = bool(invoice_items and accepted_receipts)
@@ -74,11 +107,12 @@ def evaluate_three_way_match(allocation: InvoicePurchaseOrderAllocation, *, user
         ref = _key(line.po_item_reference or line.line_number or line.description)
         po_item = po_by_ref.get(ref)
         invoice_qty = line.quantity or Decimal('0')
+        combined_qty = invoice_quantity_by_ref.get(canonical_refs.get(ref), Decimal('0'))
         ordered_qty = _quantity(po_item or {}, 'quantity', 'qty', 'ordered_qty')
-        received_qty = received_by_ref.get(ref, Decimal('0'))
+        received_qty = received_by_ref.get(canonical_refs.get(ref, ref), Decimal('0'))
         po_line_found = po_item is not None
-        quantity_within_po = po_line_found and (not invoice_qty or invoice_qty <= ordered_qty)
-        quantity_received = bool(accepted_receipts) and (not invoice_qty or invoice_qty <= received_qty)
+        quantity_within_po = po_line_found and invoice_qty > 0 and combined_qty <= ordered_qty
+        quantity_received = po_line_found and bool(accepted_receipts) and invoice_qty > 0 and combined_qty <= received_qty
         line_items_matched = line_items_matched and po_line_found and quantity_within_po
         receipt_quantities_matched = receipt_quantities_matched and quantity_received
         line_checks.append({
@@ -86,6 +120,7 @@ def evaluate_three_way_match(allocation: InvoicePurchaseOrderAllocation, *, user
             'reference': line.po_item_reference or str(line.line_number),
             'description': line.description,
             'invoice_quantity': str(invoice_qty),
+            'invoice_po_line_quantity': str(combined_qty),
             'ordered_quantity': str(ordered_qty),
             'accepted_quantity': str(received_qty),
             'po_line_found': po_line_found,
@@ -106,6 +141,9 @@ def evaluate_three_way_match(allocation: InvoicePurchaseOrderAllocation, *, user
     receipt_required = allocation.receipt_required
 
     exceptions = []
+    from .purchase_order_handoff import approved_order
+    if not approved_order(po):
+        exceptions.append('purchase_order_approval_requires_review')
     if not vendor_matched:
         exceptions.append('vendor_mismatch')
     if not currency_matched:
@@ -118,6 +156,12 @@ def evaluate_three_way_match(allocation: InvoicePurchaseOrderAllocation, *, user
         exceptions.append('invoice_po_line_mismatch')
     if receipt_required and invoice_items and accepted_receipts and not receipt_quantities_matched:
         exceptions.append('invoice_quantity_exceeds_receipt')
+    if service_acceptance:
+        # Receipt service values are net, whereas allocations are invoice totals.
+        # No approved line/value contract currently authorizes that conversion.
+        exceptions.append('service_value_match_requires_review')
+    elif receipt_required and accepted_receipts and (not invoice_items or any(not line.quantity or line.quantity <= 0 for line in invoice_items)):
+        exceptions.append('invoice_line_match_requires_review')
 
     verified = not exceptions and (not receipt_required or bool(accepted_receipts))
     allocation.po_amount_at_match = po.total_amount
@@ -135,7 +179,10 @@ def evaluate_three_way_match(allocation: InvoicePurchaseOrderAllocation, *, user
         'available_po_value': str(available),
         'invoice_total': str(invoice.total_amount or 0),
         'accepted_receipts': [r.receipt_number for r in accepted_receipts],
+        'service_acceptance': service_acceptance,
         'line_checks': line_checks,
+        'quantity_scope': 'this_invoice_only',
+        'limitations': ['receipt_quantities_not_allocated_between_invoices'],
     }
     allocation.match_status = InvoiceMatchStatus.VERIFIED if verified else InvoiceMatchStatus.EXCEPTION
     if verified:

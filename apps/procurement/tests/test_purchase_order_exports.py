@@ -23,6 +23,103 @@ from apps.procurement.services.purchase_order_exports import (
 
 
 class PurchaseOrderExportTests(TestCase):
+    def test_empty_introduction_and_editor_markup_omit_the_entire_scope_page(self):
+        empty_narratives = (
+            '', ' \n\t\u00a0 ', '<p><br></p>',
+            '<div><p> &nbsp;\t</p><p><br /></p></div>', '&nbsp;',
+            '<p>\u200b\u200c\u200d&#xfeff;&nbsp;<br></p>',
+            '&lt;p&gt;&lt;br&gt;&lt;/p&gt;',
+            '<div data-po-page-break="true">Page Break</div>', '<table></table>',
+        )
+        for narrative in empty_narratives:
+            for show_heading in (False, True):
+                with self.subTest(narrative=narrative, show_heading=show_heading):
+                    order = self._order()
+                    order.description = narrative
+                    order.contact_persons = {'order_introduction': ' \t\u00a0 ',
+                                             'show_scope_heading': show_heading}
+                    content, warnings = build_purchase_order_pdf(order)
+                    self.assertEqual(warnings, [])
+                    with fitz.open(stream=content, filetype='pdf') as pdf:
+                        self.assertEqual(len(pdf), 2)
+                        self.assertIn('SUMMARY OF PRICES', pdf[1].get_text())
+                        text = '\n'.join(page.get_text() for page in pdf)
+                        self.assertNotIn('PURCHASE ORDER:', text)
+                        self.assertNotIn('PO DESCRIPTION & SCOPE', text)
+                        self.assertNotIn(order.title, pdf[1].get_text())
+                        self.assertIn('Order Confirmation:', pdf[0].get_text())
+                    word = Document(BytesIO(build_purchase_order_docx(order)))
+                    paragraphs = [paragraph.text for paragraph in word.paragraphs]
+                    self.assertNotIn(order.title, paragraphs)
+                    self.assertFalse(any(text.startswith('PURCHASE ORDER:') for text in paragraphs))
+                    self.assertNotIn('PO DESCRIPTION & SCOPE', paragraphs)
+                    self.assertEqual([paragraph.text for paragraph in word.paragraphs
+                                      if paragraph.paragraph_format.page_break_before], ['SUMMARY OF PRICES'])
+
+    def test_intro_only_body_only_and_legacy_intro_keep_scope_without_title_as_body(self):
+        cases = (
+            ({'order_introduction': 'Agreed introduction only.'}, '<p><br></p>', 'Agreed introduction only.'),
+            ({'order_introduction': ''}, '<p>Recorded scope only.</p>', 'Recorded scope only.'),
+            ({}, '', 'issue this purchase order to'),
+        )
+        for contacts, narrative, expected in cases:
+            with self.subTest(contacts=contacts, narrative=narrative):
+                order = self._order()
+                order.description = narrative
+                order.contact_persons = {**contacts, 'show_scope_heading': False}
+                content, warnings = build_purchase_order_pdf(order)
+                self.assertEqual(warnings, [])
+                with fitz.open(stream=content, filetype='pdf') as pdf:
+                    self.assertEqual(len(pdf), 3)
+                    scope = pdf[1].get_text()
+                    self.assertIn('PURCHASE ORDER:', scope)
+                    self.assertIn(expected, scope)
+                    self.assertEqual(scope.count(order.title), 1)
+                    self.assertNotIn('PO DESCRIPTION & SCOPE', scope)
+                    self.assertIn('SUMMARY OF PRICES', pdf[2].get_text())
+                word = Document(BytesIO(build_purchase_order_docx(order)))
+                paragraphs = [paragraph.text for paragraph in word.paragraphs]
+                self.assertNotIn(order.title, paragraphs)
+                self.assertEqual(sum(text.startswith('PURCHASE ORDER:') for text in paragraphs), 1)
+                self.assertIn(expected, '\n'.join(paragraphs))
+                self.assertNotIn('PO DESCRIPTION & SCOPE', paragraphs)
+
+    def test_image_only_scope_survives_without_introduction_or_heading(self):
+        image = BytesIO()
+        PILImage.new('RGB', (19, 11), 'navy').save(image, 'PNG')
+        encoded = base64.b64encode(image.getvalue()).decode()
+        order = self._order()
+        order.contact_persons = {'order_introduction': '', 'show_scope_heading': False}
+        order.description = f'<p><br></p><img src="data:image/png;base64,{encoded}" width="100"><p>&nbsp;</p>'
+        content, warnings = build_purchase_order_pdf(order)
+        self.assertEqual(warnings, [])
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertEqual(len(pdf), 3)
+            self.assertTrue(any(image[2:4] == (19, 11) for image in pdf[1].get_images()))
+            self.assertEqual(pdf[1].get_text().count(order.title), 1)
+        word = Document(BytesIO(build_purchase_order_docx(order)))
+        self.assertTrue(word.inline_shapes)
+        self.assertNotIn(order.title, [paragraph.text for paragraph in word.paragraphs])
+
+    def test_table_only_scope_preserves_authored_cells_and_empty_table_grid(self):
+        for first_cell in ('Recorded service deliverable', '&nbsp;'):
+            with self.subTest(first_cell=first_cell):
+                order = self._order()
+                order.contact_persons = {'order_introduction': '', 'show_scope_heading': False}
+                order.description = f'<table><tr><td>{first_cell}</td><td><br></td></tr></table>'
+                content, warnings = build_purchase_order_pdf(order)
+                self.assertEqual(warnings, [])
+                with fitz.open(stream=content, filetype='pdf') as pdf:
+                    self.assertEqual(len(pdf), 3)
+                    self.assertTrue(pdf[1].get_drawings())
+                    if first_cell != '&nbsp;':
+                        self.assertIn(first_cell, pdf[1].get_text())
+                word = Document(BytesIO(build_purchase_order_docx(order)))
+                tables = [table for table in word.tables if table.style.name == 'Table Grid'
+                          and len(table.rows) == 1 and len(table.columns) == 2]
+                self.assertEqual(len(tables), 1)
+                self.assertEqual(tables[0].cell(0, 0).text.strip(), '' if first_cell == '&nbsp;' else first_cell)
+
     def test_pending_po_shows_ceo_identity_without_inventing_a_completed_approval(self):
         order = self._order()
         order.status, order.approved_at = 'draft', None
