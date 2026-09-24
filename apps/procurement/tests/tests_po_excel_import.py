@@ -59,12 +59,12 @@ class POExcelImportTests(TestCase):
         self.assertEqual(po.pr_reference_id, self.pr.id)
         self.pr.refresh_from_db()
         self.assertEqual(self.pr.po_number_reference, po.po_number)
-        self.assertEqual(self.pr.status, 'converted')
+        self.assertEqual(self.pr.status, 'draft')
 
     def test_existing_po_is_overwritten(self):
         PurchaseOrder.objects.create(
             po_number='RAD-GEN-PUR-0011_MAY2026', pr_reference=self.pr, vendor=self.vendor,
-            title='Old value', category='other', total_amount=1, created_by=self.user,
+            title='Old value', category='other', total_amount=1, created_by=self.user, status='sent',
         )
         result = import_po_workbook(workbook_upload([self.row(7000)]), user=self.user, dry_run=False)
         po = PurchaseOrder.objects.get(po_number='RAD-GEN-PUR-0011_2026')

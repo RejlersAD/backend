@@ -200,6 +200,51 @@ class RequisitionSourceApprovalEditTests(TestCase):
         self.assertEqual(row, {**self.rows[3], 'user_name': 'Corrected Vice President'})
         self.assertFalse(self.pr.price_remarks_data['signed_document_verification']['signed_off'])
 
+    def test_current_source_token_returns_fresh_token_for_the_next_form_save(self):
+        token = self.pr.updated_at.isoformat()
+        response = self.client.post(self.url, self.payload(
+            expected_updated_at=token, signature_verified=False, approval_date='',
+            approver_name='Corrected Vice President',
+        ), format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        next_token = response.data['updated_at']
+        self.assertNotEqual(next_token, token)
+        self.assertNotIn('expected_updated_at', response.data)
+        self.pr.refresh_from_db()
+        reviewed_metadata = deepcopy(self.pr.price_remarks_data)
+        saved = self.client.patch(self.detail_url, {
+            'expected_updated_at': next_token, 'notes': 'Preserved editor input after source review',
+        }, format='json')
+        self.assertEqual(saved.status_code, 200, saved.data)
+        self.pr.refresh_from_db()
+        self.assertEqual(self.pr.price_remarks_data, reviewed_metadata)
+        self.assertEqual(self.pr.notes, 'Preserved editor input after source review')
+        self.assertEqual(self.pr.status, 'draft')
+
+    def test_stale_source_token_cannot_approve_after_concurrent_commercial_edit(self):
+        token = self.pr.updated_at.isoformat()
+        payload = self.payload(expected_updated_at=token)
+        changed = self.client.patch(self.detail_url, {
+            'expected_updated_at': token, 'price_remarks': 'New negotiated commercial terms',
+        }, format='json')
+        self.assertEqual(changed.status_code, 200, changed.data)
+        before = self.snapshot()
+        response = self.assert_rejected_unchanged(payload, 409)
+        self.assertEqual(response.data['code'], 'stale_requisition')
+        self.assertEqual(before['status'], 'draft')
+        self.assertEqual(before['price_remarks_data']['source_approval_reviews'], [])
+        self.storage_open.assert_not_called()
+        self.client.force_authenticate(self.reader)
+        self.assert_rejected_unchanged(payload, 403)
+        self.storage_open.assert_not_called()
+
+    def test_invalid_source_version_tokens_cannot_read_storage_or_change_evidence(self):
+        for token in ('', None, 'not-a-timestamp'):
+            with self.subTest(token=token):
+                response = self.assert_rejected_unchanged(self.payload(expected_updated_at=token))
+                self.assertIn('expected_updated_at', response.data)
+        self.storage_open.assert_not_called()
+
     def test_partial_signature_stays_draft_until_last_outstanding_source_row_is_verified(self):
         rows = deepcopy(self.rows)
         rows[2] = source_row('MoP', 'Morgan Projects', verified=False)

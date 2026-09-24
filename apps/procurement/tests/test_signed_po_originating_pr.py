@@ -132,6 +132,20 @@ class SignedPOOriginatingPRTests(TestCase):
         self.assertEqual(order.currency, 'AED')
         self.assertTrue(response.data['reconciliation_required'])
 
+    def test_verified_mismatched_source_cannot_authorize_sending_native_order(self):
+        existing = self.order(status='draft', total_amount='95.00', currency='AED')
+        response = self.upload()
+        order = self.assert_linked(response)
+        self.assertEqual(order.pk, existing.pk)
+        self.assertTrue(response.data['signature_verified'])
+        self.assertTrue(response.data['reconciliation_required'])
+        self.assertEqual(order.approval_log[0]['status'], 'Approved')
+        sent = self.client.post(f'{BASE}orders/{order.pk}/send_to_vendor/', {}, format='json')
+        self.assertEqual(sent.status_code, 400, sent.data)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'draft')
+        self.assertEqual(order.total_amount, Decimal('95.00'))
+
     def test_existing_po_requires_update_permission_before_link_or_source_changes(self):
         order = self.order()
         self.revoke('update')

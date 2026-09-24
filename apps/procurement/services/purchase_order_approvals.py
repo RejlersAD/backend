@@ -14,6 +14,7 @@ from .employee_display import employee_display_name
 from .notification_context import purchase_order_teams_context
 from .approval_eligibility import MODULE_PO, eligible_stage_assignee, position_matches_stage
 from .purchase_order_approval_artwork import DEFAULT_APPROVAL_STAMP_REFERENCE
+from .purchase_order_content import purchase_order_content_fingerprint, purchase_order_content_issue
 
 
 TECHNICAL_STAGE = 'Technical Approval'
@@ -24,7 +25,10 @@ ACTIONABLE_ORDER_STATUSES = {'draft', 'sent', 'acknowledged', 'in_progress', 'pa
 
 
 def _order_is_actionable(order):
-    return str(getattr(order, 'status', 'draft') or '').strip().lower() in ACTIONABLE_ORDER_STATUSES
+    return (
+        str(getattr(order, 'status', 'draft') or '').strip().lower() in ACTIONABLE_ORDER_STATUSES
+        and not purchase_order_content_issue(order)
+    )
 
 
 def _active_actor_profile(actor, *, refresh=False):
@@ -173,11 +177,24 @@ def default_management_assignment():
 def normalize_assignments(approval_log, existing_log=None, require_core=True, require_management=False):
     """Validate employee assignments and keep decisions server-controlled."""
     incoming = [dict(entry) for entry in (approval_log or []) if isinstance(entry, dict)]
-    existing_by_assignment = {
-        (str(entry.get('stage') or ''), _entry_level(entry, index), str(entry.get('user_id') or '')): entry
-        for index, entry in enumerate(existing_log or [])
-        if isinstance(entry, dict)
-    }
+
+    def assignment_key(entry, index):
+        # Match the route guard's stage comparison: cosmetic label changes
+        # must never discard a recorded decision or its content fingerprint.
+        return (str(entry.get('stage') or '').strip().lower(), _entry_level(entry, index),
+                str(entry.get('user_id') or '').strip())
+
+    existing_by_assignment = {}
+    for index, entry in enumerate(existing_log or []):
+        if not isinstance(entry, dict) or not entry.get('user_id'):
+            continue
+        key = assignment_key(entry, index)
+        if key in existing_by_assignment:
+            raise ValidationError({'approval_log': (
+                'The saved approval route contains duplicate assignments. '
+                'Approval review is required before editing this route.'
+            )})
+        existing_by_assignment[key] = entry
 
     final_entry = next((entry for entry in incoming if entry.get('stage') == MANAGEMENT_STAGE), None)
     if require_management and final_entry is not None and not final_entry.get('user_id'):
@@ -195,7 +212,19 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
     if missing:
         raise ValidationError({'approval_log': f"Select an active employee for: {', '.join(sorted(missing))}."})
 
-    user_ids = {str(entry.get('user_id')) for entry in incoming if entry.get('user_id')}
+    incoming_assignments = set()
+    for index, entry in enumerate(incoming):
+        if not entry.get('user_id'):
+            continue
+        key = assignment_key(entry, index)
+        if key in incoming_assignments:
+            raise ValidationError({'approval_log': (
+                'Duplicate approval assignments are not allowed. '
+                'Select each approver only once for the same stage and level.'
+            )})
+        incoming_assignments.add(key)
+
+    user_ids = {str(entry.get('user_id')).strip() for entry in incoming if entry.get('user_id')}
     profiles = _active_profiles(user_ids)
     if len(profiles) != len(user_ids):
         raise ValidationError({'approval_log': 'Every selected PO approver must be an active RADAI employee.'})
@@ -216,7 +245,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
 
         user = profile.user
         level = _entry_level(entry, index)
-        previous = existing_by_assignment.get((stage, level, user_id)) or {}
+        previous = existing_by_assignment.get(assignment_key(entry, index)) or {}
         same_assignee = bool(previous)
         normalized.append({
             'stage': stage,
@@ -240,7 +269,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
                     'decided_at', 'decided_by_id', 'decided_by_email', 'decided_by_name',
                     'approved_by_id', 'approved_by_email', 'approved_by_name',
                     'rejected_by_id', 'rejected_by_email', 'rejected_by_name',
-                    'signature_user_id', 'signature_user_email',
+                    'signature_user_id', 'signature_user_email', 'content_fingerprint',
                 )
                 if same_assignee and field in previous
             },
@@ -430,6 +459,9 @@ def record_decision(order, actor, decision, stage='', comment='', require_signat
         raise PermissionDenied('Only an active RADAI employee may record a Purchase Order decision.')
     actor = profile.user
     locked = PurchaseOrder.objects.select_for_update(of=('self',)).select_related('created_by').get(pk=order.pk)
+    content_issue = purchase_order_content_issue(locked)
+    if content_issue:
+        raise ValidationError(content_issue)
     if not _order_is_actionable(locked):
         raise ValidationError('This Purchase Order is not open for approval decisions.')
     workflow = [dict(entry) for entry in (locked.approval_log or [])]
@@ -473,6 +505,7 @@ def record_decision(order, actor, decision, stage='', comment='', require_signat
     entry['signature_user_email'] = actor_email if signature else ''
     if decision == 'approve':
         entry['approved_by_id'] = str(actor.pk)
+        entry['content_fingerprint'] = purchase_order_content_fingerprint(locked)
         entry['approved_by_email'] = actor_email
         entry['approved_by_name'] = actor_name
         for field in ('rejected_by_id', 'rejected_by_email', 'rejected_by_name'):

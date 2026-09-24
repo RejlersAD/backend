@@ -79,6 +79,11 @@ def stage_signature_issue(stage):
 
 def purchase_order_signature_issue(order):
     """Validate the final signature against recorded internal PO decisions."""
+    from .purchase_order_content import purchase_order_content_issue
+
+    issue = purchase_order_content_issue(order)
+    if issue:
+        return issue
     rows = [row for row in (getattr(order, 'approval_log', None) or [])
             if isinstance(row, dict) and (row.get('user_id') or row.get('approver_email'))
             and not row.get('external') and not row.get('evidence_document_id')]

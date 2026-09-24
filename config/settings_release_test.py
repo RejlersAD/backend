@@ -15,6 +15,7 @@ INSTALLED_APPS = [  # noqa: F405
     'apps.project_organizer',
     'apps.spec_customization',
     'apps.valve_standards',
+    'apps.file_replica',
 ]
 USE_S3 = False
 _release_media_directory = TemporaryDirectory(prefix='radai-release-tests-')

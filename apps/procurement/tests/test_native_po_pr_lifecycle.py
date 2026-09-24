@@ -220,15 +220,17 @@ class NativeOrderRequisitionLifecycleTests(TestCase):
         self.assertEqual(result.status, 'approved')
         self.assertFalse(PurchaseOrder.objects.filter(pr_reference=self.pr).exists())
 
-    def test_historical_import_context_keeps_explicit_conversion_without_faking_decisions(self):
+    def test_historical_import_context_preserves_pending_native_pr_decisions(self):
         self.pr.status = 'submitted'
         self.pr.save(update_fields=['status'])
         original = deepcopy(self.pr.approval_workflow_config)
-        self.create_order(context={'source_document_import': True, 'historical_requisition_conversion': True}, approval_log=[])
+        order = self.create_order(context={'source_document_import': True, 'historical_requisition_conversion': True}, approval_log=[])
         self.pr.refresh_from_db()
-        self.assertEqual(self.pr.status, 'converted')
+        self.assertEqual(self.pr.status, 'submitted')
         self.assertEqual(self.pr.approval_workflow_config, original)
-        self.assertEqual(self.pr.price_remarks_data[PREVIOUS_STATUS], 'submitted')
+        self.assertNotIn(PREVIOUS_STATUS, self.pr.price_remarks_data)
+        self.assertEqual(self.pr.po_number_reference, order.po_number)
+        self.assertTrue(RequisitionWorkflowService.can_approve(self.pr, self.first))
 
     def test_originating_source_import_still_defers_conversion(self):
         self.pr.status = 'submitted'

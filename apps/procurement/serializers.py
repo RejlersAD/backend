@@ -33,6 +33,7 @@ from .services.employee_display import (
 )
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_status import canonicalize_pr_status
+from .services.requisition_concurrency import RequisitionTimestampField, check_requisition_precondition
 from .services.requisition_source_documents import (
     SIGNED_PR_TYPE, refreshed_requisition_attachments, requisition_original_source,
 )
@@ -55,6 +56,12 @@ from .services.approval_integrity import (
 )
 from .services.procurement_vat import apply_confirmed_input, CONFIRMED_BASES
 from .services.requisition_supplier_contacts import requisition_supplier_contacts
+from .services.purchase_order_content import (
+    COMMERCIAL_LOCK_REASON, commercial_edit_locked, protect_purchase_order_content, purchase_order_content_issue,
+)
+from .services.purchase_order_lifecycle import (
+    purchase_order_transition_issue, validate_purchase_order_transition,
+)
 
 
 PR_SERVER_CONTROLLED_FIELDS = {
@@ -204,6 +211,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     Aligned with RAD-OM-PRC-0001 FRM -1 Rev 0 template (23 fields)
     """
     
+    expected_updated_at = RequisitionTimestampField(required=False, write_only=True)
+
     # Display fields
     requisition_type_display = serializers.CharField(source='get_requisition_type_display', read_only=True)
     status_display = serializers.SerializerMethodField()
@@ -382,12 +391,17 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'attachments', 'attachments_files',
             
             # Timestamps
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'expected_updated_at'
         ]
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'attachments',
             *PR_SERVER_CONTROLLED_FIELDS,
         ]
+
+    def validate_expected_updated_at(self, value):
+        if self.instance is None:
+            raise serializers.ValidationError('A version precondition applies only to an existing purchase recommendation.')
+        return value
 
     def get_attachments(self, obj):
         attachments = refreshed_requisition_attachments(obj)
@@ -940,6 +954,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # finished. Save against the locked current record so its status,
         # source decisions and audit cannot be replaced by that stale copy.
         instance = PurchaseRequisition.objects.select_for_update().get(pk=instance.pk)
+        check_requisition_precondition(instance, validated_data.pop('expected_updated_at', serializers.empty))
         if not getattr(self, '_explicit_enterprise_project', 'enterprise_project' in validated_data):
             # Reconciliation may have committed after form validation. Decide
             # automatic linkage against the locked current references/link.
@@ -1019,7 +1034,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if management_evidence:
             instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
             instance.save(update_fields=['management_approval_evidence'])
-        if workflow_changed:
+        # Saving a draft only stores its planned route. Initial approval
+        # notices belong exclusively to the explicit submit action.
+        if workflow_changed and canonicalize_pr_status(instance.status) in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES:
             transaction.on_commit(
                 lambda: notify_requisition_approver_changes(instance, previous_workflow),
                 robust=True,
@@ -1117,6 +1134,11 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     po_number_verification_message = serializers.SerializerMethodField()
     can_approve = serializers.SerializerMethodField()
     current_approval = serializers.SerializerMethodField()
+    can_send_to_vendor = serializers.SerializerMethodField()
+    can_complete = serializers.SerializerMethodField()
+    lifecycle_block_reason = serializers.SerializerMethodField()
+    commercial_edit_locked = serializers.SerializerMethodField()
+    commercial_edit_lock_reason = serializers.SerializerMethodField()
     
     # Project linkage fields (soft-coded relationship)
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
@@ -1174,6 +1196,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'approval_signature', 'approval_stamp',
             'technical_approver', 'financial_approver', 'management_approver',
             'approval_log', 'final_approver_notes', 'can_approve', 'current_approval',
+            'can_send_to_vendor', 'can_complete', 'lifecycle_block_reason',
+            'commercial_edit_locked', 'commercial_edit_lock_reason',
             
             # Order confirmation (vendor response)
             'confirmation_date', 'seller_contact_person', 'seller_phone', 'seller_fax', 'seller_email',
@@ -1199,9 +1223,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         rows = []
+        content_issue = purchase_order_content_issue(instance)
         for original in data.get('approval_log') or []:
             row = dict(original)
-            issue = stage_signature_issue(row)
+            issue = content_issue or stage_signature_issue(row)
             if issue:
                 row['signature'] = ''
                 row['signature_review_required'] = True
@@ -1293,9 +1318,15 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
+        from .services.purchase_order_project_display import purchase_order_project_reference
+        reference = purchase_order_project_reference(obj)
+        if isinstance(obj.contact_persons, dict) and 'project_selections' in obj.contact_persons:
+            return reference or None
+        if reference and (not obj.project or reference != obj.project.project_number):
+            return reference
         if obj.project:
             return f"{obj.project.project_number} - {obj.project.project_name}"
-        return None
+        return reference or None
 
     def get_current_approval(self, obj):
         active = _active_entries(list(obj.approval_log or []))
@@ -1313,6 +1344,36 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if not request or not getattr(request, 'user', None):
             return False
         return can_approve_purchase_order(obj, request.user)
+
+    def _lifecycle_capabilities(self, obj):
+        cached = getattr(self, '_po_lifecycle_capabilities', {})
+        key = id(obj)
+        if key not in cached:
+            reason = purchase_order_transition_issue(obj, 'completed')
+            if obj.status in {'completed', 'cancelled'}:
+                reason = 'This purchase order is closed.'
+            cached[key] = {
+                'can_send_to_vendor': obj.status == 'draft' and not reason,
+                'can_complete': obj.status not in {'completed', 'cancelled'} and not reason,
+                'lifecycle_block_reason': reason,
+            }
+            self._po_lifecycle_capabilities = cached
+        return cached[key]
+
+    def get_can_send_to_vendor(self, obj):
+        return self._lifecycle_capabilities(obj)['can_send_to_vendor']
+
+    def get_can_complete(self, obj):
+        return self._lifecycle_capabilities(obj)['can_complete']
+
+    def get_lifecycle_block_reason(self, obj):
+        return self._lifecycle_capabilities(obj)['lifecycle_block_reason']
+
+    def get_commercial_edit_locked(self, obj):
+        return commercial_edit_locked(obj)
+
+    def get_commercial_edit_lock_reason(self, obj):
+        return COMMERCIAL_LOCK_REASON if commercial_edit_locked(obj) else ''
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
@@ -1419,6 +1480,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             )
             attrs['enterprise_project'] = candidate
 
+        if self.instance is not None:
+            protect_purchase_order_content(self.instance, attrs)
+            if 'status' in attrs and attrs['status'] != self.instance.status:
+                validate_purchase_order_transition(self.instance, attrs['status'], approval_log=attrs.get('approval_log'))
         return attrs
     
     @transaction.atomic
@@ -1431,6 +1496,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if not validated_data.get('po_number'):
             validated_data['po_number'] = PurchaseOrderNumberService.next_for_requisition(locked_pr.pr_number)
         validated_data['created_by'] = self.context['request'].user
+        target_status = validated_data.get('status', 'draft')
+        if target_status != 'draft':
+            prospective = PurchaseOrder(**{**validated_data, 'status': 'draft'})
+            validate_purchase_order_transition(prospective, target_status)
         order = super().create(validated_data)
         if files:
             self._upload_attachments(order, files)
@@ -1521,6 +1590,11 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             contacts[RETAINED_ATTACHMENTS] = sorted(attachment_cleanup_keys(instance))
             validated_data['contact_persons'] = contacts
         files = validated_data.pop('attachments_files', [])
+        protect_purchase_order_content(instance, validated_data)
+        if 'status' in validated_data and validated_data['status'] != instance.status:
+            validate_purchase_order_transition(
+                instance, validated_data['status'], approval_log=validated_data.get('approval_log'),
+            )
         order = super().update(instance, validated_data)
         if files:
             self._upload_attachments(order, files)

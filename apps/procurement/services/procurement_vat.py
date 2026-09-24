@@ -115,9 +115,22 @@ def item_financials(items):
 
 
 def apply_confirmed_input(values, instance, kind):
-    """Only an explicit request choice authorizes calculating stored amounts."""
+    """Calculate confirmed tax choices; PR quotations may remain unconfirmed."""
     supplied_amount = values.pop('entered_amount', None)
     basis = values.get('vat_basis')
+    if kind == 'pr':
+        saved_basis = getattr(instance, 'vat_basis', 'unconfirmed')
+        if basis is None and saved_basis in CONFIRMED_BASES:
+            basis = saved_basis
+        if basis in (None, 'unconfirmed') and saved_basis not in CONFIRMED_BASES:
+            # The PR form records quoted prices without requiring a tax
+            # decision. Keep the submitted net/total as entered; never infer
+            # VAT or turn unconfirmed historical prices into a 5% calculation.
+            if supplied_amount is not None:
+                amount = money(supplied_amount)
+                values.setdefault('net_total_excl_vat', amount)
+                values.setdefault('total_price', amount)
+            return values
     if instance is not None and supplied_amount is None and not financial_changes(instance, values, kind):
         if basis is None or basis == getattr(instance, 'vat_basis', 'unconfirmed'):
             return values

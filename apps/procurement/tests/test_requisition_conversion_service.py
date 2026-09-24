@@ -144,10 +144,69 @@ class RequisitionConversionServiceTests(SimpleTestCase):
         self.assertEqual(create_data['payment_terms'], 'Net 45')
         self.assertEqual(create_data['items'][0]['total'], 1250.0)
         self.assertEqual(create_data['approval_log'][0]['status'], 'Approved')
+        self.assertEqual(create_data['seller_reference'], 'Vendor Contact')
+        self.assertEqual(create_data['seller_contact_person'], '')
         self.assertEqual(create_data['approval_log'][0]['source'], 'purchase_requisition')
         self.assertTrue(create_data['approval_log'][0]['external'])
         self.assertEqual(create_data['approval_log'][-1], self.po_assignment)
         self.assertEqual(self.on_commit.call_count, 2)
+
+    @patch('apps.project_control.models.CostAllocation.objects')
+    @patch('apps.procurement.services.requisition_conversion.PurchaseOrder.objects')
+    def test_conversion_carries_all_explicit_project_numbers_in_order(self, purchase_orders, allocations):
+        allocations.filter.return_value = []
+        purchase_orders.filter.return_value.exists.return_value = False
+        purchase_orders.create.return_value = SimpleNamespace(id='po-id', po_number='RAD-PRJ-PUR-0042_2026')
+        pr = self._pr(project='First project only', project_details=[
+            {'project_number': ' 590001 '}, {'project_code': '590002'}, {'code': '590003'},
+            {'project_number': '590001'}, {'project_name': 'Project title without number'},
+        ])
+        RequisitionConversionService._convert_locked(pr, self.actor)
+        self.assertEqual(purchase_orders.create.call_args.kwargs['project_number'], '590001, 590002, 590003')
+        self.assertEqual(purchase_orders.create.call_args.kwargs['seller_contact_person'], '')
+
+    @patch('apps.procurement.services.requisition_conversion.PurchaseOrder.objects')
+    def test_conversion_rejects_project_references_that_cannot_be_saved_without_truncation(self, purchase_orders):
+        purchase_orders.filter.return_value.exists.return_value = False
+        pr = self._pr(project_details=[{'project_number': str(index) * 40} for index in range(3)])
+        with self.assertRaisesMessage(ValidationError, 'combined project numbers exceed 100 characters'):
+            RequisitionConversionService._convert_locked(pr, self.actor)
+        purchase_orders.create.assert_not_called()
+        self.assertEqual(pr.status, 'approved')
+
+    @patch('apps.project_control.models.CostAllocation.objects')
+    @patch('apps.procurement.services.requisition_conversion.PurchaseOrder.objects')
+    def test_conversion_recovers_three_historical_project_numbers_without_package_numbers(self, purchase_orders, allocations):
+        allocations.filter.return_value = []
+        purchase_orders.filter.return_value.exists.return_value = False
+        purchase_orders.create.return_value = SimpleNamespace(id='po-id', po_number='RAD-PRJ-PUR-0042_2026')
+        labels = [
+            '5901142-SARB PRODUCED WATER TREATMENT PROJECT',
+            'C & F CED.FWA T31 Plant Modifications (MOCs) for Upper Zakum Package 5901086',
+            'Detailed Engineering for (NEB) (10522 & 10523), 5901056',
+        ]
+        pr = self._pr(project='', project_department='; '.join(labels), project_details=[
+            {'source': 'historical', 'value': label, 'label': label} for label in labels
+        ])
+        RequisitionConversionService._convert_locked(pr, self.actor)
+        self.assertEqual(purchase_orders.create.call_args.kwargs['project_number'], '5901142, 5901086, 5901056')
+
+    def test_historical_project_number_fallback_is_conservative_and_explicit_codes_win(self):
+        from apps.procurement.services.purchase_order_project_display import requisition_project_reference
+
+        pr = self._pr(project='', project_details=[], project_department='Package 10522; project 5901142, 5901086, 5901142')
+        self.assertEqual(requisition_project_reference(pr), '5901142, 5901086')
+        pr.project_details = [{'value': 'Package 10522; no project code'}]
+        self.assertEqual(requisition_project_reference(pr), '5901142, 5901086')
+        pr.project_department = ''
+        pr.project = 'Legacy projects 5901142, 5901086'
+        self.assertEqual(requisition_project_reference(pr), '5901142, 5901086')
+        pr.project_details = [
+            {'code': ' ALPHA-12 ', 'value': 'Do not replace explicit code with 5909999'},
+            {'value': 'Embedded A5900001 or 5900002X and longer 15900003 are not standalone project codes'},
+            {'value': 'Package 10522; MOC 10523; T31'},
+        ]
+        self.assertEqual(requisition_project_reference(pr), 'ALPHA-12')
 
     @patch('apps.procurement.services.requisition_conversion.PurchaseOrder.objects')
     def test_unapproved_pr_cannot_be_converted(self, purchase_orders):

@@ -22,7 +22,7 @@ from apps.procurement.services.purchase_order_exports import (
 
 
 class PurchaseOrderExportTests(TestCase):
-    def test_pending_po_exports_status_without_inventing_a_completed_approver(self):
+    def test_pending_po_shows_ceo_identity_without_inventing_a_completed_approval(self):
         order = self._order()
         order.status, order.approved_at = 'draft', None
         order.approved_by_name = 'Preselected Approver'
@@ -32,13 +32,17 @@ class PurchaseOrderExportTests(TestCase):
             text = '\n'.join(page.get_text() for page in pdf)
         self.assertIn('PO status: Draft', text)
         self.assertIn('Approval pending:', text)
-        self.assertIn('Not yet approved', text)
+        self.assertIn('Jarmo Suominen', text)
+        self.assertIn('CEO, Rejlers Abu Dhabi', text)
         self.assertNotIn('Preselected Approver', text)
         self.assertNotIn('Approved by:', text)
         document = Document(BytesIO(build_purchase_order_docx(order)))
         text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
         self.assertIn('Approval pending:', text)
+        self.assertIn('Jarmo Suominen', text)
+        self.assertIn('CEO, Rejlers Abu Dhabi', text)
         self.assertNotIn('Preselected Approver', text)
+        self.assertNotIn('Approved by:', text)
 
     def test_unassigned_draft_pdf_and_word_do_not_claim_approval_was_requested(self):
         order = self._order()
@@ -52,7 +56,8 @@ class PurchaseOrderExportTests(TestCase):
             text = '\n'.join(page.get_text() for page in pdf)
             self.assertTrue(pdf[0].search_for('Order Confirmation:'))
             self.assertIn('Approval not requested:', text)
-            self.assertIn('No approver assigned', text)
+            self.assertIn('Jarmo Suominen', text)
+            self.assertIn('CEO, Rejlers Abu Dhabi', text)
             self.assertNotIn('Approval pending:', text)
             self.assertNotIn('Preselected Approver', text)
             self.assertNotIn('Approved by:', text)
@@ -60,7 +65,8 @@ class PurchaseOrderExportTests(TestCase):
         cell = next(cell for table in document.tables for row in table.rows for cell in row.cells
                     if 'Approval not requested:' in cell.text)
         self.assertEqual(cell.vertical_alignment, 0)
-        self.assertIn('No approver assigned', cell.text)
+        self.assertIn('Jarmo Suominen', cell.text)
+        self.assertIn('CEO, Rejlers Abu Dhabi', cell.text)
         self.assertNotIn('Preselected Approver', cell.text)
 
     def test_linked_requisition_approval_and_source_rows_do_not_supply_po_approval(self):
@@ -82,7 +88,8 @@ class PurchaseOrderExportTests(TestCase):
         word_text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
         for rendered in (text, word_text):
             self.assertIn('Approval not requested:', rendered)
-            self.assertIn('No approver assigned', rendered)
+            self.assertIn('Jarmo Suominen', rendered)
+            self.assertIn('CEO, Rejlers Abu Dhabi', rendered)
             self.assertNotIn('PR Signer', rendered)
             self.assertNotIn('Approved by:', rendered)
             self.assertNotIn('Approval pending:', rendered)
@@ -99,7 +106,8 @@ class PurchaseOrderExportTests(TestCase):
                 }]
                 display = _approval_display(order)
                 self.assertEqual(display['heading'], 'Approval pending:')
-                self.assertEqual(display['name'], 'Not yet approved')
+                self.assertEqual(display['name'], 'Jarmo Suominen')
+                self.assertIn('CEO, Rejlers Abu Dhabi', display['title'])
         order.status = 'draft'
         for row in (
             {'status': 'pending', 'stage': 'Final Management Sign-off'},
@@ -266,7 +274,7 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('Email:', first_page_text)
         self.assertNotIn('Phone / Email:', first_page_text)
         self.assertRegex(first_page_text, r'Seller Ref\. no:\s+—')
-        self.assertRegex(first_page_text, r'Contact Person:\s+Vendor Contact')
+        self.assertRegex(first_page_text, r'Contact Person:\s+Phone Number:')
         price_summary_text = exported.pages[2].extract_text()
         self.assertIn('SUMMARY OF PRICES', price_summary_text)
         self.assertRegex(price_summary_text, r'Total Price:\s+USD 100\.00')
@@ -564,14 +572,128 @@ class PurchaseOrderExportTests(TestCase):
             self._assert_body_clear_of_footer(pdf)
             page = pdf[0]
             heading = page.search_for('Approval pending:')[0]
-            identity = page.search_for('Not yet approved')[0]
+            identity = page.search_for('Jarmo Suominen')[0]
             self.assertGreater(identity.y0, heading.y1)
             self.assertAlmostEqual(identity.x0, heading.x0, delta=1)
             self.assertGreater(identity.y0, page.rect.height - 115 * mm)
             self.assertLess(identity.y0, page.rect.height - 95 * mm)
-            self.assertNotIn(order.approved_by_name, page.get_text())
+            self.assertNotIn('Approved by:', page.get_text())
             self.assertTrue(page.search_for('Order Confirmation:'))
         word = Document(BytesIO(build_purchase_order_docx(order)))
         cell = next(cell for table in word.tables for row in table.rows for cell in row.cells if 'Approval pending:' in cell.text)
         self.assertEqual(cell.vertical_alignment, 0)  # Word TOP alignment.
-        self.assertIn('Not yet approved', cell.text)
+        self.assertIn('Jarmo Suominen', cell.text)
+        self.assertIn('CEO, Rejlers Abu Dhabi', cell.text)
+
+    def test_pending_cover_shows_all_projects_and_blank_contact_without_signing_artwork(self):
+        order = self._order()
+        order.status, order.approved_at, order.approved_date = 'draft', None, None
+        order.approval_log = [{'user_id': 'po-reviewer', 'stage': 'Final Management Sign-off', 'status': 'Pending'}]
+        order.project_number = '590001, 590002, 590003'
+        order.pr_reference = SimpleNamespace(project_details=[
+            {'project_number': '590001'}, {'project_number': '590002'}, {'project_number': '590003'},
+        ])
+        image = BytesIO()
+        PILImage.new('RGB', (181, 51), 'navy').save(image, format='PNG')
+        order.approval_signature = 'data:image/png;base64,' + base64.b64encode(image.getvalue()).decode()
+        with patch('apps.procurement.services.purchase_order_exports.completed_jarmo_profile_artwork') as artwork:
+            content, warnings = build_purchase_order_pdf(order)
+            word_content = build_purchase_order_docx(order)
+        artwork.assert_not_called()
+        self.assertFalse(warnings)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            cover = pdf[0].get_text()
+            self.assertIn('590001, 590002, 590003', cover)
+            self.assertIn('Jarmo Suominen', cover)
+            self.assertIn('CEO, Rejlers Abu Dhabi', cover)
+            self.assertIn('Approval pending:', cover)
+            self.assertNotIn('Approved by:', cover)
+            self.assertEqual(cover.count('Vendor Contact'), 1)  # Seller Reference only.
+            self.assertRegex(cover, r'Contact Person:\s+Phone Number:')
+            self.assertFalse(any(entry[2:4] == (181, 51) for page in pdf for entry in page.get_images()))
+        word = Document(BytesIO(word_content))
+        text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
+        self.assertIn('590001, 590002, 590003', text)
+        self.assertIn('Jarmo Suominen', text)
+        self.assertIn('CEO, Rejlers Abu Dhabi', text)
+        self.assertNotIn('Approved by:', text)
+        self.assertRegex(text, r'Contact Person:\s+Phone / Email:')
+        self.assertNotIn(image.getvalue(), [part.blob for part in word.part.package.parts])
+        self.assertIsNone(order.approved_at)
+        self.assertIsNone(order.approved_date)
+
+    def test_project_expansion_keeps_explicit_overrides_and_approved_recorded_terms(self):
+        from apps.procurement.serializers import PurchaseOrderSerializer
+        from apps.procurement.services.purchase_order_project_display import purchase_order_project_reference
+
+        order = self._order()
+        order.status, order.approved_at = 'draft', None
+        order.project = SimpleNamespace(project_number='590001', project_name='First project')
+        order.pr_reference = SimpleNamespace(project_details=[
+            {'project_number': ' 590001 '}, {'project_code': '590002'}, {'code': '590003'},
+            {'project_number': '590001'}, {'project_name': 'A description is not a project code'},
+        ])
+        self.assertEqual(purchase_order_project_reference(order), '590001, 590002, 590003')
+        self.assertEqual(PurchaseOrderSerializer().get_project_display(order), '590001, 590002, 590003')
+        order.project_number = 'OVERRIDE-42'
+        self.assertEqual(purchase_order_project_reference(order), 'OVERRIDE-42')
+        self.assertEqual(PurchaseOrderSerializer().get_project_display(order), 'OVERRIDE-42')
+        order.project_number = '590001'
+        order.approval_log = [{'status': 'Approved'}]
+        self.assertEqual(purchase_order_project_reference(order), '590001')
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertNotIn('590002', pdf[0].get_text())
+        self.assertEqual(order.project_number, '590001')
+
+    def test_unlocked_historical_project_labels_render_all_three_numbers(self):
+        order = self._order()
+        order.status, order.approved_at = 'draft', None
+        order.project_number = '5901142'
+        order.pr_reference = SimpleNamespace(project_details=[
+            {'source': 'historical', 'value': '5901142-SARB PRODUCED WATER TREATMENT PROJECT'},
+            {'source': 'historical', 'label': 'C & F CED.FWA T31 Plant Modifications (MOCs) for Upper Zakum Package 5901086'},
+            {'source': 'historical', 'value': 'Detailed Engineering for (NEB) (10522 & 10523), 5901056'},
+        ])
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertIn('5901142, 5901086, 5901056', pdf[0].get_text())
+        word = Document(BytesIO(build_purchase_order_docx(order)))
+        text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
+        self.assertIn('5901142, 5901086, 5901056', text)
+        self.assertEqual(order.project_number, '5901142')
+
+    def test_explicit_single_or_empty_project_selection_overrides_linked_pr_and_stale_primary(self):
+        from apps.procurement.serializers import PurchaseOrderSerializer
+        from apps.procurement.services.purchase_order_project_display import purchase_order_project_reference
+
+        order = self._order()
+        order.status, order.approved_at = 'draft', None
+        order.project = SimpleNamespace(project_number='5901142', project_name='Old primary project')
+        order.rad_project_no = '5901142'
+        order.pr_reference = SimpleNamespace(project_details=[
+            {'project_number': '5901142'}, {'project_number': '5901086'}, {'project_number': '5901056'},
+        ])
+        for number, selections in (
+            ('5901086', [{'project_number': '5901086', 'project_name': 'Selected project'}]),
+            ('', []),
+        ):
+            with self.subTest(number=number):
+                order.project_number = number
+                order.contact_persons = {'project_selections': selections}
+                self.assertEqual(purchase_order_project_reference(order), number)
+                self.assertEqual(PurchaseOrderSerializer().get_project_display(order), number or None)
+                content, _ = build_purchase_order_pdf(order)
+                with fitz.open(stream=content, filetype='pdf') as pdf:
+                    cover = pdf[0].get_text()
+                word = Document(BytesIO(build_purchase_order_docx(order)))
+                word_text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
+                for text in (cover, word_text):
+                    self.assertNotIn('5901142', text)
+                    self.assertNotIn('5901056', text)
+                    if number:
+                        self.assertIn(number, text)
+                    else:
+                        self.assertNotIn('5901086', text)
+                        self.assertNotIn('Multiple Projects', text)
+                        self.assertRegex(text, r'Project:?\s+—')

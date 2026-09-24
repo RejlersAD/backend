@@ -192,11 +192,6 @@ class ProcurementCRUDLifecycleTests(TestCase):
             self.pr.purchase_recommendation = 'Before'
             self.pr.price_remarks_data = source
             self.pr.save()
-            # Clearing a price is a financial edit and now needs a VAT decision.
-            blocked = self.client.patch(f'{BASE}requisitions/{self.pr.pk}/', {
-                'total_price': '' if encoding == 'multipart' else None,
-            }, format=encoding)
-            self.assertEqual(blocked.status_code, 400, blocked.data)
             response = self.client.patch(f'{BASE}requisitions/{self.pr.pk}/', {
                 'vendor': '' if encoding == 'multipart' else None,
                 'supplier_name': '', 'purchase_recommendation': '',
@@ -250,12 +245,12 @@ class ProcurementCRUDLifecycleTests(TestCase):
                            approval_signature='/original.pdf#page=1', attachments=[original])
         with self.captureOnCommitCallbacks(execute=True), patch('apps.procurement.serializers.notify_assigned_approvers'):
             response = self.client.patch(f'{BASE}orders/{order.pk}/', {
-                'title': 'Corrected order', 'approval_log': [], 'attachments': [],
+                'notes': 'Delivery follow-up', 'approval_log': [], 'attachments': [],
                 'approved_by_name': '', 'approved_date': None, 'approval_signature': '',
             }, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         order.refresh_from_db()
-        self.assertEqual(order.title, 'Corrected order')
+        self.assertEqual(order.notes, 'Delivery follow-up')
         self.assertEqual(order.approval_log, history)
         self.assertEqual(order.attachments, [original])
         self.assertEqual(order.approved_by_name, 'Original Approver')

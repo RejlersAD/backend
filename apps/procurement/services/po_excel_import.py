@@ -13,10 +13,14 @@ from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from openpyxl import load_workbook
 from openpyxl.utils.datetime import from_excel
+from rest_framework.exceptions import ValidationError
 
 from ..models import PurchaseOrder, PurchaseRequisition, Vendor
 from .pr_excel_import import _match_vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
+from .purchase_order_content import protect_purchase_order_content
+from .purchase_order_lifecycle import validate_purchase_order_transition
+from .procurement_lifecycle import mark_requisition_converted
 
 
 MAX_IMPORT_ROWS = 5000
@@ -302,6 +306,22 @@ def import_po_workbook(file_obj, *, user, dry_run=True):
     prs = {pr.pr_number: pr for pr in PurchaseRequisition.objects.filter(pr_number__in=[row.pr_number for row in rows])}
     vendors = list(Vendor.objects.all().only("id", "vendor_code", "name", "country"))
     previews, imported = [], []
+    locked_prs = {}
+    if not dry_run:
+        numbers = {number for row in rows for number in (row.po_number, row.source_po_number)}
+        observed_orders = list(PurchaseOrder.objects.filter(po_number__in=numbers).values('pk', 'pr_reference_id'))
+        pr_ids = {pr.pk for pr in prs.values()} | {
+            order['pr_reference_id'] for order in observed_orders if order['pr_reference_id']
+        }
+        # Hold a consistent order for the whole workbook, not one row at a
+        # time: otherwise the second row could acquire PR after a prior PO.
+        locked_prs = {pr.pk: pr for pr in PurchaseRequisition.objects.select_for_update()
+                      .filter(pk__in=pr_ids).order_by('pk')}
+        prs = {pr.pr_number: pr for pr in locked_prs.values()}
+        locked_orders = list(PurchaseOrder.objects.select_for_update()
+                             .filter(pk__in=[order['pk'] for order in observed_orders]).order_by('pk'))
+        if any(po.pr_reference_id and po.pr_reference_id not in locked_prs for po in locked_orders):
+            raise ValidationError('The linked recommendation changed. Refresh and retry this import.')
 
     for row in rows:
         preview = row.preview()
@@ -340,11 +360,25 @@ def import_po_workbook(file_obj, *, user, dry_run=True):
             preview["warnings"].append("Supplier does not unambiguously match the company vendor database.")
         else:
             preview["status"] = "ready"
+        proposed = {
+            key: value for key, value in row.values.items()
+            if key != 'supplier_name' and not (key == 'po_date' and value is None)
+        }
+        proposed.update(po_number=row.po_number, vendor_id=vendor_match.get('id'))
+        if existing and preview['status'] == 'ready':
+            try:
+                protect_purchase_order_content(existing, proposed)
+                if proposed.get('status', existing.status) != existing.status:
+                    validate_purchase_order_transition(existing, proposed['status'])
+            except ValidationError as error:
+                preview['status'] = 'error'
+                preview['warnings'].append(str(error.detail))
         previews.append(preview)
         if dry_run or preview["status"] != "ready":
             continue
 
         with transaction.atomic():
+            pr = locked_prs[pr.pk]
             po = PurchaseOrder.objects.select_for_update().filter(
                 Q(po_number=row.po_number) | Q(po_number=row.source_po_number)
             ).annotate(
@@ -358,6 +392,11 @@ def import_po_workbook(file_obj, *, user, dry_run=True):
             if created:
                 po = PurchaseOrder(po_number=row.po_number, created_by=user)
             else:
+                if po.pr_reference_id and po.pr_reference_id not in locked_prs:
+                    raise ValidationError('The linked recommendation changed. Refresh and retry this import.')
+                protect_purchase_order_content(po, proposed)
+                if proposed.get('status', po.status) != po.status:
+                    validate_purchase_order_transition(po, proposed['status'])
                 po.po_number = row.po_number
             for key, value in row.values.items():
                 if key != "supplier_name" and not (key == "po_date" and value is None):
@@ -371,11 +410,7 @@ def import_po_workbook(file_obj, *, user, dry_run=True):
             if row.values.get("po_date"):
                 PurchaseOrder.objects.filter(pk=po.pk).update(po_date=row.values["po_date"])
                 po.po_date = row.values["po_date"]
-            PurchaseRequisition.objects.filter(pk=pr.pk).update(
-                po_applicable=True,
-                po_number_reference=row.po_number,
-                status="converted",
-            )
+            mark_requisition_converted(pr, row.po_number)
             imported.append({
                 "id": str(po.id),
                 "po_number": po.po_number,

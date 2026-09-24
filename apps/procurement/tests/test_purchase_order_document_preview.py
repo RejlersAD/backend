@@ -67,6 +67,46 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         self.assertNotIn('Saved narrative', text)
         self.assertEqual(PurchaseOrder.objects.values().get(pk=order.pk), before)
 
+    def test_new_editor_cover_keeps_contact_blank_and_shows_projects_and_unsigned_ceo(self):
+        snapshot = {
+            'po_number': 'RAD-PRJ-PUR-0126_SEP2026', 'vendor': str(self.vendor.pk),
+            'title': 'Three-project engineering scope', 'total_amount': '100.00',
+            'seller_reference': 'Seller Reference Contact', 'seller_contact_person': '',
+            'seller_phone': '+971500001234',
+            'project_number': '590001, 590002, 590003',
+            'approved_by_name': 'Untrusted client signer', 'approved_date': '2026-09-15',
+            'approval_signature': 'untrusted-client-signature',
+        }
+        with patch('apps.procurement.services.purchase_order_exports.completed_jarmo_profile_artwork') as artwork:
+            response = self.preview(snapshot)
+            self.assertEqual(response.status_code, 200)
+            word_response = self.preview(snapshot, format='word')
+            self.assertEqual(word_response.status_code, 200)
+        artwork.assert_not_called()
+        with fitz.open(stream=response.content, filetype='pdf') as document:
+            cover = document[0].get_text()
+            self.assertIn('590001, 590002, 590003', cover)
+            self.assertIn('Jarmo Suominen', cover)
+            self.assertIn('CEO, Rejlers Abu Dhabi', cover)
+            self.assertIn('Approval not requested:', cover)
+            self.assertNotIn('Approval pending:', cover)
+            self.assertNotIn('Approved by:', cover)
+            self.assertNotIn('Untrusted client signer', cover)
+            self.assertEqual(cover.count('Seller Reference Contact'), 1)
+            self.assertRegex(cover, r'Contact Person:\s+Phone Number:')
+        word = Document(BytesIO(word_response.content))
+        text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
+        self.assertIn('590001, 590002, 590003', text)
+        self.assertIn('Jarmo Suominen', text)
+        self.assertIn('CEO, Rejlers Abu Dhabi', text)
+        self.assertIn('Approval not requested:', text)
+        self.assertNotIn('Approval pending:', text)
+        self.assertNotIn('Approved by:', text)
+        self.assertNotIn('Untrusted client signer', text)
+        self.assertRegex(text, r'Contact Person:\s+Phone / Email:')
+        self.assertFalse(PurchaseOrder.objects.exists())
+        self.assertFalse(PODocument.objects.exists())
+
     def test_unchanged_snapshot_has_identical_page_rendering_to_saved_export(self):
         order = self.order(status='sent', approved_by_name='Recorded signer', approved_date=date(2026, 9, 15),
                            approved_at=timezone.now())
@@ -88,7 +128,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         text = self.text(self.preview(fake, order_id=str(order.pk)))
         self.assertNotIn('Recorded signer', text)
         self.assertIn('Approval not requested', text)
-        self.assertIn('No approver assigned', text)
+        self.assertIn('Jarmo Suominen', text)
         self.assertEqual(PurchaseOrder.objects.values().get(pk=order.pk), before)
 
     def test_uploaded_attachment_is_merged_in_memory_and_cannot_supply_storage_keys(self):
@@ -168,3 +208,51 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         self.assertIn('Short vendor summary', self.text(preview))
         with fitz.open(stream=saved, filetype='pdf') as first, fitz.open(stream=preview.content, filetype='pdf') as second:
             self.assertEqual([p.get_pixmap().samples for p in first], [p.get_pixmap().samples for p in second])
+
+    def test_explicit_project_removals_survive_save_reload_and_pdf_preview(self):
+        self.pr.project_details = [
+            {'project_number': '5901142'}, {'project_number': '5901086'}, {'project_number': '5901056'},
+        ]
+        self.pr.save(update_fields=['project_details'])
+        order = self.order(pr_reference=self.pr, project_number='5901142, 5901086, 5901056', rad_project_no='5901142')
+        endpoint = f'/api/v1/procurement/orders/{order.pk}/'
+        for number, selections in (
+            ('5901086', [{'project_number': '5901086', 'project_name': 'Selected project'}]),
+            ('', []),
+        ):
+            with self.subTest(number=number):
+                contacts = {'commercial': [{'name': 'Existing contact'}], 'project_selections': selections}
+                snapshot = {'project_number': number, 'contact_persons': contacts}
+                response = self.client.patch(endpoint, snapshot, format='json')
+                self.assertEqual(response.status_code, 200, response.data)
+                order.refresh_from_db()
+                self.assertEqual(order.project_number, number)
+                self.assertEqual(order.contact_persons, contacts)
+                reloaded = self.client.get(endpoint)
+                self.assertEqual(reloaded.status_code, 200, reloaded.data)
+                self.assertEqual(reloaded.data['project_number'], number)
+                self.assertEqual(reloaded.data['project_display'], number or None)
+                self.assertEqual(reloaded.data['contact_persons']['project_selections'], selections)
+                saved, _ = build_purchase_order_pdf(order)
+                with fitz.open(stream=saved, filetype='pdf') as pdf:
+                    saved_text = pdf[0].get_text()
+                preview_text = self.text(self.preview(snapshot, order_id=str(order.pk)))
+                for text in (saved_text, preview_text):
+                    self.assertNotIn('5901142', text)
+                    self.assertNotIn('5901056', text)
+                    if number:
+                        self.assertIn(number, text)
+                    else:
+                        self.assertNotIn('5901086', text)
+                        self.assertNotIn('Multiple Projects', text)
+                        self.assertRegex(text, r'Project:\s+—')
+        order.approval_log = [{'stage': 'CEO', 'status': 'Approved'}]
+        order.save(update_fields=['approval_log'])
+        response = self.client.patch(endpoint, {
+            'project_number': '5901142',
+            'contact_persons': {'project_selections': [{'project_number': '5901142'}]},
+        }, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        order.refresh_from_db()
+        self.assertEqual(order.project_number, '')
+        self.assertEqual(order.contact_persons['project_selections'], [])
