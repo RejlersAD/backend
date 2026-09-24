@@ -55,6 +55,10 @@ ALL_MODULES_CATALOGUE = [
     # ── Process sub-module codes (granular per sidebar item) ───────────────────
     {'code': 'pid_line_list',          'name': 'Line List',                    'icon': 'TableCells',  'order': 23, 'description': 'Extract base line list columns from P&ID drawings'},
     {'code': 'pid_equipment_list',     'name': 'Equipment List',               'icon': 'TableCells',  'order': 23, 'description': 'Extract equipment tags and type classification from P&ID'},
+    # SOFT-CODED: HMB Extractor — own module code so it appears under
+    # Role & Permission and can be granted/revoked independently of
+    # 'process_datasheet' (was previously sharing that code and invisible here).
+    {'code': 'hmb_extractor',          'name': 'HMB Extractor',                'icon': 'FileSearch',  'order': 26, 'description': 'Heat & Material Balance stream extraction and final Excel export'},
     # ── Piping sub-module code (moved away from shared designiq code) ───────────
     {'code': 'piping_critical_line_list', 'name': 'Critical Line List',        'icon': 'GitBranch',   'order': 24, 'description': '5-document critical line list with full 35-column enrichment'},
     # ── Instrument sub-module code (split from shared instrument_datasheet code) ──
@@ -339,6 +343,7 @@ DEFAULT_ROLE_MODULES = [
     'pid_analysis',
     'pfd_quality',
     'process_datasheet',
+    'hmb_extractor',
     'pid_line_list',
     'pid_equipment_list',
     # ── Piping Engineering ────────────────────────────────────────────
@@ -383,6 +388,7 @@ ENGINEERING_SECTION_MODULES = [
     'qhse_energy',
     # ── Discipline Datasheets ─────────────────────────────────────────
     'process_datasheet',
+    'hmb_extractor',
     'electrical_datasheet',
     'electrical_sld',
     'electrical_checklist',  # SOFT-CODED: NEW FEATURE - Electrical Check List
@@ -472,6 +478,7 @@ ROLE_MODULE_POLICY = {
 # Which module codes map to which discipline (used for diagnostics)
 MODULE_DISCIPLINE_MAP = {
     'process_datasheet': 'Process',
+    'hmb_extractor':     'Process',
     'pid_analysis':      'Process / P&ID',
     'pfd_to_pid':        'Process',
     'pfd_quality':       'Process',
