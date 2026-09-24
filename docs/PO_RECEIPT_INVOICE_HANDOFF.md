@@ -114,6 +114,10 @@ There is no automatic historical backfill, PO reopen, receipt acceptance or invo
 
 ## Verification evidence - 24 September 2026
 
+The sections below retain implementation-stage evidence. See the
+[release verification](PROCUREMENT_RELEASE_20260924.md) for the subsequent
+integrated release and current local migration state.
+
 The integrated Procurement/Finance regression suite passed 155 tests on Python 3.11.16 and PostgreSQL 15, including five observed row-lock races: competing receipts, same-command receipt retry, competing invoice allocations, and inspection versus edit in both directions. The latter verifies the central approval guard and domain command share the PR -> PO -> Receipt lock order without weakening approval checks.
 
 All 527 current graph migrations applied successfully to a disposable PostgreSQL database using the full 58-app registry. Migration history, zero-pending and model-drift checks passed. The guarded local application of procurement 0045 also passed with zero pending and unchanged evidence for the two existing receipts. This evidence does not certify production schema or records. Local test/migration logs are retained under the workspace `.codex-temp/po-handoff-20260924/`.
