@@ -48,7 +48,7 @@ from .purchase_order_approval_artwork import (
 )
 from .purchase_order_source_artwork import source_approval_artwork
 from .purchase_order_sources import is_safe_source_storage_key, uploaded_purchase_order_sources
-from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_rich_flowables
+from .po_rich_content import append_docx_rich_content, parse_meaningful_rich_content, pdf_rich_flowables
 
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
@@ -151,16 +151,7 @@ def _html_blocks(value):
 
 def _scope_narrative_blocks(value):
     """Keep authored layout, but do not turn empty editor markup into a page."""
-    blocks = parse_rich_content(value, default_font_size=12)
-    meaningful = any(
-        (block.kind == 'paragraph' and any(
-            re.sub('[\u200b-\u200d\ufeff]', '', run.text).strip() for run in block.runs
-        ))
-        or (block.kind == 'image' and block.image)
-        or (block.kind == 'table' and block.rows)
-        for block in blocks
-    )
-    return blocks if meaningful else []
+    return parse_meaningful_rich_content(value, default_font_size=12)
 
 
 def _pdf_rich_text(blocks, styles, width=None):

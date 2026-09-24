@@ -20,6 +20,7 @@ from apps.rbac.action_policy import record_workflow_not_denied, request_action_a
 from apps.rbac.models import AuditLog
 from apps.rbac.utils import create_audit_log
 from ..models import Receipt
+from .po_rich_content import parse_meaningful_rich_content
 from .purchase_order_lifecycle import lock_purchase_order, require_purchase_order_approval
 from .receipt_numbering import ReceiptNumberService
 
@@ -73,7 +74,8 @@ def _basis(po):
                           'description': str(item.get('description') or item.get('item') or item.get('name') or f'Line {index}'),
                           'uom': uom, 'ordered': ordered})
         return 'quantity', lines
-    scope = str(po.scope_of_services or po.description or '').strip()
+    scope = next((str(value).strip() for value in (po.scope_of_services, po.description)
+                  if parse_meaningful_rich_content(value)), '')
     if (po.category not in SERVICE_CATEGORIES or not scope or po.vat_basis == 'unconfirmed'
             or po.net_amount is None or po.net_amount <= 0 or not str(po.currency or '').strip()):
         raise ValueError('Record a valid goods line basis or a service scope with confirmed net value and currency before receiving.')

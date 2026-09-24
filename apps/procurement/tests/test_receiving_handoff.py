@@ -1,6 +1,8 @@
 """Guarded receiving handoff: real evidence, decimals, authority and retries."""
+import base64
 from copy import deepcopy
 from datetime import date, datetime, timezone as datetime_timezone
+from io import BytesIO
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -10,6 +12,7 @@ from django.test import TestCase, override_settings
 from django.urls import include, path
 from django.utils import timezone
 from rest_framework.test import APIClient
+from PIL import Image
 
 from apps.procurement.models import PurchaseOrder, PurchaseRequisition, Receipt, Vendor
 from apps.procurement.services.receiving import receiving_summary
@@ -340,6 +343,50 @@ class ReceivingHandoffTests(TestCase):
         self.assertEqual(summary['lines'][0]['ordered'], '100.00')
         self.assertEqual(summary['lines'][0]['accepted'], '40.00')
         self.assertEqual(summary['lines'][0]['remaining'], '60.00')
+
+    def test_blank_rich_service_scope_blocks_queue_and_receipt_creation(self):
+        for blank in ('<p><br></p>', '<p>&nbsp;</p>', '<div>\u200b\u200c\u200d\ufeff</div>',
+                      '<div style="page-break-before:always"><br></div>',
+                      '<script>Not service evidence</script>'):
+            with self.subTest(scope=blank):
+                po = self.order(items=[], category='engineering_services', scope_of_services=blank,
+                                description='<p>&nbsp;<br></p>', vat_basis='exclusive',
+                                net_amount='100.00', total_amount='105.00', currency='AED')
+                row = self.client.get(BASE + 'receipts/available-orders/', {'search': po.po_number}).data['results'][0]
+                self.assertEqual(row['receiving']['status'], 'blocked')
+                self.assertFalse(row['receiving']['can_record'])
+                payload = self.payload(po, items_received=[{'line_id': 'service:total', 'received_amount': '10'}])
+                response = self.client.post(BASE + 'receipts/', payload, format='json')
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertFalse(Receipt.objects.filter(purchase_order=po).exists())
+
+    def test_service_basis_uses_first_meaningful_recorded_scope(self):
+        fallback = '<p>Inspect the retained project specifications.</p>'
+        po = self.order(items=[], category='engineering_services', scope_of_services='<p>&nbsp;<br></p>',
+                        description=fallback, vat_basis='exclusive', net_amount='100.00', currency='AED')
+        self.assertEqual(receiving_summary(po)['lines'][0]['description'], fallback)
+        payload = self.payload(po, items_received=[{'line_id': 'service:total', 'received_amount': '10'}])
+        response = self.client.post(BASE + 'receipts/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['items_received'][0]['item'], fallback)
+        po.scope_of_services = '<p>Primary recorded service scope.</p>'
+        self.assertEqual(receiving_summary(po)['lines'][0]['description'], po.scope_of_services)
+
+    def test_safe_rich_text_image_and_table_service_scopes_remain_receivable(self):
+        content = BytesIO()
+        Image.new('RGB', (2, 2), 'white').save(content, format='PNG')
+        encoded = base64.b64encode(content.getvalue()).decode('ascii')
+        for scope in ('<p><strong>Review project specifications.</strong></p>',
+                      f'<p><img src="data:image/png;base64,{encoded}"></p>',
+                      '<table><tr><td>Recorded service schedule.</td></tr></table>'):
+            with self.subTest(scope=scope):
+                po = self.order(items=[], category='engineering_services', scope_of_services=scope,
+                                description='', vat_basis='exclusive', net_amount='100.00', currency='AED')
+                payload = self.payload(po, items_received=[{'line_id': 'service:total', 'received_amount': '10'}])
+                response = self.client.post(BASE + 'receipts/', payload, format='json')
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual(receiving_summary(po)['basis'], 'service_value')
+                self.assertEqual(response.data['items_received'][0]['item'], scope)
 
     def test_ambiguous_service_basis_and_legacy_receipt_evidence_remain_blocked(self):
         for kwargs in ({}, {'net_amount': '100'}, {'net_amount': '100', 'vat_basis': 'none', 'scope_of_services': ''}):

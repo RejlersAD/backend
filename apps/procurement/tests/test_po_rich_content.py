@@ -11,12 +11,26 @@ from PIL import Image
 from PyPDF2 import PdfReader
 from reportlab.pdfgen import canvas
 
-from apps.procurement.services.po_rich_content import parse_rich_content
+from apps.procurement.services.po_rich_content import parse_meaningful_rich_content, parse_rich_content
 from apps.procurement.services.purchase_order_exports import build_purchase_order_docx, build_purchase_order_pdf
 from apps.procurement.tests import test_purchase_order_exports as export_tests
 
 
 class PurchaseOrderRichContentTests(TestCase):
+    def test_meaningful_content_omits_empty_editor_and_unsafe_markup(self):
+        for source in ('', '  ', '\u00a0\u200b', '<p><br></p>', '<p>&nbsp;\u200c\ufeff</p>',
+                       '&lt;p&gt;&amp;nbsp;&lt;/p&gt;',
+                       '<div style="page-break-before:always"><br></div>',
+                       '<script>Invisible script</script>'):
+            with self.subTest(source=source):
+                self.assertEqual(parse_meaningful_rich_content(source), [])
+
+    def test_meaningful_content_preserves_authored_blocks_and_default_size(self):
+        source = '<p>&nbsp;</p><div style="page-break-before:always"></div><p>Actual scope</p>'
+        self.assertEqual(parse_meaningful_rich_content(source, default_font_size=12),
+                         parse_rich_content(source, default_font_size=12))
+        self.assertTrue(parse_meaningful_rich_content('<table><tr><td></td></tr></table>'))
+
     def order(self, narrative):
         order = export_tests.PurchaseOrderExportTests()._order()
         order.description = narrative

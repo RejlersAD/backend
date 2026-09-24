@@ -445,6 +445,20 @@ def parse_rich_content(value, *, default_font_size=None):
     return _Builder().content(tree.root.children, default_style)
 
 
+def parse_meaningful_rich_content(value, *, default_font_size=None):
+    """Return authored blocks only when safe text, an image or a table remains."""
+    blocks = parse_rich_content(value, default_font_size=default_font_size)
+    meaningful = any(
+        (block.kind == 'paragraph' and any(
+            re.sub('[\u200b-\u200d\ufeff]', '', run.text).strip() for run in block.runs
+        ))
+        or (block.kind == 'image' and block.image)
+        or (block.kind == 'table' and block.rows)
+        for block in blocks
+    )
+    return blocks if meaningful else []
+
+
 def _pdf_font(style):
     family = style.get('font_family', '').lower()
     base = 'Courier' if any(word in family for word in ('courier', 'mono', 'consolas')) else 'Times' if any(word in family for word in ('times', 'serif', 'georgia')) and 'sans' not in family else 'Helvetica'

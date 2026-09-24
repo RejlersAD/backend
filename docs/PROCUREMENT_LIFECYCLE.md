@@ -81,15 +81,18 @@ decision. Legacy POs without a PR remain supported for permitted edits.
    Draft, Sent to Vendor, Acknowledged by Vendor, In Progress, Partially Received
    and Completed. These are available states, not a requirement to visit every
    intermediate state. The server rechecks approval evidence on progression.
-5. **Record and inspect receipt.** Goods Receipts shows approved issued POs with
+5. **Record and confirm receipt.** Goods Receipts shows approved issued POs with
    remaining quantity/service value beside the receipt register. Record actual
-   delivered evidence as Pending, then use explicit inspection acceptance or
-   rejection under the configured receipt authority. Accepted evidence determines
+   delivered evidence as Pending. The authorized recorder can explicitly confirm
+   delivery; configured inspection authority can instead accept or reject it.
+   Delivery confirmation does not assert technical inspection checks. Accepted
+   evidence determines
    partial versus full coverage; accepting a receipt does not close the PO.
    Mark Complete requires full accepted coverage as well as valid PO approvals.
 6. **Reconcile missing historical evidence.** Completed POs without full accepted
    coverage appear in the reconciliation queue. An authorized recorder supplies
-   actual receipt/service evidence and a reason; inspection remains separate.
+   actual receipt/service evidence and a reason; delivery confirmation or
+   configured inspection remains a separate decision.
    This preserves the completed PO and its history instead of reopening it.
 7. **Capture the supplier invoice.** Finance's awaiting-invoice queue uses
    remaining canonical PO allocations. Import opens with the PO selected and
@@ -100,8 +103,8 @@ decision. Legacy POs without a PR remain supported for permitted edits.
 
 See [the receiving and invoice contract](PO_RECEIPT_INVOICE_HANDOFF.md) for
 balance, freshness, retry and migration requirements. These changes are verified
-locally; deployment must apply procurement migration 0045 before the coordinated
-backend/frontend release.
+locally; deployment must apply procurement migrations 0045 and 0046 before the
+coordinated backend/frontend release.
 
 A rejected PO approval blocks progression. Cancellation can preserve the record
 without creating approval evidence. Completed and Cancelled POs cannot be
