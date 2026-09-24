@@ -259,6 +259,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     # API alias for frontend compatibility
     approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
     can_approve = serializers.SerializerMethodField()
+    can_reopen = serializers.SerializerMethodField()
     current_approval = serializers.SerializerMethodField()
     registration_warnings = serializers.SerializerMethodField()
     can_reassign_approvers = serializers.SerializerMethodField()
@@ -276,6 +277,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         'po_link_previous_status',
         '_retained_attachment_sources',
         'approval_reassignment_history',
+        'approval_revision_history',
     )
 
     DISPLAY_USER_FIELDS = (
@@ -366,7 +368,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Dynamic Approval Workflow
             'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
             'can_approve', 'current_approval', 'registration_warnings',
-            'can_reassign_approvers', 'reassignable_approval_stage_indices', 'approval_reassignments',
+            'can_reassign_approvers', 'reassignable_approval_stage_indices', 'approval_reassignments', 'can_reopen',
             
             # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
@@ -802,6 +804,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         actor = getattr(request, 'user', None)
         return bool(actor and RequisitionWorkflowService.can_approve(obj, actor))
 
+    def get_can_reopen(self, obj):
+        from .services.requisition_revisions import can_reopen
+        return can_reopen(obj, self.context.get('request'))
+
     def get_registration_warnings(self, obj):
         from .services.requisition_registration import requisition_registration_warnings
 
@@ -954,6 +960,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # finished. Save against the locked current record so its status,
         # source decisions and audit cannot be replaced by that stale copy.
         instance = PurchaseRequisition.objects.select_for_update().get(pk=instance.pk)
+        if canonicalize_pr_status(instance.status) == 'rejected':
+            raise serializers.ValidationError({'error': 'Reopen this rejected requisition before editing it. Its previous review will be retained.'})
         check_requisition_precondition(instance, validated_data.pop('expected_updated_at', serializers.empty))
         if not getattr(self, '_explicit_enterprise_project', 'enterprise_project' in validated_data):
             # Reconciliation may have committed after form validation. Decide
@@ -1268,9 +1276,14 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     def validate_contact_persons(self, value):
         from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, RETAINED_SOURCES
+        from .services.purchase_order_introduction import validate_order_introduction
 
         if not isinstance(value, dict):
             raise serializers.ValidationError('Contact details must be an object.')
+        try:
+            validate_order_introduction(value)
+        except serializers.ValidationError as exc:
+            raise serializers.ValidationError(exc.detail['contact_persons']) from exc
         value = dict(value)
         existing = getattr(self.instance, 'contact_persons', None) or {}
         for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES):

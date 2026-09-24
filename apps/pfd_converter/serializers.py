@@ -3,6 +3,7 @@ PFD Converter Serializers
 """
 from rest_framework import serializers
 from .models import PFDDocument, PIDConversion, ConversionFeedback
+from . import artifacts
 
 
 class PFDDocumentSerializer(serializers.ModelSerializer):
@@ -63,6 +64,25 @@ class PIDConversionSerializer(serializers.ModelSerializer):
     feedback_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
     
+    artifact = serializers.SerializerMethodField()
+    allowed_actions = serializers.SerializerMethodField()
+
+    def get_artifact(self, obj):
+        if not hasattr(obj, '_serialized_artifact'):
+            obj._serialized_artifact = artifacts.artifact_summary(obj)
+        return obj._serialized_artifact
+
+    def get_allowed_actions(self, obj):
+        return artifacts.allowed_actions(obj, self.context.get('request'), self.get_artifact(obj))
+
+    def validate(self, attrs):
+        protected = set(self.initial_data) - {'pid_title', 'pid_drawing_number', 'pid_revision'}
+        if protected:
+            raise serializers.ValidationError('Output, source, and review evidence are command-owned fields.')
+        if self.instance and (self.instance.pid_file or self.instance.pid_pdf or self.instance.reviewed_at):
+            raise serializers.ValidationError('Stored output metadata is preserved. Use a separate regeneration command.')
+        return attrs
+
     class Meta:
         model = PIDConversion
         fields = [
@@ -76,12 +96,15 @@ class PIDConversionSerializer(serializers.ModelSerializer):
             'safety_systems', 'design_parameters', 'compliance_checks',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'review_notes',
             'confidence_score', 'feedback_count', 'average_rating',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'artifact', 'allowed_actions'
         ]
         read_only_fields = [
             'id', 'converted_by', 'generation_started_at',
             'generation_completed_at', 'generation_duration',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'pfd_document', 'pid_file', 'preview_image', 'status',
+            'equipment_list', 'instrument_list', 'piping_details', 'safety_systems',
+            'design_parameters', 'compliance_checks', 'reviewed_by', 'reviewed_at',
+            'review_notes', 'confidence_score',
         ]
     
     def get_generation_time(self, obj):

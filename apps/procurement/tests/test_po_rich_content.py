@@ -157,7 +157,7 @@ class PurchaseOrderRichContentTests(TestCase):
             self.assertIn('Measured value', text)
             self.assertNotIn('Discount', text)
         word = Document(BytesIO(build_purchase_order_docx(order)))
-        table = word.tables[-1]
+        table = next(table for table in word.tables if table.cell(0, 0).text == 'Agreed Specification')
         self.assertEqual([cell.text for cell in table.rows[0].cells], ['Agreed Specification', 'Measure', 'Scope Item'])
         self.assertEqual(table.cell(1, 0).text, 'SPEC-AX7')
 

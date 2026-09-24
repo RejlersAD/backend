@@ -11,7 +11,7 @@ from xml.sax.saxutils import escape
 from django.utils.html import strip_tags
 from django.utils import timezone
 from docx import Document
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -38,6 +38,8 @@ from reportlab.lib.utils import ImageReader
 
 from .approval_integrity import purchase_order_signature_issue
 from .purchase_order_project_display import purchase_order_project_reference
+from .purchase_order_introduction import BUYER_NAME as COMPANY_NAME, INTRODUCTION_KEY, purchase_order_introduction
+from .purchase_order_word_pages import append_pdf_pages
 from .purchase_order_approval_artwork import (
     approval_image_stream as _signature_stream,
     approval_stamp_stream,
@@ -50,7 +52,6 @@ from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_r
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
 JARMO_COMPANY = 'Rejlers International Engineering Solutions AB'
-COMPANY_NAME = 'Rejlers International Engineering Solutions'
 COMPANY_ADDRESS = (
     'Rejlers Tower, 13th floor, AI Hamdan Street, P.O. Box 39317, '
     'Abu Dhabi, United Arab Emirates'
@@ -456,7 +457,7 @@ def _approval_display(order):
     }
 
 
-def _main_pdf(order):
+def _main_pdf(order, *, measure_cover=False):
     output = BytesIO()
     styles = _pdf_styles()
     document = SimpleDocTemplate(
@@ -474,6 +475,13 @@ def _main_pdf(order):
     tax = float(order.tax_amount or 0)
     total = float(order.total_amount or subtotal + tax)
     vendor = getattr(order, 'vendor', None)
+    introduction = escape(purchase_order_introduction(order)).replace('\n', '<br/>')
+    contacts = getattr(order, 'contact_persons', None)
+    if not isinstance(contacts, dict) or not isinstance(contacts.get(INTRODUCTION_KEY), str):
+        introduction = (
+            f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
+            f'<b>{escape(_value(getattr(vendor, "name", None)))}</b> (Seller).'
+        )
     # The signed commercial cover is one page. Use compact, readable cover
     # typography without changing the scope/price-summary pages that follow.
     preview = ParagraphStyle('POCoverField', parent=styles['preview'], fontSize=9.5, leading=11.5)
@@ -694,17 +702,29 @@ def _main_pdf(order):
     # inside the first-page frame. Never clip text or move approval/confirmation
     # to a continuation page. The frame reserves the branded header and footer;
     # SimpleDocTemplate's default frame adds 6pt padding on each side.
+    fitted_cover = KeepInFrame(document.width - 12, document.height - 12, cover,
+                               mode='shrink', hAlign='CENTER', vAlign='TOP', fakeWidth=False)
+    if measure_cover:
+        # Word uses the same measured approval panel and identity position.
+        # This path measures existing flowables without serializing a PDF or
+        # downloading supporting attachments.
+        from reportlab.pdfgen.canvas import Canvas
+
+        fitted_cover.wrapOn(Canvas(BytesIO()), document.width - 12, document.height - 12)
+        scale = getattr(fitted_cover, '_scale', 1)
+        return {
+            'panel_height': panel_height / scale,
+            'identity_gap': max(0, signing_top - approved_height) / scale,
+            'scale': scale,
+        }
     story = [
-        KeepInFrame(document.width - 12, document.height - 12, cover,
-                    mode='shrink', hAlign='CENTER', vAlign='TOP', fakeWidth=False),
+        fitted_cover,
         PageBreak(),
         Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
-        Paragraph(
-            f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
-            f'<b>{escape(_value(getattr(vendor, "name", None)))}</b> (Seller).', styles['preview'],
-        ),
-        Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']),
     ]
+    if introduction:
+        story.append(Paragraph(introduction, styles['preview']))
+    story.append(Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']))
     narrative = _pdf_rich_text(order.description, styles, width=document.width - 12)
     story.extend(narrative or [Paragraph(escape(_value(order.title)), styles['body'])])
     # Match the live A4 document: the price summary starts on a clean page.
@@ -872,8 +892,8 @@ def _attachment_pdf(content, filename, content_type=''):
     return None
 
 
-def build_purchase_order_pdf(order):
-    """Return one PDF containing the PO, attachment covers, and renderable files."""
+def _purchase_order_pdf_packet(order):
+    """Build the canonical packet and retain its authored-body boundary."""
     writer = PdfWriter()
     warnings = []
     source_readers = []
@@ -888,6 +908,7 @@ def build_purchase_order_pdf(order):
             writer.add_page(page)
 
     append(_main_pdf(order))
+    body_page_count = len(writer.pages)
     renderable_attachments = [row for row in (order.attachments or []) if not (
         isinstance(row, dict) and row.get('type') == 'po_excel_import_source'
         and not any(row.get(key) for key in ('s3_key', 'storage_key', 'url', 's3_url', 'file_url'))
@@ -922,7 +943,13 @@ def build_purchase_order_pdf(order):
 
     output = BytesIO()
     writer.write(output)
-    return output.getvalue(), warnings
+    return output.getvalue(), warnings, body_page_count
+
+
+def build_purchase_order_pdf(order):
+    """Return one PDF containing the PO, attachment covers, and renderable files."""
+    content, warnings, _ = _purchase_order_pdf_packet(order)
+    return content, warnings
 
 
 def _docx_cell_shading(cell, fill):
@@ -934,13 +961,14 @@ def _docx_cell_shading(cell, fill):
     shading.set(qn('w:fill'), fill)
 
 
-def _docx_set_cell_text(cell, value, *, size=7, bold=False, color='334155', align=None):
+def _docx_set_cell_text(cell, value, *, size=9.5, bold=False, color='334155', align=None):
     cell.text = ''
     paragraph = cell.paragraphs[0]
     if align is not None:
         paragraph.alignment = align
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.line_spacing = Pt(size + 2)
     run = paragraph.add_run(str(value or ''))
     run.bold = bold
     run.font.name = 'Arial'
@@ -952,6 +980,9 @@ def _docx_set_cell_text(cell, value, *, size=7, bold=False, color='334155', alig
 
 def _docx_add_page_field(paragraph):
     run = paragraph.add_run()
+    run.font.name = 'Arial'
+    run.font.size = Pt(7)
+    run.font.color.rgb = RGBColor.from_string('3275B6')
     begin = OxmlElement('w:fldChar')
     begin.set(qn('w:fldCharType'), 'begin')
     instruction = OxmlElement('w:instrText')
@@ -974,24 +1005,124 @@ def _docx_no_borders(table):
         borders.append(element)
 
 
+def _docx_cell_margins(cell, *, top=0, left=0, bottom=0, right=0):
+    properties = cell._tc.get_or_add_tcPr()
+    old = properties.find(qn('w:tcMar'))
+    if old is not None:
+        properties.remove(old)
+    margins = OxmlElement('w:tcMar')
+    for side, value in (('top', top), ('left', left), ('bottom', bottom), ('right', right)):
+        edge = OxmlElement(f'w:{side}')
+        edge.set(qn('w:w'), str(round(value * 20)))
+        edge.set(qn('w:type'), 'dxa')
+        margins.append(edge)
+    properties.append(margins)
+
+
+def _docx_cell_border(cell, edge, *, color='475569', size=8):
+    properties = cell._tc.get_or_add_tcPr()
+    borders = properties.find(qn('w:tcBorders'))
+    if borders is None:
+        borders = OxmlElement('w:tcBorders')
+        properties.append(borders)
+    border = OxmlElement(f'w:{edge}')
+    border.set(qn('w:val'), 'single')
+    border.set(qn('w:color'), color)
+    border.set(qn('w:sz'), str(size))
+    borders.append(border)
+
+
+def _docx_table(container, widths, rows=1):
+    table = container.add_table(rows=rows, cols=len(widths))
+    table.autofit = False
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    _docx_no_borders(table)
+    for column, width in zip(table.columns, widths):
+        column.width = Mm(width)
+    for row in table.rows:
+        for cell, width in zip(row.cells, widths):
+            cell.width = Mm(width)
+            _docx_cell_margins(cell)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+    return table
+
+
+def _docx_spacer(container, height):
+    paragraph = container.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = Mm(height)
+    paragraph.add_run().font.size = Pt(1)
+    return paragraph
+
+
+def _docx_field_rows(container, rows, widths=(30, 52)):
+    table = _docx_table(container, widths, rows=len(rows))
+    for row, (label, value, strong) in zip(table.rows, rows):
+        _docx_set_cell_text(row.cells[0], label + ':', bold=True)
+        _docx_set_cell_text(row.cells[1], _value(value), bold=strong)
+        for cell in row.cells:
+            _docx_cell_margins(cell, top=1.5, bottom=2, right=4.25)
+    return table
+
+
+def _docx_empty_cell_paragraphs(cell):
+    # Word requires a final paragraph after a nested table. Keep that required
+    # paragraph negligible, rather than introducing an extra line per panel.
+    for paragraph in cell.paragraphs:
+        if not paragraph.text:
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.paragraph_format.line_spacing = Pt(1)
+            paragraph.add_run().font.size = Pt(1)
+
+
+def _docx_heading(document, text, *, prefix=''):
+    paragraph = document.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(8)
+    paragraph.paragraph_format.space_after = Pt(5)
+    paragraph.paragraph_format.line_spacing = Pt(15)
+    paragraph.paragraph_format.keep_with_next = True
+    if prefix:
+        run = paragraph.add_run(prefix)
+        run.underline = True
+        run.bold = True
+    run = paragraph.add_run(text)
+    run.bold = True
+    for run in paragraph.runs:
+        run.font.name = 'Arial'
+        run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor.from_string('1F2937')
+    return paragraph
+
+
 def _configure_docx_header_footer(document, order):
     section = document.sections[0]
-    section.header_distance = Mm(7)
-    section.footer_distance = Mm(5)
+    section.header_distance = Mm(5.5)
+    section.footer_distance = Mm(15)
 
     header = section.header
     table = header.add_table(rows=1, cols=2, width=Mm(178))
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
     table.columns[0].width = Mm(135)
     table.columns[1].width = Mm(43)
+    _docx_no_borders(table)
     left, right = table.rows[0].cells
-    paragraph = _docx_set_cell_text(left, 'PURCHASE ORDER', size=8, bold=True, color='3275B6')
+    left.width, right.width = Mm(135), Mm(43)
+    for cell in (left, right):
+        _docx_cell_margins(cell)
+    paragraph = _docx_set_cell_text(left, 'PURCHASE ORDER', size=15, bold=True, color='3275B6')
     for value, size, bold, color in (
-        (_value(order.po_number, 'PO NUMBER PENDING'), 7, True, '3275B6'),
-        (_value(getattr(order, 'form_note', None), '(PO no. to be used in all documents)'), 5.5, False, '64748B'),
-        (_date_text(getattr(order, 'po_date', None)), 7, True, '3275B6'),
+        (_value(order.po_number, 'PO NUMBER PENDING'), 10, True, '3275B6'),
+        (_value(getattr(order, 'form_note', None), '(PO no. to be used in all documents)'), 7.5, False, '64748B'),
+        (_date_text(getattr(order, 'po_date', None)), 10, True, '3275B6'),
     ):
-        run = paragraph.add_run(f'\n{value}')
+        paragraph = left.add_paragraph()
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.line_spacing = Pt(12 if size == 7.5 else 16)
+        run = paragraph.add_run(value)
         run.bold = bold
         run.font.name = 'Arial'
         run.font.size = Pt(size)
@@ -1000,94 +1131,176 @@ def _configure_docx_header_footer(document, order):
     logo_paragraph = right.paragraphs[0]
     logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     logo_paragraph.paragraph_format.space_after = Pt(0)
+    logo_paragraph.paragraph_format.space_before = Mm(2)
     if LOGO_PATH.exists():
         logo_paragraph.add_run().add_picture(str(LOGO_PATH), width=Mm(27))
     tagline = logo_paragraph.add_run('\nHOME OF THE\nLEARNING MINDS')
     tagline.bold = True
     tagline.font.name = 'Arial'
-    tagline.font.size = Pt(6.5)
+    tagline.font.size = Pt(8.5)
     tagline.font.color.rgb = RGBColor.from_string('3275B6')
 
     footer = section.footer
     band = footer.add_table(rows=1, cols=5, width=Mm(178))
     band.alignment = WD_TABLE_ALIGNMENT.CENTER
+    band.autofit = False
+    _docx_no_borders(band)
+    band.rows[0].height = Mm(7)
+    band.rows[0].height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
     values = ('REJLERS', 'HOME of the\nLEARNING MINDS', 'REJLERS', 'HOME of the\nLEARNING MINDS', 'REJLERS')
     for index, (cell, value) in enumerate(zip(band.rows[0].cells, values)):
         _docx_cell_shading(cell, '0870AA')
-        paragraph = _docx_set_cell_text(cell, value, size=5.5, bold=True, color='FFFFFF', align=WD_ALIGN_PARAGRAPH.CENTER)
+        _docx_cell_margins(cell)
+        cell.width = Mm(35.6)
+        paragraph = _docx_set_cell_text(cell, value, size=7, bold=True, color='FFFFFF', align=WD_ALIGN_PARAGRAPH.CENTER)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         if index in (0, 2, 4) and WHITE_LOGO_PATH.exists():
             paragraph.clear()
-            paragraph.add_run().add_picture(str(WHITE_LOGO_PATH), height=Mm(3.2))
-    details = footer.add_table(rows=1, cols=2, width=Mm(160))
+            paragraph.add_run().add_picture(str(WHITE_LOGO_PATH), width=Mm(21))
+    # Separate native tables so Word does not merge their grids and let the
+    # address-cell inset resize the branded band above it.
+    footer.add_paragraph()
+    details = footer.add_table(rows=1, cols=2, width=Mm(178))
     details.alignment = WD_TABLE_ALIGNMENT.CENTER
+    details.autofit = False
+    _docx_no_borders(details)
+    details.columns[0].width, details.columns[1].width = Mm(140), Mm(38)
+    details.cell(0, 0).width, details.cell(0, 1).width = Mm(140), Mm(38)
+    for cell in details.rows[0].cells:
+        _docx_cell_margins(cell, top=3)
+    _docx_cell_margins(details.cell(0, 0), top=3, left=Mm(8).pt)
     _docx_set_cell_text(
         details.cell(0, 0),
-        f'{COMPANY_NAME}\n{COMPANY_ADDRESS}\nTel: {COMPANY_PHONE} | {COMPANY_WEBSITE}',
-        size=4.5, color='4E83AD',
+        f'{COMPANY_NAME}\nRejlers Tower, 13th floor, AI Hamdan Street, P.O. Box 39317,\n'
+        f'Abu Dhabi, United Arab Emirates\nTel: {COMPANY_PHONE} | {COMPANY_WEBSITE}',
+        size=7, color='3275B6',
     )
-    page_paragraph = _docx_set_cell_text(details.cell(0, 1), 'Page ', size=5, color='4E83AD', align=WD_ALIGN_PARAGRAPH.RIGHT)
+    page_paragraph = _docx_set_cell_text(details.cell(0, 1), 'Page ', size=7, color='3275B6', align=WD_ALIGN_PARAGRAPH.RIGHT)
+    details.cell(0, 1).vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.BOTTOM
     _docx_add_page_field(page_paragraph)
+    for area in (header, footer):
+        for paragraph in area.paragraphs:
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.paragraph_format.line_spacing = Pt(1)
+            paragraph.add_run().font.size = Pt(1)
 
 
-def build_purchase_order_docx(order):
-    """Return the editable PO through Summary of Prices; attachments are excluded."""
+def build_purchase_order_docx(order, *, with_warnings=False):
+    """Return the editable company PO with canonical supporting pages as images.
+
+    Existing service callers receive bytes. HTTP downloads request warnings so
+    unavailable supporting files are disclosed just as they are for the PDF.
+    """
     document = Document()
     section = document.sections[0]
     section.page_width = Mm(210)
     section.page_height = Mm(297)
-    section.top_margin = Mm(29)
-    section.bottom_margin = Mm(25)
-    section.left_margin = Mm(16)
-    section.right_margin = Mm(16)
+    # The PDF frame includes 6pt padding inside its 16mm/34mm/42mm margins.
+    # Keep the editable Word body on that same A4 content rectangle.
+    section.top_margin = Mm(34) + Pt(6)
+    section.bottom_margin = Mm(42) + Pt(6)
+    section.left_margin = Mm(16) + Pt(6)
+    section.right_margin = Mm(16) + Pt(6)
+    normal_style = document.styles['Normal']
+    normal_style.font.name = 'Arial'
+    normal_style.font.size = Pt(10.5)
+    normal_style.paragraph_format.space_after = Pt(0)
+    normal_style.paragraph_format.line_spacing = Pt(13.5)
     _configure_docx_header_footer(document, order)
+    cover_metrics = _main_pdf(order, measure_cover=True)
 
     vendor = getattr(order, 'vendor', None)
     invoice_emails = getattr(order, 'invoicing_emails', None) or []
     if not isinstance(invoice_emails, (list, tuple)):
         invoice_emails = [invoice_emails]
-    invoice_address = '\n'.join(filter(None, (
-        str(getattr(order, 'invoicing_attn', '') or '').strip(),
-        *[str(email).strip() for email in invoice_emails if email],
-    ))) or DEFAULT_INVOICE_ADDRESS
-    details = document.add_table(rows=4, cols=4)
-    _docx_no_borders(details)
-    detail_rows = (
-        ('Seller information', '\n'.join(filter(None, (_value(getattr(vendor, 'name', None)), str(getattr(order, 'seller_address', '') or '').strip()))), 'Seller Reference', getattr(order, 'seller_reference', None)),
-        ('Invoicing Address', invoice_address, 'Quote Ref.', getattr(order, 'quote_ref', None)),
-        ('', '', 'License No.', getattr(order, 'seller_license_no', None)),
-        ('', '', 'Buyer Reference', _buyer_reference(order)),
-    )
-    for row, values in zip(details.rows, detail_rows):
-        for index, value in enumerate(values):
-            _docx_set_cell_text(row.cells[index], _value(value, '') if index % 2 else value, bold=index % 2 == 0)
+    invoice_address = DEFAULT_INVOICE_ADDRESS
+    if getattr(order, 'invoicing_attn', None) or invoice_emails:
+        invoice_address = '\n'.join(filter(None, (
+            str(getattr(order, 'invoicing_attn', '') or '').strip(),
+            *[str(email).strip() for email in invoice_emails if email],
+            'Rejlers International Engineering Solutions AB', 'PO Box 39317',
+            'Abu Dhabi, UAE.', 'Tel: +971 2 639 7449',
+            f'Fax: {_value(getattr(order, "company_fax", None), "+971 2 639 7448")}',
+        )))
+    _docx_spacer(document, 1)
+    details = _docx_table(document, (83, 8, 83))
+    seller_fields = _docx_field_rows(details.cell(0, 0), (
+        ('Seller', getattr(vendor, 'name', None), False),
+        ('Seller Address', getattr(order, 'seller_address', None) or getattr(vendor, 'address', None), False),
+        ('Invoicing Address', invoice_address, False),
+    ), widths=(30, 53))
+    invoice_cell = seller_fields.cell(2, 1)
+    invoice_cell.text = ''
+    invoice_paragraph = invoice_cell.paragraphs[0]
+    invoice_paragraph.paragraph_format.line_spacing = Pt(11.5)
+    for index, line in enumerate(invoice_address.splitlines()):
+        if index:
+            invoice_paragraph.add_run('\n')
+        run = invoice_paragraph.add_run(line)
+        run.font.name = 'Arial'
+        run.font.size = Pt(9 if '@' in line else 9.5)
+        run.font.color.rgb = RGBColor.from_string('334155')
+    references = _docx_field_rows(details.cell(0, 2), (
+        ('Seller Reference', getattr(order, 'seller_reference', None), False),
+        ('Quote Ref.', getattr(order, 'quote_ref', None), False),
+        ('License No.', getattr(order, 'seller_license_no', None), False),
+        ('Buyer Reference', '', False),
+    ), widths=(30, 53))
+    reference_cell = references.cell(3, 1)
+    # Shared markup is safe, generated display content. Preserve its line
+    # breaks/bold job titles, rather than printing <br/> and <b> in Word.
+    reference_cell.text = ''
+    paragraph = reference_cell.paragraphs[0]
+    paragraph.paragraph_format.line_spacing = Pt(11.5)
+    for index, line in enumerate(_buyer_reference(order).split('<br/>')):
+        if index:
+            paragraph.add_run('\n')
+        run = paragraph.add_run(html.unescape(strip_tags(line)))
+        run.bold = '<b>' in line
+        run.font.name = 'Arial'
+        run.font.size = Pt(9 if '@' in line else 9.5)
+        run.font.color.rgb = RGBColor.from_string('334155')
+    for cell in details.rows[0].cells:
+        _docx_empty_cell_paragraphs(cell)
 
-    document.add_paragraph().paragraph_format.space_after = Pt(0)
-    commercial = document.add_table(rows=3, cols=4)
-    _docx_no_borders(commercial)
+    _docx_spacer(document, 1)
+    commercial = _docx_table(document, (30, 53, 8, 30, 53), rows=3)
     commercial_rows = (
-        ('Payment Terms', getattr(order, 'payment_terms', None), 'Delivery terms', getattr(order, 'delivery_terms', None)),
-        ('Payment Mode', getattr(order, 'payment_mode', None), 'Delivery date', _date_text(getattr(order, 'expected_delivery', None))),
-        ('Project', _project_display(order), 'Marking', getattr(order, 'marking', None) or order.po_number),
+        ('Payment Terms:', getattr(order, 'payment_terms', None), '', 'Delivery terms:', getattr(order, 'delivery_terms', None)),
+        ('Payment Mode:', getattr(order, 'payment_mode', None), '', 'Delivery date:', _date_text(getattr(order, 'expected_delivery', None))),
+        ('Project:', _project_display(order), '', 'Marking:', getattr(order, 'marking', None) or order.po_number),
     )
-    for row, values in zip(commercial.rows, commercial_rows):
+    for row_index, (row, values) in enumerate(zip(commercial.rows, commercial_rows)):
         for index, value in enumerate(values):
-            _docx_set_cell_text(row.cells[index], _value(value), bold=index % 2 == 0 or (index == 1 and row is commercial.rows[-1]))
+            _docx_set_cell_text(row.cells[index], '' if index == 2 else _value(value), bold=index in (0, 3) or row_index == 2)
+            _docx_cell_margins(row.cells[index], top=1.5, bottom=2, right=4.25)
 
-    summary = document.add_table(rows=1, cols=2)
-    summary.style = 'Table Grid'
-    _docx_set_cell_text(summary.cell(0, 0), f'Purchase Summary:\n{_value(_purchase_summary(order))}', size=7, bold=True)
+    _docx_spacer(document, 2)
+    summary = _docx_table(document, (89, 6, 79))
+    for cell in summary.rows[0].cells:
+        _docx_cell_border(cell, 'top', size=10)
+        _docx_cell_border(cell, 'bottom', size=10)
+        _docx_cell_margins(cell, top=4.25, bottom=4.25)
+    _docx_set_cell_text(summary.cell(0, 0), f'Purchase Summary:\n{_value(_purchase_summary(order))}', bold=True)
     subtotal_for_summary = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in _items(order))
-    _docx_set_cell_text(
-        summary.cell(0, 1),
-        f'Total Purchase Price: {subtotal_for_summary:,.2f} {order.currency or "AED"}\n'
-        f'VAT ({float(order.vat_percentage or 0):g}%): {float(order.tax_amount or 0):,.2f} {order.currency or "AED"}\n'
-        f'Total Sum: {float(order.total_amount or 0):,.2f} {order.currency or "AED"}',
-        size=7, bold=True,
-    )
+    summary_totals = _docx_table(summary.cell(0, 2), (45, 34), rows=3)
+    for row, (label, value) in zip(summary_totals.rows, (
+        ('Total Purchase Price:', f'{subtotal_for_summary:,.2f} {order.currency or "AED"}'),
+        (f'VAT ({float(order.vat_percentage or 0):g}%):', f'{float(order.tax_amount or 0):,.2f} {order.currency or "AED"}'),
+        ('Total Sum:', f'{float(order.total_amount or 0):,.2f} {order.currency or "AED"}'),
+    )):
+        _docx_set_cell_text(row.cells[0], label, bold=True)
+        _docx_set_cell_text(row.cells[1], value, size=8.5, align=WD_ALIGN_PARAGRAPH.RIGHT)
+    _docx_empty_cell_paragraphs(summary.cell(0, 2))
 
-    document.add_paragraph().paragraph_format.space_after = Pt(0)
-    approval = document.add_table(rows=1, cols=2)
-    _docx_no_borders(approval)
+    _docx_spacer(document, 2)
+    approval = _docx_table(document, (85, 5, 84))
+    approval.rows[0].height = Pt(cover_metrics['panel_height'])
+    approval.rows[0].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+    _docx_cell_border(approval.cell(0, 2), 'left', color='64748B', size=4)
+    _docx_cell_margins(approval.cell(0, 0), top=3, right=19.8)
+    _docx_cell_margins(approval.cell(0, 2), top=3, left=8.5)
     approval_cell = approval.cell(0, 0)
     # Word already flows the signing block directly below the cover summary;
     # make that upper placement explicit even when confirmation is taller.
@@ -1096,9 +1309,11 @@ def build_purchase_order_docx(order):
     signature_issue = purchase_order_signature_issue(order)
     signature_stream, stamp_stream, source_stream = _approval_artwork(order, approval_display, signature_issue)
     heading = '' if source_stream else f'\n{approval_display["heading"]}'
-    _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}{heading}', size=7, bold=True)
+    _docx_set_cell_text(approval_cell, f'PO status: {approval_display["status"]}{heading}', bold=True)
     approval_name, approval_title = approval_display['name'], approval_display['title']
     identity_with_artwork = False
+    if not source_stream:
+        _docx_spacer(approval_cell, cover_metrics['identity_gap'] / mm)
     if source_stream:
         source_image = _approval_image(source_stream, 79, 65)
         source_stream.seek(0)
@@ -1137,69 +1352,114 @@ def build_purchase_order_docx(order):
             paragraph.paragraph_format.space_after = Pt(0)
             paragraph.add_run().add_picture(stamp_stream, width=Pt(stamp_image.drawWidth), height=Pt(stamp_image.drawHeight))
             details = signing.cell(1, 0).merge(signing.cell(1, 2))
-            _docx_set_cell_text(details, f'{approval_title}\n{JARMO_COMPANY}\nDate: {_value(approval_display["date"], "")}', size=7)
+            _docx_set_cell_text(details, f'{approval_title}\n{JARMO_COMPANY}\nDate: {_value(approval_display["date"], "__________________________")}')
             identity_with_artwork = True
         else:
             paragraph = approval_cell.add_paragraph()
             paragraph.paragraph_format.space_after = Mm(1)
             paragraph.add_run().add_picture(signature_stream, width=Pt(signature_image.drawWidth), height=Pt(signature_image.drawHeight))
     else:
-        approval_cell.add_paragraph('\n\n\n')
+        # The PDF reserves a blank signature area before its measured gap.
+        _docx_spacer(approval_cell, 16 / cover_metrics['scale'])
     if signature_issue:
         approval_cell.add_paragraph(signature_issue)
     if not source_stream and not identity_with_artwork:
-        approval_cell.add_paragraph(
-            f'{approval_name}\n'
-            f'{approval_title}\n{JARMO_COMPANY}\n'
-            f'Date: {_value(approval_display["date"], "")}'
-        )
-    _docx_set_cell_text(
-        approval.cell(0, 1),
-        f'Order Confirmation:\nWe acknowledge receipt of your documents and will perform according to this PO.\n\n'
-        f'Seller Signature: ____________________\n\nDate: {_date_text(getattr(order, "confirmation_date", None))}\n\n'
-        f'Seller information: {_value(getattr(vendor, "name", None))}\n\n'
-        f'Contact Person: {str(getattr(order, "seller_contact_person", "") or "").strip()}\n\n'
-        f'Phone / Email: {" / ".join(filter(None, (str(getattr(order, "seller_phone", "") or ""), str(getattr(order, "seller_email", "") or "")))) or "â€”"}', size=7,
-    )
-    document.add_page_break()
-    document.add_heading(f'PURCHASE ORDER:  {_value(order.title)}', level=1)
-    document.add_paragraph(f'We, {COMPANY_NAME} (Buyer), issue this purchase order to {_value(getattr(vendor, "name", None))} (Seller).')
-    document.add_heading('PO DESCRIPTION & SCOPE', level=1)
+        identity = approval_cell.add_paragraph()
+        identity.add_run(approval_name).bold = True
+        identity.add_run(f'\n{approval_title}\n{JARMO_COMPANY}\n')
+        identity.add_run('Date: ').bold = True
+        identity.add_run(_value(approval_display['date'], '__________________________'))
+        identity.paragraph_format.line_spacing = Pt(11.5)
+        for run in identity.runs:
+            run.font.size = Pt(9.5)
+            run.font.color.rgb = RGBColor.from_string('334155')
+    confirmation = approval.cell(0, 2)
+    _docx_set_cell_text(confirmation, 'Order Confirmation:\nWe acknowledge receipt of your documents and will perform according to this PO.')
+    _docx_spacer(confirmation, 2)
+    seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
+    seller_contact = str(getattr(order, 'seller_contact_person', '') or '').strip()
+    seller_reference = seller_reference if seller_contact and seller_reference != seller_contact else ''
+    confirmation_fields = _docx_field_rows(confirmation, (
+        ('Seller Signature', '________________________', False),
+        ('Date', _date_text(getattr(order, 'confirmation_date', None)), False),
+        ('Seller Name', getattr(vendor, 'name', None), False),
+        ('Seller Ref. no', seller_reference, False),
+        ('Contact Person', seller_contact, False),
+        ('Phone Number', getattr(order, 'seller_phone', None), False),
+        ('Fax', getattr(order, 'seller_fax', None), False),
+        ('Email', getattr(order, 'seller_email', None), False),
+    ), widths=(30, 49))
+    # A missing contact name remains blank, as in the PDF confirmation panel.
+    _docx_set_cell_text(confirmation_fields.cell(4, 1), seller_contact)
+    _docx_empty_cell_paragraphs(confirmation)
+    # A heading page break does not leave an empty extra page when the cover
+    # panel fills its A4 frame, unlike a separate page-break paragraph.
+    _docx_heading(document, f'  {_value(order.title)}', prefix='PURCHASE ORDER:').paragraph_format.page_break_before = True
+    introduction_text = purchase_order_introduction(order)
+    if introduction_text:
+        introduction = document.add_paragraph()
+        contacts = getattr(order, 'contact_persons', None)
+        if isinstance(contacts, dict) and isinstance(contacts.get(INTRODUCTION_KEY), str):
+            introduction.add_run(introduction_text)
+        else:
+            introduction.add_run(f'We, {COMPANY_NAME} (Buyer), issue this purchase order to ')
+            introduction.add_run(_value(getattr(vendor, 'name', None))).bold = True
+            introduction.add_run(' (Seller).')
+        for run in introduction.runs:
+            run.font.color.rgb = RGBColor.from_string('334155')
+    _docx_heading(document, 'PO DESCRIPTION & SCOPE')
     if parse_rich_content(order.description):
         _docx_rich_text(document, order.description)
     else:
         document.add_paragraph(_value(order.title))
-    document.add_page_break()
-    document.add_heading('Summary of Prices', level=1)
+    _docx_heading(document, 'SUMMARY OF PRICES').paragraph_format.page_break_before = True
     items = _items(order)
     item_columns = _item_columns(order)
-    table = document.add_table(rows=1, cols=len(item_columns)) if item_columns else None
+    weights = [{'description': 3, 'specification': 2, 'comment': 2}.get(key, 1) for key, _ in item_columns]
+    widths = [174 * weight / sum(weights) for weight in weights]
+    table = _docx_table(document, widths, rows=len(items) + 1) if item_columns else None
     if table is not None:
-        table.style = 'Table Grid'
+        table.rows[0]._tr.get_or_add_trPr().append(OxmlElement('w:tblHeader'))
         for cell, (_, heading) in zip(table.rows[0].cells, item_columns):
-            cell.text = heading
+            _docx_set_cell_text(cell, heading, size=7, bold=True, color='000000')
+            _docx_cell_border(cell, 'top', size=10)
+            _docx_cell_border(cell, 'bottom', size=10)
     currency = order.currency or 'AED'
-    for item in items:
+    for index, item in enumerate(items):
         if table is None:
             break
-        cells = table.add_row().cells
+        cells = table.rows[index + 1].cells
         values = [_item_value(item, key, currency) for key, _ in item_columns]
         for cell, value in zip(cells, values):
-            cell.text = str(value)
+            _docx_set_cell_text(cell, str(value), size=7, color='000000')
+    if table is not None:
+        for row in table.rows:
+            for cell in row.cells:
+                _docx_cell_margins(cell, left=3, right=3, top=4, bottom=4)
     subtotal = float(order.net_amount) if getattr(order, 'net_amount', None) is not None else sum(item['total'] for item in items)
     tax = float(order.tax_amount or 0)
     total = float(order.total_amount or subtotal + tax)
-    totals = document.add_paragraph()
-    totals.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    totals_text = (
-        f'Total Price: {_money(subtotal, currency)}\n'
-        f'VAT ({float(order.vat_percentage or 0):g}%): {_money(tax, currency)}\n'
-        f'Total Sum: {_money(total, currency)}'
-    )
-    totals.add_run(totals_text).bold = True
-    normal_style = document.styles['Normal']
-    normal_style.font.name = 'Arial'
-    normal_style.font.size = Pt(9)
+    _docx_spacer(document, 6)
+    totals = _docx_table(document, (55, 42), rows=3)
+    totals.alignment = WD_TABLE_ALIGNMENT.RIGHT
+    for index, (row, values) in enumerate(zip(totals.rows, (
+        ('Total Price:', _money(subtotal, currency)),
+        (f'VAT ({float(order.vat_percentage or 0):g}%):', _money(tax, currency)),
+        ('Total Sum:', _money(total, currency)),
+    ))):
+        for column, (cell, value) in enumerate(zip(row.cells, values)):
+            _docx_set_cell_text(cell, value, size=8.5, bold=True, color='000000',
+                                align=WD_ALIGN_PARAGRAPH.RIGHT if column else WD_ALIGN_PARAGRAPH.LEFT)
+            _docx_cell_margins(cell, left=6, right=6, top=3, bottom=3)
+            for edge in ('top', 'left', 'bottom', 'right'):
+                _docx_cell_border(cell, edge, size=4)
+            if index == 2:
+                _docx_cell_shading(cell, 'E2E8F0')
+    warnings = []
+    if order.attachments:
+        packet, warnings, body_page_count = _purchase_order_pdf_packet(order)
+        append_pdf_pages(document, packet, start_page=body_page_count)
     output = BytesIO()
     document.save(output)
-    return output.getvalue()
+    content = output.getvalue()
+    return (content, warnings) if with_warnings else content

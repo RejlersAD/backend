@@ -95,7 +95,8 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
             self.assertEqual(cover.count('Seller Reference Contact'), 1)
             self.assertRegex(cover, r'Contact Person:\s+Phone Number:')
         word = Document(BytesIO(word_response.content))
-        text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
+        # Company cover fields are native nested Word tables.
+        text = '\n'.join(word.element.xpath('//w:t/text()'))
         self.assertIn('590001, 590002, 590003', text)
         self.assertIn('Jarmo Suominen', text)
         self.assertIn('CEO, Rejlers Abu Dhabi', text)
@@ -103,7 +104,9 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         self.assertNotIn('Approval pending:', text)
         self.assertNotIn('Approved by:', text)
         self.assertNotIn('Untrusted client signer', text)
-        self.assertRegex(text, r'Contact Person:\s+Phone / Email:')
+        self.assertRegex(text, r'Contact Person:\s+Phone Number:')
+        self.assertIn('Fax:', text)
+        self.assertIn('Email:', text)
         self.assertFalse(PurchaseOrder.objects.exists())
         self.assertFalse(PODocument.objects.exists())
 

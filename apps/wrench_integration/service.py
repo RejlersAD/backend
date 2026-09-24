@@ -8,6 +8,7 @@ Implements the real SmartProject API authentication flow:
 API Reference: SmartProject API - Rejlers R0.pdf
 """
 import logging
+import time
 from urllib.parse import urlparse
 import requests
 from datetime import timedelta
@@ -25,6 +26,72 @@ _TIMEOUT_PROBE  = 8      # soft-coded shorter timeout for endpoint-existence pro
                           # (used when iterating fallback REST paths that may 404)
 # Token freshness window – re-login if token older than this
 _TOKEN_MAX_AGE_MINUTES = 55
+
+# This endpoint retrieves metadata only. It does not import canonical records or
+# write to Wrench. D-05/D-07 do not establish any additional writable contract.
+SYNC_CAPABILITIES = [
+    {
+        'direction': 'wrench_to_radai',
+        'entity_type': 'document',
+        'description': 'Retrieve a page of document metadata; no canonical records are imported.',
+    },
+    {
+        'direction': 'wrench_to_radai',
+        'entity_type': 'transmittal',
+        'description': 'Retrieve a page of transmittal metadata; no canonical records are imported.',
+    },
+]
+
+
+class UnsupportedSyncOperation(ValueError):
+    """A requested direction/entity has no implemented synchronization path."""
+
+
+class InvalidSyncResponse(ValueError):
+    """The adapter did not establish a valid metadata retrieval result."""
+
+
+def validate_sync_operation(direction: str, entity_type: str) -> None:
+    if direction != 'wrench_to_radai' or entity_type not in ('document', 'doc_search', 'transmittal'):
+        raise UnsupportedSyncOperation(
+            'This synchronization operation is unavailable. Only Wrench-to-RADAI '
+            'document and transmittal metadata retrieval is implemented. '
+            'Push, project, user and all-entity synchronization are unavailable.'
+        )
+
+
+def _validate_retrieval_response(data: dict) -> None:
+    """Reject explicit errors without guessing undocumented numeric status codes."""
+    if not isinstance(data, dict):
+        raise InvalidSyncResponse('Wrench did not return a metadata response object.')
+    if any(data.get(key) for key in ('ErrorMsg', 'error_msg', 'error', 'errors', 'ErrorMessage')):
+        raise InvalidSyncResponse('Wrench reported an error; metadata retrieval was not confirmed.')
+    if data.get('success') is False or data.get('Success') is False:
+        raise InvalidSyncResponse('Wrench reported an unsuccessful metadata retrieval.')
+    for key in ('status', 'Status', 'OperationStatus', 'operation_status', 'ProcessStatus'):
+        value = data.get(key)
+        if isinstance(value, str) and value.lower() in (
+            'failed', 'failure', 'error', 'denied', 'pending', 'in_progress', 'cancelled', 'partial',
+        ):
+            raise InvalidSyncResponse('Wrench did not confirm a completed metadata response.')
+
+
+def _validate_field_rows(rows: list) -> None:
+    if not isinstance(rows, list) or any(
+        not isinstance(row, list) or not row or any(not isinstance(field, dict) for field in row)
+        for row in rows
+    ):
+        raise InvalidSyncResponse('Wrench returned an invalid metadata collection.')
+    if any(not any(field.get('FieldName') or field.get('PropertyName') for field in row) for row in rows):
+        raise InvalidSyncResponse('Wrench returned metadata rows without usable fields.')
+
+
+def _metadata_count(value) -> int:
+    if isinstance(value, str) and value.isdecimal():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InvalidSyncResponse('Wrench returned an invalid metadata count.')
+    return value
 
 # ─── Soft-coded per-host endpoint capability cache ───────────────────────────
 # Persists across requests within the Django process. Keyed by base_url so each
@@ -394,6 +461,7 @@ def search_documents(
     date_to: str = None,
     doc_no: str = None,
     order_no: str = None,    # filter by Transmittal ORDER_NO (used as fallback by get_transmittal_documents)
+    _validate_result: bool = False,
 ) -> dict:
     """
     Search Wrench documents using the SearchObject API.
@@ -512,6 +580,8 @@ def search_documents(
         try:
             resp = requests.post(url, json=payload, timeout=_TIMEOUT_SEARCH)
         except requests.exceptions.ConnectionError as conn_exc:
+            if _validate_result:
+                raise
             logger.debug('[Wrench] Connection error on %s: %s', url, conn_exc)
             continue
 
@@ -523,6 +593,9 @@ def search_documents(
         resp.raise_for_status()
 
         data = resp.json()
+        if _validate_result:
+            _validate_retrieval_response(data)
+            _validate_field_rows(data.get('ObjectSearchResults'))
         # Refresh rolling token
         _refresh_token_from_response(cfg, data)
 
@@ -538,8 +611,14 @@ def search_documents(
             if doc:
                 documents.append(doc)
 
+        if _validate_result and len(documents) != len(raw_results):
+            raise InvalidSyncResponse('Wrench returned metadata rows without usable fields.')
+
+        total = data.get('TotalSearchResultCount', len(documents))
+        if _validate_result:
+            total = _metadata_count(total)
         return {
-            'total': data.get('TotalSearchResultCount', len(documents)),
+            'total': total,
             'documents': documents,
             'operation_status': data.get('OperationStatus', -1),
             'error_msg': data.get('ErrorMsg'),
@@ -563,12 +642,15 @@ def search_documents(
                 date_from=date_from,
                 date_to=date_to,
                 order_no=order_no,
+                _validate_result=_validate_result,
             )
             if odata_result is not None:
                 return odata_result
         except _ODataNotApplicable:
             # Configured svc_url isn't an OData service — fall through to error.
             pass
+        except (requests.exceptions.RequestException, InvalidSyncResponse):
+            raise
         except Exception as exc:  # noqa: BLE001 - surface OData errors clearly
             logger.warning('[Wrench] OData fallback failed: %s', exc)
             raise RuntimeError(
@@ -675,7 +757,7 @@ def _build_odata_filter(*, doc_no=None, discipline=None, doc_type=None,
     return ' and '.join(clauses)
 
 
-def _odata_discover_entity_sets(odata_base: str, token: str) -> list:
+def _odata_discover_entity_sets(odata_base: str, token: str, *, _validate_result: bool = False) -> list:
     """
     GET <odata_base>/  → AtomPub or OData JSON service document.
     Extract entity-set names; fall back to soft-coded list if not parseable.
@@ -685,10 +767,14 @@ def _odata_discover_entity_sets(odata_base: str, token: str) -> list:
     try:
         resp = requests.get(odata_base + '/', headers=headers, params=params, timeout=15)
     except requests.exceptions.RequestException as exc:
+        if _validate_result:
+            raise
         logger.debug('[Wrench OData] discovery GET failed: %s', exc)
         return list(_ODATA_DOCUMENT_ENTITY_SETS)
     if resp.status_code == 404:
         raise _ODataNotApplicable(f'AtomSVC.svc not found at {odata_base}')
+    if resp.status_code in (401, 403) or (_validate_result and not resp.ok):
+        resp.raise_for_status()
     if not resp.ok:
         return list(_ODATA_DOCUMENT_ENTITY_SETS)
     try:
@@ -721,6 +807,7 @@ def _search_documents_via_odata(
     date_from: str = None,
     date_to: str = None,
     order_no: str = None,
+    _validate_result: bool = False,
 ) -> dict:
     """
     Query documents via the OData/AtomPub layer at <svc>/AtomSVC.svc/.
@@ -730,7 +817,7 @@ def _search_documents_via_odata(
     odata_base = _resolve_atomsvc_base(cfg)
     token = _ensure_token(cfg)
 
-    entity_sets = _odata_discover_entity_sets(odata_base, token)
+    entity_sets = _odata_discover_entity_sets(odata_base, token, _validate_result=_validate_result)
 
     skip = max((page - 1) * page_size, 0)
     base_params = {
@@ -761,11 +848,15 @@ def _search_documents_via_odata(
                 timeout=_ODATA_TIMEOUT,
             )
         except requests.exceptions.RequestException as exc:
+            if _validate_result:
+                raise
             logger.debug('[Wrench OData] %s failed: %s', url, exc)
             continue
         last_status = resp.status_code
         if resp.status_code == 404:
             continue
+        if resp.status_code in (401, 403) or (_validate_result and not resp.ok):
+            resp.raise_for_status()
         if not resp.ok:
             raise RuntimeError(
                 f'OData query to {url} returned HTTP {resp.status_code}: {resp.text[:200]}'
@@ -774,6 +865,19 @@ def _search_documents_via_odata(
             data = resp.json()
         except ValueError as exc:
             raise RuntimeError(f'OData response from {url} is not JSON: {exc}')
+
+        if _validate_result:
+            _validate_retrieval_response(data)
+            inner = data.get('d', data)
+            rows = inner.get('results') if isinstance(inner, dict) else None
+            if rows is None:
+                rows = data.get('value')
+            if not isinstance(rows, list) or any(not isinstance(row, dict) or not row for row in rows):
+                raise InvalidSyncResponse('Wrench returned an invalid OData metadata collection.')
+            if isinstance(inner, dict) and '__count' in inner:
+                _metadata_count(inner['__count'])
+            if '@odata.count' in data:
+                _metadata_count(data['@odata.count'])
 
         if isinstance(data, dict):
             _refresh_token_from_response(cfg, data)
@@ -1391,6 +1495,7 @@ def get_transmittals(
     *,
     page: int = 1,
     page_size: int = 50,
+    _validate_result: bool = False,
 ) -> dict:
     """
     Fetch transmittals via the Wrench SmartProject REST WebAPI.
@@ -1420,6 +1525,14 @@ def get_transmittals(
     resp.raise_for_status()
     data = resp.json()
 
+    if _validate_result:
+        _validate_retrieval_response(data)
+        data_list = data.get('DataList')
+        rows = data_list.get('TRANSMITTAL_LIST') if isinstance(data_list, dict) else None
+        _validate_field_rows(rows)
+        for detail in data.get('ProcessDetails') or []:
+            _validate_retrieval_response(detail)
+
     _refresh_token_from_response(cfg, data)
 
     # Flatten DataList.TRANSMITTAL_LIST — list-of-lists, each inner list is FieldName/Value pairs
@@ -1434,6 +1547,9 @@ def get_transmittals(
                 item[name] = value
         if item:
             transmittals.append(item)
+
+    if _validate_result and len(transmittals) != len(raw_list):
+        raise InvalidSyncResponse('Wrench returned transmittal rows without usable fields.')
 
     total_available = len(transmittals)
 
@@ -1720,12 +1836,41 @@ def get_documents_from_transmittals(
     }
 
 
+# Retrying metadata reads is safe; no external mutation is performed here.
+_SYNC_MAX_ATTEMPTS = 3
+_SYNC_RETRYABLE_HTTP = {429, 502, 503, 504}
+
+
+def _sync_retryable(exc: Exception) -> bool:
+    if isinstance(exc, requests.exceptions.SSLError):
+        return False
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    return (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and exc.response.status_code in _SYNC_RETRYABLE_HTTP
+    )
+
+
+def _sync_failure_message(exc: Exception) -> str:
+    # External errors may contain credentials, URLs or sensitive record data.
+    if isinstance(exc, InvalidSyncResponse):
+        return str(exc)
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        if exc.response.status_code in (401, 403):
+            return 'Wrench denied authorization. Ask the integration owner to review access before retrying.'
+        return f'Wrench returned HTTP {exc.response.status_code}. Metadata retrieval failed.'
+    if isinstance(exc, requests.exceptions.Timeout):
+        return 'Wrench metadata retrieval timed out. Review the connection and retry explicitly.'
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return 'Wrench could not be reached. Review the connection and retry explicitly.'
+    return 'Metadata retrieval could not be confirmed. Ask the integration owner to review the operation.'
+
+
 def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = None) -> WrenchSyncLog:
-    """
-    Perform a data sync between RADAI and Wrench.
-    For wrench_to_radai + document: calls SearchObject.
-    Creates + updates a WrenchSyncLog record.
-    """
+    """Retrieve existing metadata and record the actual outcome, without imports."""
+    validate_sync_operation(direction, entity_type)
     cfg = _get_active_config()
     log = WrenchSyncLog.objects.create(
         config=cfg,
@@ -1734,59 +1879,64 @@ def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = Non
         entity_type=entity_type,
         status='in_progress',
     )
+    log.sync_details = {
+        'effect': 'metadata_retrieval',
+        'canonical_records_imported': 0,
+        'retrieval_validated': False,
+        'attempts': 0,
+    }
 
     try:
-        if direction == 'wrench_to_radai':
-            if entity_type in ('document', 'doc_search'):
-                result = search_documents(cfg, **(filters or {}))
-                log.records_requested = result['total']
-                log.records_synced = len(result['documents'])
-                log.records_failed = 0
-                log.sync_details = {
-                    'total_in_wrench': result['total'],
-                    'fetched': len(result['documents']),
-                    'sample_doc_nos': [d.get('DOC_NO', '') for d in result['documents'][:5]],
-                    'operation_status': result.get('operation_status'),
-                }
-            elif entity_type == 'transmittal':
-                result = get_transmittals(cfg, **(filters or {}))
-                log.records_requested = result['total']
-                log.records_synced = len(result['transmittals'])
-                log.records_failed = 0
-                log.sync_details = {
-                    'total_fetched': result['total'],
-                    'sample_transmittals': result['transmittals'][:3],
-                    'operation_status': result.get('operation_status'),
-                }
-            elif entity_type == 'all':
-                # Try transmittals (REST endpoint); documents require SVC URL configuration
-                result = get_transmittals(cfg)
-                log.records_requested = result['total']
-                log.records_synced = len(result['transmittals'])
-                log.records_failed = 0
-                log.sync_details = {
-                    'entity_types_attempted': ['transmittal'],
-                    'transmittals_fetched': result['total'],
-                    'operation_status': result.get('operation_status'),
-                }
-            else:
-                # project / user – placeholder
-                _ensure_token(cfg)  # validate connection is alive
-                log.records_requested = 0
-                log.records_synced = 0
-                log.sync_details = {'note': f'Sync for entity_type={entity_type} – implement specific endpoint.'}
-        else:
-            # RADAI → Wrench: future implementation
-            log.records_requested = 0
-            log.records_synced = 0
-            log.sync_details = {'note': 'Push direction reserved for future implementation.'}
+        document_request = entity_type in ('document', 'doc_search')
+        fetch = search_documents if document_request else get_transmittals
+        collection = 'documents' if document_request else 'transmittals'
+        for attempt in range(1, _SYNC_MAX_ATTEMPTS + 1):
+            log.sync_details['attempts'] = attempt
+            try:
+                result = fetch(cfg, **(filters or {}), _validate_result=True)
+                break
+            except Exception as exc:
+                if attempt == _SYNC_MAX_ATTEMPTS or not _sync_retryable(exc):
+                    raise
+                time.sleep(0.25 * (2 ** (attempt - 1)))
 
-        log.status = 'success'
+        _validate_retrieval_response(result)
+        rows = result.get(collection)
+        total = result.get('total')
+        if (
+            not isinstance(rows, list)
+            or any(not isinstance(row, dict) or not row for row in rows)
+            or isinstance(total, bool) or not isinstance(total, int)
+            or total < len(rows)
+        ):
+            raise InvalidSyncResponse('Wrench returned incomplete or invalid metadata retrieval evidence.')
+        if total > 0 and not rows:
+            raise InvalidSyncResponse('Wrench reported available records but returned no metadata for this request.')
 
+        log.records_requested = total
+        log.records_synced = len(rows)
+        # Unfetched pages are not failed records. No further job is scheduled.
+        log.records_failed = 0
+        log.status = 'partial' if len(rows) < total else 'success'
+        log.sync_details.update({
+            'retrieval_validated': True,
+            'fetched': len(rows),
+            'total_available': total,
+            'remaining_available': total - len(rows),
+            'scope': 'requested_metadata_page',
+            'operation_status': result.get('operation_status'),
+            'external_status_interpreted': False,
+            'message': (
+                'Metadata page retrieved. More records are available; no further work is queued.'
+                if log.status == 'partial' else
+                'Metadata retrieval completed. No canonical RADAI records were imported.'
+            ),
+        })
     except Exception as exc:
         log.status = 'failed'
-        log.error_message = str(exc)
-        logger.error('[Wrench] sync failed: %s', exc, exc_info=True)
+        log.error_message = _sync_failure_message(exc)
+        log.sync_details['retryable'] = _sync_retryable(exc)
+        logger.warning('[Wrench] metadata retrieval failed (%s)', type(exc).__name__)
     finally:
         log.completed_at = dj_timezone.now()
         log.save()

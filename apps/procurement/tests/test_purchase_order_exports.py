@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import fitz
 from docx import Document
+from docx.oxml.ns import qn
 from PIL import Image as PILImage
 from PyPDF2 import PdfReader
 from reportlab.lib.pagesizes import A4
@@ -288,14 +289,18 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('Description 1', first_cover_text)
         self.assertNotIn('attachment-1.pdf', first_cover_text)
 
-    def test_word_stops_at_price_summary_and_excludes_attachments(self):
-        content = build_purchase_order_docx(self._order([{
+    def test_word_keeps_native_price_summary_before_supporting_cover_pages(self):
+        content, warnings = build_purchase_order_docx(self._order([{
             'title': 'Attachment 1',
-            'description': 'Should not be exported to Word',
+            'description': 'Retained supporting cover',
             'filename': 'support.pdf',
-        }]))
+        }]), with_warnings=True)
         document = Document(BytesIO(content))
-        rendered_text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
+        self.assertEqual(warnings, ['support.pdf: file could not be downloaded'])
+        page_images = document.element.xpath('//wp:anchor/wp:docPr/@descr')
+        self.assertEqual(page_images, ['Original PDF page 4'])
+        self.assertEqual(len(document.sections), 2)
+        rendered_text = '\n'.join(document.element.xpath('//w:t/text()'))
         header_text = '\n'.join(
             cell.text
             for table in document.sections[0].header.tables
@@ -309,16 +314,15 @@ class PurchaseOrderExportTests(TestCase):
             for cell in row.cells
         )
 
-        self.assertIn('Summary of Prices', rendered_text)
-        self.assertIn('Total Price: USD 100.00', rendered_text)
-        self.assertIn('VAT (5%): USD 5.00', rendered_text)
-        self.assertIn('Total Sum: USD 105.00', rendered_text)
+        self.assertIn('SUMMARY OF PRICES', rendered_text)
+        self.assertRegex(rendered_text, r'Total Price:\s+USD 100\.00')
+        self.assertRegex(rendered_text, r'VAT \(5%\):\s+USD 5\.00')
+        self.assertRegex(rendered_text, r'Total Sum:\s+USD 105\.00')
         self.assertNotIn('Grand Total', rendered_text)
         self.assertNotIn('AED', rendered_text)
         self.assertIn('First scope\u00a0paragraph', rendered_text)
         self.assertIn('Second scope paragraph', rendered_text)
         self.assertNotIn('&nbsp;', rendered_text)
-        self.assertNotIn('Should not be exported to Word', rendered_text)
         self.assertIn('PURCHASE ORDER', header_text)
         self.assertIn('RAD-PRJ-PUR-0001_2026', header_text)
         self.assertIn('HOME OF THE', header_text)
@@ -343,6 +347,79 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('(ADOC)', first_page_text)
         self.assertIn('Approved by:', first_page_text)
         self.assertIn('Order Confirmation:', first_page_text)
+
+    def test_word_company_form_preserves_editable_cover_fields_and_branding(self):
+        order = self._order()
+        order.contact_persons['buyer_references'] = [{
+            'name': 'Buyer & Contract Manager', 'designation': 'Project Manager',
+            'email': 'buyer@example.test',
+        }]
+        order.seller_reference = 'SELLER-REF-726'
+        order.seller_contact_person = 'Supplier Contact'
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        text = '\n'.join(document.element.xpath('//w:t/text()'))
+        for expected in (
+            'Seller:', 'Seller Address:', 'Invoicing Address:',
+            'Accounts Payable', 'PO Box 39317', 'Fax: +971 2 639 7448',
+            'Seller Reference:', 'Quote Ref.:', 'License No.:',
+            'Buyer & Contract Manager', 'Project Manager', 'buyer@example.test',
+            'Seller Name:', 'Seller Ref. no:', 'SELLER-REF-726',
+            'Contact Person:', 'Supplier Contact', 'Phone Number:',
+            'Fax:', '+971 1 234 5679', 'Email:', 'vendor@example.com',
+        ):
+            self.assertIn(expected, text)
+        self.assertNotIn('<br', text)
+        self.assertNotIn('<b>', text)
+        self.assertNotIn('Phone / Email:', text)
+        self.assertNotIn('Seller information', text)
+        # Native table cells and paragraphs remain editable; the body is not
+        # a screenshot of the PDF. Brand marks live in repeating page furniture.
+        self.assertGreater(len(document.tables), 4)
+        self.assertFalse(document.element.xpath('//w:drawing'))
+        section = document.sections[0]
+        self.assertAlmostEqual(section.page_width.mm, 210, delta=.1)
+        self.assertAlmostEqual(section.page_height.mm, 297, delta=.1)
+        header_title = section.header.tables[0].cell(0, 0).paragraphs[0]
+        self.assertEqual(header_title.text, 'PURCHASE ORDER')
+        self.assertEqual(next(run for run in header_title.runs if run.text).font.size.pt, 15)
+        self.assertTrue(section.header._element.xpath('.//w:drawing'))
+        self.assertEqual(len(section.footer._element.xpath('.//w:drawing')), 3)
+        self.assertTrue(section.footer._element.xpath('.//w:instrText[text()=" PAGE "]'))
+        self.assertEqual(len(document.element.xpath('//w:pPr/w:pageBreakBefore')), 2)
+
+    def test_word_prices_match_pdf_columns_borders_and_totals(self):
+        order = self._order()
+        order.items_table_headers = {
+            '__column_order': ['description', 'quantity', 'total_price'],
+            'description': 'Agreed service', 'quantity': 'Quantity',
+            'total_price': 'Amount',
+        }
+        document = Document(BytesIO(build_purchase_order_docx(order)))
+        table = next(table for table in document.tables if table.cell(0, 0).text == 'Agreed service')
+        self.assertEqual([cell.text for cell in table.rows[1].cells], ['Test item', '2', 'USD 100.00'])
+        self.assertAlmostEqual(table.columns[0].width / table.columns[1].width, 3, delta=.01)
+        self.assertIsNotNone(table.rows[0]._tr.find(qn('w:trPr')).find(qn('w:tblHeader')))
+        totals = document.tables[-1]
+        self.assertEqual([[cell.text for cell in row.cells] for row in totals.rows], [
+            ['Total Price:', 'USD 100.00'], ['VAT (5%):', 'USD 5.00'], ['Total Sum:', 'USD 105.00'],
+        ])
+        self.assertEqual(totals.cell(2, 0)._tc.find('.//' + qn('w:shd')).get(qn('w:fill')), 'E2E8F0')
+
+    def test_custom_opening_statement_matches_pdf_and_word_as_literal_text(self):
+        order = self._order()
+        custom = 'The Buyer & Seller agree to <specific> scope.\nDelivery follows the approved schedule.'
+        order.contact_persons['order_introduction'] = custom
+        word = Document(BytesIO(build_purchase_order_docx(order)))
+        self.assertTrue(any(paragraph.text == custom for paragraph in word.paragraphs))
+        content, _ = build_purchase_order_pdf(order)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            text = pdf[1].get_text()
+            for line in custom.splitlines():
+                self.assertIn(line, text)
+            self.assertNotIn('We, Rejlers', text)
+        order.contact_persons['order_introduction'] = ''
+        word = Document(BytesIO(build_purchase_order_docx(order)))
+        self.assertTrue(any('We, Rejlers International Engineering Solutions (Buyer)' in p.text for p in word.paragraphs))
 
     def test_rich_text_normalization_decodes_entities_and_keeps_blocks(self):
         self.assertEqual(
@@ -612,12 +689,12 @@ class PurchaseOrderExportTests(TestCase):
             self.assertRegex(cover, r'Contact Person:\s+Phone Number:')
             self.assertFalse(any(entry[2:4] == (181, 51) for page in pdf for entry in page.get_images()))
         word = Document(BytesIO(word_content))
-        text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
+        text = '\n'.join(word.element.xpath('//w:t/text()'))
         self.assertIn('590001, 590002, 590003', text)
         self.assertIn('Jarmo Suominen', text)
         self.assertIn('CEO, Rejlers Abu Dhabi', text)
         self.assertNotIn('Approved by:', text)
-        self.assertRegex(text, r'Contact Person:\s+Phone / Email:')
+        self.assertRegex(text, r'Contact Person:\s+Phone Number:')
         self.assertNotIn(image.getvalue(), [part.blob for part in word.part.package.parts])
         self.assertIsNone(order.approved_at)
         self.assertIsNone(order.approved_date)
