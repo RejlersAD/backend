@@ -207,6 +207,8 @@ test_*.py
 !docs/portfolio-sharepoint.md
 !docs/ORGANIZATION_CATALOG.md
 !docs/BUSINESS_APPROVAL_ELIGIBILITY.md
+!docs/PROCUREMENT_LIFECYCLE.md
+!apps/procurement/tests/test_requisition_word_export.py
 scripts/timesheet_mirror.env
 scripts/timesheet_mirror*.state.json
 # Allow P&ID analysis config prompt files (engineers tune these without code deploys)
