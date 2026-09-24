@@ -8,6 +8,29 @@ An approval request is actionable only when all three conditions hold at the tim
 
 Super Admin, staff, CEO and application access roles do not supply a missing business assignment or skip a stage. Existing access grants are not changed by this release. Organizational positions come from the HR employee master, not an editable profile label or an access-role name. An assigned project manager or reporting manager is a business responsibility, not an admin permission.
 
+PO Final Management Sign-off recognizes the full CEO designations
+`CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region`,
+`CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region. 5950 Abu Dhabi`,
+`Sr. Vice President, Middle East / CEO, Rejlers Abu Dhabi`, and
+`Senior Vice President, Middle East / CEO, Rejlers Abu Dhabi`, in addition to
+the existing CEO titles. Existing normalization permits punctuation, whitespace
+and line-break variants; matching still requires the complete designation.
+Generic VP titles, assistants and former CEOs do not qualify. The primary HR
+designation remains authoritative; secondary titles only fill an empty field.
+The complete designation ending in `5950 Abu Dhabi` was confirmed by a read-only
+inspection of the local application's HR record on 24 September 2026. It is an
+explicit full-title alias; arbitrary location/code suffixes are not stripped.
+
+`GET /api/v1/procurement/requisitions/get_approvers/?role=po_final_signoff`
+returns only employees who currently pass the same position and Purchase Order
+approval-access checks used when saving the assignment. The existing response
+shape is unchanged. `role=any_active` remains the broader employee directory
+used for buyers and other existing selectors. Eligibility is checked again on
+save and decision, so a listed employee can become unavailable if their position,
+employment or access changes. Rejected management assignments identify whether
+to review the active HR record/CEO designation or PO approval permissions.
+These changes grant no access and rewrite no employee or approval records.
+
 ## Where decisions are enforced
 
 `apps/rbac/approval_eligibility.py` provides current access, canonical position, project assignment and configured route checks. `route_guard.py` requires an explicitly registered, checked approval command. Generic CRUD cannot manufacture, clear or reset recorded decisions. Write requests keep checks and changes in one transaction; detail approval requests lock their record.
@@ -81,3 +104,20 @@ Two existing workflow limitations remain deliberately blocked: daily work-log pr
 Validate configured routes with a legitimate approver and wrong-position, missing-permission, premature-stage, replay and changed-assignment cases. Do not backfill approvals merely to unblock later stages. Historical invalid decisions/signatures require a separate audited data correction.
 
 Tests use disposable databases and disabled external delivery. Functional SQLite tests cover business rules; the guarded authorization suite covers HTTP enforcement. PostgreSQL checks cover locking behavior and migration consistency separately. Frontend capability/browser tests verify actionable buttons follow server eligibility.
+
+The final-signatory correction was verified on 24 September 2026 with 11 tests
+in `apps.procurement.tests.test_po_final_signatory_eligibility`, including the
+guarded directory-to-PO-save flow, title and permission denials, inactive/missing
+employee records, revocation after selection, and buyer-directory compatibility.
+Another 40 existing PO assignment, creation/notification, operations-title and
+business-approval tests passed. These runs used `config.settings_release_test`
+with isolated SQLite and disabled/mocked external delivery. A later read-only
+local check confirmed the full designation noted above; no employee record or
+grant was changed. Production configuration, migration application and deployment
+remain outside this verification.
+
+After reloading local Gunicorn and restarting the idle local Celery worker,
+Jarmo's actual account passed canonical CEO, effective PO approval permission
+and assignment validation. The directory view returned HTTP 200 with Jarmo as
+its sole eligible final signatory, and the localhost health endpoint returned
+HTTP 200. No PO save or approval was performed by these checks.

@@ -1011,9 +1011,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 'names': ['Super Administrator', 'Super Admin'],
             },
         }
-        # Soft-coded: the dropdown must always let the requester pick ANY active
-        # user as the approver G�� job_title is only used to surface the most
-        # relevant users FIRST, never to hide the rest of the user base.
+        # The general employee directory ranks matching titles without hiding
+        # other active users. The PO final-signatory role additionally applies
+        # the domain eligibility check below.
         matched_user_ids = set()
 
         if role and role in role_title_mapping:
@@ -1066,7 +1066,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 | Q(roles__is_active=True, roles__modules__code__istartswith='invoice', roles__modules__is_active=True)
                 | Q(roles__is_active=True, roles__modules__code__istartswith='account', roles__modules__is_active=True)
             ).distinct()
-        elif role != 'any_active':
+        elif role not in {'any_active', 'po_final_signoff'}:
             profiles = profiles.filter(
                 Q(user__is_superuser=True)
                 | Q(
@@ -1088,6 +1088,14 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             if profile.user_id not in employee_records
             or employee_records[profile.user_id].employment_status in eligible_employment_statuses
         ]
+        if role == 'po_final_signoff':
+            from .services.approval_eligibility import MODULE_PO, eligible_stage_assignee
+            from .services.purchase_order_approvals import MANAGEMENT_STAGE
+
+            profiles = [
+                profile for profile in profiles
+                if eligible_stage_assignee(profile.user, {'stage': MANAGEMENT_STAGE}, MODULE_PO)
+            ]
 
         profiles = sorted(
             profiles,
