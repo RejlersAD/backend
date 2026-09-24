@@ -830,12 +830,105 @@ _NPD_FRACTION_MAP = {
 _INCH_TOKENS = ('"', '“', '”', '″', '′', "''", "'", 'IN', 'in', 'In', 'inch', 'INCH', 'Inch')
 
 
+# ── Soft-coded open-ended size range handling ────────────────────────────
+# Legacy specs use open-ended ranges: '14" & ABOVE', '1½" & BELOW'.
+# Previously these were silently clamped to the single parsed bound, losing
+# every size above/below. With `enabled`, an open-ended bound expands to the
+# configured ladder limits instead.
+OPEN_SIZE_RANGE_CONFIG = {
+    'enabled': True,
+    # Case-insensitive keywords marking an open direction (matched as whole words).
+    'above_keywords': ['above', 'over', 'larger', 'greater', 'and up', '& up'],
+    'below_keywords': ['below', 'under', 'smaller', 'less'],
+    # Expansion limits when a range is open-ended (inches, ASME B36.10 ladder).
+    'max_npd_inches': 48.0,
+    'min_npd_inches': 0.125,
+}
+
+# Unicode vulgar fractions found in scanned/legacy PDFs (e.g. '1½"').
+# Mapped to mixed-fraction text with a LEADING space so '1½"' → '1 1/2"'
+# parses via the mixed-fraction branch, and bare '½"' → ' 1/2"' still parses.
+_UNICODE_FRACTION_MAP = {
+    '⅛': ' 1/8', '¼': ' 1/4', '⅜': ' 3/8', '½': ' 1/2',
+    '⅝': ' 5/8', '¾': ' 3/4', '⅞': ' 7/8',
+}
+
+
+# ── Soft-coded schedule / wall-thickness normalisation ───────────────────
+# Extracted W.T. values arrive in many notations ('SCH. 80', 'SCH 80',
+# 'Schedule 80', 'S-80', '80'). SP3D bulkload expects canonical S-series
+# tokens. Only canonical schedule strings are rewritten; anything else
+# ('3/8" THK', 'NOTE 1', ...) is preserved verbatim. Disable via 'enabled'.
+SCHEDULE_VALUE_NORMALIZE_CONFIG = {
+    'enabled': True,
+    'pattern': r'^(?:SCH(?:EDULE)?\.?|S[-\s]?)?\s*(10|20|30|40|60|80|100|120|140|160|STD|XS|XXS)$',
+    'canonical_map': {
+        '10': 'S-10', '20': 'S-20', '30': 'S-30', '40': 'S-40',
+        '60': 'S-60', '80': 'S-80', '100': 'S-100', '120': 'S-120',
+        '140': 'S-140', '160': 'S-160',
+        'std': 'STD', 'xs': 'XS', 'xxs': 'XXS',
+    },
+}
+
+
+# ── Soft-coded unrouted-component catch-all sheet ─────────────────────────
+# Components with no matching CAT routing rule (e.g. exotic valve sub-types)
+# were previously excluded from the exported CAT.xlsx entirely (only a UI
+# banner reported them). When `enabled`, they are written to a dedicated
+# catch-all sheet appended to the workbook so no extracted data is lost.
+CAT_UNROUTED_EXPORT_CONFIG = {
+    'enabled': True,
+    'sheet_name': 'UnroutedComponents',
+    # Column headers of the generated sheet (order = column order).
+    'headers': [
+        'SpecName', 'ComponentType', 'SubType', 'SizeFrom', 'SizeTo',
+        'ScheduleOrRating', 'MaterialStandard', 'EndConnection',
+        'Description', 'Notes',
+    ],
+    # Maps each header to a field of the unrouted component dict.
+    'field_map': {
+        'SpecName':         'class_code',
+        'ComponentType':    'component_type',
+        'SubType':          'sub_type',
+        'SizeFrom':         'size_from',
+        'SizeTo':           'size_to',
+        'ScheduleOrRating': 'schedule_or_rating',
+        'MaterialStandard': 'material_standard',
+        'EndConnection':    'end_connection',
+        'Description':      'description',
+        'Notes':            'notes',
+    },
+}
+
+
+def _normalize_schedule(value):
+    """Canonicalise schedule notation per SCHEDULE_VALUE_NORMALIZE_CONFIG.
+    Non-schedule values (wall-thickness text, note refs) pass through verbatim."""
+    if value in (None, ''):
+        return value
+    cfg_n = SCHEDULE_VALUE_NORMALIZE_CONFIG
+    if not cfg_n.get('enabled', True):
+        return value
+    s = str(value).strip()
+    m = re.match(cfg_n['pattern'], s, re.IGNORECASE)
+    if not m:
+        return value
+    return cfg_n['canonical_map'].get(m.group(1).lower(), value)
+
+
 def _to_float_npd(size) -> float | None:
     """Parse an NPD size string ('1/2"', '2”', '2-1/2"', '1 1/2″') → float inches.
-    Returns None when un-parseable."""
+    Unicode vulgar fractions ('1½"') and open-ended range keywords
+    ('& ABOVE' / '& BELOW') are normalised away first. Returns None when un-parseable."""
     if size in (None, ''):
         return None
     s = str(size)
+    for u, rep in _UNICODE_FRACTION_MAP.items():
+        s = s.replace(u, rep)
+    # Strip open-ended range keywords so '14" & ABOVE' parses as 14.
+    if OPEN_SIZE_RANGE_CONFIG.get('enabled', True):
+        for kw in OPEN_SIZE_RANGE_CONFIG['above_keywords'] + OPEN_SIZE_RANGE_CONFIG['below_keywords']:
+            s = re.sub(rf'(?i)&?\s*\b{re.escape(kw)}\b', ' ', s)
     for tok in _INCH_TOKENS:
         s = s.replace(tok, '')
     s = s.replace('-', ' ').strip()
@@ -984,11 +1077,37 @@ def _npd_token(npd: float) -> str:
     return f'N{int(round(npd * 100)):04d}'   # 0.5 → N0050, 1.5 → N0150
 
 
+def _npd_open_direction(size_from, size_to) -> str | None:
+    """Detect open-ended range direction from the RAW size strings.
+    Returns 'above', 'below' or None (soft-coded keyword lists)."""
+    if not OPEN_SIZE_RANGE_CONFIG.get('enabled', True):
+        return None
+    blob = f'{size_from or ""} {size_to or ""}'.lower()
+    for kw in OPEN_SIZE_RANGE_CONFIG['above_keywords']:
+        if re.search(rf'(?i)\b{re.escape(kw)}\b', blob):
+            return 'above'
+    for kw in OPEN_SIZE_RANGE_CONFIG['below_keywords']:
+        if re.search(rf'(?i)\b{re.escape(kw)}\b', blob):
+            return 'below'
+    return None
+
+
 def _enumerate_npds(size_from, size_to) -> list[float]:
     """Return the standard NPDs lying within [size_from, size_to].
-    If only one bound is given, returns [that value]; if neither, returns []."""
+    If only one bound is given, returns [that value]; if neither, returns [].
+    Open-ended ranges ('14" & ABOVE' / '1½" & BELOW') expand to the
+    configured ladder bounds instead of collapsing to the single parsed size."""
+    direction = _npd_open_direction(size_from, size_to)
     a = _to_float_npd(size_from)
     b = _to_float_npd(size_to)
+    if direction == 'above' and (a is not None or b is not None):
+        lo = a if a is not None else b
+        hi = OPEN_SIZE_RANGE_CONFIG['max_npd_inches']
+        return [n for n in STD_NPDS_INCHES if lo <= n <= hi]
+    if direction == 'below' and (a is not None or b is not None):
+        hi = a if a is not None else b
+        lo = OPEN_SIZE_RANGE_CONFIG['min_npd_inches']
+        return [n for n in STD_NPDS_INCHES if lo <= n <= hi]
     if a is None and b is None:
         return []
     if a is not None and b is None:
@@ -3173,7 +3292,7 @@ def _rows_piping_commodity_filter(cls):
             continue
         short_code = _pcf_short_code_for_component(c)
         end_prep   = _normalize_end_prep(c.end_connection) or S3D_DEFAULTS['EndPrep_BW']
-        sched      = c.schedule_or_rating or ''
+        sched      = _normalize_schedule(c.schedule_or_rating or '')
         # Optional commodity_code attribute (set at runtime by extractor on some
         # components) — fall back to the deterministic ICC so the column is
         # never blank and the SPEC↔CAT cross-link stays intact.
@@ -3450,7 +3569,7 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
     suffix_parts = [_npd_token(n) for n in (npd1, npd2, npd3) if n is not None]
     icc = f'{d.get("icc_prefix", "RAD_CMP")}_{cls_token}_{"_".join(suffix_parts)}'
     end_prep = _normalize_end_prep(comp.end_connection) or S3D_DEFAULTS['EndPrep_BW']
-    sched = comp.schedule_or_rating or 'STD'
+    sched = _normalize_schedule(comp.schedule_or_rating) or 'STD'
     pressure = _normalize_pressure_class(cls.pressure_rating)
     primary_lbl   = d.get('primary_label', '')
     secondary_lbl = d.get('secondary_label', '')

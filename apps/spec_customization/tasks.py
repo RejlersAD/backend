@@ -130,6 +130,7 @@ def _persist_classes(job: PaperSpecExtractionJob, merged: List[Dict[str, Any]]) 
                 schedule_or_rating=comp.get("schedule_or_rating", "") or "",
                 material_standard=comp.get("material_standard", "") or "",
                 end_connection=comp.get("end_connection", "") or "",
+                revision_number=(comp.get("revision_no") or comp.get("revision_number") or ""),
                 notes=comp.get("notes", "") or "",
                 display_order=idx,
             ))

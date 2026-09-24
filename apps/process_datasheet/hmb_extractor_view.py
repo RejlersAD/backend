@@ -129,15 +129,39 @@ def _is_admin(user) -> bool:
     return role in {'admin', 'super_admin', 'tenant_admin'}
 
 
+# Soft-coded HMB project access policy. Mirrors the RBAC VisibilityStrategy
+# pattern used across the platform (module-team collaboration) instead of a
+# bespoke owner-only rule.
+HMB_ACCESS_CONFIG = {
+    # 'owner'   → only admin or the project creator (legacy behaviour).
+    # 'module_team' → admin, the creator, OR any user who has the
+    #                 `process_datasheet` module (same-module collaboration).
+    'strategy': os.getenv('HMB_ACCESS_STRATEGY', 'module_team').strip().lower(),
+    # Module whose grant confers team visibility when strategy=module_team.
+    'team_module_code': os.getenv('HMB_ACCESS_TEAM_MODULE', 'process_datasheet').strip(),
+}
+
+
+def _user_has_hmb_team_access(user) -> bool:
+    """True when the user holds the soft-coded team module (module_team mode)."""
+    try:
+        from apps.rbac.data_visibility_config import user_has_module_access
+        return user_has_module_access(user, HMB_ACCESS_CONFIG['team_module_code'])
+    except Exception:
+        return False
+
+
 def _get_accessible_project(user, project_id: str):
     try:
         project = Project.objects.get(project_id=project_id)
     except Project.DoesNotExist:
         return None, Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    if not _is_admin(user) and project.created_by_id != getattr(user, 'id', None):
-        return None, Response({'error': 'Access denied for this project.'}, status=status.HTTP_403_FORBIDDEN)
-    return project, None
+    if _is_admin(user) or project.created_by_id == getattr(user, 'id', None):
+        return project, None
+    if HMB_ACCESS_CONFIG['strategy'] == 'module_team' and _user_has_hmb_team_access(user):
+        return project, None
+    return None, Response({'error': 'Access denied for this project.'}, status=status.HTTP_403_FORBIDDEN)
 
 
 def _build_excel(streams):

@@ -175,7 +175,8 @@ class PaperSpecExtractionService:
         return out
 
     def extract_text_for_pages(self, pdf_path: str, start: int, end: int) -> List[str]:
-        """Return per-page plain text from PyMuPDF."""
+        """Return per-page plain text from PyMuPDF, with running
+        header/footer furniture stripped (soft-coded, HEADER_FOOTER_STRIP_CONFIG)."""
         texts: List[str] = []
         try:
             import fitz
@@ -187,7 +188,62 @@ class PaperSpecExtractionService:
                     texts.append(page.get_text("text") or "")
         except Exception as e:
             logger.warning("[SpecExtraction] text extract failed: %s", e)
-        return texts
+        return self.strip_running_furniture(texts)
+
+    @staticmethod
+    def strip_running_furniture(texts: List[str]) -> List[str]:
+        """Remove repeating running headers/footers from per-page text.
+
+        A line is furniture when its digit-normalised form repeats on at least
+        `min_repeat_ratio` of pages within the first/last N non-empty lines,
+        or when it matches an always-strip pattern. All knobs live in
+        config.HEADER_FOOTER_STRIP_CONFIG.
+        """
+        from .config import HEADER_FOOTER_STRIP_CONFIG as HF
+        if not HF.get("enabled", True) or not texts:
+            return texts
+
+        top_n   = int(HF.get("max_top_lines", 12))
+        bot_n   = int(HF.get("max_bottom_lines", 6))
+        ratio   = float(HF.get("min_repeat_ratio", 0.6))
+        min_len = int(HF.get("min_line_length", 8))
+        always  = [re.compile(p, re.IGNORECASE) for p in HF.get("extra_line_patterns", [])]
+
+        def _norm(line: str) -> str:
+            """Collapse whitespace and mask digits so 'Page 5 of 181' and
+            'Page 6 of 181' count as the same furniture line."""
+            s = re.sub(r"\s+", " ", line).strip()
+            s = re.sub(r"\d+", "#", s)
+            return s.lower()
+
+        counts: Dict[str, int] = {}
+        n_pages = len(texts)
+        for text in texts:
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            seen_on_page = set()
+            for ln in lines[:top_n] + lines[-bot_n:]:
+                key = _norm(ln)
+                if len(key) < min_len or key in seen_on_page:
+                    continue
+                seen_on_page.add(key)
+                counts[key] = counts.get(key, 0) + 1
+
+        threshold = max(1, int(round(n_pages * ratio)))
+        furniture = {k for k, v in counts.items() if v >= threshold}
+        if not furniture and not always:
+            return texts
+
+        cleaned: List[str] = []
+        for text in texts:
+            kept = []
+            for ln in text.splitlines():
+                if ln.strip():
+                    key = _norm(ln)
+                    if key in furniture or any(p.search(ln.strip()) for p in always):
+                        continue
+                kept.append(ln)
+            cleaned.append("\n".join(kept))
+        return cleaned
 
     def render_pages_to_jpeg_b64(self, pdf_path: str, start: int, end: int) -> List[str]:
         """Render the requested pages as JPEG base64 strings."""
@@ -650,8 +706,33 @@ class PaperSpecExtractionService:
 
     # ── Merging chunk results ───────────────────────────────────────────
     @staticmethod
+    def _component_signature(comp: Dict[str, Any], fields: List[str]) -> tuple:
+        """Normalised dedupe signature for a component dict (soft-coded fields)."""
+        parts = []
+        for f in fields:
+            v = comp.get(f, "") or ""
+            parts.append(re.sub(r"\s+", " ", str(v)).strip().lower())
+        return tuple(parts)
+
+    @staticmethod
     def merge_classes(all_class_lists: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        """Deduplicate by class_code, prefer the entry with most components."""
+        """Deduplicate by class_code.
+
+        Metadata carrier: prefer the extraction with most components, else
+        highest confidence (legacy behaviour). Components, service lists and
+        PT tables are UNIONED across all chunk extractions of the same class
+        (soft-coded via COMPONENT_MERGE_CONFIG) so classes spanning chunk
+        boundaries no longer lose rows.
+        """
+        from .config import COMPONENT_MERGE_CONFIG as CM
+        union_components = CM.get("union_components_across_chunks", True)
+        sig_fields       = CM.get("signature_fields", ["component_type", "sub_type",
+                                                       "size_from", "size_to",
+                                                       "schedule_or_rating",
+                                                       "material_standard", "description"])
+        union_lists      = CM.get("union_list_fields", ["service_list"])
+        union_pt         = CM.get("union_pt_table", True)
+
         bucket: Dict[str, Dict[str, Any]] = {}
         for lst in all_class_lists:
             for cls in lst:
@@ -662,17 +743,56 @@ class PaperSpecExtractionService:
                 if existing is None:
                     bucket[code] = cls
                     continue
-                # Prefer one with more components, else higher confidence.
+                # Metadata carrier: more components wins, else higher confidence.
                 if len(cls.get("components", [])) > len(existing.get("components", [])):
-                    bucket[code] = cls
+                    primary, secondary = cls, existing
                 elif (cls.get("confidence", 0) or 0) > (existing.get("confidence", 0) or 0):
-                    bucket[code] = cls
+                    primary, secondary = cls, existing
+                else:
+                    primary, secondary = existing, cls
+
+                if union_components:
+                    seen_sigs = set()
+                    merged_comps: List[Dict[str, Any]] = []
+                    for src in (primary, secondary):
+                        for comp in src.get("components", []) or []:
+                            sig = PaperSpecExtractionService._component_signature(comp, sig_fields)
+                            if any(sig) and sig in seen_sigs:
+                                continue
+                            seen_sigs.add(sig)
+                            merged_comps.append(comp)
+                    primary["components"] = merged_comps
+
+                for field in union_lists:
+                    combined = list(dict.fromkeys(
+                        [str(x).strip() for x in (primary.get(field) or []) if str(x).strip()]
+                        + [str(x).strip() for x in (secondary.get(field) or []) if str(x).strip()]
+                    ))
+                    primary[field] = combined
+
+                if union_pt:
+                    pt_seen = set()
+                    pt_merged = []
+                    for src in (primary, secondary):
+                        for row in src.get("pt_rating_table", []) or []:
+                            try:
+                                key = (round(float(row.get("pressure_bar_g", 0)), 3),
+                                       round(float(row.get("temperature_c", 0)), 3))
+                            except (TypeError, ValueError):
+                                key = (str(row), "")
+                            if key in pt_seen:
+                                continue
+                            pt_seen.add(key)
+                            pt_merged.append(row)
+                    primary["pt_rating_table"] = pt_merged
+
                 # Merge page ranges.
                 merged_pages = sorted(set(
                     (existing.get("_source_pages") or []) + (cls.get("_source_pages") or [])
                 ))
                 if merged_pages:
-                    bucket[code]["_source_pages"] = [merged_pages[0], merged_pages[-1]]
+                    primary["_source_pages"] = [merged_pages[0], merged_pages[-1]]
+                bucket[code] = primary
         return sorted(bucket.values(), key=lambda c: c.get("class_code", ""))
 
 

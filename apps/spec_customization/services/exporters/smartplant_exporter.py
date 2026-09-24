@@ -217,9 +217,18 @@ def build_cat_workbook(job) -> io.BytesIO:
 
     preview_data = preview.build_preview(job, preview.WORKBOOK_CAT)
     summary = {}
+    ur_cfg = getattr(cfg, 'CAT_UNROUTED_EXPORT_CONFIG', {}) or {}
     for sheet in preview_data['sheets']:
         sheet_name = sheet['name']
         if sheet_name not in wb.sheetnames:
+            # Soft-coded catch-all: the unrouted-components sheet is not part
+            # of the shipped template — append it dynamically so extracted
+            # components without a routing rule still land in the xlsx.
+            if ur_cfg.get('enabled') and sheet_name == ur_cfg.get('sheet_name'):
+                n = _write_unrouted_sheet(wb, sheet, ur_cfg)
+                if n:
+                    summary[sheet_name] = n
+                continue
             logger.warning("[SmartPlantExport] CAT template missing sheet %s", sheet_name)
             continue
         rows = [r['cells'] for r in sheet['rows']]
@@ -233,6 +242,27 @@ def build_cat_workbook(job) -> io.BytesIO:
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
+def _write_unrouted_sheet(wb, sheet: dict, ur_cfg: dict) -> int:
+    """Append the soft-coded unrouted-components catch-all sheet to `wb`.
+    Plain table layout (header row 1, data from row 2) — the sheet is an
+    audit/appendix, not an SP3D bulkload sheet."""
+    ws = wb.create_sheet(title=sheet['name'])
+    headers = sheet.get('headers') or list(ur_cfg.get('headers', []))
+    for c, h in enumerate(headers, start=1):
+        ws.cell(1, c).value = h
+    n = 0
+    for row in sheet.get('rows', []):
+        n += 1
+        cells = row.get('cells', {})
+        for c, h in enumerate(headers, start=1):
+            v = cells.get(h)
+            if v not in (None, ''):
+                ws.cell(1 + n, c).value = v
+    logger.info("[SmartPlantExport] unrouted catch-all sheet %s: %d rows",
+                sheet['name'], n)
+    return n
 
 
 # ─────────────────────────────────────────────────────────────────────────────

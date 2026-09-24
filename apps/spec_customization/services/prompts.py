@@ -164,12 +164,13 @@ correctly)**:
 9. Resolve "AS ABOVE" against the immediately preceding row for the same Part
    Name and retain the printed qualifier (for example "WITH GEAR OPERATION")
    in description or notes. Never drop a row because it says "AS ABOVE".
-10. The source table columns are Part Name, Part Symbol, Size From, Size To,
-    W.T., Description, Commodity Code and Notes. Map them faithfully into the
-    schema: Part Name -> component_type/sub_type; W.T. -> schedule_or_rating;
-    Description -> description; Notes -> notes. Leave commodity code in notes
-    when no dedicated field is available. Do not replace source data with a
-    generic catalog default.
+10. The source table columns are Rev No, Part Name, Part Symbol, Size From,
+    Size To, W.T., Description, Commodity Code and Notes. Map them faithfully
+    into the schema: Rev No -> revision_no; Part Name -> component_type/sub_type;
+    W.T. -> schedule_or_rating; Description -> description; Notes -> notes.
+    Leave commodity code in notes when no dedicated field is available. Do not
+    replace source data with a generic catalog default. When the Rev No cell
+    is blank or merged, return an empty string - never invent a revision.
 
 For each class produce one object in this exact schema:
 
@@ -198,6 +199,7 @@ For each class produce one object in this exact schema:
       "material_standard":  "ASTM A106 GR. B",
       "end_connection":     "BW",
       "notes":              "",
+      "revision_no":        "",                      # Rev No column, verbatim (e.g. "2"); "" when blank
       "is_generic_fitting_family": false,             # true only for umbrella "B.W./S.W./SCRD FITTINGS" rows
       "weld_type":          ""                        # "BW"|"SW"|"SCRD" — only set when is_generic_fitting_family is true
     }},
