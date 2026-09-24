@@ -1428,13 +1428,16 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         """Explicitly start approval after a saved draft has been confirmed."""
         from django.db import transaction
+        from rest_framework.fields import empty
+        from .services.requisition_concurrency import check_requisition_precondition
 
         with transaction.atomic():
             observed = self.get_object()
             pr = PurchaseRequisition.objects.select_for_update().get(pk=observed.pk)
+            self._enforce_owner_mutation(pr)
+            check_requisition_precondition(pr, request.data.get('expected_updated_at', empty))
             workflow = request.data.get('approval_workflow_config')
             if workflow is not None and canonicalize_pr_status(pr.status) == 'draft':
-                self._enforce_owner_mutation(pr)
                 serializer = self.get_serializer(
                     pr,
                     data={'approval_workflow_config': workflow},

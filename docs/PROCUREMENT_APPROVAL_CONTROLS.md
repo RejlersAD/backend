@@ -65,7 +65,35 @@ Existing approvals are not rewritten or retrospectively certified. They are
 protected against future commercial edits, but a fingerprint cannot establish
 whether their terms had already changed before these controls were introduced.
 
-## Validation
+## Recommendation edit and submission freshness
+
+Recommendation updates and the explicit `requisitions/{id}/submit/` action accept
+an optional `expected_updated_at` field. The `source-approvals/` command accepts
+the same precondition alongside its existing source-row snapshot check, so an
+evidence correction cannot adopt a newer version over unseen commercial edits.
+Participating clients send the exact
+`updated_at` string last returned by the server; after saving, submission must
+use the save response's new token. JSON and multipart updates are supported.
+
+The server compares against the current row under the existing transaction and
+row lock before changing content, route or submission state. A mismatch returns
+HTTP 409 with `code: stale_requisition`; an invalid supplied token is a validation
+error. Existing authorization and workflow guards still apply. A rejected stale
+submission does not change its approval route or schedule submission delivery.
+
+The form preserves unsaved input and offers explicit reload on conflict. It must
+not silently refresh its token and retry against content the user has not read.
+After a successful guarded source-evidence correction, the form uses that
+response's `updated_at` for subsequent saves. A stale correction retains its
+editor input and requires the same explicit conflict recovery.
+
+Compatibility is intentional: omitted tokens retain the previous API behavior.
+This check covers participating clients and changes that advance `updated_at`;
+it is not an immutable submitted revision, universal attachment/import change
+counter, or idempotency key. No migration, role grant, approval-route rule or
+production data correction is introduced.
+
+## Validation evidence
 
 Regression tests cover guarded status writes and actions, empty/pending/rejected
 routes, recorded/source evidence, receipt atomicity, unchanged and revised

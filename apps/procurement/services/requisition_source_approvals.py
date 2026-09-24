@@ -12,10 +12,12 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
+from rest_framework.fields import empty
 
 from ..models import PurchaseRequisition
 from .pr_pdf_semantics import approval_role
 from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
+from .requisition_concurrency import check_requisition_precondition
 from .requisition_workflow import RequisitionWorkflowService
 from .signed_pr_pdf_import import _find_unique_active_issuer
 
@@ -46,7 +48,8 @@ def _name(row):
 
 
 def _validate_payload(payload):
-    allowed = {'document_sha256', 'row_index', 'expected_row', 'approver_name', 'signature_verified', 'approval_date'}
+    allowed = {'document_sha256', 'row_index', 'expected_row', 'approver_name', 'signature_verified', 'approval_date',
+               'expected_updated_at'}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise ValidationError({'detail': 'Only the source approver name, signature confirmation, and date may be edited.'})
     digest = payload.get('document_sha256')
@@ -135,6 +138,7 @@ def edit_requisition_source_approval(requisition_id, actor, payload):
     pr = PurchaseRequisition.objects.select_for_update().get(pk=requisition_id)
     if str(pr.issued_by_id) != str(actor.pk) and not RequisitionWorkflowService._is_super_admin(actor):
         raise PermissionDenied('Only the requisition issuer may modify this requisition.')
+    check_requisition_precondition(pr, payload.get('expected_updated_at', empty))
     metadata = deepcopy(pr.price_remarks_data or {})
     verification = metadata.get('signed_document_verification') or {}
     if str(verification.get('document_sha256') or '').lower() != digest:

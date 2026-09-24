@@ -33,6 +33,7 @@ from .services.employee_display import (
 )
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_status import canonicalize_pr_status
+from .services.requisition_concurrency import RequisitionTimestampField, check_requisition_precondition
 from .services.requisition_source_documents import (
     SIGNED_PR_TYPE, refreshed_requisition_attachments, requisition_original_source,
 )
@@ -210,6 +211,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     Aligned with RAD-OM-PRC-0001 FRM -1 Rev 0 template (23 fields)
     """
     
+    expected_updated_at = RequisitionTimestampField(required=False, write_only=True)
+
     # Display fields
     requisition_type_display = serializers.CharField(source='get_requisition_type_display', read_only=True)
     status_display = serializers.SerializerMethodField()
@@ -388,12 +391,17 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'attachments', 'attachments_files',
             
             # Timestamps
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'expected_updated_at'
         ]
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'attachments',
             *PR_SERVER_CONTROLLED_FIELDS,
         ]
+
+    def validate_expected_updated_at(self, value):
+        if self.instance is None:
+            raise serializers.ValidationError('A version precondition applies only to an existing purchase recommendation.')
+        return value
 
     def get_attachments(self, obj):
         attachments = refreshed_requisition_attachments(obj)
@@ -946,6 +954,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # finished. Save against the locked current record so its status,
         # source decisions and audit cannot be replaced by that stale copy.
         instance = PurchaseRequisition.objects.select_for_update().get(pk=instance.pk)
+        check_requisition_precondition(instance, validated_data.pop('expected_updated_at', serializers.empty))
         if not getattr(self, '_explicit_enterprise_project', 'enterprise_project' in validated_data):
             # Reconciliation may have committed after form validation. Decide
             # automatic linkage against the locked current references/link.

@@ -244,3 +244,120 @@ class PurchaseRequisitionSaveSubmitAPITests(TestCase):
                 self.assertEqual(pr.vat_basis, 'unconfirmed')
                 self.assertEqual((pr.total_price, pr.net_total_excl_vat), (Decimal('125.50'), Decimal('125.50')))
                 self.assertEqual(self.notices(pr).count(), 1)
+
+    def test_timestamp_precondition_allows_current_edits_and_rejects_stale_json_and_multipart(self):
+        pr = self.save_new()
+        for request_format in ('json', 'multipart'):
+            with self.subTest(request_format=request_format):
+                pr.refresh_from_db()
+                token = pr.updated_at.isoformat()
+                response = self.client.patch(f'{BASE}{pr.pk}/', {
+                    'notes': f'Current {request_format} edit', 'expected_updated_at': token,
+                }, format=request_format)
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertNotIn('expected_updated_at', response.data)
+                pr.refresh_from_db()
+                saved_timestamp = pr.updated_at
+                self.assertNotEqual(saved_timestamp.isoformat(), token)
+
+                stale = self.client.patch(f'{BASE}{pr.pk}/', {
+                    'notes': 'Stale edit must not win', 'expected_updated_at': token,
+                }, format=request_format)
+                self.assertEqual(stale.status_code, 409, stale.data)
+                self.assertEqual(stale.data['code'], 'stale_requisition')
+                pr.refresh_from_db()
+                self.assertEqual(pr.notes, f'Current {request_format} edit')
+                self.assertEqual(pr.updated_at, saved_timestamp)
+        self.assert_no_new_notifications()
+
+    def test_precondition_is_checked_against_locked_record_after_serializer_validation(self):
+        from rest_framework.test import APIRequestFactory
+        from apps.procurement.serializers import PurchaseRequisitionSerializer
+        from apps.procurement.services.requisition_concurrency import StaleRequisition
+
+        pr = self.save_new()
+        request = APIRequestFactory().patch('/')
+        request.user = self.issuer
+        serializer = PurchaseRequisitionSerializer(pr, data={
+            'notes': 'Old validated form', 'expected_updated_at': pr.updated_at.isoformat(),
+        }, partial=True, context={'request': request})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        newer = PurchaseRequisition.objects.get(pk=pr.pk)
+        newer.notes = 'Concurrent saved edit'
+        newer.save()
+        with self.assertRaises(StaleRequisition):
+            serializer.save()
+        newer.refresh_from_db()
+        self.assertEqual(newer.notes, 'Concurrent saved edit')
+        self.assert_no_new_notifications()
+
+    def test_matching_timestamp_can_submit_and_returns_the_next_token(self):
+        pr = self.save_new()
+        token = pr.updated_at.isoformat()
+        submitted = self.request('post', pr, {'expected_updated_at': token}, action='submit/')
+        self.assertEqual(submitted.status_code, 200, submitted.data)
+        self.assertEqual(submitted.data['status'], 'submitted')
+        self.assertNotIn('expected_updated_at', submitted.data)
+        pr.refresh_from_db()
+        self.assertNotEqual(pr.updated_at.isoformat(), token)
+        self.assertEqual(self.notices(pr).count(), 1)
+        self.tasks['teams'].assert_called_once()
+
+    def test_stale_submission_cannot_change_route_or_start_notifications(self):
+        pr = self.save_new()
+        token = pr.updated_at.isoformat()
+        pr.notes = 'New draft content'
+        pr.save()
+        original_workflow = deepcopy(pr.approval_workflow_config)
+        current_timestamp = pr.updated_at
+        changed = deepcopy(self.workflow)
+        changed[0]['user_id'] = str(self.alternate.pk)
+        response = self.request('post', pr, {
+            'expected_updated_at': token, 'approval_workflow_config': changed,
+        }, action='submit/')
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data['code'], 'stale_requisition')
+        pr.refresh_from_db()
+        self.assertEqual(pr.status, 'draft')
+        self.assertEqual(pr.notes, 'New draft content')
+        self.assertEqual(pr.approval_workflow_config, original_workflow)
+        self.assertEqual(pr.updated_at, current_timestamp)
+        self.assert_no_new_notifications()
+
+    def test_invalid_preconditions_fail_without_edits_or_submission(self):
+        pr = self.save_new()
+        timestamp = pr.updated_at
+        for request_format in ('json', 'multipart'):
+            tokens = ('not-a-timestamp', '') if request_format == 'multipart' else ('not-a-timestamp', '', None)
+            for token in tokens:
+                for method, suffix in (('patch', ''), ('post', 'submit/')):
+                    with self.subTest(request_format=request_format, token=token, method=method):
+                        response = getattr(self.client, method)(f'{BASE}{pr.pk}/{suffix}', {
+                            'notes': 'Invalid precondition', 'expected_updated_at': token,
+                        }, format=request_format)
+                        self.assertEqual(response.status_code, 400, response.data)
+                        self.assertIn('expected_updated_at', response.data)
+                        pr.refresh_from_db()
+                        self.assertEqual(pr.status, 'draft')
+                        self.assertEqual(pr.notes, '')
+                        self.assertEqual(pr.updated_at, timestamp)
+        self.assert_no_new_notifications()
+
+    def test_stale_token_does_not_bypass_submission_issuer_check(self):
+        pr = self.save_new()
+        token = pr.updated_at.isoformat()
+        pr.save()
+        UserRole.objects.create(user_profile=self.engineer.rbac_profile, role=self.editor_role)
+        self.client.force_authenticate(self.engineer)
+        response = self.request('post', pr, {'expected_updated_at': token}, action='submit/')
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assert_no_new_notifications()
+
+    def test_creation_rejects_a_precondition_for_a_nonexistent_record(self):
+        response = self.client.post(BASE, {
+            'pr_number': 'RAD-PRJ-PR-0599_2026',
+            'expected_updated_at': '2026-09-24T10:00:00Z',
+        }, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('expected_updated_at', response.data)
+        self.assertFalse(PurchaseRequisition.objects.filter(pr_number='RAD-PRJ-PR-0599_2026').exists())
