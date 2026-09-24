@@ -154,6 +154,101 @@ SPEC_EXTRACTION_CONFIG = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Running header/footer stripping — soft-coded page-furniture removal
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy PMS PDFs (e.g. ADNOC LNG) repeat a title block on EVERY page
+# ("ADNOC LNG PIPING SPECIFICATIONS", "Page 5 of 181", doc number, owner).
+# Sent to the AI unfiltered, this furniture invites false class detections and
+# pollutes the token budget. A line is treated as furniture when its
+# digit-normalised form repeats on at least `min_repeat_ratio` of the pages in
+# a chunk, within the first `max_top_lines` / last `max_bottom_lines`
+# non-empty lines of each page. Tune here only — no code changes elsewhere.
+HEADER_FOOTER_STRIP_CONFIG = {
+    "enabled":            True,
+    "max_top_lines":      _env_int("SPEC_STRIP_TOP_LINES", 12, lo=1, hi=40),
+    "max_bottom_lines":   _env_int("SPEC_STRIP_BOTTOM_LINES", 6, lo=1, hi=20),
+    # Fraction of chunk pages a line must appear on to be considered furniture.
+    "min_repeat_ratio":   float(os.environ.get("SPEC_STRIP_MIN_REPEAT_RATIO", "0.6") or 0.6),
+    # Ignore very short lines (page numbers alone are caught by patterns below).
+    "min_line_length":    _env_int("SPEC_STRIP_MIN_LINE_LEN", 8, lo=1, hi=200),
+    # Always-strip patterns (case-insensitive), regardless of repeat ratio.
+    "extra_line_patterns": [
+        r'^page\s+\d+\s+(of\s+\d+)?$',
+        r'unauthorized use prohibited',
+        r'classification\s*:\s*\w+',
+    ],
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-chunk component merge — soft-coded union strategy
+# ─────────────────────────────────────────────────────────────────────────────
+# A spec class averaging ~12 pages spans 10-page chunk boundaries. The legacy
+# merge kept ONLY the chunk extraction with the most components, silently
+# losing rows found by the other chunk. With `union_components_across_chunks`
+# the merge instead unions components from ALL chunk extractions of the same
+# class_code, deduplicated by a soft-coded signature.
+COMPONENT_MERGE_CONFIG = {
+    "union_components_across_chunks": True,
+    # Fields forming the dedupe signature (order matters, keep stable).
+    "signature_fields": [
+        "component_type", "sub_type", "size_from", "size_to",
+        "schedule_or_rating", "material_standard", "description",
+    ],
+    # Also union these class-level list fields across chunks.
+    "union_list_fields": ["service_list"],
+    # PT table rows dedupe by (pressure, temperature) rounded to 3 decimals.
+    "union_pt_table": True,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ASME validation — soft-coded cross-check against valve_standards DB
+# ─────────────────────────────────────────────────────────────────────────────
+# Validates an extracted PipingClass PT table against ASME pressure-temperature
+# ratings (valve_standards app). Advisory overlay: never blocks, never mutates
+# extraction data. Tune here only.
+ASME_VALIDATION_CONFIG = {
+    "enabled": True,
+    # Reference standard + rating table section to validate against.
+    "standard_code":  "ASME_B16_34",
+    "class_section":  "A",          # 'A' = Standard class, 'B' = Special class
+    # Allowed overage: spec pressure may exceed the ASME table value by this
+    # many percent and still pass. Default 1.5% absorbs edition drift — many
+    # legacy specs carry ASME B16.5-2003 (or earlier) flange rating numbers
+    # (19.7 bar @ 38 °C) while the reference DB holds the current-edition
+    # 19.6 bar. Set to 0 for strict current-edition comparison.
+    "tolerance_pct":  float(os.environ.get("SPEC_ASME_TOLERANCE_PCT", "1.5") or 1.5),
+    # A PT row counts as an exact table hit when |t_row - t_spec| <= this (°C).
+    "temp_exact_tolerance_c": 0.51,
+    # 2-point linear interpolation between bracketing table temperatures
+    # (ASME B16.34 para 2.1(f)).
+    "interpolation_enabled": True,
+    # Max distinct component material_standard strings tried when resolving
+    # the class's MaterialGroup (most-frequent first).
+    "max_material_candidates": 3,
+    # Product-form hint per component_type (narrows MaterialGroupSpec search).
+    "component_product_form_map": {
+        "valve":   "casting",
+        "flange":  "forging",
+        "fitting": "",
+        "pipe":    "tubular",
+        "gasket":  "",
+        "bolt":    "bar",
+    },
+    # Status labels surfaced in the UI badge (soft-coded wording).
+    "status_labels": {
+        "pass":    "Within ASME B16.34 rating",
+        "fail":    "Exceeds ASME B16.34 rating",
+        "skipped_no_class":    "No ASME class parsed",
+        "skipped_no_material": "Material group not resolved",
+        "skipped_no_pt":       "No PT data to validate",
+        "disabled":            "ASME validation disabled",
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NPD Format Configuration — Display Format for Size Columns
 # ─────────────────────────────────────────────────────────────────────────────
 NPD_FORMAT_CONFIG = {

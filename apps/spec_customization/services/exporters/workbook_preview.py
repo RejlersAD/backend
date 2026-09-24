@@ -302,6 +302,12 @@ def _route_cat_components(job) -> tuple[dict[str, list], list[dict]]:
                     'class_code':     cls.class_code,
                     'component_type': comp.component_type or '',
                     'sub_type':       comp.sub_type or '',
+                    'size_from':      comp.size_from or '',
+                    'size_to':        comp.size_to or '',
+                    'schedule_or_rating': comp.schedule_or_rating or '',
+                    'material_standard':  comp.material_standard or '',
+                    'end_connection':     comp.end_connection or '',
+                    'notes':              comp.notes or '',
                     'description':    (comp.description or '')[:120],
                 })
                 continue
@@ -480,6 +486,29 @@ def build_preview(job, workbook: str) -> dict:
     }
     if workbook == WORKBOOK_CAT:
         result['unrouted_components'] = _summarize_unrouted(unrouted)
+        # Soft-coded catch-all sheet: surface unrouted components as a real
+        # sheet in the canvas (and, via the exporter, in the downloaded
+        # CAT.xlsx) instead of dropping them after the banner.
+        ur_cfg = getattr(cfg, 'CAT_UNROUTED_EXPORT_CONFIG', {}) or {}
+        if unrouted and ur_cfg.get('enabled'):
+            headers  = list(ur_cfg.get('headers', []))
+            field_map = ur_cfg.get('field_map', {})
+            ur_rows = []
+            for item in unrouted:
+                cells = _clean_cells({h: item.get(field_map.get(h, ''), '') for h in headers})
+                ur_rows.append({
+                    'row_key':    f"unrouted:{item['component_id']}",
+                    'cells':      cells,
+                    'overridden': [],
+                    'source':     {'class_code': _clean_workbook_text(item['class_code']),
+                                   'component_id': item['component_id']},
+                })
+            result['sheets'].append({
+                'name':      ur_cfg.get('sheet_name', 'UnroutedComponents'),
+                'headers':   headers,
+                'row_count': len(ur_rows),
+                'rows':      ur_rows,
+            })
     return result
 
 

@@ -634,6 +634,27 @@ def class_detail(request, class_id):
     return Response(PipingClassSerializer(cls).data)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def class_asme_validation(request, class_id):
+    """Advisory ASME validation of a piping class's PT table against the
+    valve_standards reference DB (soft-coded via ASME_VALIDATION_CONFIG).
+    Never mutates data; returns status pass/fail/skipped + per-point detail."""
+    cls = get_object_or_404(PipingClass.objects.select_related('job__document'), pk=class_id)
+    if not _is_spec_admin(request.user) and not (
+        cls.job.created_by_id == getattr(request.user, 'id', None)
+        or _can_access_document(request.user, cls.job.document)
+    ):
+        raise PermissionDenied('You do not have access to this piping class.')
+    try:
+        from .services.asme_validation import validate_piping_class
+        return Response(validate_piping_class(cls))
+    except Exception:
+        logger.exception("[SpecCustomization] ASME validation failed for class %s", class_id)
+        return Response({'status': 'error',
+                         'label': 'ASME validation unavailable'}, status=status.HTTP_200_OK)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Export
 # ─────────────────────────────────────────────────────────────────────────────

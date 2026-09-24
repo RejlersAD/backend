@@ -63,6 +63,21 @@ WORKBOOK_CHATBOT_CONFIG = {
             "from spec",
         ],
     },
+    # Soft-coded grammar help, surfaced in error messages and the UI hint.
+    # Keep in sync with the regex patterns in _parse_instruction().
+    "supported_patterns": {
+        "where_clause": "set <column> to <value> where <column> contains|equals <text>",
+        "all_rows":     "set <column> to <value> for all rows",
+        "class_scoped": "set <column> to <value> for class <CODE> [in sheet <name>]",
+        "sheet_scoped": "set <column> to <value> in sheet <name>",
+        "repair":       "fix / correct / normalize / align the workbook data",
+        "examples": [
+            "set MaterialGrade to ASTM A106 Gr.B where Description contains PIPE",
+            "set JointQualityFactor to 1.0 for all rows",
+            "update CommodityCode = VLV-001 for class A1 in sheet PipingCommodityFilter",
+            "set Notes to REVIEWED in sheet PipingMaterialsClassData",
+        ],
+    },
 }
 
 
@@ -578,6 +593,24 @@ def _parse_instruction(instruction: str) -> ParsedInstruction | None:
             sheet_name=m.group("sheet").strip().strip("\"'"),
         )
 
+    # All-rows pattern: "set <column> to <value> for all rows" (no where
+    # clause, no class, no sheet). Deliberately placed LAST so more specific
+    # patterns win when present.
+    p_d = re.compile(
+        r"(?:set|update|change)\s+"
+        r"(?P<target>[A-Za-z0-9_\- ./()]+?)\s+"
+        r"(?:to|=)\s+"
+        r"(?P<value>.+?)\s+"
+        r"for\s+(?:all\s+rows?|every\s+row|all)\s*$",
+        flags=re.IGNORECASE,
+    )
+    m = p_d.match(text)
+    if m:
+        return ParsedInstruction(
+            target_column=m.group("target").strip(),
+            target_value=m.group("value").strip().strip("\"'"),
+        )
+
     return None
 
 
@@ -815,14 +848,14 @@ def _match_row(parsed: ParsedInstruction, row: dict[str, Any], where_column_real
 def _plan_updates_for_workbook(job, workbook: str, instruction: str, *, resolved_target_value: str | None = None) -> dict[str, Any]:
     parsed = _parse_instruction(instruction)
     if not parsed:
+        patterns = WORKBOOK_CHATBOT_CONFIG["supported_patterns"]
         return {
             "ok": False,
-            "error": "Unsupported instruction format. Use: set <column> to <value> where <column> contains <value>.",
-            "help_examples": [
-                "set MaterialGrade to ASTM A106 Gr.B where Description contains PIPE",
-                "update CommodityCode = VLV-001 for class A1 in sheet PipingCommodityFilter",
-                "set Notes to REVIEWED in sheet PipingMaterialsClassData",
-            ],
+            "error": (
+                "I could not understand that instruction. Supported patterns: "
+                + " | ".join(patterns[k] for k in ("where_clause", "all_rows", "class_scoped", "sheet_scoped"))
+            ),
+            "help_examples": patterns["examples"],
         }
 
     idx = _retrieval_index(job, workbook)
@@ -842,6 +875,53 @@ def _plan_updates_for_workbook(job, workbook: str, instruction: str, *, resolved
             "ok": False,
             "error": f"Could not resolve where column '{parsed.where_column}'.",
             "retrieved_columns": headers[:50],
+        }
+
+    # Sheet-scoped fast path: when the instruction names a sheet, plan directly
+    # against that sheet's rows instead of scoring the whole workbook index
+    # (avoids a full-corpus scan and prevents stalls on large workbooks).
+    if parsed.sheet_name:
+        sheet_req = _norm(parsed.sheet_name)
+        sheet_rows = [r for r in idx["rows"] if sheet_req in _norm(r.get("sheet_name") or "")]
+        if not sheet_rows:
+            available = sorted({r["sheet_name"] for r in idx["rows"]})
+            return {
+                "ok": False,
+                "error": f"No sheet matching '{parsed.sheet_name}' in the {workbook.upper()} workbook.",
+                "retrieved_sheets": available[:50],
+            }
+        updates = []
+        for row in sheet_rows:
+            if not _match_row(parsed, row, where_column_real):
+                continue
+            cells = row.get("cells") or {}
+            updates.append({
+                "workbook": workbook,
+                "sheet_name": row["sheet_name"],
+                "row_key": row["row_key"],
+                "column_name": target_column_real,
+                "value": resolved_target_value if resolved_target_value is not None else parsed.target_value,
+                "previous_value": cells.get(target_column_real),
+                "source": row.get("source") or {},
+            })
+            if len(updates) >= WORKBOOK_CHATBOT_CONFIG["safety"]["max_cell_updates"]:
+                break
+        return {
+            "ok": True,
+            "workbook": workbook,
+            "parsed": {
+                "target_column": target_column_real,
+                "target_value": parsed.target_value,
+                "where_column": where_column_real,
+                "where_operator": parsed.where_operator,
+                "where_value": parsed.where_value,
+                "class_code": parsed.class_code,
+                "sheet_name": parsed.sheet_name,
+            },
+            "planned_updates": updates,
+            "planned_count": len(updates),
+            "retrieved_rows": len(sheet_rows),
+            "retrieval_cache_hit": bool(idx.get("_cache_hit")),
         }
 
     q_tokens = _tokens(instruction)
@@ -1028,6 +1108,26 @@ def apply_workbook_chat_instruction(
                 },
             },
             "warning": guidance,
+        }
+
+    # An unparseable instruction (not repair, no grammar match) is an explicit
+    # failure — return ok:False with the supported patterns instead of the
+    # misleading "no matching rows" warning.
+    if not parsed and not repair_requested:
+        patterns = WORKBOOK_CHATBOT_CONFIG["supported_patterns"]
+        return {
+            "ok": False,
+            "instruction": instruction,
+            "workbooks": workbooks,
+            "error": (
+                "I could not understand that instruction. Supported patterns: "
+                + " | ".join(patterns[k] for k in ("where_clause", "all_rows", "class_scoped", "sheet_scoped"))
+            ),
+            "help_examples": patterns["examples"],
+            "planned_count": 0,
+            "applied_count": 0,
+            "workbook_results": [],
+            "document_context": _uploaded_document_context(job),
         }
 
     workbook_results = []

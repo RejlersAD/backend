@@ -50,7 +50,7 @@ class PipingClassComponentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'component_type', 'sub_type', 'size_from', 'size_to',
             'description', 'schedule_or_rating', 'material_standard',
-            'end_connection', 'notes', 'display_order',
+            'end_connection', 'revision_number', 'notes', 'display_order',
         ]
 
 

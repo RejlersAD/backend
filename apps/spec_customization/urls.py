@@ -33,6 +33,7 @@ urlpatterns = [
     path('paper-spec/jobs/<uuid:job_id>/workbook/delete-row/', views.workbook_delete_row, name='job-workbook-delete-row'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/bulk-delete/', views.workbook_bulk_delete_rows, name='job-workbook-bulk-delete'),
     path('paper-spec/classes/<uuid:class_id>/',    views.class_detail,  name='class-detail'),
+    path('paper-spec/classes/<uuid:class_id>/asme-validation/', views.class_asme_validation, name='class-asme-validation'),
 
     # Component Matching (Match/SPEC/CAT workbooks)
     path('matching/upload/',                                      matching_views.upload_matching_workbooks,      name='matching-upload'),

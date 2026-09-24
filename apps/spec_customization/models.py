@@ -456,6 +456,10 @@ class PipingClassComponent(models.Model):
 
     end_connection = models.CharField(max_length=128, blank=True, default='')
 
+    # Source-table "REV NO" column, captured verbatim for traceability
+    # (blank when the spec sheet leaves the cell empty / merged).
+    revision_number = models.CharField(max_length=32, blank=True, default='')
+
     notes = models.TextField(blank=True, default='')
 
 
