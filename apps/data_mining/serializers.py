@@ -51,7 +51,7 @@ class TransformationPipelineSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'canvas_config', 'steps', 'step_count',
             'last_executed_at', 'execution_log', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'last_executed_at', 'execution_log']
     
     def get_step_count(self, obj):
         return obj.steps.count()
@@ -73,7 +73,11 @@ class DataMiningProjectSerializer(serializers.ModelSerializer):
             'total_rows_processed', 'execution_time_seconds', 'executed_at',
             'documents', 'pipeline', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'created_by', 'created_at', 'updated_at', 'status',
+            'master_file_path', 'total_documents', 'total_rows_processed',
+            'execution_time_seconds', 'executed_at',
+        ]
     
     def create(self, validated_data):
         # Set created_by from request context

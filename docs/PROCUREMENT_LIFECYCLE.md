@@ -42,8 +42,19 @@ access does not replace a business assignment or let someone skip a stage.
 
 An assigned approver can reject with a reason, making the PR Rejected and
 stopping the route. The issuer can refer a rejected PR to MoE or MoP for
-resolution. There is no general return-to-draft/resubmit command implied by this
-guide: submission accepts drafts, and ordinary edits cannot erase decisions.
+resolution, or choose **Edit and resubmit** with existing update access. This
+explicit action preserves the rejected review in revision history and opens a
+draft with fresh pending assignments. Correct and save the PR, then choose
+**Send for Approval** to restart at the first configured level. Earlier approvals
+and signatures do not approve the corrected draft. Reopening alone sends no
+approval request. The same PR number and original files remain available.
+
+`POST /api/v1/procurement/requisitions/{id}/reopen/` requires the exact saved
+`expected_updated_at`; the command rechecks issuer/super-administrator authority,
+effective update access and rejected state under a lock. It returns the updated
+PR representation. Ordinary PATCH requests cannot edit a rejected PR, reopen it
+or replace its archived history. Saves, submission and decisions after reopening
+require the current timestamp, so an old tab cannot change or decide a new round.
 Cancelled exists as a PR status, but the inspected workflow does not provide a
 general cancellation command.
 
@@ -89,6 +100,36 @@ PR/PO approval notifications use RADAI alerts and request Teams delivery, which
 depends on configured transport, worker availability and recipient eligibility.
 These assignment flows do not request email delivery. Saving or seeing a
 notification record does not prove delivery through an external channel.
+
+## Edit the PO Buyer/Seller introduction and download Word
+
+In the PO editor, open **PO Description & Scope** and edit **Buyer / Seller
+introduction**. This replaces the standard sentence beginning "We, Rejlers
+International Engineering Solutions (Buyer), issue this purchase order to ...".
+**Use standard introduction** removes the override and uses the selected supplier.
+Clearing the textbox removes the introduction from PDF and Word, including the
+current-form preview. The cleared value remains empty after saving and reopening.
+Saving uses existing PO update authority. Once commercial content is approved,
+the same edit lock applies; the field cannot amend approved terms.
+
+The optional plain text is stored in `contact_persons.order_introduction`, with
+a 10,000-character limit and XML-compatible character validation on both writes
+and previews. An absent text override retains the standard sentence without
+adding a key to legacy records. An explicit empty or whitespace-only value
+omits the paragraph without leaving a blank paragraph. No schema migration is required.
+
+Saved `export-word/` and current-form `preview-document/` Word downloads use the
+same text as PDF. Native editable Word pages follow the company cover, scope
+and price layout. Supporting attachment covers and renderable pages follow in
+the same order as the canonical PDF, as page images with their orientation and
+dimensions retained. Word's maximum paper size scales oversized drawings; the
+editable body can reflow with fonts or Word versions. Attached page images are
+not editable text and do not replace the source files.
+
+Both Word routes expose `X-PO-Attachment-Warnings` when a supporting file is
+missing, corrupt or unsupported. The cover remains and the download UI warns
+that files were omitted. Downloads/previews perform no save or approval and
+retain the existing file-source checks; no arbitrary attachment URL is fetched.
 
 ## Download a PR in Word format
 

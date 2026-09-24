@@ -19,6 +19,7 @@ enablement, group-resolution maps. No literal magic values below.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -162,6 +163,8 @@ def _interpolate(group_no: str, class_number: int, temp_c: float) -> Optional[Di
     2-point linear interpolation between bracketing temperatures."""
     from apps.valve_standards.models import PressureTemperatureRating
 
+    if not math.isfinite(temp_c):
+        return None
     std_code   = AVC.get('standard_code', 'ASME_B16_34')
     section    = AVC.get('class_section', 'A')
     temp_tol   = float(AVC.get('temp_exact_tolerance_c', 0.51))
@@ -176,14 +179,28 @@ def _interpolate(group_no: str, class_number: int, temp_c: float) -> Optional[Di
         .exclude(pressure__isnull=True)
     )
     points: List[Tuple[float, float]] = []
+    ranges: List[Tuple[float, float, float]] = []
     for r in rows:
         t = _temp_label_value(r.temp_label)
         if t is None or r.pressure is None:
             continue
         points.append((t, float(r.pressure)))
+        interval = _TEMP_RANGE_RE.search(r.temp_label)
+        if interval:
+            lower, upper = float(interval.group(1)), float(interval.group(2))
+            if lower <= upper:
+                ranges.append((lower, upper, float(r.pressure)))
     if not points:
         return None
     points.sort(key=lambda p: p[0])
+
+    # An explicit reference interval covers its printed bounds. A nearby row
+    # or the final table value cannot establish a rating beyond those bounds.
+    for lower, upper, pressure in ranges:
+        if lower <= temp_c <= upper:
+            return {'allowed_bar': pressure, 'method': 'exact', 'bracket': [lower, upper]}
+    if temp_c < points[0][0] or temp_c > points[-1][0]:
+        return None
 
     for t, p in points:
         if abs(t - temp_c) <= temp_tol:
@@ -194,10 +211,7 @@ def _interpolate(group_no: str, class_number: int, temp_c: float) -> Optional[Di
     lower = [p for p in points if p[0] < temp_c]
     upper = [p for p in points if p[0] > temp_c]
     if not lower or not upper:
-        # Out of table range — clamp to nearest bound but flag as extrapolated.
-        nearest = min(points, key=lambda p: abs(p[0] - temp_c))
-        return {'allowed_bar': nearest[1], 'method': 'nearest_extrapolated',
-                'bracket': [nearest[0], nearest[0]]}
+        return None
     t0, p0 = lower[-1]
     t1, p1 = upper[0]
     frac = (temp_c - t0) / (t1 - t0)
@@ -267,6 +281,10 @@ def validate_piping_class(cls) -> Dict[str, Any]:
         status = 'skipped'
         label = labels.get('skipped_no_pt', 'No PT data to validate')
         reason = 'pt_table_empty_or_no_rating_data'
+    elif not any_fail and len(checked) != len(pt_rows):
+        status = 'skipped'
+        label = labels.get('skipped_incomplete_pt', 'Incomplete PT reference data')
+        reason = 'pt_table_incomplete_rating_data'
     else:
         status = 'fail' if any_fail else 'pass'
         label = labels.get('fail' if any_fail else 'pass', '')

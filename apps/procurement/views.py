@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from rest_framework.fields import empty
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 # RBAC - Module-level access control (soft-coded)
@@ -747,6 +748,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             require_signature=True,
             expected_stage_key='pm',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -757,6 +759,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             request.data.get('reason', ''),
             expected_stage_key='pm',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -767,6 +770,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             require_signature=True,
             expected_stage_key='vp',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -777,6 +781,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             request.data.get('reason', ''),
             expected_stage_key='vp',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -787,6 +792,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             require_signature=True,
             expected_stage_key='eng_manager',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -797,6 +803,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             request.data.get('reason', ''),
             expected_stage_key='eng_manager',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -807,6 +814,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             require_signature=True,
             expected_stage_key='manager_projects',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -817,6 +825,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.user,
             request.data.get('reason', ''),
             expected_stage_key='manager_projects',
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -826,6 +835,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             pk,
             request.user,
             require_signature=True,
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
 
@@ -835,6 +845,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             pk,
             request.user,
             request.data.get('reason', ''),
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
 
@@ -1375,33 +1386,41 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'count': len(suggestions),
             'suggestions': suggestions
         })
+    def _record_rejection_referral(self, request, target, remarks):
+        from django.db import transaction
+
+        with transaction.atomic():
+            observed = self.get_object()
+            pr = PurchaseRequisition.objects.select_for_update().get(pk=observed.pk)
+            self._enforce_owner_mutation(pr)
+            RequisitionWorkflowService._check_decision_precondition(
+                pr, request.data.get('expected_updated_at', empty),
+            )
+            if canonicalize_pr_status(pr.status) != 'rejected':
+                raise ValidationError({'error': 'Only rejected recommendations can be referred.'})
+            target = str(target or '').strip().lower()
+            if target not in {'moe', 'mop'}:
+                raise ValidationError({'target': 'Select MoE or MoP.'})
+            remarks = str(remarks or '').strip()
+            if len(remarks) < 10:
+                raise ValidationError({'remarks': 'Add at least 10 characters explaining the discussion required.'})
+            pr.resolution_referral = {
+                'target': target,
+                'target_label': 'Manager of Engineering' if target == 'moe' else 'Manager of Projects',
+                'remarks': remarks[:2000],
+                'referred_by_id': str(request.user.id),
+                'referred_by_name': request.user.get_full_name() or request.user.email,
+                'referred_at': timezone.now().isoformat(),
+                'status': 'open',
+            }
+            pr.save(update_fields=['resolution_referral', 'updated_at'])
+            return pr
+
     @action(detail=True, methods=['post'], url_path='refer-rejection')
     def refer_rejection(self, request, pk=None):
-        pr = self.get_object()
-        if canonicalize_pr_status(pr.status) != 'rejected':
-            raise ValidationError({'error': 'Only rejected recommendations can be referred.'})
-        if str(pr.issued_by_id) != str(request.user.id) and not RequisitionWorkflowService._is_super_admin(request.user):
-            raise PermissionDenied('Only the issuer may refer this rejected recommendation.')
-
-        target = str(request.data.get('target', '') or '').strip().lower()
-        if target not in {'moe', 'mop'}:
-            raise ValidationError({'target': 'Select MoE or MoP.'})
-        remarks = str(request.data.get('remarks', '') or '').strip()
-        if len(remarks) < 10:
-            raise ValidationError({'remarks': 'Add at least 10 characters explaining the discussion required.'})
-
-        pr.resolution_referral = {
-            'target': target,
-            'target_label': 'Manager of Engineering' if target == 'moe' else 'Manager of Projects',
-            'remarks': remarks[:2000],
-            'referred_by_id': str(request.user.id),
-            'referred_by_name': request.user.get_full_name() or request.user.email,
-            'referred_at': timezone.now().isoformat(),
-            'status': 'open',
-        }
-        pr.save(update_fields=['resolution_referral', 'updated_at'])
+        pr = self._record_rejection_referral(request, request.data.get('target'), request.data.get('remarks'))
         return Response(self._build_requisition_response(pr))
-    
+
     @action(detail=False, methods=['get'], url_path='check_po_conflict')
     def check_po_conflict(self, request):
         po_number = request.query_params.get('po_number', '').strip()
@@ -1434,6 +1453,15 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    def reopen(self, request, pk=None):
+        """Archive the rejected round and open a draft for explicit resubmission."""
+        from .services.requisition_revisions import reopen_requisition
+
+        observed = self.get_object()
+        pr = reopen_requisition(observed.pk, request, request.data.get('expected_updated_at', empty))
+        return Response(self._build_requisition_response(pr))
+
+    @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
         """Explicitly start approval after a saved draft has been confirmed."""
         from django.db import transaction
@@ -1449,7 +1477,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             if workflow is not None and canonicalize_pr_status(pr.status) == 'draft':
                 serializer = self.get_serializer(
                     pr,
-                    data={'approval_workflow_config': workflow},
+                    data={'approval_workflow_config': workflow, 'expected_updated_at': pr.updated_at},
                     partial=True,
                 )
                 serializer.is_valid(raise_exception=True)
@@ -1821,6 +1849,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             pk,
             request.user,
             require_signature=True,
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     
@@ -1830,6 +1859,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             pk,
             request.user,
             request.data.get('reason', ''),
+            expected_updated_at=request.data.get('expected_updated_at', empty),
         )
         return Response(self._build_requisition_response(pr))
     @action(detail=False, methods=['get'], url_path='export-to-excel')
@@ -1991,44 +2021,14 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], url_path='escalate-rejection')
     def escalate_rejection(self, request, pk=None):
-        pr = self.get_object()
-        
-        if pr.status != 'rejected':
-            return Response(
-                {'error': 'Only rejected PRs can be escalated'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        escalate_to = request.data.get('escalate_to', '').lower()
-        escalation_notes = request.data.get('escalation_notes', '')
-        
-        if escalate_to not in ['moe', 'mop']:
-            return Response(
-                {'error': 'escalate_to must be "moe" or "mop"'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if not escalation_notes:
-            return Response(
-                {'error': 'escalation_notes is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if escalate_to == 'moe':
-            pr.rejection_escalated_to_moe = True
-        else:
-            pr.rejection_escalated_to_mop = True
-        
-        pr.escalation_notes = escalation_notes
-        pr.escalation_initiated_by = request.user
-        pr.escalation_initiated_at = timezone.now()
-        pr.escalation_resolved = False
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
+        # Legacy callers share the real referral command instead of saving an
+        # unlocked, stale requisition with attributes that are not model fields.
+        pr = self._record_rejection_referral(
+            request, request.data.get('escalate_to'), request.data.get('escalation_notes'),
+        )
         return Response({
-            'message': f'PR escalated to {escalate_to.upper()} successfully',
-            'data': serializer.data
+            'message': f'PR escalated to {pr.resolution_referral["target"].upper()} successfully',
+            'data': self.get_serializer(pr).data,
         })
 
 
@@ -2253,7 +2253,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         warnings = []
         try:
             if output_format == 'word':
-                content = build_purchase_order_docx(order)
+                content, warnings = build_purchase_order_docx(order, with_warnings=True)
                 content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
                 filename = filename[:-4] + '.docx'
             else:
@@ -2282,9 +2282,9 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='export-word')
     def export_word(self, request, pk=None):
-        """Export the editable PO through Summary of Prices, without attachments."""
+        """Export the editable company PO with the PDF's supporting pages."""
         order = self.get_object()
-        content = build_purchase_order_docx(order)
+        content, warnings = build_purchase_order_docx(order, with_warnings=True)
         pdf_name = build_procurement_pdf_filename(order.po_number, 'po', order.po_date)
         filename = pdf_name[:-4] + '.docx'
         response = HttpResponse(
@@ -2292,6 +2292,9 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         )
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Cache-Control'] = 'no-store'
+        if warnings:
+            response['X-PO-Attachment-Warnings'] = str(len(warnings))
         return response
 
     @action(detail=False, methods=['get'], url_path='available-requisitions')

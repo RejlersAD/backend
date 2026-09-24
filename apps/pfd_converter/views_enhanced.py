@@ -1,3 +1,5 @@
+from rest_framework.exceptions import APIException
+from .artifacts import download_response
 """
 Enhanced PFD Converter Views
 API endpoints for AI-assisted PFD to P&ID conversion
@@ -166,16 +168,10 @@ def download_pid_pdf(request, conversion_id):
                 'error': 'Permission denied'
             }, status=status.HTTP_403_FORBIDDEN)
         
-        # Return PDF
-        if hasattr(conversion, 'pid_pdf') and conversion.pid_pdf:
-            response = HttpResponse(conversion.pid_pdf, content_type='application/pdf')
-            response['Content-Disposition'] = f'attachment; filename="Draft_PID_{conversion.pfd_document.document_number}.pdf"'
-            return response
-        else:
-            return Response({
-                'error': 'P&ID PDF not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-            
+        return download_response(conversion, request)
+
+    except APIException:
+        raise
     except PIDConversion.DoesNotExist:
         return Response({
             'error': 'Conversion not found'

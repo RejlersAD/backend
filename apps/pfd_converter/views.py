@@ -26,6 +26,7 @@ from .serializers import (
 from .services import PFDToPIDConverter
 from .services_advanced_pipeline import AdvancedPFDToPIDPipeline
 from apps.rbac.permissions import HasModuleAccess
+from . import artifacts
 
 
 class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
@@ -816,7 +817,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                         
                         graph_output_path = os.path.join(
                             graph_output_dir,
-                            f"{serializer.validated_data['pid_drawing_number']}_ultra.pdf"
+                            f"{conversion.id}_ultra.pdf"
                         )
                         
                         # Generate with ULTRA intelligence
@@ -900,7 +901,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 )
             
             return Response(
-                PIDConversionSerializer(conversion).data,
+                self.get_serializer(conversion).data,
                 status=status.HTTP_201_CREATED
             )
             
@@ -916,128 +917,31 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             )
     
     @action(detail=True, methods=['get'])
-    @tracked_http('pfd_to_pid', methods=('GET',))
     def download_drawing(self, request, pk=None):
-        """
-        Download P&ID drawing PDF with intelligent caching prevention
-        
-        GET /api/v1/pfd/conversions/{id}/download_drawing/
-        GET /api/v1/pfd/conversions/{id}/download_drawing/?force_regenerate=true
-        
-        5-Layer Caching Prevention:
-        1. UUID + timestamp filenames
-        2. HTTP cache-control headers
-        3. Old file deletion before regeneration
-        4. Query param timestamps (handled by frontend)
-        5. Unique download filenames with timestamps
-        """
-        try:
-            conversion = self.get_object()
-            force_regenerate = request.query_params.get('force_regenerate', 'false').lower() == 'true'
-            
-            logger.info(f"Download request for conversion {pk}, force_regenerate={force_regenerate}")
-            
-            # If force regenerate requested
-            if force_regenerate:
-                logger.info(f"🔄 Force regeneration requested for conversion {pk}")
-                
-                # Delete old file if exists
-                if conversion.pid_file:
-                    old_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
-                    if os.path.exists(old_path):
-                        os.remove(old_path)
-                        logger.info(f"🗑️ Deleted old file: {old_path}")
-                
-                # Auto-increment revision (A → B → C → D)
-                current_revision = conversion.pid_revision or 'A'
-                if current_revision and len(current_revision) == 1 and current_revision.isalpha():
-                    next_revision = chr(ord(current_revision) + 1)
-                    conversion.pid_revision = next_revision
-                    logger.info(f"📝 Revision updated: {current_revision} → {next_revision}")
-                
-                # Regenerate drawing with new timestamp and UUID
-                from .services_advanced_pipeline import AdvancedPFDToPIDPipeline
-                pipeline = AdvancedPFDToPIDPipeline()
-                
-                # Prepare drawing specs
-                drawing_specs = {
-                    'drawing_number': conversion.pid_drawing_number,
-                    'title': conversion.pid_title,
-                    'revision': conversion.pid_revision,
-                    'equipment': conversion.equipment_list or [],
-                    'instruments': conversion.instrument_list or [],
-                    'piping': conversion.piping_details or [],
-                    'safety_systems': conversion.safety_systems or []
-                }
-                
-                # Generate new P&ID
-                new_pid_path = pipeline.generate_programmatic_pid(drawing_specs)
-                conversion.pid_file = new_pid_path
-                conversion.save()
-                logger.info(f"✅ Generated new P&ID: {new_pid_path}")
-            
-            if not conversion.pid_file:
-                logger.warning(f"P&ID drawing not available for conversion {pk}")
-                
-                # Check if OpenAI API key is configured
-                from decouple import config
-                api_key = config('OPENAI_API_KEY', default='')
-                
-                if not api_key or api_key == '' or api_key.startswith('your-'):
-                    error_msg = (
-                        "P&ID drawing generation requires OpenAI API configuration. "
-                        "Please configure OPENAI_API_KEY in your environment variables or .env file. "
-                        "The system supports DALL-E 3 (HD quality) and DALL-E 2 (fallback) for AI-generated drawings."
-                    )
-                else:
-                    error_msg = (
-                        "P&ID drawing not generated yet. The generation may have failed or is still in progress. "
-                        "Please check the conversion status or try regenerating the drawing."
-                    )
-                
-                return Response(
-                    {'error': error_msg},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Build full path
-            drawing_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
-            logger.info(f"Attempting to serve file from: {drawing_path}")
-            
-            if not os.path.exists(drawing_path):
-                logger.error(f"Drawing file not found at path: {drawing_path}")
-                return Response(
-                    {'error': f'Drawing file not found on server. Path checked: {conversion.pid_file}'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Serve file with aggressive cache prevention headers
-            from django.http import FileResponse
-            from datetime import datetime
-            
-            response = FileResponse(open(drawing_path, 'rb'), content_type='application/pdf')
-            
-            # Layer 2: HTTP cache-control headers (prevent server/proxy caching)
-            response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-            response['Pragma'] = 'no-cache'
-            response['Expires'] = '0'
-            response['X-Content-Type-Options'] = 'nosniff'
-            
-            # Layer 5: Unique download filename with timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"{conversion.pid_drawing_number}_Rev{conversion.pid_revision}_{timestamp}.pdf"
-            response['Content-Disposition'] = f'attachment; filename="{filename}"'
-            
-            logger.info(f"✅ Successfully serving file: {drawing_path} as {filename}")
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error in download_drawing: {str(e)}", exc_info=True)
-            return Response(
-                {'error': f'Failed to download drawing: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
+        """Retrieve existing bytes only; legacy regeneration flags cannot mutate."""
+        return artifacts.download_response(self.get_object(), request)
+
+    @action(detail=True, methods=['post'])
+    def regenerate(self, request, pk=None):
+        """Create a distinct unreviewed output from the stored specifications."""
+        conversion = artifacts.regenerate(self.get_object(), request.user, request.data)
+        return Response(self.get_serializer(conversion).data, status=status.HTTP_201_CREATED)
+
+    def create(self, request, *args, **kwargs):
+        return Response({'detail': 'Use the Generate command to create conversion output.'},
+                        status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def perform_update(self, serializer):
+        # An output published after validation must not acquire stale metadata.
+        from django.db import transaction
+        from rest_framework.exceptions import ValidationError
+        with transaction.atomic():
+            current = PIDConversion.objects.select_for_update().get(pk=serializer.instance.pk)
+            if current.pid_file or current.pid_pdf or current.reviewed_at or current.reviewed_by_id:
+                raise ValidationError('Stored output metadata is preserved. Use a separate regeneration command.')
+            serializer.instance = current
+            serializer.save()
+
     @action(detail=False, methods=['post'], url_path='verify-pid')
     @tracked_http('pfd_to_pid')
     def verify_pid(self, request):
@@ -1291,17 +1195,9 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve P&ID conversion"""
-        conversion = self.get_object()
-        from apps.rbac.approval_eligibility import require_configured_approval
-        require_configured_approval(request.user, 'pfd_to_pid', conversion, 'approve')
-        conversion.reviewed_by = request.user
-        conversion.reviewed_at = timezone.now()
-        conversion.review_notes = request.data.get('review_notes', '')
-        conversion.status = 'approved'
-        conversion.save()
-        
-        return Response(PIDConversionSerializer(conversion).data)
-    
+        conversion = artifacts.approve_exact_output(self.get_object(), request.user, request.data)
+        return Response(self.get_serializer(conversion).data)
+
     @action(detail=True, methods=['get'], url_path='load-to-canvas')
     @tracked_http('pfd_to_pid', methods=('GET',))
     def load_to_canvas(self, request, pk=None):
@@ -1649,7 +1545,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 # Prepare output path
                 output_dir = os.path.join(settings.MEDIA_ROOT, 'pid_drawings_intelligent')
                 os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.join(output_dir, f"{pid_drawing_number}_intelligent.png")
+                output_path = os.path.join(output_dir, f"{conversion.id}_intelligent.png")
                 
                 # Initialize intelligent generator
                 generator = IntelligentPIDGenerator(reference_pid_path)
@@ -1687,7 +1583,7 @@ class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 logger.info(f"✅ Intelligent P&ID generation completed: {relative_path}")
                 
                 return Response(
-                    PIDConversionSerializer(conversion).data,
+                    self.get_serializer(conversion).data,
                     status=status.HTTP_201_CREATED
                 )
                 

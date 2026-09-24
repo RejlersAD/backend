@@ -9,6 +9,7 @@ from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.fields import empty
 
 from ..models import PurchaseRequisition
 from .requisition_status import canonicalize_pr_status
@@ -575,12 +576,17 @@ class RequisitionWorkflowService:
 
     @classmethod
     @transaction.atomic
-    def approve(cls, pr_id, actor, signature='', expected_stage_key=None, require_signature=False):
+    def approve(cls, pr_id, actor, signature='', expected_stage_key=None, require_signature=False, expected_updated_at=empty):
         pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
-        return cls._approve_locked(pr, actor, signature, expected_stage_key, require_signature)
+        return cls._approve_locked(pr, actor, signature, expected_stage_key, require_signature, expected_updated_at)
 
     @classmethod
-    def _approve_locked(cls, pr, actor, signature='', expected_stage_key=None, require_signature=False):
+    def _check_decision_precondition(cls, pr, expected_updated_at=empty):
+        from .requisition_concurrency import check_requisition_precondition
+        check_requisition_precondition(pr, expected_updated_at)
+
+    @classmethod
+    def _approve_locked(cls, pr, actor, signature='', expected_stage_key=None, require_signature=False, expected_updated_at=empty):
         workflow = cls._workflow(pr)
         current_status = canonicalize_pr_status(pr.status)
         if not cls._is_awaiting_approval(pr, workflow):
@@ -588,6 +594,7 @@ class RequisitionWorkflowService:
         evidence_recovery = current_status == 'converted'
         active_level, active_stages = cls._active_level_stages(pr, workflow)
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
+        cls._check_decision_precondition(pr, expected_updated_at)
         if evidence_recovery and not stage.get('evidence_requested_at'):
             raise ValidationError({'error': 'Approval evidence has not been requested for this stage.'})
 
@@ -666,12 +673,12 @@ class RequisitionWorkflowService:
 
     @classmethod
     @transaction.atomic
-    def reject(cls, pr_id, actor, reason, expected_stage_key=None):
+    def reject(cls, pr_id, actor, reason, expected_stage_key=None, expected_updated_at=empty):
         pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
-        return cls._reject_locked(pr, actor, reason, expected_stage_key)
+        return cls._reject_locked(pr, actor, reason, expected_stage_key, expected_updated_at)
 
     @classmethod
-    def _reject_locked(cls, pr, actor, reason, expected_stage_key=None):
+    def _reject_locked(cls, pr, actor, reason, expected_stage_key=None, expected_updated_at=empty):
         workflow = cls._workflow(pr)
         current_status = canonicalize_pr_status(pr.status)
         if not cls._is_awaiting_approval(pr, workflow):
@@ -686,6 +693,7 @@ class RequisitionWorkflowService:
 
         _, active_stages = cls._active_level_stages(pr, workflow)
         _, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
+        cls._check_decision_precondition(pr, expected_updated_at)
         if evidence_recovery and not stage.get('evidence_requested_at'):
             raise ValidationError({'error': 'Approval evidence has not been requested for this stage.'})
 

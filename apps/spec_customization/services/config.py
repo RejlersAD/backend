@@ -160,7 +160,8 @@ SPEC_EXTRACTION_CONFIG = {
 # ("ADNOC LNG PIPING SPECIFICATIONS", "Page 5 of 181", doc number, owner).
 # Sent to the AI unfiltered, this furniture invites false class detections and
 # pollutes the token budget. A line is treated as furniture when its
-# digit-normalised form repeats on at least `min_repeat_ratio` of the pages in
+# whitespace-normalised form repeats on at least two distinct pages and
+# `min_repeat_ratio` of the pages in
 # a chunk, within the first `max_top_lines` / last `max_bottom_lines`
 # non-empty lines of each page. Tune here only — no code changes elsewhere.
 HEADER_FOOTER_STRIP_CONFIG = {

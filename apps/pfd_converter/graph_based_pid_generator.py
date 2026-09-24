@@ -30,6 +30,8 @@ import math
 import os
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 # Azure P&ID Algorithm Integration (adapted for local use)
 try:
     from apps.pfd_converter.azure_algorithms.integration import (
@@ -41,9 +43,6 @@ try:
 except ImportError:
     AZURE_ALGORITHMS_AVAILABLE = False
     logger.info("Azure algorithms not available (optional enhancement)")
-
-logger = logging.getLogger(__name__)
-
 
 def normalize_equipment_data(equipment_list: List[Dict]) -> List[Dict]:
     """

@@ -893,6 +893,15 @@ def import_signed_pr_pdf(
         )
     pr = PurchaseRequisition.objects.select_for_update().filter(pr_number__iexact=fields["pr_number"]).first()
     previous_metadata = (pr.price_remarks_data or {}) if pr is not None else {}
+    if previous_metadata.get('approval_revision_history'):
+        # A signed import can otherwise replace the live route and mark the
+        # edited round approved using evidence from before its rejection.
+        # Retained originals remain readable; this round must use its own
+        # explicit submission and assigned approval decisions.
+        raise SignedPRImportError(
+            "This requisition was reopened after rejection. Edit and send it for approval in RADAI; "
+            "a signed PDF cannot replace its current approval round. The original documents were kept."
+        )
     previous_verification = previous_metadata.get("signed_document_verification") or {}
     same_document = previous_verification.get("document_sha256") == digest
     effective_signature_overrides = manual_signature_overrides

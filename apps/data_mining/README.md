@@ -1,14 +1,78 @@
 # Data Mining Platform
 
 ## Overview
-AI-powered data integration and transformation platform with Wrench project integration. Provides Tableau Prep-style visual pipeline building for creating master files from multiple documents.
+Data integration and transformation tools with Wrench project selection and a visual pipeline editor. Genuine document extraction is currently unavailable. Existing saved extracted tables can be transformed and exported; the UI's create/pipeline persistence gaps (audit F02) are not corrected by F01.
+
+## Operational contract — F01 correction, 24 September 2026
+
+The extraction action no longer writes fixed sample rows. It returns HTTP 503
+`extraction_unavailable` after authorization and record lookup, without changing
+any sources, results, status or configuration. The same unavailable outcome
+prevents execution from silently omitting selected sources that lack completed data.
+
+| Operation | Required access and actual outcome |
+| --- | --- |
+| `POST projects/{id}/extract_data/` | Existing guarded `data_mining.create` plus project scope; HTTP 503 without fabricated results or database mutations. |
+| `POST projects/{id}/execute_pipeline/` | Existing create guard **and** current export grant, project scope, saved pipeline and prepared data for every source. Serializes the existing transformation result, saves a unique private object, checks existence and exact read-back, then commits result metadata. |
+| `GET projects/{id}/download_master/` | Existing export guard plus current project scope. Streams an actual stored file as an attachment; never redirects to an arbitrary stored URL. Optional `expected_master_file` must match the current artifact, otherwise HTTP 409 `artifact_changed`. |
+
+Execution success returns `{status: 'completed', artifact_available: true,
+master_file, filename, rows_processed, execution_time, preview}`. `master_file` is
+an opaque project-owned storage key, **not a public download URL**. The frontend
+requires the explicit completion/artifact confirmation and uses its authenticated
+API client for downloading, including the expected key.
+
+Errors retain the existing string `error` convention plus stable `code`:
+
+- HTTP 400 `pipeline_missing`: no saved pipeline; F02 remains unresolved.
+- HTTP 503 `extraction_unavailable`: source extraction is unsupported or some
+  selected source lacks prepared data. No invented rows or partial completion.
+- HTTP 503 `artifact_storage_unavailable`: save, existence, read-back or open failed.
+- HTTP 500 `pipeline_execution_failed`: transformation, serialization or metadata
+  persistence failed. No new completed result or download is claimed.
+- HTTP 404 `artifact_unavailable`: missing file or unsupported legacy/arbitrary
+  storage pointer. Existing values are preserved, not repaired or deleted.
+- HTTP 409 `artifact_changed`: another execution replaced the currently displayed
+  result; the requested download produces no bytes.
+- Existing authentication, action denials (403) and safe cross-owner lookup (404)
+  remain authoritative, including when grants change after execution.
+
+Local artifacts use `BASE_DIR/private/data-mining`, outside the publicly served
+media tree. An overlapping local root or a remote backend without declared private
+ACL/authenticated URLs fails closed. Existing private remote storage is reused;
+no public fallback, bucket permission or infrastructure change is introduced.
+Stored keys are unique under `data-mining/{project UUID}/exports/{run UUID}.{ext}`.
+Download responses are `private, no-store` and `nosniff`.
+
+Prior files remain untouched. Previous project/step result metadata is appended
+to the pipeline's existing log before latest-result fields change; log text is
+preserved. Pipeline reads follow the existing project owner/admin rule. Generated
+project result fields and pipeline log/time are read-only to generic edits. This
+is not a new approval system or verification of historical extraction accuracy.
+
+Failed execution rolls back database changes and preserves prior evidence. Storage
+and database commits are not one distributed transaction: a failed read-back or
+metadata commit may leave a new unreferenced private object, never reported as
+completed. No historical cleanup runs. Live S3, Wrench and provider behavior are
+not certified by local tests. Parquet requires an available pandas writer; missing
+dependencies fail explicitly. CSV preserves raw values; consumers determine how
+those values are interpreted. XLSX stores source text literally, including `=`
+prefixes, rather than silently converting it into formulas.
+
+The UI retains project/source selections and local pipeline steps on failure,
+shows persistent unavailable/denied/failed alerts, and rejects legacy success
+responses without verified-artifact fields. These input-preservation checks do
+not imply that local pipeline edits are persisted (F02).
+
+See the [scoped brief and verification evidence](../../../docs/features/data-mining-truthful-results.md)
+and [guarded synthetic tests](tests.py). Shared context lives outside this Git repository.
 
 ## Features
 
 ### 1. Wrench Integration
 - **Project Selection**: Browse and select Wrench projects
 - **Document Search**: Search and select multiple documents from Wrench
-- **Automatic Download**: Documents are automatically retrieved for processing
+- **Document retrieval/extraction**: No genuine extraction adapter is connected to the operational extraction action; selected metadata is retained for future authorized processing.
 
 ### 2. Visual Pipeline Builder
 Soft-coded transformation operations:
@@ -66,10 +130,10 @@ Take random subset
 - **Config**: `sample_size` or `sample_fraction`, `random_state`
 
 ### 3. Execution & Output
-- **Real-time Processing**: Execute pipeline and see live progress
+- **Processing**: Synchronous execution of the existing saved pipeline using already prepared source tables
 - **Data Preview**: View first 20 rows of results
-- **Master File**: Export to CSV, Excel, JSON, or Parquet
-- **Statistics**: Row count, execution time, file size
+- **Master File**: CSV, Excel, JSON, or Parquet only after successful serialization and verified private storage; required format dependencies must be available
+- **Statistics**: Actual row count and elapsed execution time for the completed operation
 
 ## Architecture
 
@@ -99,7 +163,7 @@ PATCH  /api/v1/data-mining/projects/{id}/             - Update project
 DELETE /api/v1/data-mining/projects/{id}/             - Delete project
 
 POST   /api/v1/data-mining/projects/{id}/add_documents/     - Add Wrench documents
-POST   /api/v1/data-mining/projects/{id}/extract_data/      - Extract data from docs
+POST   /api/v1/data-mining/projects/{id}/extract_data/      - Explicit extraction-unavailable outcome (503)
 POST   /api/v1/data-mining/projects/{id}/execute_pipeline/  - Run pipeline
 GET    /api/v1/data-mining/projects/{id}/download_master/   - Download master file
 
@@ -144,6 +208,11 @@ GET    /api/v1/data-mining/wrench/search/            - Search Wrench documents
 - `execution_time_ms`
 
 ## Usage Example
+
+This is the intended journey, not a claim that new-project creation and local
+pipeline configuration are fully connected. Audit F02 remains open. A newly
+selected source cannot be genuinely extracted by the current route; successful
+export requires an existing saved pipeline and prepared source tables.
 
 1. **Create Project**
    ```
@@ -202,14 +271,18 @@ All transformation configs follow JSON schema:
 Module code: `data_mining`
 
 Permissions:
-- `data_mining.view` - View own projects
-- `data_mining.create` - Create new projects
-- `data_mining.execute` - Run pipelines
-- `data_mining.admin` - View all projects
+- `data_mining.read` - Read permitted projects and pipelines
+- `data_mining.create` - Create/add sources and invoke the extraction/execution actions
+- `data_mining.update` - Edit permitted configuration, excluding generated result/history fields
+- `data_mining.export` - Required in addition to create for execution, and rechecked for download
+
+The registered guard uses these existing action names, not a separate `execute`
+grant. Project/pipeline scope retains the existing owner rule and `user.is_admin`
+exception; it does not establish new organizational visibility policy.
 
 ## Future Enhancements
 - [ ] Real document extraction (PDF tables, Excel sheets)
-- [ ] S3 integration for file storage
+- [ ] Live validation of configured private remote storage and provider contracts
 - [ ] Advanced AI transformations (NLP, classification)
 - [ ] Scheduled pipeline execution
 - [ ] Version control for pipelines

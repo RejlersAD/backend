@@ -1,3 +1,6 @@
+from rest_framework.exceptions import APIException
+from .artifacts import download_response
+from .serializers import PIDConversionSerializer
 """
 PFD Converter History API
 Provides user-specific PFD upload and conversion history with download capabilities
@@ -168,18 +171,20 @@ def pfd_all_conversions(request):
         
         conversions_data = []
         for conversion in conversions_page:
+            output = PIDConversionSerializer(conversion, context={'request': request}).data
             conversions_data.append({
+                **output,
                 'id': conversion.id,
                 'pfd_id': conversion.pfd_document.id,
                 'document_number': conversion.pid_drawing_number,
                 'document_title': conversion.pid_title,
                 'project_name': conversion.pfd_document.project_name,
-                'revision': conversion.pfd_document.revision,
+                'revision': conversion.pid_revision,
                 'status': conversion.status,
                 'confidence_score': conversion.confidence_score,
                 'created_at': conversion.created_at.isoformat(),
                 'updated_at': conversion.updated_at.isoformat(),
-                'can_download': conversion.status == 'completed',
+                'can_download': 'download' in output['allowed_actions'],
                 'filename': f"{conversion.pid_drawing_number}.pdf"
             })
         
@@ -276,34 +281,11 @@ def download_converted_pid(request, conversion_id):
                 'error': 'Conversion not found or access denied'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        if conversion.status != 'completed':
-            return Response({
-                'success': False,
-                'error': 'Conversion not yet completed'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        if not conversion.pid_file:
-            return Response({
-                'success': False,
-                'error': 'P&ID file not available'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        # Return P&ID PDF for download
-        try:
-            filename = f"{conversion.pid_drawing_number}_PID.pdf"
-            response = FileResponse(
-                conversion.pid_file.open('rb'),
-                content_type='application/pdf'
-            )
-            response['Content-Disposition'] = f'attachment; filename="{filename}"'
-            return response
-        except Exception as file_error:
-            logger.error(f"Error opening P&ID file: {str(file_error)}")
-            return Response({
-                'success': False,
-                'error': 'P&ID file could not be opened'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+        return download_response(conversion, request)
+
+    except APIException:
+        raise
+
     except Exception as e:
         logger.error(f"Error downloading converted P&ID: {str(e)}", exc_info=True)
         return Response({

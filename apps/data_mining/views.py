@@ -6,16 +6,21 @@ import logging
 import json
 import pandas as pd
 import io
+import re
+import uuid
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
+from django.core.files.base import ContentFile
+from django.http import FileResponse
 from django.utils import timezone
 from django.db import transaction
 
 from apps.wrench_integration import service as wrench_service
 from apps.wrench_integration.models import WrenchConfig
-from apps.rbac.permissions import IsAdmin
+from apps.rbac.action_policy import request_action_allowed
 
 from .models import (
     DataMiningProject,
@@ -31,8 +36,45 @@ from .serializers import (
     TransformationStepSerializer,
 )
 from .transformation_engine import TransformationEngine
+from .storage import master_storage
 
 logger = logging.getLogger(__name__)
+
+
+def valid_master_key(project, key):
+    """Never interpret legacy URLs or caller-supplied arbitrary storage paths."""
+    prefix = re.escape(f'data-mining/{project.pk}/exports/')
+    return isinstance(key, str) and bool(re.fullmatch(prefix + r'[a-f0-9]{32}\.(csv|xlsx|json|parquet)', key))
+
+
+def table_preview(dataframe, limit):
+    """Use pandas JSON normalization for nulls and timestamp-like values."""
+    table = json.loads(dataframe.head(limit).to_json(orient='split', date_format='iso'))
+    return {'columns': table['columns'], 'rows': table['data']}
+
+
+def serialize_master(dataframe, file_format):
+    """Serialize existing transformed data using the already-supported formats."""
+    if file_format == 'csv':
+        return dataframe.to_csv(index=False).encode('utf-8'), 'csv'
+    if file_format == 'json':
+        return dataframe.to_json(orient='records', date_format='iso').encode('utf-8'), 'json'
+    output = io.BytesIO()
+    if file_format == 'excel':
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            dataframe.to_excel(writer, index=False)
+            # Extracted strings are evidence, not executable spreadsheet formulas
+            # or Excel error cells. Preserve their exact text, including headers.
+            for sheet in writer.book.worksheets:
+                for row in sheet:
+                    for cell in row:
+                        if cell.data_type in {'f', 'e'}:
+                            cell.data_type = 's'
+        return output.getvalue(), 'xlsx'
+    if file_format == 'parquet':
+        dataframe.to_parquet(output, index=False)
+        return output.getvalue(), 'parquet'
+    raise ValueError('Unsupported export format.')
 
 
 class DataMiningProjectViewSet(viewsets.ModelViewSet):
@@ -117,199 +159,216 @@ class DataMiningProjectViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def extract_data(self, request, pk=None):
-        """
-        Extract tabular data from uploaded documents
-        Uses AI/OCR to extract tables from PDFs, Excel, etc.
-        
-        This is a placeholder - actual implementation would use:
-        - PDF table extraction (Camelot, Tabula, Azure Form Recognizer)
-        - Excel reading (openpyxl, xlrd)
-        - OCR for scanned documents
-        """
-        project = self.get_object()
-        
-        # Soft-coded extraction logic placeholder
-        # In production, this would:
-        # 1. Download documents from Wrench/S3
-        # 2. Use appropriate extraction method based on file type
-        # 3. Store extracted data in document.extracted_data JSONField
-        
-        documents = project.documents.filter(extraction_status='pending')
-        
-        for doc in documents:
-            # Placeholder: simulate extraction
-            doc.extraction_status = 'completed'
-            # Simulated extracted data (would be real table data from document)
-            doc.extracted_data = {
-                'columns': ['Item', 'Description', 'Quantity', 'Unit Price'],
-                'rows': [
-                    ['PUMP-001', 'Centrifugal Pump', 2, 15000],
-                    ['VALVE-001', 'Gate Valve 6"', 10, 850],
-                ]
-            }
-            doc.row_count = len(doc.extracted_data.get('rows', []))
-            doc.column_count = len(doc.extracted_data.get('columns', []))
-            doc.save()
-        
-        project.status = 'configuring'
-        project.save()
-        
-        return Response({
-            'message': f'Extracted data from {documents.count()} documents',
-            'project': DataMiningProjectSerializer(project).data
-        })
-    
+        """No genuine source extractor is connected to this operational route."""
+        self.get_object()  # Keep record scope checks before disclosing capability.
+        return Response(
+            {
+                'code': 'extraction_unavailable',
+                'error': 'Document extraction is unavailable. Sources, configuration and existing results are unchanged.',
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
     @action(detail=True, methods=['post'])
     def execute_pipeline(self, request, pk=None):
-        """
-        Execute the transformation pipeline and generate master file
-        """
+        """Transform existing extracted inputs; publish only verified artifacts."""
         project = self.get_object()
-        
+        # The registered action already requires create. This command also
+        # produces an export, so it must not bypass the download/export grant.
+        if not request_action_allowed(request, 'data_mining', 'export'):
+            raise PermissionDenied('You do not have export permission for this module.')
+
+        failure_stage = 'transformation'
         try:
-            pipeline = project.pipeline
-        except TransformationPipeline.DoesNotExist:
-            return Response(
-                {'error': 'No pipeline configured for this project'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Load source documents as DataFrames
-        dataframes = {}
-        for doc in project.documents.filter(extraction_status='completed'):
-            if doc.extracted_data:
-                # Convert JSONField data to DataFrame
-                df = pd.DataFrame(
-                    doc.extracted_data.get('rows', []),
-                    columns=doc.extracted_data.get('columns', [])
-                )
-                dataframes[str(doc.id)] = df
-        
-        if not dataframes:
-            return Response(
-                {'error': 'No extracted data available. Please run extract_data first.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Execute pipeline steps in order
-        engine = TransformationEngine()
-        step_outputs = {}
-        
-        with transaction.atomic():
-            project.status = 'executing'
-            project.save()
-            
-            start_time = timezone.now()
-            
-            for step in pipeline.steps.order_by('sequence_order'):
+            with transaction.atomic():
+                project = DataMiningProject.objects.select_for_update().get(pk=project.pk)
                 try:
-                    step.status = 'executing'
-                    step.save()
-                    
-                    # Get input DataFrame
+                    pipeline = project.pipeline
+                except TransformationPipeline.DoesNotExist:
+                    return Response(
+                        {'code': 'pipeline_missing', 'error': 'No pipeline configured for this project.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                documents = list(project.documents.all())
+                if not documents or any(
+                    doc.extraction_status != 'completed' or not doc.extracted_data
+                    for doc in documents
+                ):
+                    return Response(
+                        {
+                            'code': 'extraction_unavailable',
+                            'error': 'Every selected source needs existing extracted data. Document extraction is unavailable; sources and configuration are unchanged.',
+                        },
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+
+                start_time = timezone.now()
+                dataframes = {}
+                for doc in documents:
+                    source = doc.extracted_data
+                    if not isinstance(source, dict) or not isinstance(source.get('rows'), list) or not isinstance(source.get('columns'), list):
+                        raise ValueError('Invalid extracted table.')
+                    dataframes[str(doc.pk)] = pd.DataFrame(source['rows'], columns=source['columns'])
+
+                engine = TransformationEngine()
+                step_outputs = {}
+                step_results = []
+                steps = list(pipeline.steps.order_by('sequence_order'))
+                for step in steps:
                     if step.input_source:
-                        # Input from previous step or document
-                        input_df = step_outputs.get(step.input_source) or dataframes.get(step.input_source)
+                        input_df = step_outputs.get(step.input_source)
                         if input_df is None:
-                            raise ValueError(f"Input source '{step.input_source}' not found")
+                            input_df = dataframes.get(step.input_source)
+                        if input_df is None:
+                            raise ValueError('Input source unavailable.')
                     else:
-                        # Use first available document as default input
-                        input_df = list(dataframes.values())[0]
-                    
-                    # Collect additional inputs for operations like join, union
+                        input_df = next(iter(dataframes.values()))
                     additional_inputs = {}
                     if step.operation_type in ['join', 'union']:
-                        # Make all previous outputs and documents available
                         additional_inputs.update(step_outputs)
                         additional_inputs.update(dataframes)
-                    
-                    # Execute transformation
                     step_start = timezone.now()
-                    output_df = engine.execute(
-                        step.operation_type,
-                        input_df,
-                        step.config,
-                        additional_inputs
-                    )
-                    step_end = timezone.now()
-                    
-                    # Store output
-                    step_outputs[str(step.id)] = output_df
-                    
-                    # Update step with results
-                    step.status = 'completed'
-                    step.output_row_count = len(output_df)
-                    step.output_column_count = len(output_df.columns)
-                    step.execution_time_ms = (step_end - step_start).total_seconds() * 1000
-                    
-                    # Store preview (first 100 rows)
-                    preview_df = output_df.head(100)
-                    step.output_preview = {
-                        'columns': preview_df.columns.tolist(),
-                        'rows': preview_df.values.tolist()
-                    }
-                    step.save()
-                    
-                except Exception as e:
-                    step.status = 'failed'
-                    step.error_message = str(e)
-                    step.save()
-                    
-                    project.status = 'failed'
-                    project.save()
-                    
-                    return Response(
-                        {'error': f'Step "{step.step_name}" failed: {str(e)}'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-            
-            # Get final output (last step or first document if no steps)
-            if step_outputs:
-                final_df = list(step_outputs.values())[-1]
-            else:
-                final_df = list(dataframes.values())[0]
-            
-            # Save master file (placeholder - would upload to S3)
-            project.total_rows_processed = len(final_df)
-            project.master_file_path = f"s3://data-mining/{project.id}/master.{project.master_file_format}"
-            project.status = 'completed'
-            project.executed_at = timezone.now()
-            project.execution_time_seconds = (timezone.now() - start_time).total_seconds()
-            project.save()
-            
-            pipeline.last_executed_at = timezone.now()
-            pipeline.save()
-        
+                    output_df = engine.execute(step.operation_type, input_df, step.config, additional_inputs)
+                    step_outputs[str(step.pk)] = output_df
+                    step_results.append((step, {
+                        'status': 'completed',
+                        'output_row_count': len(output_df),
+                        'output_column_count': len(output_df.columns),
+                        'execution_time_ms': (timezone.now() - step_start).total_seconds() * 1000,
+                        'output_preview': table_preview(output_df, 100),
+                        'error_message': '',
+                    }))
+
+                final_df = list(step_outputs.values())[-1] if step_outputs else next(iter(dataframes.values()))
+                failure_stage = 'serialization'
+                content, extension = serialize_master(final_df, project.master_file_format)
+                preview = table_preview(final_df, 20)
+                failure_stage = 'storage'
+                storage = master_storage()
+                run_id = uuid.uuid4().hex
+                artifact_key = f'data-mining/{project.pk}/exports/{run_id}.{extension}'
+                saved_key = storage.save(artifact_key, ContentFile(content))
+                if not valid_master_key(project, saved_key) or not storage.exists(saved_key):
+                    raise OSError('Artifact storage did not produce a valid object.')
+                with storage.open(saved_key, 'rb') as stored_file:
+                    if stored_file.read() != content:
+                        raise OSError('Stored artifact does not match the generated output.')
+
+                # Files use unique keys. Retain the preceding result metadata in
+                # the existing log before changing the latest-result fields.
+                completed_at = timezone.now()
+                run_record = {
+                    'run_id': run_id,
+                    'executed_by': str(request.user.pk),
+                    'executed_at': completed_at.isoformat(),
+                    'master_file_path': saved_key,
+                    'source_documents': [
+                        {'id': str(doc.pk), 'updated_at': doc.updated_at.isoformat()}
+                        for doc in documents
+                    ],
+                    'previous_result': {
+                        'status': project.status,
+                        'master_file_path': project.master_file_path,
+                        'total_rows_processed': project.total_rows_processed,
+                        'executed_at': project.executed_at.isoformat() if project.executed_at else None,
+                        'execution_time_seconds': project.execution_time_seconds,
+                        'pipeline_last_executed_at': pipeline.last_executed_at.isoformat() if pipeline.last_executed_at else None,
+                        'steps': [
+                            {
+                                'id': str(step.pk), 'status': step.status,
+                                'output_preview': step.output_preview,
+                                'output_row_count': step.output_row_count,
+                                'output_column_count': step.output_column_count,
+                                'execution_time_ms': step.execution_time_ms,
+                                'error_message': step.error_message,
+                            }
+                            for step in steps
+                        ],
+                    },
+                }
+                failure_stage = 'persistence'
+                for step, values in step_results:
+                    for field, value in values.items():
+                        setattr(step, field, value)
+                    step.save(update_fields=[*values, 'updated_at'])
+
+                project.total_rows_processed = len(final_df)
+                project.master_file_path = saved_key
+                project.status = 'completed'
+                project.executed_at = completed_at
+                project.execution_time_seconds = (completed_at - start_time).total_seconds()
+                project.save(update_fields=[
+                    'total_rows_processed', 'master_file_path', 'status',
+                    'executed_at', 'execution_time_seconds', 'updated_at',
+                ])
+                pipeline.last_executed_at = completed_at
+                pipeline.execution_log = (pipeline.execution_log + '\n' if pipeline.execution_log else '') + json.dumps(run_record)
+                pipeline.save(update_fields=['last_executed_at', 'execution_log', 'updated_at'])
+        except Exception:
+            # Do not expose source values, provider errors or filesystem details.
+            logger.warning('Data Mining execution failed', extra={
+                'project_id': str(project.pk), 'failure_stage': failure_stage,
+            })
+            storage_failure = failure_stage == 'storage'
+            return Response(
+                {
+                    'code': 'artifact_storage_unavailable' if storage_failure else 'pipeline_execution_failed',
+                    'error': (
+                        'The export could not be stored and verified. Sources, configuration and previous results are unchanged.'
+                        if storage_failure else
+                        'The pipeline could not produce an export. Sources, configuration and previous results are unchanged.'
+                    ),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE if storage_failure else status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
         return Response({
-            'message': 'Pipeline executed successfully',
+            'status': 'completed',
+            'artifact_available': True,
+            'message': 'Pipeline completed and the export was stored.',
             'rows_processed': project.total_rows_processed,
             'execution_time': project.execution_time_seconds,
             'master_file': project.master_file_path,
-            'preview': {
-                'columns': final_df.columns.tolist(),
-                'rows': final_df.head(20).values.tolist()
-            }
+            'filename': f'master.{extension}',
+            'preview': preview,
         })
-    
+
     @action(detail=True, methods=['get'])
     def download_master(self, request, pk=None):
-        """
-        Download the generated master file
-        (Placeholder - would download from S3)
-        """
+        """Stream the actual project-owned artifact after current authorization."""
         project = self.get_object()
-        
-        if not project.master_file_path:
+        expected_key = request.query_params.get('expected_master_file')
+        if expected_key is not None and expected_key != project.master_file_path:
             return Response(
-                {'error': 'No master file generated yet. Please execute the pipeline first.'},
-                status=status.HTTP_404_NOT_FOUND
+                {'code': 'artifact_changed', 'error': 'The project export changed. Refresh the result before downloading.'},
+                status=status.HTTP_409_CONFLICT,
             )
-        
-        return Response({
-            'download_url': project.master_file_path,
-            'format': project.master_file_format,
-            'message': 'Download functionality placeholder - implement S3 download'
-        })
+        if not valid_master_key(project, project.master_file_path):
+            return Response(
+                {'code': 'artifact_unavailable', 'error': 'No verified stored export is available for this project.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            storage = master_storage()
+            if not storage.exists(project.master_file_path):
+                raise FileNotFoundError
+            stored_file = storage.open(project.master_file_path, 'rb')
+        except FileNotFoundError:
+            return Response(
+                {'code': 'artifact_unavailable', 'error': 'The stored export is unavailable. No download was started.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception:
+            logger.warning('Data Mining export storage unavailable', extra={'project_id': str(project.pk)})
+            return Response(
+                {'code': 'artifact_storage_unavailable', 'error': 'Export storage is unavailable. Please try again later.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        extension = project.master_file_path.rsplit('.', 1)[1]
+        response = FileResponse(stored_file, as_attachment=True, filename=f'master.{extension}')
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
 
 class TransformationPipelineViewSet(viewsets.ModelViewSet):
@@ -319,6 +378,13 @@ class TransformationPipelineViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = TransformationPipelineSerializer
     queryset = TransformationPipeline.objects.all()
+
+    def get_queryset(self):
+        # Generated previews/history inherit the existing project owner scope.
+        user = self.request.user
+        if hasattr(user, 'is_admin') and user.is_admin:
+            return TransformationPipeline.objects.all()
+        return TransformationPipeline.objects.filter(project__created_by=user)
     
     @action(detail=True, methods=['post'])
     def add_step(self, request, pk=None):

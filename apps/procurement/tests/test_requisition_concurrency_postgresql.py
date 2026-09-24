@@ -207,6 +207,7 @@ class PurchaseRequisitionPostgreSQLConcurrencyTests(TransactionTestCase):
                    for name, operation in (('winner', winner), ('contender', contender))]
         try:
             with patch('apps.procurement.serializers.check_requisition_precondition', side_effect=checked), \
+                    patch('apps.procurement.services.requisition_revisions.check_requisition_precondition', side_effect=checked), \
                     patch('apps.procurement.services.requisition_concurrency.check_requisition_precondition', side_effect=checked):
                 threads[0].start()
                 self.assertTrue(acquired.wait(WAIT_SECONDS), f'Winner never reached its locked precondition: {failures}')
@@ -341,6 +342,38 @@ class PurchaseRequisitionPostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(self.pr.status, 'submitted')
         self.assertEqual(self.notices().get().recipient_id, self.procurement.pk)
         self.tasks['teams'].assert_called_once()
+
+    def test_same_token_reopens_archive_one_rejected_round_without_notifying(self):
+        submitted = self.request('post', {'expected_updated_at': self.token}, 'submit/')
+        self.assertEqual(submitted.status_code, 200, submitted.data)
+        approver_client = APIClient()
+        approver_client.force_authenticate(self.procurement)
+        rejected = self.request('post', {
+            'reason': 'Correct the scope before requesting approval again.',
+            'expected_updated_at': submitted.data['updated_at'],
+        }, 'process_dynamic_rejection/', approver_client)
+        self.assertEqual(rejected.status_code, 200, rejected.data)
+        self.pr.refresh_from_db()
+        rejected_workflow = deepcopy(self.pr.approval_workflow_config)
+        self.original_notification_ids = set(Notification.objects.values_list('pk', flat=True))
+        for task in self.tasks.values():
+            task.reset_mock()
+
+        operation = ('post', {'expected_updated_at': rejected.data['updated_at']}, 'reopen/')
+        winner, loser = self.race(operation, operation)
+        self.assertEqual(winner.status_code, 200, winner.data)
+        self.assert_conflict(loser)
+        self.pr.refresh_from_db()
+        self.assertEqual(self.pr.status, 'draft')
+        history = self.pr.price_remarks_data['approval_revision_history']
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]['approval_workflow_config'], rejected_workflow)
+        self.assertEqual(history[0]['snapshot']['status'], 'rejected')
+        self.assertTrue(all(stage['status'] == 'pending' for stage in self.pr.approval_workflow_config))
+        self.assertTrue(set(stage['assignment_id'] for stage in self.pr.approval_workflow_config).isdisjoint(
+            stage.get('assignment_id') for stage in rejected_workflow
+        ))
+        self.assert_no_new_notifications()
 
     def test_stale_edit_and_submit_leave_all_row_fields_and_notifications_unchanged(self):
         updated = self.request('patch', {'notes': 'New saved content', 'expected_updated_at': self.token})

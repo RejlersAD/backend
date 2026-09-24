@@ -82,9 +82,15 @@ class WrenchConfigViewSet(viewsets.ViewSet):
     def list(self, request):
         cfg = WrenchConfig.objects.filter(is_active=True).first()
         if not cfg:
-            return Response({'configured': False, 'config': None})
+            return Response({
+                'configured': False, 'config': None,
+                'sync_capabilities': wrench_service.SYNC_CAPABILITIES,
+            })
         serializer = WrenchConfigReadSerializer(cfg)
-        return Response({'configured': True, 'config': serializer.data})
+        return Response({
+            'configured': True, 'config': serializer.data,
+            'sync_capabilities': wrench_service.SYNC_CAPABILITIES,
+        })
 
     def create(self, request):
         """Create or replace the active Wrench config."""
@@ -319,10 +325,16 @@ class WrenchSyncViewSet(viewsets.ViewSet):
             )
 
         try:
+            wrench_service.validate_sync_operation(direction, entity_type)
             log = wrench_service.run_sync(
                 direction=direction,
                 entity_type=entity_type,
                 triggered_by=request.user,
+            )
+        except wrench_service.UnsupportedSyncOperation as exc:
+            return Response(
+                {'code': 'sync_unsupported', 'status': 'unavailable', 'detail': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         except RuntimeError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_424_FAILED_DEPENDENCY)

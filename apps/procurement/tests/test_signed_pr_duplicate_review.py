@@ -297,3 +297,36 @@ class DuplicateSignedPRReviewTests(TestCase):
                 self.import_document(manual_signature_overrides={"vp": True}, approval_date=invalid_date)
         self.storage.save.assert_not_called()
         self.assertFalse(PurchaseRequisition.objects.exists())
+
+    def test_reimport_cannot_replace_reopened_round_or_its_archived_source(self):
+        pr = self.first_review()
+        previous_metadata = deepcopy(pr.price_remarks_data)
+        previous_workflow = deepcopy(pr.approval_workflow_config)
+        pr.price_remarks_data = {'approval_revision_history': [{
+            'round': 1, 'rejection_reason': 'Correct the commercial description.',
+            'approval_workflow_config': previous_workflow,
+            'snapshot': {'price_remarks_data': previous_metadata},
+        }]}
+        pr.approval_workflow_config = [{
+            'level': 1, 'role': 'Level 1 Approver', 'user_id': str(self.approvers['pm'].pk),
+            'status': 'pending', 'assignment_id': 'current-review-assignment',
+        }]
+        pr.description_reason = 'Corrected commercial description awaiting fresh review.'
+        pr.approved_at = None
+        pr.approved_by = None
+        for current_status in ('draft', 'submitted', 'in_review', 'rejected', 'approved'):
+            pr.status = current_status
+            pr.save()
+            before = PurchaseRequisition.objects.filter(pk=pr.pk).values().get()
+            for attach_only in (False, True):
+                with self.subTest(status=current_status, attach_only=attach_only):
+                    self.storage.reset_mock()
+                    self.detect.reset_mock()
+                    with self.assertRaisesRegex(SignedPRImportError, 'cannot replace its current approval round'):
+                        self.import_document(
+                            existing=pr, attach_only=attach_only,
+                            manual_signature_overrides={'vp': True}, approval_date='2026-01-07',
+                        )
+                    self.assertEqual(PurchaseRequisition.objects.filter(pk=pr.pk).values().get(), before)
+                    self.detect.assert_not_called()
+                    self.assertEqual(self.storage.mock_calls, [])
