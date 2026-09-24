@@ -364,6 +364,7 @@ class ReceivingHandoffTests(TestCase):
         fallback = '<p>Inspect the retained project specifications.</p>'
         po = self.order(items=[], category='engineering_services', scope_of_services='<p>&nbsp;<br></p>',
                         description=fallback, vat_basis='exclusive', net_amount='100.00', currency='AED')
+        po.refresh_from_db()
         self.assertEqual(receiving_summary(po)['lines'][0]['description'], fallback)
         payload = self.payload(po, items_received=[{'line_id': 'service:total', 'received_amount': '10'}])
         response = self.client.post(BASE + 'receipts/', payload, format='json')
