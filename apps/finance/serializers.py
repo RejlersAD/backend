@@ -1,6 +1,8 @@
 """
 Finance API Serializers
 """
+from collections.abc import Mapping
+
 from django.core.files.storage import default_storage
 from rest_framework import serializers
 from .models import (
@@ -12,6 +14,24 @@ from .models import (
     Approval,
     AuditLog,
     ApprovalRoute,
+)
+
+
+# Generic invoice writes cannot supply workflow state or its supporting evidence.
+# Dedicated domain services own these values, including the submitter identity.
+INVOICE_SERVER_CONTROLLED_FIELDS = (
+    'status', 'procurement_status', 'match_status', 'payment_status',
+    'manual_review_required',
+    'procurement_reviewed_by', 'procurement_reviewed_at',
+    'finance_reviewed_by', 'finance_reviewed_at',
+    'scheduled_payment_date', 'payment_date', 'payment_reference', 'paid_amount',
+    'processed_at', 'submitted_by',
+    'approvals', 'audit_logs', 'payment_operations', 'po_allocations',
+    'structured_line_items', 'extracted_text', 'classification_confidence',
+    'classification_reasoning',
+)
+INVOICE_SERVER_CONTROLLED_INPUTS = INVOICE_SERVER_CONTROLLED_FIELDS + (
+    'procurement_reviewed_by_id', 'finance_reviewed_by_id', 'submitted_by_id',
 )
 
 
@@ -124,6 +144,27 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
     payment_operations = PayablePaymentSerializer(many=True, read_only=True)
     source_file_available = serializers.SerializerMethodField()
 
+    def to_internal_value(self, data):
+        # DRF normally discards read-only inputs. Reject them explicitly so a
+        # mixed request cannot appear to have saved the requested transition.
+        if isinstance(data, Mapping):
+            errors = {
+                field: ['Server-controlled field; omit it from ordinary invoice writes.']
+                for field in INVOICE_SERVER_CONTROLLED_INPUTS if field in data
+            }
+            if errors:
+                raise serializers.ValidationError(errors)
+        return super().to_internal_value(data)
+
+    def update(self, instance, validated_data):
+        # Persist only requested metadata. A domain command may have changed
+        # protected state since this instance was read by the view.
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save(update_fields=[*validated_data, 'updated_at'])
+        instance.refresh_from_db()
+        return instance
+
     def get_source_file_available(self, obj):
         if not obj.file_path:
             return False
@@ -152,12 +193,7 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             'submitted_by', 'created_at', 'updated_at', 'processed_at',
             'approvals', 'audit_logs', 'payment_operations'
         ]
-        read_only_fields = [
-            'extracted_text', 'classification_confidence',
-            'classification_reasoning', 'structured_line_items', 'po_allocations',
-            'status', 'procurement_reviewed_by', 'procurement_reviewed_at',
-            'finance_reviewed_by', 'finance_reviewed_at'
-        ]
+        read_only_fields = INVOICE_SERVER_CONTROLLED_FIELDS
 
 
 class InvoiceUploadSerializer(serializers.ModelSerializer):

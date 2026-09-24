@@ -52,6 +52,56 @@ class HMBTemplateAccessTests(TestCase):
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['id'], str(self.profile.id))
 
+    def _grant_shared_project_read(self):
+        from apps.rbac.models import (
+            Module, Organization, Permission, Role, RoleModule, RolePermission,
+            UserProfile, UserRole,
+        )
+        org = Organization.objects.create(name='HMB shared test', code='hmb-shared-test')
+        module = Module.objects.create(name='HMB shared module', code='process_datasheet')
+        role = Role.objects.create(name='HMB shared read', code='hmb-shared-read')
+        RoleModule.objects.create(role=role, module=module)
+        for user in (self.owner, self.outsider):
+            profile, _ = UserProfile.objects.get_or_create(user=user, defaults={'organization': org})
+            UserRole.objects.create(user_profile=profile, role=role)
+        Permission.objects.create(
+            module=module, code='process_datasheet.read', name='Read Process Datasheet', action='read',
+        )
+        permissions = list(Permission.objects.filter(module=module, action='read'))
+        self.assertTrue(permissions)
+        for permission in permissions:
+            RolePermission.objects.create(role=role, permission=permission)
+        return permissions
+
+    def test_shared_read_grant_can_list_project_templates(self):
+        self._grant_shared_project_read()
+        request = self.factory.get('/templates/', {'project_id': str(self.project.pk)})
+        force_authenticate(request, user=self.outsider)
+        response = list_hmb_master_templates_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_shared_read_denial_cannot_list_project_templates(self):
+        from apps.rbac.models import UserPermissionOverride
+        permissions = self._grant_shared_project_read()
+        UserPermissionOverride.objects.create(
+            user_profile=self.outsider.rbac_profile, permission=permissions[0], allowed=False,
+        )
+        request = self.factory.get('/templates/', {'project_id': str(self.project.pk)})
+        force_authenticate(request, user=self.outsider)
+        response = list_hmb_master_templates_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_shared_permission_failure_does_not_fall_back_to_menu_access(self):
+        self._grant_shared_project_read()
+        request = self.factory.get('/templates/', {'project_id': str(self.project.pk)})
+        force_authenticate(request, user=self.outsider)
+        with patch('apps.project_organizer.views._shares_team_module', side_effect=RuntimeError('synthetic failure')), \
+                patch('apps.process_datasheet.hmb_extractor_view._user_has_hmb_team_access', return_value=True) as fallback:
+            response = list_hmb_master_templates_view(request)
+        self.assertEqual(response.status_code, 403)
+        fallback.assert_not_called()
+
     def test_project_preserves_linked_owned_global_master(self):
         master = HMBMasterTemplateProfile.objects.create(
             source_filename='Master.xlsx', file_sha256='d' * 64, created_by=self.owner,

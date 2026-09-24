@@ -68,6 +68,11 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         elif self.action == 'upload':
             return InvoiceUploadSerializer
         return InvoiceDetailSerializer
+
+    def perform_create(self, serializer):
+        # Generic creation records its actor; clients cannot assign evidence
+        # ownership or initialize approval/payment state through the payload.
+        serializer.save(submitted_by=self.request.user)
     
 
     def get_permissions(self):
