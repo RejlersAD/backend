@@ -12,10 +12,10 @@ DELETE projects/<project_id>/           delete_project
 GET    projects/<project_id>/activity/  list_project_activity (optional ?tool_code=)
 POST   projects/<project_id>/activity/  create_project_activity (append-only)
 
-Self-contained (no cross-app imports) — mirrors
-``apps.spec_customization.project_views`` RBAC conventions. Admins
+Uses the central module/action policy and mirrors
+``apps.spec_customization.project_views`` owner/admin write conventions. Admins
 (``is_staff``/``is_superuser``/admin-ish role) see and modify every
-project; regular users only see / modify projects they created.
+project; team sharing adds read access only. Regular users modify their own projects.
 """
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ PROJECT_RBAC = {
 }
 
 # Project visibility policy (soft-coded). Mirrors the platform's RBAC
-# VisibilityStrategy pattern so every user holding a collaboration module sees
-# the SAME project list as admins — no per-user divergence.
+# VisibilityStrategy pattern. Sharing requires effective read permission in a
+# configured collaboration module for both the viewer and project owner.
 PROJECT_VISIBILITY = {
     # 'owner'       → non-admins see only their own projects (legacy).
     # 'module_team' → non-admins see their own projects PLUS projects whose
@@ -62,13 +62,13 @@ PROJECT_VISIBILITY = {
 
 
 def _user_team_module_codes(user) -> set:
-    """All module codes the user currently holds (empty set on failure)."""
+    """Configured team modules with a current effective read grant."""
     try:
-        from apps.rbac.models import UserProfile
-        profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
-        if not profile:
-            return set()
-        return {m.code for m in profile.get_all_modules()}
+        from apps.rbac.action_policy import module_action_allowed
+        return {
+            code for code in PROJECT_VISIBILITY['team_module_codes']
+            if module_action_allowed(user, code, 'read')
+        }
     except Exception:
         return set()
 
@@ -157,8 +157,7 @@ def _filtered_queryset(user):
     if PROJECT_VISIBILITY['strategy'] == 'module_team':
         team = set(PROJECT_VISIBILITY['team_module_codes'])
         if team and _user_team_module_codes(user).intersection(team):
-            # Team members see the same project list as admins — every project
-            # created by any teammate holding a shared collaboration module.
+            # Share only projects whose creator has a common effective read grant.
             teammate_ids = [
                 uid for uid in Project.objects.values_list('created_by_id', flat=True).distinct()
                 if uid and _shares_team_module(user, User.objects.filter(pk=uid).first())
@@ -279,6 +278,8 @@ def activity_collection(request, project_id):
         return err
 
     if request.method == 'POST':
+        if not _user_can_modify(request.user, p):
+            return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
         tool_code = (request.data.get('tool_code') or '').strip()
         summary   = (request.data.get('summary') or '').strip()
         if not tool_code or not summary:

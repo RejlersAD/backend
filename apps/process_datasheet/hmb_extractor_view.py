@@ -167,8 +167,7 @@ def _get_accessible_project(user, project_id: str):
             if _shares_team_module(user, project.created_by):
                 return project, None
         except Exception:
-            if _user_has_hmb_team_access(user):
-                return project, None
+            logger.warning('Unable to verify shared project access.')
     return None, Response({'error': 'Access denied for this project.'}, status=status.HTTP_403_FORBIDDEN)
 
 
