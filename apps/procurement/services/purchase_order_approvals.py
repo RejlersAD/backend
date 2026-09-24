@@ -238,10 +238,19 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
             continue
         profile = profiles[user_id]
         if not eligible_stage_assignee(profile.user, entry, MODULE_PO):
-            raise ValidationError({'approval_log': (
+            message = (
                 f'{stage or "Approval stage"} requires an employee in the configured business position '
                 'with Purchase Order approval permission.'
-            )})
+            )
+            if stage.casefold() == MANAGEMENT_STAGE.casefold():
+                if not position_matches_stage(profile.user, entry):
+                    message += " Check the selected employee's active HR record and CEO designation."
+                else:
+                    message += (
+                        " Check the selected employee's Purchase Order Approve permission, "
+                        'including any explicit denial.'
+                    )
+            raise ValidationError({'approval_log': message})
 
         user = profile.user
         level = _entry_level(entry, index)

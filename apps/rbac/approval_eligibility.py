@@ -59,7 +59,16 @@ POSITION_TITLES.update({
                                          'VP Operations', 'VP Delivery', 'Vice President Operations',
                                          'Vice President Project Delivery',
                                          'Chief Operating Officer & VP, Head of Operations & Project Delivery'},
-    'ceo': {'CEO', 'Chief Executive Officer'},
+    'ceo': {
+        'CEO', 'Chief Executive Officer',
+        # Full CEO designations used by the organization catalog and PO
+        # documents. Match the entire title: a generic VP or an assistant to
+        # the CEO must not acquire final-signatory authority by substring.
+        'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region',
+        'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region. 5950 Abu Dhabi',
+        'Sr. Vice President, Middle East / CEO, Rejlers Abu Dhabi',
+        'Senior Vice President, Middle East / CEO, Rejlers Abu Dhabi',
+    },
 })
 POSITION_GROUPS = {
     'human_resource': ('hr_manager', 'hr_admin', 'hr_coordinator', 'head_hr_administration'),

@@ -352,3 +352,6 @@ apps/finance/data/invoice_performance_summary.json
 !apps/planning_intelligence/tests/test_enterprise_workflows.py
 !docs/enterprise-scheduling.md
 !docs/PROCUREMENT_APPROVAL_CONTROLS.md
+!docs/PROCUREMENT_CONCURRENCY_POSTGRESQL.md
+!config/test_procurement_ci_runner.py
+!requirements-procurement-ci.txt
