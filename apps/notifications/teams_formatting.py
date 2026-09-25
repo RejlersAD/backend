@@ -1,8 +1,12 @@
 """Readable Teams previews of saved rich text, without renderer dependencies."""
 
 import html
+from datetime import datetime
 from html.parser import HTMLParser
 import re
+
+from django.utils.dateparse import parse_datetime
+from django.utils.timezone import is_aware
 
 
 _BLOCK_TAGS = {
@@ -137,6 +141,29 @@ def teams_card_text(value):
     """Keep user punctuation literal in Adaptive Card Markdown only."""
     escaped = re.sub(r'([\\`*_\[\]])', r'\\\1', value)
     return escaped.replace('\n', '\n\n')
+
+
+def teams_summary_text(value, *, max_length=180):
+    """One short visible field; full details stay in the record/webhook fields."""
+    text = ' '.join(teams_plain_text(value, max_length=None).split())
+    if len(text) <= max_length:
+        return text
+    preview = text[:max_length - 1].rstrip()
+    boundary = preview.rfind(' ')
+    if boundary >= max_length * .7:
+        preview = preview[:boundary]
+    return preview + '…'
+
+
+def teams_approval_deadline(value):
+    """Display only an explicit timestamp, including its supplied UTC offset."""
+    try:
+        deadline = value if isinstance(value, datetime) else parse_datetime(str(value or ''))
+    except (TypeError, ValueError):
+        deadline = None
+    if deadline is None or not is_aware(deadline):
+        return 'Not specified'
+    return deadline.strftime('%d %b %Y, %H:%M UTC%z')
 
 
 def teams_html_message(title, facts, action_url):

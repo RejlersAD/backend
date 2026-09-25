@@ -1,5 +1,6 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase
@@ -33,6 +34,7 @@ class ProcurementNotificationContextTests(SimpleTestCase):
         self.assertEqual(context['vendor'], 'Supplier LLC')
         self.assertEqual(context['value'], 'AED 10,500.00')
         self.assertEqual(context['approval_level'], 0)
+        self.assertIsNone(context['approval_due_at'])
         self.assertNotIn('due_date', context)
 
         notification = SimpleNamespace(
@@ -41,7 +43,7 @@ class ProcurementNotificationContextTests(SimpleTestCase):
             action_url='/procurement/orders/42', action_label='Open Request',
         )
         payload = build_approval_assignment_payload(notification, context)
-        self.assertIn('PO Number: PO-42', payload['message'])
+        self.assertIn('PR/PO: PO-42', payload['message'])
         self.assertIn('Value: AED 10,500.00', payload['message'])
         self.assertNotIn('Due Date', payload['message'])
 
@@ -86,3 +88,41 @@ class ProcurementNotificationContextTests(SimpleTestCase):
         self.assertEqual(context['po_number'], 'Not issued')
         self.assertEqual(context['value'], 'Not specified')
         self.assertEqual(context['project_id'], 'Not specified')
+        self.assertIsNone(context['approval_due_at'])
+
+    def test_pr_approval_due_at_uses_saved_review_timestamp_and_is_json_safe(self):
+        review_due_at = datetime(2026, 9, 25, 16, 30, tzinfo=timezone(timedelta(hours=4)))
+        pr = SimpleNamespace(
+            pr_number='PR-REVIEW-DUE', review_due_at=review_due_at,
+            required_date=date(2026, 10, 1), priority='urgent',
+        )
+
+        context = requisition_teams_context(pr)
+
+        self.assertEqual(context['approval_due_at'], '2026-09-25T16:30:00+04:00')
+        self.assertEqual(json.loads(json.dumps(context))['approval_due_at'], review_due_at.isoformat())
+        self.assertEqual(pr.review_due_at, review_due_at)
+
+    def test_pr_without_saved_review_timestamp_does_not_infer_an_approval_deadline(self):
+        pr = SimpleNamespace(
+            pr_number='PR-NO-REVIEW-DUE', review_due_at=None,
+            required_date=date(2026, 10, 1), priority='urgent',
+        )
+
+        self.assertIsNone(requisition_teams_context(pr)['approval_due_at'])
+
+    def test_po_does_not_use_delivery_or_linked_pr_review_dates_for_approval(self):
+        order = SimpleNamespace(
+            po_number='PO-NO-APPROVAL-DUE',
+            expected_delivery=date(2026, 10, 1),
+            actual_delivery=date(2026, 10, 2),
+            pr_reference=SimpleNamespace(
+                review_due_at=datetime(2026, 9, 25, 12, 30, tzinfo=timezone.utc),
+                required_date=date(2026, 10, 3),
+            ),
+        )
+
+        context = purchase_order_teams_context(order)
+
+        self.assertIsNone(context['approval_due_at'])
+        self.assertIsNone(json.loads(json.dumps(context))['approval_due_at'])

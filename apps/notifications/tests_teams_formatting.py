@@ -174,7 +174,9 @@ class TeamsFormattedPayloadTests(SimpleTestCase):
         self.assertEqual(payload['po_number'], 'RAD-PRJ-PUR-0480_2026')
         self.assertEqual(payload['value'], 'AED 89,512.50')
         self.assertEqual(payload['project_id'], '5901205')
-        self.assertIn(f'Description: {VISIBLE_DESCRIPTION}', payload['message'])
+        self.assertNotIn('Description:', payload['message'])
+        self.assertNotIn(VISIBLE_DESCRIPTION, payload['message'])
+        self.assertIn('Service: Supply of InfoMaker Standard Edition', payload['message'])
         self.assertNotIn('data-copy-service', payload['message'])
         self.assertNotIn('TgQPHd', payload['message'])
         self.assertEqual(order.description, COPIED_DESCRIPTION)
@@ -353,3 +355,125 @@ class TeamsFormattedPayloadTests(SimpleTestCase):
         self.assertLessEqual(len(payload['service']), 700)
         self.assertLessEqual(len(payload['vendor']), 300)
         self.assertTrue(payload['description'].endswith('… (Open Request for full text)'))
+
+    def test_procurement_approval_matches_short_reference_without_blank_rows(self):
+        payload = build_approval_assignment_payload(self.notification(), {
+            'entity_type': 'purchase_order',
+            'request_number': 'RAD-PRJ-PUR-0477_2026',
+            'po_number': 'RAD-PRJ-PUR-0477_2026',
+            'project_id': '5901056',
+            'project_name': 'Detailed Engineering Services for Central Engineering Division Remote Control Center',
+            'service': 'Telecom Integrator Consultancy Services',
+            'vendor': 'Exctel Engineering Pte Ltd',
+            'value': 'USD 236,888.40',
+            'description': COPIED_DESCRIPTION, 'approval_level': 0,
+        })
+        lines = payload['message'].splitlines()
+        self.assertEqual(lines[:7], [
+            '🚨 NEW PO – APPROVAL REQUIRED',
+            'PR/PO: RAD-PRJ-PUR-0477_2026',
+            'Project: 5901056 – Detailed Engineering Services for Central Engineering Division Remote Control Center',
+            'Service: Telecom Integrator Consultancy Services',
+            'Vendor: Exctel Engineering Pte Ltd',
+            'Value: USD 236,888.40',
+            '⌛ Due for approval: Not specified',
+        ])
+        self.assertEqual(len(lines), 8)
+        self.assertTrue(lines[7].startswith('Open Request: https://www.radai.ae/'))
+        markup = payload['message_html']
+        self.assertEqual(markup.count('<br>'), 7)
+        self.assertNotIn('<br><br>', markup)
+        self.assertIn('<b>PR/PO:</b> RAD-PRJ-PUR-0477_2026', markup)
+        self.assertIn('<b>Value: USD 236,888.40</b>', markup)
+        self.assertNotIn('Description:', markup)
+        self.assertNotIn('Submitted By:', markup)
+        self.assertNotIn('Approval Level:', markup)
+        card = payload['attachments'][0]['content']
+        self.assertEqual(len(card['body']), 7)
+        self.assertEqual(card['body'][0]['text'], lines[0])
+        self.assertEqual(card['body'][0]['size'], 'Default')
+        for row, line in zip(card['body'][1:], lines[1:7]):
+            self.assertEqual(row['spacing'], 'None')
+            self.assertEqual(''.join(run['text'] for run in row['inlines']), line)
+
+    def test_pr_keeps_own_number_and_explicit_approval_timestamp(self):
+        payload = build_approval_assignment_payload(self.notification(), {
+            'entity_type': 'purchase_recommendation', 'request_number': 'PR-123',
+            'po_number': 'RELATED-PO-456', 'approval_due_at': '2026-09-25T16:30:00+04:00',
+        })
+        self.assertEqual(payload['title'], '🚨 NEW PR – APPROVAL REQUIRED')
+        self.assertIn('PR/PO: PR-123\n', payload['message'])
+        self.assertNotIn('RELATED-PO-456', payload['message'])
+        self.assertEqual(payload['po_number'], 'RELATED-PO-456')
+        self.assertIn('⌛ Due for approval: 25 Sep 2026, 16:30 UTC+0400', payload['message'])
+
+    def test_missing_pr_number_does_not_fall_back_to_related_po(self):
+        payload = build_approval_assignment_payload(self.notification(), {
+            'entity_type': 'purchase_recommendation', 'po_number': 'RELATED-PO-456',
+        })
+        self.assertIn('PR/PO: Not specified\n', payload['message'])
+        self.assertNotIn('RELATED-PO-456', payload['message'])
+
+    def test_procurement_summary_flattens_and_bounds_long_rich_fields(self):
+        context = {
+            'entity_type': 'purchase_order', 'po_number': 'PO-123',
+            'project_id': '5901056', 'project_name': 'Project name ' * 40,
+            'service': '<p>Design &amp; review</p><p>' + 'Engineering services ' * 100 + '</p>',
+            'vendor': '<p>' + 'Supplier ' * 100 + '</p>',
+            'description': COPIED_DESCRIPTION,
+        }
+        original = deepcopy(context)
+        payload = build_approval_assignment_payload(self.notification(), context)
+        self.assertEqual(context, original)
+        self.assertEqual(len(payload['message'].splitlines()), 8)
+        rows = payload['attachments'][0]['content']['body'][1:]
+        facts = {row['inlines'][0]['text']: row['inlines'][1]['text'] for row in rows}
+        for label, limit in (('Service: ', 180), ('Project: ', 220), ('Vendor: ', 160)):
+            self.assertLessEqual(len(facts[label]), limit)
+            self.assertTrue(facts[label].endswith('…'))
+            self.assertNotIn('\n', facts[label])
+        self.assertIn('Design &amp; review Engineering services', payload['message_html'])
+        self.assertGreater(len(payload['service']), len(facts['Service: ']))
+
+    def test_buyer_fyi_has_compact_fields_without_approval_demand(self):
+        payload = build_approval_assignment_payload(self.notification(), {
+            'entity_type': 'purchase_order', 'po_number': 'PO-123',
+            'event_type': 'purchase_order_created', 'title': 'New purchase order created',
+        })
+        self.assertEqual(payload['title'], 'New purchase order created')
+        self.assertEqual(len(payload['message'].splitlines()), 7)
+        self.assertNotIn('APPROVAL REQUIRED', payload['message'])
+        self.assertNotIn('Due for approval', payload['message_html'])
+
+    def test_procurement_summary_keeps_engineering_notation_and_escapes_html(self):
+        payload = build_approval_assignment_payload(self.notification(), {
+            'entity_type': 'purchase_order', 'po_number': 'PO_42',
+            'service': 'Use <DN50> pipe & "special" fittings.\nIssue drawings.',
+            'vendor': '<b>Supplier &amp; Co</b><script>hidden()</script>',
+        })
+        self.assertIn('Use &lt;DN50&gt; pipe &amp; &quot;special&quot; fittings. Issue drawings.', payload['message_html'])
+        self.assertNotIn('hidden()', payload['message_html'])
+        service = payload['attachments'][0]['content']['body'][3]['inlines'][1]['text']
+        self.assertEqual(service, 'Use <DN50> pipe & "special" fittings. Issue drawings.')
+
+    def test_metadata_only_buyer_fyi_is_not_mistaken_for_an_assignment(self):
+        notice = self.notification()
+        notice.metadata = {
+            'entity_type': 'purchase_order', 'request_number': 'PO-123',
+            'event_type': 'po_created',
+        }
+        payload = build_approval_assignment_payload(notice)
+        self.assertEqual(payload['event_type'], 'po_created')
+        self.assertEqual(payload['title'], 'New purchase order created')
+        self.assertIn('PR/PO: PO-123', payload['message'])
+        self.assertNotIn('APPROVAL REQUIRED', payload['message'])
+        self.assertNotIn('Due for approval', payload['message_html'])
+
+    def test_missing_or_invalid_approval_timestamp_never_becomes_a_deadline(self):
+        for deadline in (None, '', '2026-09-25', '2026-09-25T16:30:00', '2026-09-99T16:30:00+04:00'):
+            with self.subTest(deadline=deadline):
+                payload = build_approval_assignment_payload(self.notification(), {
+                    'entity_type': 'purchase_order', 'approval_due_at': deadline,
+                    'due_date': '2026-09-26',
+                })
+                self.assertIn('⌛ Due for approval: Not specified', payload['message'])

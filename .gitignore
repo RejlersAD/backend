@@ -360,3 +360,4 @@ apps/finance/data/invoice_performance_summary.json
 !docs/PROCUREMENT_RELEASE_20260924.md
 !config/test_procurement_ci_runner.py
 !requirements-procurement-ci.txt
+!docs/SYSTEM_HEALTH_NOTIFICATION_HISTORY.md

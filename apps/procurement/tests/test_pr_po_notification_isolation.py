@@ -132,9 +132,9 @@ class PurchaseRequisitionOrderNotificationIsolationTests(TestCase):
         self.assertNotIn('pr_id', po_notice.metadata)
         for notice, context, segment, identifier, entity_type, number, title in (
             (pr_notice, pr_context, 'requisitions', self.requisition.pk, 'purchase_recommendation',
-             self.requisition.pr_number, 'Purchase Recommendation approval required'),
+             self.requisition.pr_number, '🚨 NEW PR – APPROVAL REQUIRED'),
             (po_notice, po_context, 'orders', self.order.pk, 'purchase_order',
-             self.order.po_number, 'Purchase Order approval required'),
+             self.order.po_number, '🚨 NEW PO – APPROVAL REQUIRED'),
         ):
             expected_url = f'/procurement/{segment}/{identifier}'
             self.assertEqual(NotificationListSerializer(notice).data['action_url'], expected_url)

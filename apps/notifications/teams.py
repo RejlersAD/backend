@@ -10,6 +10,7 @@ from .models import Notification, NotificationLog
 from .delivery import absolute_action_url, delivery_issue, notification_action_url
 from .teams_formatting import (
     TEAMS_EMPHASIZED_FIELDS, teams_card_text, teams_html_message, teams_plain_text,
+    teams_approval_deadline, teams_summary_text,
 )
 
 
@@ -36,7 +37,7 @@ def build_approval_assignment_payload(notification, context=None):
     entity_id = str(context.get('entity_id') or metadata.get('entity_id') or '')
     request_number = teams_plain_text(context.get('request_number') or metadata.get('request_number'), default='', max_length=300)
     message_title = teams_plain_text(context.get('title'), default='New approval request assigned', max_length=300)
-    event_type = str(context.get('event_type') or 'approval_assignment')
+    event_type = str(context.get('event_type') or metadata.get('event_type') or 'approval_assignment')
     request_name = teams_plain_text(context.get('request_name') or notification.title, default='Approval request', max_length=300)
     submitted_by = teams_plain_text(context.get('submitted_by') or _display_name(notification.sender), max_length=300)
     description = teams_plain_text(context.get('description'))
@@ -68,6 +69,31 @@ def build_approval_assignment_payload(notification, context=None):
     if approval_level is not None:
         facts.append({'title': 'Approval Level', 'value': f'Level {approval_level}'})
     facts.append({'title': 'Submitted By', 'value': submitted_by})
+    if entity_type in {'purchase_recommendation', 'purchase_order'}:
+        is_assignment = event_type == 'approval_assignment'
+        if is_assignment:
+            kind = 'PR' if entity_type == 'purchase_recommendation' else 'PO'
+            message_title = f'🚨 NEW {kind} – APPROVAL REQUIRED'
+        elif event_type in {'po_created', 'purchase_order_created'}:
+            message_title = teams_plain_text(context.get('title'), default='New purchase order created', max_length=300)
+        project = ' – '.join(
+            part for part in (project_id, project_name) if part != 'Not specified'
+        ) or 'Not specified'
+        own_number = request_number or (
+            po_number if entity_type == 'purchase_order' else 'Not specified'
+        )
+        facts = [
+            {'title': 'PR/PO', 'value': teams_summary_text(own_number, max_length=300)},
+            {'title': 'Project', 'value': teams_summary_text(project, max_length=220)},
+            {'title': 'Service', 'value': teams_summary_text(service)},
+            {'title': 'Vendor', 'value': teams_summary_text(vendor, max_length=160)},
+            {'title': 'Value', 'value': teams_summary_text(value)},
+        ]
+        if is_assignment:
+            facts.append({
+                'title': '⌛ Due for approval',
+                'value': teams_approval_deadline(context.get('approval_due_at')),
+            })
     plain_message = '\n'.join([
         message_title,
         *(f"{fact['title']}: {fact['value']}" for fact in facts),
@@ -95,6 +121,7 @@ def build_approval_assignment_payload(notification, context=None):
         'value': value,
         'currency': teams_plain_text(context.get('currency'), default='', max_length=300),
         'approval_level': approval_level,
+        'approval_due_at': context.get('approval_due_at'),
         'submitted_by': submitted_by,
         'action_label': teams_plain_text(notification.action_label, default='Open Request', max_length=300),
         'action_url': action_url,
@@ -114,7 +141,7 @@ def build_approval_assignment_payload(notification, context=None):
                     'type': 'TextBlock',
                     'text': teams_card_text(payload['title']),
                     'weight': 'Bolder',
-                    'size': 'Medium',
+                    'size': 'Default' if entity_type in {'purchase_recommendation', 'purchase_order'} else 'Medium',
                     'wrap': True,
                 },
                 *[

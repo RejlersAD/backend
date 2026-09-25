@@ -57,6 +57,7 @@ def requisition_teams_context(pr, *, approval_level=None):
     vendor = getattr(pr, 'vendor', None)
     issuer = getattr(pr, 'issued_by', None)
     currency = _text(getattr(pr, 'currency', None), default='')
+    review_due_at = getattr(pr, 'review_due_at', None)
     return {
         'title': 'Purchase Recommendation approval required',
         'entity_type': 'purchase_recommendation',
@@ -74,6 +75,7 @@ def requisition_teams_context(pr, *, approval_level=None):
         'currency': currency,
         'submitted_by': employee_display_name(issuer) if issuer else 'Not specified',
         'approval_level': approval_level,
+        'approval_due_at': review_due_at.isoformat() if review_due_at is not None else None,
     }
 
 
@@ -107,4 +109,7 @@ def purchase_order_teams_context(order, *, approval_level=None):
         'currency': currency,
         'submitted_by': employee_display_name(creator) if creator else 'Not specified',
         'approval_level': approval_level,
+        # PO approval has no recorded deadline; delivery or linked PR dates
+        # describe different obligations and must not become a PO deadline.
+        'approval_due_at': None,
     }

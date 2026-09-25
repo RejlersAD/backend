@@ -1,13 +1,1 @@
-<p><b>@{replace(replace(replace(coalesce(triggerBody()?['title'], 'New approval request assigned'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</b><br>
-<b>Request:</b> @{replace(replace(replace(coalesce(triggerBody()?['request'], 'Approval request'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}<br>
-@{if(equals(triggerBody()?['entity_type'], 'purchase_recommendation'), concat('<b>PR Number: ', replace(replace(replace(coalesce(triggerBody()?['request_number'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), '</b><br>'), '')}
-<b>@{if(equals(triggerBody()?['entity_type'], 'purchase_recommendation'), 'Related PO Number', 'PO Number')}: @{replace(replace(replace(coalesce(triggerBody()?['po_number'], 'Not issued'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</b><br>
-<b>Project Name:</b> @{replace(replace(replace(coalesce(triggerBody()?['project_name'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}<br>
-<b>Project Code: @{replace(replace(replace(coalesce(triggerBody()?['project_id'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</b><br>
-<b>Service:</b> @{replace(replace(replace(coalesce(triggerBody()?['service'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}<br>
-<b>Description:</b> @{replace(replace(replace(coalesce(triggerBody()?['description'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}<br>
-<b>Vendor:</b> @{replace(replace(replace(coalesce(triggerBody()?['vendor'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}<br>
-<b>Value: @{replace(replace(replace(coalesce(triggerBody()?['value'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</b>
-@{if(equals(triggerBody()?['approval_level'], null), '', concat('<br><b>Approval Level:</b> Level ', replace(replace(replace(string(triggerBody()?['approval_level']), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')))}
-<br><b>Submitted By:</b> @{replace(replace(replace(coalesce(triggerBody()?['submitted_by'], 'Not specified'), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}<br>
-<a href="@{replace(replace(replace(replace(coalesce(triggerBody()?['action_url'], ''), '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), decodeUriComponent('%22'), '&quot;')}">Open Request</a></p>
+@{triggerBody()?['message_html']}
