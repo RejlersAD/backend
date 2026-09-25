@@ -89,3 +89,19 @@ No model or migration file changed. Full-registry `makemigrations --check --dry-
 Evidence: workspace `.codex-temp/notification-history-backend-tests.log` and `.codex-temp/notification-history-20260925/backend-full-registry-drift.log`. The full-registry isolation settings are retained alongside the latter log. Source reads and verification performed no live notification creation, reading, dismissal, delivery or grant change.
 
 Follow-up verification evidence: `.codex-temp/notification-history-status-backend-tests.log` (54 passed). This follow-up changes only the projection, tests and this contract; it introduces no model or migration edit and does not require a migration.
+
+## Main release verification — 25 September 2026
+
+The release candidate combines this history/status feature with the existing compact procurement Teams message changes. It was captured from local development without changing the original working files, then merged with current `origin/main` (`7d779c27`) without conflicts. All 13 captured paths matched the candidate after line-ending normalization before this evidence-only addition.
+
+The aligned candidate passed **183 backend tests** with synthetic records and isolated external delivery:
+
+- 54 history, personal inbox and central action-authorization checks using `config.settings_permissions_test` (command above).
+- 87 Teams formatting/context and procurement routing/sequence checks using `config.settings_release_test`: `apps.notifications.tests_teams_formatting`, `apps.procurement.tests.test_notification_context`, `apps.procurement.tests.test_pr_po_notification_isolation`, `apps.procurement.tests.test_po_creation_notification_routing`, `apps.procurement.tests.test_po_notification_sequence`, `apps.procurement.tests.test_requisition_notification_sequence`, `apps.notifications.tests_teams`, and `apps.notifications.tests_business_delivery`.
+- 42 adjacent browser-push, approval dispatch and PR creation checks using `config.settings_release_test`: `apps.notifications.tests_push_delivery`, `apps.procurement.tests.test_approval_notification_dispatch`, and `apps.procurement.tests.test_pr_creation_notifications`.
+
+Each group used `manage.py test <modules> --settings=<settings> --noinput --verbosity=2` with the isolated environment from workspace `CONTRIBUTING.md`. These SQLite functional checks do not certify PostgreSQL row locking. The existing pull-request PostgreSQL concurrency workflow remains a separate release gate.
+
+Full-registry `makemigrations --check --dry-run` passed with no changes detected, using the isolated settings described above. A read-only query of the local PostgreSQL migration ledger, compared with the candidate's complete migration graph, found all **528 required migrations applied** and **zero pending**. The local ledger also contains 29 older entries outside that current graph; no history was edited. No model or migration file changes belong to this release. Production migration state was not queried or changed.
+
+Evidence is retained outside the repository under workspace `.codex-temp/merge-notifications-20260925/`: `backend-history-tests.log`, `backend-teams-tests.log`, `backend-delivery-tests.log`, `backend-migration-drift.log`, `backend-migration-state.json`, and `backend-capture/manifest.json`. Git whitespace checks passed. Hosted Teams-flow changes and live delivery are outside this verification; the integration guide explains the existing external flow requirement. This entry records candidate verification, not a completed GitHub merge or production deployment.
