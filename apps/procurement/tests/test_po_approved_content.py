@@ -126,7 +126,7 @@ class PurchaseOrderApprovedContentTests(TestCase):
         self.assertTrue(response.data['commercial_edit_locked'])
         self.assertEqual(response.data['notes'], 'Delivery follow-up')
         self.assertTrue(response.data['can_send_to_vendor'])
-        self.assertTrue(response.data['can_complete'])
+        self.assertFalse(response.data['can_complete'])
 
     def test_stale_validated_edit_cannot_overwrite_concurrent_approval(self):
         serializer = PurchaseOrderSerializer(self.order, data={'entered_amount': '150', 'vat_basis': 'none'},

@@ -13,6 +13,21 @@ RECEIPT_NUMBER_PATTERN = re.compile(r'^RAD-GR-(\d+)_(\d{4})$')
 
 class ReceiptNumberService:
     @classmethod
+    @transaction.atomic
+    def retain_number(cls, number):
+        """Never reuse a deleted legacy number that predates the sequence row."""
+        match = RECEIPT_NUMBER_PATTERN.fullmatch(str(number))
+        if not match:
+            return
+        sequence, _ = ProcurementNumberSequence.objects.select_for_update().get_or_create(
+            document_type='GR', prefix='GR', year=int(match.group(2)), defaults={'last_value': 0},
+        )
+        value = int(match.group(1))
+        if sequence.last_value < value:
+            sequence.last_value = value
+            sequence.save(update_fields=['last_value', 'updated_at'])
+
+    @classmethod
     def _largest_existing_value(cls, year):
         numbers = Receipt.objects.filter(
             receipt_number__startswith='RAD-GR-',

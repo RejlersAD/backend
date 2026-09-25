@@ -28,7 +28,7 @@ INVOICE_SERVER_CONTROLLED_FIELDS = (
     'processed_at', 'submitted_by',
     'approvals', 'audit_logs', 'payment_operations', 'po_allocations',
     'structured_line_items', 'extracted_text', 'classification_confidence',
-    'classification_reasoning',
+    'classification_reasoning', 'confirmed_po_references',
 )
 INVOICE_SERVER_CONTROLLED_INPUTS = INVOICE_SERVER_CONTROLLED_FIELDS + (
     'procurement_reviewed_by_id', 'finance_reviewed_by_id', 'submitted_by_id',
@@ -117,6 +117,7 @@ class InvoiceOCRJobSerializer(serializers.ModelSerializer):
 
 
 class InvoiceListSerializer(serializers.ModelSerializer):
+    confirmed_po_references = serializers.SerializerMethodField()
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     vendor_master_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
@@ -128,12 +129,26 @@ class InvoiceListSerializer(serializers.ModelSerializer):
             'vendor_name', 'invoice_date', 'received_date', 'due_date',
             'total_amount', 'currency', 'invoice_type', 'invoice_type_display',
             'status', 'status_display', 'procurement_status', 'match_status',
-            'payment_status', 'manual_review_required', 'po_reference_text',
+            'payment_status', 'manual_review_required', 'po_reference_text', 'confirmed_po_references',
             'created_at', 'updated_at'
         ]
 
+    def get_confirmed_po_references(self, obj):
+        from .services.purchase_order_handoff import confirmed_po_references
+        return confirmed_po_references(obj)
+
 
 class InvoiceDetailSerializer(serializers.ModelSerializer):
+    capabilities = serializers.SerializerMethodField()
+    confirmed_po_references = serializers.SerializerMethodField()
+
+    def get_confirmed_po_references(self, obj):
+        from .services.purchase_order_handoff import confirmed_po_references
+        return confirmed_po_references(obj)
+
+    def get_capabilities(self, obj):
+        from .services.purchase_order_handoff import matching_capabilities
+        return matching_capabilities(obj, getattr(self.context.get('request'), 'user', None))
     approvals = ApprovalSerializer(many=True, read_only=True)
     audit_logs = AuditLogSerializer(many=True, read_only=True)
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
@@ -179,12 +194,12 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             'id', 'tracking_id', 'invoice_number', 'vendor', 'vendor_master_name',
             'vendor_name', 'invoice_date', 'received_date', 'due_date', 'payment_terms',
             'amount', 'tax_amount', 'total_amount', 'currency', 'vat_percentage',
-            'vat_registration_number', 'po_reference_text',
+            'vat_registration_number', 'po_reference_text', 'confirmed_po_references',
             'invoice_type', 'invoice_type_display',
             'classification_confidence', 'classification_reasoning',
             'extracted_text', 'line_items', 'structured_line_items',
             'ocr_metadata', 'ocr_confidence', 'manual_review_required',
-            'source_file_sha256', 'po_allocations',
+            'source_file_sha256', 'po_allocations', 'capabilities',
             'original_filename', 'file_path', 'source_file_available',
             'status', 'status_display', 'procurement_status', 'match_status',
             'payment_status', 'procurement_reviewed_by', 'procurement_reviewed_at',

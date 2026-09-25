@@ -428,7 +428,8 @@ class _Builder:
         return Block('table', style, rows=rows, columns=columns, row_styles=row_styles)
 
 
-def parse_rich_content(value):
+def parse_rich_content(value, *, default_font_size=None):
+    default_style = {'font_size': default_font_size} if default_font_size is not None else {}
     source = str(value or '')
     # Decode whole escaped editor documents, not ordinary entities inside HTML
     # (e.g. a literal &lt;script&gt; typed in a paragraph).
@@ -437,10 +438,25 @@ def parse_rich_content(value):
             break
         source = html.unescape(source)
     if not re.search(r'<[a-zA-Z][^>]*>', source):
-        return [Block('paragraph', runs=[Run(html.unescape(line))]) for line in source.splitlines() if line.strip()]
+        return [Block('paragraph', dict(default_style), [Run(html.unescape(line), dict(default_style))])
+                for line in source.splitlines() if line.strip()]
     tree = _Tree()
     tree.feed(source)
-    return _Builder().content(tree.root.children)
+    return _Builder().content(tree.root.children, default_style)
+
+
+def parse_meaningful_rich_content(value, *, default_font_size=None):
+    """Return authored blocks only when safe text, an image or a table remains."""
+    blocks = parse_rich_content(value, default_font_size=default_font_size)
+    meaningful = any(
+        (block.kind == 'paragraph' and any(
+            re.sub('[\u200b-\u200d\ufeff]', '', run.text).strip() for run in block.runs
+        ))
+        or (block.kind == 'image' and block.image)
+        or (block.kind == 'table' and block.rows)
+        for block in blocks
+    )
+    return blocks if meaningful else []
 
 
 def _pdf_font(style):

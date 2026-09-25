@@ -2037,7 +2037,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all().select_related(
         'vendor', 'pr_reference', 'project', 'enterprise_project',
         'created_by', 'approved_by', 'budget_allocation',
-    ).order_by('-created_at', '-id')
+    ).prefetch_related('receipts').order_by('-created_at', '-id')
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
@@ -2559,8 +2559,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             return Response(self.get_serializer(po).data)
     @action(detail=True, methods=['get'], url_path='receiving-summary')
     def receiving_summary(self, request, pk=None):
+        from .services.receiving import receiving_summary
         po = self.get_object()
-        return Response(GoodsReceiptService.receiving_summary(po))
+        response = Response(receiving_summary(po, request=request))
+        response['Cache-Control'] = 'private, no-store'
+        return response
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
@@ -2642,7 +2645,47 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
     business_approval_actions = {'accept', 'reject_delivery'}
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
+
+    def destroy(self, request, *args, **kwargs):
+        from .services.receiving import delete_pending_receipt
+        delete_pending_receipt(self.get_object(), request)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=['get'], url_path='available-orders')
+    def available_orders(self, request):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.receiving import OPEN_STATUSES, receiving_summary
+
+        if not request_action_allowed(request, 'procurement_orders', 'read'):
+            raise PermissionDenied('Purchase order read access is required.')
+        queue = request.query_params.get('queue', 'awaiting')
+        if queue not in {'awaiting', 'reconciliation'}:
+            raise ValidationError({'queue': 'Choose awaiting or reconciliation.'})
+        queryset = PurchaseOrder.objects.filter(status__in=OPEN_STATUSES if queue == 'awaiting' else ['completed']).select_related('vendor').prefetch_related('receipts').order_by('-created_at', '-id')
+        search = str(request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(po_number__icontains=search) | Q(title__icontains=search) | Q(vendor__name__icontains=search))
+        rows = []
+        for order in queryset:
+            summary = receiving_summary(order, request=request)
+            if summary['status'] == 'complete':
+                continue
+            rows.append({'id': str(order.pk), 'po_number': order.po_number, 'title': order.title,
+                         'vendor_name': order.vendor.name, 'status': order.status, 'currency': order.currency,
+                         'updated_at': order.updated_at.isoformat(), 'receiving': summary})
+        page = self.paginate_queryset(rows)
+        response = self.get_paginated_response(page)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+    @action(detail=False, methods=['post'], url_path='reconcile')
+    def reconcile(self, request):
+        context = {**self.get_serializer_context(), 'receipt_reconciliation': True}
+        serializer = self.get_serializer(data=request.data, context=context)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
     
     def get_queryset(self):
         from .services.receipt_inspection import apply_queue, filter_receipts, order_receipts, selected_queue
@@ -2672,41 +2715,19 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return Response(response_data)
 
     @action(detail=True, methods=['post'])
-    def accept(self, request, pk=None):
-        from django.db import transaction
-        from apps.rbac.approval_eligibility import require_configured_approval
-        from .services.purchase_order_lifecycle import lock_purchase_order, validate_purchase_order_transition
+    def confirm_delivery(self, request, pk=None):
+        from .services.receiving import confirm_receipt_delivery
+        return Response(self.get_serializer(confirm_receipt_delivery(self.get_object(), request)).data)
 
-        with transaction.atomic():
-            observed = self.get_object()
-            po = lock_purchase_order(observed.purchase_order)
-            receipt = Receipt.objects.select_for_update().get(pk=observed.pk)
-            if receipt.purchase_order_id != po.pk:
-                raise ValidationError({'error': 'The receipt order changed. Refresh before accepting it.'})
-            require_configured_approval(request.user, 'procurement_receipts', receipt, 'accept')
-            if receipt.status != 'pending':
-                raise ValidationError({'error': 'Only pending receipts can be accepted.'})
-            validate_purchase_order_transition(po, 'completed')
-            receipt.status = 'accepted'
-            receipt.quality_check_passed = True
-            receipt.save(update_fields=['status', 'quality_check_passed', 'updated_at'])
-            po.status = 'completed'
-            po.actual_delivery = timezone.localdate()
-            po.save(update_fields=['status', 'actual_delivery', 'updated_at'])
-            receipt.purchase_order = po
-            return Response(self.get_serializer(receipt).data)
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        from .services.receiving import decide_receipt
+        return Response(self.get_serializer(decide_receipt(self.get_object(), request, accept=True)).data)
     
     @action(detail=True, methods=['post'])
-    @guarded_business_approval('procurement_receipts')
     def reject_delivery(self, request, pk=None):
-        receipt = self.get_object()
-        if receipt.status != 'pending':
-            raise ValidationError({'error': 'Only pending receipts can be rejected.'})
-        receipt.status = 'rejected'
-        receipt.quality_check_passed = False
-        receipt.inspection_notes = request.data.get('reason') or request.data.get('notes') or ''
-        receipt.save(update_fields=['status', 'quality_check_passed', 'inspection_notes', 'updated_at'])
-        return Response(self.get_serializer(receipt).data)
+        from .services.receiving import decide_receipt
+        return Response(self.get_serializer(decide_receipt(self.get_object(), request, accept=False)).data)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

@@ -81,12 +81,30 @@ decision. Legacy POs without a PR remain supported for permitted edits.
    Draft, Sent to Vendor, Acknowledged by Vendor, In Progress, Partially Received
    and Completed. These are available states, not a requirement to visit every
    intermediate state. The server rechecks approval evidence on progression.
-5. **Record and inspect receipt.** Goods Receipts capture delivered items and
-   inspection evidence. Acceptance requires the configured receipt authority and
-   valid PO approvals. The current acceptance command marks the receipt Accepted
-   and the PO Completed, with actual delivery dated that day. The PO screen also
-   supports manual completion after its approval guard passes. Do not interpret
-   this as an implemented line-balance or invoice-payment closure policy.
+5. **Record and confirm receipt.** Goods Receipts shows approved issued POs with
+   remaining quantity/service value beside the receipt register. Record actual
+   delivered evidence as Pending. The authorized recorder can explicitly confirm
+   delivery; configured inspection authority can instead accept or reject it.
+   Delivery confirmation does not assert technical inspection checks. Accepted
+   evidence determines
+   partial versus full coverage; accepting a receipt does not close the PO.
+   Mark Complete requires full accepted coverage as well as valid PO approvals.
+6. **Reconcile missing historical evidence.** Completed POs without full accepted
+   coverage appear in the reconciliation queue. An authorized recorder supplies
+   actual receipt/service evidence and a reason; delivery confirmation or
+   configured inspection remains a separate decision.
+   This preserves the completed PO and its history instead of reopening it.
+7. **Capture the supplier invoice.** Finance's awaiting-invoice queue uses
+   remaining canonical PO allocations. Import opens with the PO selected and
+   requires the actual supplier document and explicit confirmation. Confirmed PO
+   links remain visible in the invoice register. Receipt coverage or PO completion
+   alone does not verify an invoice or authorize payment. Service-value matching
+   and ambiguous historical evidence remain explicit review exceptions.
+
+See [the receiving and invoice contract](PO_RECEIPT_INVOICE_HANDOFF.md) for
+balance, freshness, retry and migration requirements. These changes are verified
+locally; deployment must apply procurement migrations 0045 and 0046 before the
+coordinated backend/frontend release.
 
 A rejected PO approval blocks progression. Cancellation can preserve the record
 without creating approval evidence. Completed and Cancelled POs cannot be
@@ -130,6 +148,28 @@ Both Word routes expose `X-PO-Attachment-Warnings` when a supporting file is
 missing, corrupt or unsupported. The cover remains and the download UI warns
 that files were omitted. Downloads/previews perform no save or approval and
 retain the existing file-source checks; no arbitrary attachment URL is fetched.
+
+The **Show heading** checkbox beside **PO Description & Scope** controls whether
+that heading appears in the current preview and saved PDF/Word. Unchecking it
+keeps the scope narrative visible. The choice saves in optional Boolean
+`contact_persons.show_scope_heading`; existing orders default to showing the
+heading without adding metadata. The existing approved-content edit lock still
+applies, and this option requires no migration.
+
+An empty narrative no longer repeats the PO title as body text. Clearing both
+the Buyer/Seller introduction and narrative omits the whole scope page from
+PDF and Word, even if **Show heading** is selected. Empty editor paragraphs or
+line breaks do not create a page; images and tables remain content. Populated
+scope pages retain their title and the optional heading. The PO narrative uses
+a compact toolbar, with separate **Clear formatting** and **Clear text** actions.
+
+**Show introduction** hides or reveals the Buyer/Seller authoring panel and its
+paragraph in PDF/Word, retaining the text while hidden. New drafts start hidden;
+existing orders without a visibility setting retain their resolved introduction.
+An already-empty panel starts collapsed. The optional Boolean
+`contact_persons.show_order_introduction` uses the same validation and approved
+content lock as other document metadata. Narrative text defaults to **12 pt**;
+explicit font sizes remain intact, and commercial/branding typography is unchanged.
 
 ## Download a PR in Word format
 

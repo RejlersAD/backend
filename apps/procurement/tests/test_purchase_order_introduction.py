@@ -102,11 +102,83 @@ class PurchaseOrderIntroductionTests(TestCase):
         self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
 
     def test_untouched_legacy_order_keeps_default_without_injection(self):
+        from apps.procurement.services.purchase_order_content import purchase_order_content_fingerprint
+        fingerprint = purchase_order_content_fingerprint(self.order)
         self.assertNotIn('order_introduction', self.order.contact_persons)
         self.assertIn('issue this purchase order to Content supplier', purchase_order_introduction(self.order))
         self.assertNotIn('order_introduction', self.order.contact_persons)
+        self.assertNotIn('show_order_introduction', self.order.contact_persons)
+        self.assertEqual(purchase_order_content_fingerprint(self.order), fingerprint)
+
+    def test_introduction_visibility_round_trip_retains_wording_and_other_metadata(self):
+        text = 'Preserved Buyer and Seller agreement.'
+        original_contacts = {'order_introduction': text, 'purchase_summary': 'Preserved summary',
+                             'buyer_references': [{'name': 'Preserved reference'}]}
+        self.order.contact_persons = original_contacts
+        self.order.description = '<p>Preserved scope narrative.</p>'
+        self.order.save()
+        for visible in (False, True):
+            with self.subTest(visible=visible):
+                contacts = {**original_contacts, 'show_order_introduction': visible}
+                before = PurchaseOrder.objects.values().get(pk=self.order.pk)
+                snapshot = document_preview_order({'contact_persons': contacts}, base=self.order)
+                pdf, warnings = build_purchase_order_pdf(snapshot)
+                self.assertFalse(warnings)
+                with fitz.open(stream=pdf, filetype='pdf') as document:
+                    pdf_text = '\n'.join(page.get_text() for page in document)
+                self.assertEqual(text in pdf_text, visible)
+                self.assertIn('Preserved scope narrative.', pdf_text)
+                self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
+                response = self.client.patch(self.url, {'contact_persons': contacts}, format='json')
+                self.assertEqual(response.status_code, 200, response.data)
+                self.order.refresh_from_db()
+                self.assertEqual(self.client.get(self.url).data['contact_persons'], contacts)
+                word = Document(BytesIO(build_purchase_order_docx(self.order)))
+                word_text = '\n'.join(paragraph.text for paragraph in word.paragraphs)
+                self.assertEqual(text in word_text, visible)
+                self.assertIn('Preserved scope narrative.', word_text)
+
+    def test_hidden_introduction_does_not_reintroduce_standard_text_when_override_is_reset(self):
+        for custom in (None, 'Retained hidden statement.'):
+            for visible in (False, True):
+                with self.subTest(custom=custom, visible=visible):
+                    contacts = {'show_order_introduction': visible}
+                    if custom is not None:
+                        contacts['order_introduction'] = custom
+                    snapshot = document_preview_order({'contact_persons': contacts, 'description': ''}, base=self.order)
+                    self.assertEqual(bool(purchase_order_introduction(snapshot)), visible)
+                    pdf, warnings = build_purchase_order_pdf(snapshot)
+                    self.assertFalse(warnings)
+                    with fitz.open(stream=pdf, filetype='pdf') as document:
+                        self.assertEqual(len(document), 3 if visible else 2)
+                        pdf_text = '\n'.join(page.get_text() for page in document)
+                    word = Document(BytesIO(build_purchase_order_docx(snapshot)))
+                    word_text = '\n'.join(paragraph.text for paragraph in word.paragraphs)
+                    for text in (pdf_text, word_text):
+                        self.assertEqual((custom or 'issue this purchase order to') in text, visible)
+                    self.assertEqual(snapshot.contact_persons, contacts)
+
+    def test_introduction_visibility_requires_boolean_and_preserves_approved_lock(self):
+        before = PurchaseOrder.objects.values().get(pk=self.order.pk)
+        for value in ('false', 0, 1, None, [], {}):
+            contacts = {**self.order.contact_persons, 'show_order_introduction': value}
+            response = self.client.patch(self.url, {'contact_persons': contacts}, format='json')
+            self.assertEqual(response.status_code, 400, response.data)
+            with self.assertRaises(ValidationError):
+                document_preview_order({'contact_persons': contacts}, base=self.order)
+            self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
+        self.approve()
+        approved = PurchaseOrder.objects.values().get(pk=self.order.pk)
+        response = self.client.patch(self.url, {'contact_persons': {
+            **self.order.contact_persons, 'show_order_introduction': False,
+        }}, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('revised purchase order', str(response.data))
+        self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), approved)
 
     def test_cleared_statement_stays_blank_after_save_and_is_omitted_from_pdf_and_word(self):
+        self.order.description = '<p>Scope retained after clearing the introduction.</p>'
+        self.order.save()
         for blank in ('', '   ', '\r\n\t'):
             with self.subTest(blank=repr(blank)):
                 self.assertEqual(self.patch_statement(blank).status_code, 200)
@@ -119,11 +191,13 @@ class PurchaseOrderIntroductionTests(TestCase):
                 with fitz.open(stream=pdf, filetype='pdf') as document:
                     text = '\n'.join(page.get_text() for page in document)
                     self.assertIn('PO DESCRIPTION & SCOPE', text)
+                    self.assertIn('Scope retained after clearing the introduction.', text)
                     self.assertNotIn('issue this purchase order to', text)
                     self.assertNotIn('(Seller).', text)
                 word = Document(BytesIO(build_purchase_order_docx(self.order)))
                 paragraphs = [paragraph.text for paragraph in word.paragraphs]
                 scope_index = paragraphs.index('PO DESCRIPTION & SCOPE')
+                self.assertIn('Scope retained after clearing the introduction.', paragraphs)
                 # There is no empty introduction paragraph left above scope.
                 self.assertTrue(paragraphs[scope_index - 1].startswith('PURCHASE ORDER:'))
                 self.assertNotIn('issue this purchase order to', '\n'.join(paragraphs))
@@ -136,4 +210,72 @@ class PurchaseOrderIntroductionTests(TestCase):
         pdf, _ = build_purchase_order_pdf(snapshot)
         with fitz.open(stream=pdf, filetype='pdf') as document:
             self.assertNotIn('issue this purchase order to', '\n'.join(page.get_text() for page in document))
+        self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
+
+    def test_scope_heading_toggle_preserves_narrative_in_saved_and_preview_documents(self):
+        self.order.description = '<p>Retained engineering scope narrative.</p>'
+        self.order.contact_persons = {'order_introduction': 'Agreed opening statement.',
+                                      'purchase_summary': 'Retained purchase summary'}
+        self.order.save()
+        for visible in (None, False, True):
+            with self.subTest(visible=visible):
+                contacts = deepcopy(self.order.contact_persons)
+                if visible is not None:
+                    contacts['show_scope_heading'] = visible
+                before = PurchaseOrder.objects.values().get(pk=self.order.pk)
+                snapshot = document_preview_order({'contact_persons': contacts}, base=self.order)
+                pdf, warnings = build_purchase_order_pdf(snapshot)
+                self.assertFalse(warnings)
+                with fitz.open(stream=pdf, filetype='pdf') as document:
+                    text = '\n'.join(page.get_text() for page in document)
+                self.assertEqual('PO DESCRIPTION & SCOPE' in text, visible is not False)
+                self.assertIn('Retained engineering scope narrative.', text)
+                self.assertIn('Agreed opening statement.', text)
+                self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
+                response = self.client.patch(self.url, {'contact_persons': contacts}, format='json')
+                self.assertEqual(response.status_code, 200, response.data)
+                self.order.refresh_from_db()
+                self.assertEqual(self.client.get(self.url).data['contact_persons'], contacts)
+                word = Document(BytesIO(build_purchase_order_docx(self.order)))
+                word_text = '\n'.join(paragraph.text for paragraph in word.paragraphs)
+                self.assertEqual('PO DESCRIPTION & SCOPE' in word_text, visible is not False)
+                self.assertIn('Retained engineering scope narrative.', word_text)
+                self.assertIn('Agreed opening statement.', word_text)
+
+    def test_scope_heading_rejects_invalid_values_and_preserves_approved_content_lock(self):
+        before = PurchaseOrder.objects.values().get(pk=self.order.pk)
+        for value in ('false', 0, 1, None, [], {}):
+            contacts = {**self.order.contact_persons, 'show_scope_heading': value}
+            response = self.client.patch(self.url, {'contact_persons': contacts}, format='json')
+            self.assertEqual(response.status_code, 400, response.data)
+            with self.assertRaises(ValidationError):
+                document_preview_order({'contact_persons': contacts}, base=self.order)
+            self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
+        self.approve()
+        approved = PurchaseOrder.objects.values().get(pk=self.order.pk)
+        response = self.client.patch(self.url, {'contact_persons': {
+            **self.order.contact_persons, 'show_scope_heading': False,
+        }}, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('revised purchase order', str(response.data))
+        self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), approved)
+
+    def test_empty_current_scope_omits_the_page_without_changing_saved_content_or_approval(self):
+        self.order.description = '<p>Previously approved scope.</p>'
+        self.order.save()
+        self.approve()
+        before = PurchaseOrder.objects.values().get(pk=self.order.pk)
+        contacts = {**self.order.contact_persons, 'order_introduction': '', 'show_scope_heading': False}
+        snapshot = document_preview_order({
+            'contact_persons': contacts, 'description': '<p>&nbsp;<br></p>',
+        }, base=self.order)
+        self.assertFalse(snapshot.approval_log)
+        content, warnings = build_purchase_order_pdf(snapshot)
+        self.assertFalse(warnings)
+        with fitz.open(stream=content, filetype='pdf') as pdf:
+            self.assertEqual(len(pdf), 2)
+            self.assertIn('SUMMARY OF PRICES', pdf[1].get_text())
+            self.assertNotIn('PURCHASE ORDER:', '\n'.join(page.get_text() for page in pdf))
+        word = Document(BytesIO(build_purchase_order_docx(snapshot)))
+        self.assertFalse(any(paragraph.text.startswith('PURCHASE ORDER:') for paragraph in word.paragraphs))
         self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)

@@ -68,8 +68,8 @@ def _field_value(name, value):
                     except (InvalidOperation, ValueError) as exc:
                         raise ValidationError({'items': 'Enter valid line amounts to preview the document.'}) from exc
         if name == 'contact_persons':
-            from .purchase_order_introduction import validate_order_introduction
-            validate_order_introduction(value)
+            from .purchase_order_document_options import validate_order_document_options
+            validate_order_document_options(value)
             references = value.get('buyer_references', [])
             if not isinstance(references, list) or any(not isinstance(row, dict) for row in references):
                 raise ValidationError({name: 'Invalid buyer contacts.'})

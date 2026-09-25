@@ -137,10 +137,12 @@ class PurchaseOrderLifecycleApprovalGuardsTests(TestCase):
         self.assertEqual(order.approval_log[0]['status'], 'Pending')
 
     def test_approved_route_can_be_sent_acknowledged_and_completed(self):
-        order = self.order(approval_log=self.approved_rows())
+        order = self.order(approval_log=self.approved_rows(), items=[{'quantity': '1', 'unit': 'EA'}])
         for operation in ('send_to_vendor', 'acknowledge'):
             response = self.client.post(f'{BASE}orders/{order.pk}/{operation}/', {}, format='json')
             self.assertEqual(response.status_code, 200, response.data)
+        Receipt.objects.create(receipt_number='FULL-EVIDENCE', purchase_order=order, status='accepted',
+                               items_received=[{'line_number': 1, 'received_qty': '1', 'accepted_qty': '1'}])
         response = self.client.patch(f'{BASE}orders/{order.pk}/', {'status': 'completed'}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         order.refresh_from_db()
@@ -243,7 +245,7 @@ class PurchaseOrderLifecycleApprovalGuardsTests(TestCase):
     def test_receipt_accept_rolls_back_when_order_approval_pending(self):
         order = self.order()
         receipt = Receipt.objects.create(receipt_number='GUARDED-PENDING', purchase_order=order)
-        response = self.client.post(f'{BASE}receipts/{receipt.pk}/accept/', {}, format='json')
+        response = self.client.post(f'{BASE}receipts/{receipt.pk}/accept/', {'expected_updated_at': receipt.updated_at.isoformat()}, format='json')
         self.assertEqual(response.status_code, 400, response.data)
         receipt.refresh_from_db()
         order.refresh_from_db()
@@ -251,16 +253,17 @@ class PurchaseOrderLifecycleApprovalGuardsTests(TestCase):
         self.assertEqual(order.status, 'draft')
         self.assertIsNone(order.actual_delivery)
 
-    def test_receipt_accept_completes_only_approved_order(self):
-        order = self.order(approval_log=self.approved_rows())
-        receipt = Receipt.objects.create(receipt_number='GUARDED-APPROVED', purchase_order=order)
-        response = self.client.post(f'{BASE}receipts/{receipt.pk}/accept/', {}, format='json')
+    def test_receipt_accept_records_evidence_without_closing_approved_order(self):
+        order = self.order(status='sent', approval_log=self.approved_rows(), items=[{'quantity': '1', 'unit': 'EA'}])
+        receipt = Receipt.objects.create(receipt_number='GUARDED-APPROVED', purchase_order=order,
+                                         items_received=[{'line_number': 1, 'received_qty': '1', 'accepted_qty': '1'}])
+        response = self.client.post(f'{BASE}receipts/{receipt.pk}/accept/', {'expected_updated_at': receipt.updated_at.isoformat()}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         receipt.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(receipt.status, 'accepted')
-        self.assertEqual(order.status, 'completed')
-        self.assertIsNotNone(order.actual_delivery)
+        self.assertEqual(order.status, 'sent')
+        self.assertIsNone(order.actual_delivery)
 
     def test_receipt_business_position_gate_remains_enforced(self):
         order = self.order(approval_log=self.approved_rows())

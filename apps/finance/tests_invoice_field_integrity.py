@@ -146,6 +146,7 @@ class InvoiceFieldIntegrityAPITests(TestCase):
             'po_allocations': [], 'structured_line_items': [],
             'extracted_text': 'Replacement extraction', 'classification_confidence': 1,
             'classification_reasoning': 'Replacement classification',
+            'confirmed_po_references': [{'po_number': 'SYNTHETIC-FORGED-PO'}],
             'procurement_reviewed_by_id': self.editor.pk, 'finance_reviewed_by_id': self.editor.pk,
             'submitted_by_id': self.editor.pk,
         }

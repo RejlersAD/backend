@@ -107,6 +107,11 @@ def validate_purchase_order_transition(order, target_status, *, approval_log=Non
         if approval_log is not None:
             proposed.approval_log = approval_log
         require_purchase_order_approval(proposed)
+        if target_status == 'completed' and current_status != 'completed':
+            from .receiving import receiving_summary
+            summary = receiving_summary(order)
+            if summary['status'] != 'complete':
+                raise ValidationError({'status': summary['blocked_reason'] or 'Complete receipt or service acceptance before closing this purchase order.'})
 
 
 def purchase_order_transition_issue(order, target_status):

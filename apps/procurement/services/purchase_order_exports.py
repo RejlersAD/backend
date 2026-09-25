@@ -39,6 +39,7 @@ from reportlab.lib.utils import ImageReader
 from .approval_integrity import purchase_order_signature_issue
 from .purchase_order_project_display import purchase_order_project_reference
 from .purchase_order_introduction import BUYER_NAME as COMPANY_NAME, INTRODUCTION_KEY, purchase_order_introduction
+from .purchase_order_document_options import show_scope_heading
 from .purchase_order_word_pages import append_pdf_pages
 from .purchase_order_approval_artwork import (
     approval_image_stream as _signature_stream,
@@ -47,7 +48,7 @@ from .purchase_order_approval_artwork import (
 )
 from .purchase_order_source_artwork import source_approval_artwork
 from .purchase_order_sources import is_safe_source_storage_key, uploaded_purchase_order_sources
-from .po_rich_content import append_docx_rich_content, parse_rich_content, pdf_rich_flowables
+from .po_rich_content import append_docx_rich_content, parse_meaningful_rich_content, pdf_rich_flowables
 
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
@@ -148,17 +149,22 @@ def _html_blocks(value):
     return blocks
 
 
-def _pdf_rich_text(value, styles, width=None):
+def _scope_narrative_blocks(value):
+    """Keep authored layout, but do not turn empty editor markup into a page."""
+    return parse_meaningful_rich_content(value, default_font_size=12)
+
+
+def _pdf_rich_text(blocks, styles, width=None):
     # SimpleDocTemplate's frame reserves 6pt on each side inside its margins.
     # Tables and tab fields must use the same line width as its paragraphs.
     width = A4[0] - 32 * mm - 12 if width is None else width
-    return pdf_rich_flowables(parse_rich_content(value), width, styles['body'])
+    return pdf_rich_flowables(blocks, width, styles['body'])
 
 
-def _docx_rich_text(document, value):
+def _docx_rich_text(document, blocks):
     section = document.sections[-1]
     width = (section.page_width - section.left_margin - section.right_margin) / Pt(1)
-    append_docx_rich_content(document, parse_rich_content(value), width=width)
+    append_docx_rich_content(document, blocks, width=width)
 
 
 def _money(value, currency):
@@ -477,7 +483,7 @@ def _main_pdf(order, *, measure_cover=False):
     vendor = getattr(order, 'vendor', None)
     introduction = escape(purchase_order_introduction(order)).replace('\n', '<br/>')
     contacts = getattr(order, 'contact_persons', None)
-    if not isinstance(contacts, dict) or not isinstance(contacts.get(INTRODUCTION_KEY), str):
+    if introduction and (not isinstance(contacts, dict) or not isinstance(contacts.get(INTRODUCTION_KEY), str)):
         introduction = (
             f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
             f'<b>{escape(_value(getattr(vendor, "name", None)))}</b> (Seller).'
@@ -717,16 +723,18 @@ def _main_pdf(order, *, measure_cover=False):
             'identity_gap': max(0, signing_top - approved_height) / scale,
             'scale': scale,
         }
-    story = [
-        fitted_cover,
-        PageBreak(),
-        Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
-    ]
-    if introduction:
-        story.append(Paragraph(introduction, styles['preview']))
-    story.append(Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']))
-    narrative = _pdf_rich_text(order.description, styles, width=document.width - 12)
-    story.extend(narrative or [Paragraph(escape(_value(order.title)), styles['body'])])
+    story = [fitted_cover]
+    narrative = _scope_narrative_blocks(order.description)
+    if introduction or narrative:
+        story.extend((
+            PageBreak(),
+            Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
+        ))
+        if introduction:
+            story.append(Paragraph(introduction, styles['preview']))
+        if show_scope_heading(order):
+            story.append(Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']))
+        story.extend(_pdf_rich_text(narrative, styles, width=document.width - 12))
     # Match the live A4 document: the price summary starts on a clean page.
     # This also prevents an orphaned heading or split table after long scope text.
     story.extend((PageBreak(), Paragraph('SUMMARY OF PRICES', styles['heading'])))
@@ -1394,24 +1402,24 @@ def build_purchase_order_docx(order, *, with_warnings=False):
     _docx_empty_cell_paragraphs(confirmation)
     # A heading page break does not leave an empty extra page when the cover
     # panel fills its A4 frame, unlike a separate page-break paragraph.
-    _docx_heading(document, f'  {_value(order.title)}', prefix='PURCHASE ORDER:').paragraph_format.page_break_before = True
     introduction_text = purchase_order_introduction(order)
-    if introduction_text:
-        introduction = document.add_paragraph()
-        contacts = getattr(order, 'contact_persons', None)
-        if isinstance(contacts, dict) and isinstance(contacts.get(INTRODUCTION_KEY), str):
-            introduction.add_run(introduction_text)
-        else:
-            introduction.add_run(f'We, {COMPANY_NAME} (Buyer), issue this purchase order to ')
-            introduction.add_run(_value(getattr(vendor, 'name', None))).bold = True
-            introduction.add_run(' (Seller).')
-        for run in introduction.runs:
-            run.font.color.rgb = RGBColor.from_string('334155')
-    _docx_heading(document, 'PO DESCRIPTION & SCOPE')
-    if parse_rich_content(order.description):
-        _docx_rich_text(document, order.description)
-    else:
-        document.add_paragraph(_value(order.title))
+    narrative = _scope_narrative_blocks(order.description)
+    if introduction_text or narrative:
+        _docx_heading(document, f'  {_value(order.title)}', prefix='PURCHASE ORDER:').paragraph_format.page_break_before = True
+        if introduction_text:
+            introduction = document.add_paragraph()
+            contacts = getattr(order, 'contact_persons', None)
+            if isinstance(contacts, dict) and isinstance(contacts.get(INTRODUCTION_KEY), str):
+                introduction.add_run(introduction_text)
+            else:
+                introduction.add_run(f'We, {COMPANY_NAME} (Buyer), issue this purchase order to ')
+                introduction.add_run(_value(getattr(vendor, 'name', None))).bold = True
+                introduction.add_run(' (Seller).')
+            for run in introduction.runs:
+                run.font.color.rgb = RGBColor.from_string('334155')
+        if show_scope_heading(order):
+            _docx_heading(document, 'PO DESCRIPTION & SCOPE')
+        _docx_rich_text(document, narrative)
     _docx_heading(document, 'SUMMARY OF PRICES').paragraph_format.page_break_before = True
     items = _items(order)
     item_columns = _item_columns(order)

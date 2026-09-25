@@ -4,6 +4,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.contrib.auth import get_user_model
 from rest_framework.exceptions import ValidationError
 
 from apps.finance.models import Invoice, InvoiceMatchStatus
@@ -50,6 +51,13 @@ class VendorInvoiceOCRParsingTests(SimpleTestCase):
 
 class VendorInvoiceReviewedImportTests(TestCase):
     def setUp(self):
+        from apps.rbac.models import Module, Organization, Permission, UserProfile
+        from apps.rbac.module_actions import ensure_module_actions
+        self.user = get_user_model().objects.create_user('synthetic-importer', email='importer@handoff.example.test', is_superuser=True)
+        org = Organization.objects.create(code='SYNTHETIC-IMPORT', name='Synthetic import')
+        UserProfile.objects.get_or_create(user=self.user, defaults={'organization': org, 'status': 'active'})
+        module, _ = Module.objects.get_or_create(code='procurement_orders', defaults={'name': 'Orders'})
+        ensure_module_actions(Module, Permission, module_ids=[module.pk])
         self.media_root = tempfile.mkdtemp(prefix='radai-invoice-test-')
         self.override = override_settings(MEDIA_ROOT=self.media_root)
         self.override.enable()
@@ -61,6 +69,7 @@ class VendorInvoiceReviewedImportTests(TestCase):
         self.po = PurchaseOrder.objects.create(
             po_number='RAD-PRJ-PUR-9998_2026', vendor=self.vendor,
             title='OCR import test PO', category='other', total_amount=Decimal('1050.00'), currency='AED',
+            status='sent', approval_log=[{'status': 'approved', 'approver': 'Synthetic historical approver'}],
         )
         self.payload = {
             'invoice_number': 'AE-INV-TEST-001',
@@ -82,7 +91,7 @@ class VendorInvoiceReviewedImportTests(TestCase):
     @patch('apps.finance.services.vendor_invoice_import.extract_text_from_pdf_tesseract', return_value=SAMPLE_OCR)
     def test_preview_suggests_but_does_not_write(self, _extract):
         before = Invoice.objects.count()
-        result = VendorInvoiceImportService().preview(b'%PDF-1.4 preview-only', 'invoice.pdf')
+        result = VendorInvoiceImportService().preview(b'%PDF-1.4 preview-only', 'invoice.pdf', user=self.user)
         self.assertEqual(Invoice.objects.count(), before)
         self.assertEqual(result['extracted']['invoice_number'], 'AE-INV-2026-044')
         self.assertTrue(result['vendor_suggestions'])
@@ -91,7 +100,7 @@ class VendorInvoiceReviewedImportTests(TestCase):
     def test_reviewed_import_records_normalized_lines_without_po(self):
         invoice = VendorInvoiceImportService().save_reviewed(
             pdf_bytes=b'%PDF-1.4 reviewed-no-po', filename='invoice.pdf',
-            reviewed_data=self.payload, user=None,
+            reviewed_data=self.payload, user=self.user,
         )
         self.assertEqual(invoice.vendor, self.vendor)
         self.assertEqual(invoice.structured_line_items.count(), 1)
@@ -103,7 +112,7 @@ class VendorInvoiceReviewedImportTests(TestCase):
         with self.assertRaises(ValidationError):
             VendorInvoiceImportService().save_reviewed(
                 pdf_bytes=b'%PDF-1.4 no-confirmation', filename='invoice.pdf',
-                reviewed_data=payload, user=None,
+                reviewed_data=payload, user=self.user,
             )
         self.assertFalse(Invoice.objects.filter(invoice_number='AE-INV-TEST-001').exists())
 
@@ -121,7 +130,7 @@ class VendorInvoiceReviewedImportTests(TestCase):
         }
         invoice = VendorInvoiceImportService().save_reviewed(
             pdf_bytes=b'%PDF-1.4 confirmed-match', filename='invoice.pdf',
-            reviewed_data=payload, user=None,
+            reviewed_data=payload, user=self.user,
         )
         allocation = invoice.po_allocations.get()
         self.assertEqual(allocation.match_status, InvoiceMatchStatus.VERIFIED)
@@ -140,8 +149,47 @@ class VendorInvoiceReviewedImportTests(TestCase):
         }
         invoice = VendorInvoiceImportService().save_reviewed(
             pdf_bytes=b'%PDF-1.4 missing-receipt', filename='invoice.pdf',
-            reviewed_data=payload, user=None,
+            reviewed_data=payload, user=self.user,
         )
         allocation = invoice.po_allocations.get()
         self.assertEqual(allocation.match_status, InvoiceMatchStatus.EXCEPTION)
         self.assertIn('missing_accepted_receipt', allocation.exception_codes)
+
+    def test_reviewed_import_rechecks_current_po_allocation_capacity(self):
+        first = {**self.payload, 'confirmed_po_id': str(self.po.pk), 'confirm_po_match': True,
+                 'total_amount': '600.00', 'amount': '600.00', 'tax_amount': '0.00'}
+        VendorInvoiceImportService().save_reviewed(
+            pdf_bytes=b'%PDF-1.4 first-partial', filename='first.pdf', reviewed_data=first, user=self.user,
+        )
+        second = {**first, 'invoice_number': 'AE-INV-SECOND'}
+        with self.assertRaises(ValidationError):
+            VendorInvoiceImportService().save_reviewed(
+                pdf_bytes=b'%PDF-1.4 second-partial', filename='second.pdf', reviewed_data=second, user=self.user,
+            )
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(self.po.invoice_allocations.count(), 1)
+
+    def test_reviewed_import_requires_po_source_access_and_approval(self):
+        from rest_framework.exceptions import PermissionDenied
+        payload = {**self.payload, 'confirmed_po_id': str(self.po.pk), 'confirm_po_match': True}
+        with self.assertRaises(PermissionDenied):
+            VendorInvoiceImportService().save_reviewed(
+                pdf_bytes=b'%PDF-1.4 unauthorized', filename='invoice.pdf', reviewed_data=payload, user=None,
+            )
+        self.po.approval_log = [{'status': 'pending', 'approver': 'Synthetic reviewer'}]
+        self.po.save(update_fields=['approval_log'])
+        with self.assertRaises(ValidationError):
+            VendorInvoiceImportService().save_reviewed(
+                pdf_bytes=b'%PDF-1.4 unapproved', filename='invoice.pdf', reviewed_data=payload, user=self.user,
+            )
+        self.assertEqual(Invoice.objects.count(), 0)
+
+    def test_reviewed_import_rejects_explicit_vendor_or_currency_mismatch(self):
+        other = Vendor.objects.create(vendor_code='SYNTHETIC-OTHER', name='Other supplier', status='active')
+        payload = {**self.payload, 'confirmed_po_id': str(self.po.pk), 'confirm_po_match': True}
+        for change in ({'vendor_id': str(other.pk)}, {'currency': 'USD'}):
+            with self.subTest(change=change), self.assertRaises(ValidationError):
+                VendorInvoiceImportService().save_reviewed(
+                    pdf_bytes=b'%PDF-1.4 mismatch', filename='invoice.pdf', reviewed_data={**payload, **change}, user=self.user,
+                )
+        self.assertEqual(Invoice.objects.count(), 0)

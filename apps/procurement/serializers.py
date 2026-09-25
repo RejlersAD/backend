@@ -1276,12 +1276,12 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     def validate_contact_persons(self, value):
         from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, RETAINED_SOURCES
-        from .services.purchase_order_introduction import validate_order_introduction
+        from .services.purchase_order_document_options import validate_order_document_options
 
         if not isinstance(value, dict):
             raise serializers.ValidationError('Contact details must be an object.')
         try:
-            validate_order_introduction(value)
+            validate_order_document_options(value)
         except serializers.ValidationError as exc:
             raise serializers.ValidationError(exc.detail['contact_persons']) from exc
         value = dict(value)
@@ -1363,12 +1363,13 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         key = id(obj)
         if key not in cached:
             reason = purchase_order_transition_issue(obj, 'completed')
+            send_reason = purchase_order_transition_issue(obj, 'sent')
             if obj.status in {'completed', 'cancelled'}:
                 reason = 'This purchase order is closed.'
             cached[key] = {
-                'can_send_to_vendor': obj.status == 'draft' and not reason,
+                'can_send_to_vendor': obj.status == 'draft' and not send_reason,
                 'can_complete': obj.status not in {'completed', 'cancelled'} and not reason,
-                'lifecycle_block_reason': reason,
+                'lifecycle_block_reason': send_reason if obj.status == 'draft' else reason,
             }
             self._po_lifecycle_capabilities = cached
         return cached[key]
@@ -1625,9 +1626,14 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 class ReceiptSerializer(serializers.ModelSerializer):
     """Serializer for Goods Receipt"""
     
+    receipt_date = serializers.DateField(required=False)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True, allow_null=True)
     po_number = serializers.CharField(source='purchase_order.po_number', read_only=True)
+    operation_key = serializers.UUIDField(required=False)
+    expected_po_updated_at = serializers.CharField(write_only=True, required=False)
+    expected_updated_at = serializers.CharField(write_only=True, required=False)
+    reason = serializers.CharField(write_only=True, required=False, max_length=4000)
     
     class Meta:
         model = Receipt
@@ -1639,12 +1645,17 @@ class ReceiptSerializer(serializers.ModelSerializer):
             'inspection_agency', 'inspection_report_number', 'ndt_performed',
             'ndt_results', 'dimensional_check_passed',
             'visual_inspection_passed', 'material_verification_passed',
-            'delivery_note_number', 'notes', 'attachments', 'created_at', 'updated_at'
+            'delivery_note_number', 'notes', 'attachments', 'created_at', 'updated_at',
+            'operation_key', 'workflow_history', 'expected_po_updated_at', 'expected_updated_at', 'reason',
         ]
-        read_only_fields = ['id', 'receipt_number', 'receipt_date', 'received_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'receipt_number', 'received_by', 'created_at', 'updated_at', 'workflow_history']
 
     def validate(self, attrs):
         from rest_framework.exceptions import PermissionDenied
+
+        protected = {'workflow_history', 'command_fingerprint', 'received_by', 'receipt_number'} & set(self.initial_data)
+        if protected:
+            raise serializers.ValidationError({field: 'This field is recorded by the server.' for field in sorted(protected)})
 
         if self.instance is None:
             changes_disposition = attrs.get('status', 'pending') != 'pending'
@@ -1659,9 +1670,12 @@ class ReceiptSerializer(serializers.ModelSerializer):
         return enrich_receipt(super().to_representation(instance), instance, self.context.get('request'))
 
     def create(self, validated_data):
-        validated_data['receipt_number'] = ReceiptNumberService.next_number()
-        validated_data['received_by'] = self.context['request'].user
-        return super().create(validated_data)
+        from .services.receiving import record_receipt
+        return record_receipt(validated_data, self.context['request'], reconciliation=self.context.get('receipt_reconciliation', False))
+
+    def update(self, instance, validated_data):
+        from .services.receiving import update_pending_receipt
+        return update_pending_receipt(instance, validated_data, self.context['request'])
 
 
 class ProcurementCategorySerializer(serializers.Serializer):

@@ -5,6 +5,7 @@ Smart data models for procurement tracking, vendor management, and purchasing wo
 
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from apps.core.models import TimeStampedModel
 import uuid
 import hashlib
@@ -747,7 +748,7 @@ class Receipt(TimeStampedModel):
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name='receipts')
     
     # Receipt details
-    receipt_date = models.DateField(auto_now_add=True)
+    receipt_date = models.DateField(default=timezone.localdate)
     received_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='receipts_received')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     
@@ -756,7 +757,7 @@ class Receipt(TimeStampedModel):
     # Example: [{'item': 'Laptop', 'ordered_qty': 2, 'received_qty': 2, 'accepted_qty': 2}]
     
     # Quality check
-    quality_check_passed = models.BooleanField(default=True)
+    quality_check_passed = models.BooleanField(null=True, blank=True, default=None)
     inspection_notes = models.TextField(blank=True)
     
     # Oil & Gas Quality & Compliance
@@ -767,14 +768,17 @@ class Receipt(TimeStampedModel):
     inspection_report_number = models.CharField(max_length=100, blank=True)
     ndt_performed = models.BooleanField(default=False)  # Non-destructive testing performed
     ndt_results = models.TextField(blank=True)  # NDT test results
-    dimensional_check_passed = models.BooleanField(default=True)
-    visual_inspection_passed = models.BooleanField(default=True)
-    material_verification_passed = models.BooleanField(default=True)  # PMI test passed
+    dimensional_check_passed = models.BooleanField(null=True, blank=True, default=None)
+    visual_inspection_passed = models.BooleanField(null=True, blank=True, default=None)
+    material_verification_passed = models.BooleanField(null=True, blank=True, default=None)  # PMI test passed
     
     # Metadata
     delivery_note_number = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
     attachments = models.JSONField(default=list, blank=True)
+    operation_key = models.UUIDField(null=True, blank=True, unique=True, editable=False)
+    command_fingerprint = models.CharField(max_length=64, blank=True, editable=False)
+    workflow_history = models.JSONField(default=list, blank=True, editable=False)
     
     class Meta:
         db_table = 'procurement_receipts'

@@ -66,7 +66,15 @@ class ModuleActionGuardMixin:
                 raise PermissionDenied('No verified business approval route is configured for this operation.')
             if getattr(self, 'detail', False) and hasattr(self, 'get_object'):
                 obj = self.get_object()
-                type(obj).objects.select_for_update(of=('self',)).get(pk=obj.pk)
+                if identity == ('apps.procurement.views', 'ReceiptViewSet') and operation in {'accept', 'reject_delivery'}:
+                    # The receiving commands serialize against their parent PO.
+                    # Locking Receipt first here can deadlock with a pending edit
+                    # which already owns that PO. Preserve the shared domain order
+                    # while retaining every permission and approval-route check.
+                    from apps.procurement.services.receiving import lock_receipt
+                    lock_receipt(obj)
+                else:
+                    type(obj).objects.select_for_update(of=('self',)).get(pk=obj.pk)
         self._guard_decision_fields(request, operation)
         return result
 
