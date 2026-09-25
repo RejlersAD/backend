@@ -110,14 +110,16 @@ def _add_fact(rows, file_obj, fact_type, key, value, confidence, text, start, en
     if identity in rows['_seen']:
         return
     rows['_seen'].add(identity)
-    locator = _locator(text, start, matched) if text else {'provider': method}
+    located = bool(text and type(start) is int and type(end) is int and 0 <= start < end <= len(text))
+    locator = _locator(text, start, matched) if located else {'provider': method}
     if text and file_obj:
         locator['extracted_text_sha256'] = text_hash
+    if located and file_obj:
         locator['character_end'] = end
     rows['facts'].append(IntelligenceFact(
         run=rows['run'], source_file=file_obj, fact_type=fact_type, key=key[:160], value=value,
         normalized_value=normalized, confidence=confidence, extraction_method=method,
-        source_excerpt=_excerpt(text, start, end) if text else '',
+        source_excerpt=_excerpt(text, start, end) if located else '',
         source_locator=locator,
     ))
     return rows['facts'][-1]

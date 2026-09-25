@@ -371,3 +371,4 @@ apps/finance/data/invoice_performance_summary.json
 !apps/planning_intelligence/tests/test_preview_job_dispatch.py
 !apps/planning_intelligence/tests/test_register_geometry_integration.py
 !docs/RELEASE_20260925_PLANNING_PROCUREMENT.md
+/.codex_tmp/

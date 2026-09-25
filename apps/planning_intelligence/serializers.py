@@ -256,6 +256,10 @@ class PlanningGenerationSerializer(serializers.ModelSerializer):
         return engine.get('source_analysis_run_id') or engine.get('intelligence_run_id') or intelligence.get('document_intelligence_run_id')
 
     def _schedule_version(self, instance):
+        if instance.pk is None:
+            # Legacy previews can serialize an unsaved generation. It cannot
+            # have a materialized version, and Django rejects that FK filter.
+            return None
         from .models import ScheduleVersion
         cache = getattr(self, '_materialized_versions', {})
         if instance.pk not in cache:

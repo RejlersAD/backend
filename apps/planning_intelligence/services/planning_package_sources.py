@@ -61,7 +61,8 @@ def _fact_location(fact, source):
 
 
 def _overlaps(left, right):
-    return left[0] < right[1] and right[0] < left[1]
+    return (all(type(value) is int for value in (left[0], left[1], right[0], right[1]))
+            and left[0] < right[1] and right[0] < left[1])
 
 
 def _register_overlaps(row, location):
@@ -124,7 +125,9 @@ def build_planning_package_sources(files, facts):
     register_index = defaultdict(list)
     for source in sources.values():
         for row in extract_register_rows(source.get('text') or '', structured_evidence=source.get('structured_evidence')):
-            locator = {**(row.get('source_locator') or {}), 'character_start': row['start'], 'character_end': row['end']}
+            locator = deepcopy(row.get('source_locator') or {})
+            if type(row.get('start')) is int and type(row.get('end')) is int:
+                locator.update(character_start=row['start'], character_end=row['end'])
             matching = [fact for fact, owner, location in located
                         if owner['id'] == source['id'] and fact.get('fact_type') == 'deliverable'
                         and isinstance(fact.get('value'), dict) and fact['value'].get('source_register')

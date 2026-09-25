@@ -31,7 +31,7 @@ def make_register_pdf(rows, *, caption=True, negative_legend=False, continuation
             if caption:
                 text(40, 35, 'Table 2: Applicable Deliverables for Work Packages')
             if negative_legend:
-                text(40, 52, 'X = not required')
+                text(40, 52, negative_legend if isinstance(negative_legend, str) else 'X = not required')
             for x in (40, 85, 150, 350, 440, 600):
                 line(x, 70, x, 110)
             for y in (70, 110):
@@ -53,7 +53,7 @@ def make_register_pdf(rows, *, caption=True, negative_legend=False, continuation
             bottom = top + 48
             merged = row.get('merged', False)
             for x in boundaries:
-                if not (merged and x in (380, 410)):
+                if not (merged and x in (380, 410)) and not (row.get('section_heading') and x == 150):
                     line(x, top, x, bottom)
             # Continuation has an open top, matching real PDFs which cause
             # generic find_tables() to omit their first continuation row.
@@ -63,7 +63,7 @@ def make_register_pdf(rows, *, caption=True, negative_legend=False, continuation
             text(44, top + 26, row['code'])
             text(90, top + 26, row.get('discipline', 'Process'))
             for n, value in enumerate(row['title'].split('\n')):
-                text(154, top + 16 + n * 11, value)
+                text(154, top + (26 if row.get('title_at_center') else 16) + n * 11, value)
             for mark, x in row.get('marks', [('X', 360)]):
                 text(x, top + 26, mark)
             for n, value in enumerate(row.get('remarks', '').split('\n')):
@@ -75,6 +75,44 @@ def make_register_pdf(rows, *, caption=True, negative_legend=False, continuation
     page(rows[:1] if continuation else rows, True)
     if continuation:
         page(rows[1:], False, True)
+    canvas.save()
+    stream.seek(0)
+    return stream
+
+
+def make_landscape_cooling_register(*, caption='Table 9: Applicable Deliverables for Cooling Network', title_header='Document title'):
+    """Independent landscape contract fixture with two named work packages."""
+    stream = io.BytesIO()
+    canvas = Canvas(stream, pagesize=(900, 600))
+
+    def text(x, top, value):
+        canvas.setFont('Helvetica', 10)
+        canvas.drawString(x, 600 - top, value)
+
+    def line(x0, top, x1, bottom):
+        canvas.line(x0, 600 - top, x1, 600 - bottom)
+
+    text(80, 40, caption)
+    for x in (80, 140, 250, 530, 710, 830):
+        line(x, 90, x, 200)
+    line(620, 115, 620, 200)
+    for top in (90, 140, 200):
+        line(80, top, 830, top)
+    line(530, 115, 710, 115)
+    text(87, 124, 'Item No.')
+    text(150, 124, 'Discipline')
+    text(260, 124, title_header)
+    text(549, 107, 'Work Packages')
+    text(552, 133, 'WP 10')
+    text(646, 133, 'WP 20')
+    text(730, 124, 'Comments')
+    text(87, 175, 'ME-014')
+    text(150, 175, 'Mechanical')
+    text(260, 164, 'Cooling Water Equipment Specification')
+    text(260, 181, 'and Operating Envelope')
+    text(650, 175, 'X')
+    text(720, 175, 'New issue')
+    canvas.showPage()
     canvas.save()
     stream.seek(0)
     return stream
@@ -119,10 +157,48 @@ class PdfRegisterGeometryTests(unittest.TestCase):
         self.assertEqual([row['applicability_status'] for row in rows], ['conditional', 'bundled', 'not_required'])
         self.assertTrue(all(row['applicability_marked'] for row in rows))
 
+    def test_scope_inclusion_is_not_mistaken_for_bundling_with_another_document(self):
+        for remarks in ('Included in FEED scope', 'Covered by contract', 'Included within engineering services'):
+            with self.subTest(remarks=remarks):
+                row = extract_pdf_register_rows(make_register_pdf([{
+                    'code': '1', 'title': 'Valve Specification', 'remarks': remarks,
+                }]))[0]
+                self.assertEqual(row['applicability_status'], 'marked')
+        for remarks in ('Included in safety report', 'Covered by the Design Basis Report', 'No separate document'):
+            with self.subTest(remarks=remarks):
+                row = extract_pdf_register_rows(make_register_pdf([{
+                    'code': '1', 'title': 'Valve Specification', 'remarks': remarks,
+                }]))[0]
+                self.assertEqual(row['applicability_status'], 'bundled')
+
+    def test_host_report_and_negative_inclusion_are_not_excluded_as_bundled(self):
+        for remarks in ('3.1.1 and 3.1.2 shall be part of this report', 'Not included in safety report'):
+            with self.subTest(remarks=remarks):
+                row = extract_pdf_register_rows(make_register_pdf([{
+                    'code': '7.3', 'title': 'Materials Study Report', 'remarks': remarks,
+                }]))[0]
+                self.assertEqual(row['applicability_status'], 'marked')
+
+    def test_explicit_numbered_register_reference_remains_bundled(self):
+        for remarks in ('covered in 8.2.14', 'Covered in Sr. No. 8.2.14'):
+            with self.subTest(remarks=remarks):
+                row = extract_pdf_register_rows(make_register_pdf([{
+                    'code': '9.2', 'title': 'Noise Hazard Area Layout', 'remarks': remarks,
+                }]))[0]
+                self.assertEqual(row['applicability_status'], 'bundled')
+
     def test_negative_x_legend_is_not_interpreted_as_positive_applicability(self):
         rows = extract_pdf_register_rows(make_register_pdf([{'code': '3.1.1', 'title': 'Report'}], negative_legend=True))
         self.assertEqual(rows[0]['applicability_status'], 'not_required')
         self.assertEqual(rows[0]['source_locator']['mark_meaning'], 'not_required')
+
+    def test_negative_legend_dash_variants_do_not_turn_exclusions_into_applicable_scope(self):
+        for legend in ('X - Not required', 'X \u2013 Not applicable', 'X \u2014 Excluded', 'X: Not required', 'X denotes not applicable'):
+            with self.subTest(legend=legend):
+                rows = extract_pdf_register_rows(make_register_pdf([
+                    {'code': '8.1', 'title': 'Cooling Water Load Study'},
+                ], negative_legend=legend))
+                self.assertEqual(rows[0]['applicability_status'], 'not_required')
 
     def test_vertically_merged_remarks_apply_to_the_explicit_shared_row_group(self):
         rows = extract_pdf_register_rows(make_register_pdf([
@@ -197,6 +273,94 @@ class PdfRegisterGeometryTests(unittest.TestCase):
         ], continuation=True)
         with self.assertRaisesRegex(ValueError, 'text_page_mismatch'):
             extract_pdf_register_rows(stream, extracted_text='Only one unpaginated page')
+
+    def test_simple_dotted_and_alphanumeric_ids_work_only_in_verified_serial_cells(self):
+        for code in ('1', '27', '2.1', '7.4.2', 'A-014', 'ME-DR-032', 'HVAC-12A'):
+            with self.subTest(code=code):
+                rows = extract_pdf_register_rows(make_register_pdf([{
+                    'code': code, 'title': 'Cooling Water Hydraulic Study', 'discipline': 'Mechanical',
+                }]))
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]['register_item'], code)
+                self.assertEqual(rows[0]['name'], 'Cooling Water Hydraulic Study')
+
+    def test_merged_discipline_heading_is_not_mistaken_for_a_two_level_deliverable(self):
+        rows = extract_pdf_register_rows(make_register_pdf([
+            {'code': '2.1', 'title': '', 'discipline': 'Mechanical (Rotating Equipment)', 'marks': [], 'section_heading': True},
+            {'code': '2.1.1', 'title': 'Cooling Pump Datasheet'},
+        ]))
+        self.assertEqual([row['register_item'] for row in rows], ['2.1.1'])
+
+    def test_independent_landscape_document_uses_detected_columns_and_package_labels(self):
+        rows = extract_pdf_register_rows(make_landscape_cooling_register())
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row['register_item'], 'ME-014')
+        self.assertEqual(row['name'], 'Cooling Water Equipment Specification and Operating Envelope')
+        self.assertEqual(row['discipline_label'], 'Mechanical')
+        self.assertEqual(row['applicability_cells'][0]['package_labels'], ['WP 20'])
+        self.assertEqual(row['source_remarks'], 'New issue')
+
+    def test_reference_caption_does_not_turn_an_unrelated_landscape_table_into_scope(self):
+        self.assertEqual(extract_pdf_register_rows(make_landscape_cooling_register(caption='Table 9: Reference standards')), [])
+
+    def test_applicability_caption_without_a_deliverable_header_is_rejected(self):
+        self.assertEqual(extract_pdf_register_rows(make_landscape_cooling_register(title_header='Reference standard')), [])
+
+    def test_simple_ids_do_not_bypass_caption_verification(self):
+        self.assertEqual(extract_pdf_register_rows(make_register_pdf([
+            {'code': '1', 'title': 'Ordinary Numbered Requirement'},
+        ], caption=False)), [])
+
+    def test_repeated_ids_use_unique_literal_title_evidence_instead_of_first_item_line(self):
+        stream = make_register_pdf([
+            {'code': '1', 'title': 'Cooling Water Design Criteria'},
+            {'code': '1', 'title': 'Circulation Pump Specification'},
+        ])
+        with pdfplumber.open(stream) as pdf:
+            source_text = '\f'.join(page.extract_text() for page in pdf.pages)
+        rows = extract_pdf_register_rows(stream, extracted_text=source_text)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]['source_locator']['bbox'], rows[1]['source_locator']['bbox'])
+        self.assertNotEqual(rows[0]['start'], rows[1]['start'])
+        for row in rows:
+            self.assertEqual(source_text[row['start']:row['end']], row['name'])
+            self.assertEqual(row['source_text_excerpt'], row['name'])
+            self.assertEqual(row['source_locator']['text_row_status'], 'unique_title_cell')
+            title_ranges = [part for part in row['source_locator']['text_ranges'] if part['field'] == 'title']
+            self.assertEqual(len(title_ranges), 1)
+            self.assertEqual(title_ranges[0]['quote'], row['name'])
+            self.assertEqual(source_text[title_ranges[0]['character_start']:title_ranges[0]['character_end']], row['name'])
+
+    def test_repeated_ids_and_titles_preserve_ambiguity_without_false_offsets(self):
+        stream = make_register_pdf([
+            {'code': '1', 'title': 'Cooling Water Design Criteria'},
+            {'code': '1', 'title': 'Cooling Water Design Criteria'},
+        ])
+        with pdfplumber.open(stream) as pdf:
+            source_text = '\f'.join(page.extract_text() for page in pdf.pages)
+        rows = extract_pdf_register_rows(stream, extracted_text=source_text)
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertIsNone(row['start'])
+            self.assertIsNone(row['end'])
+            self.assertNotIn('source_text_excerpt', row)
+            self.assertNotIn('quote', row['source_locator'])
+            self.assertEqual(row['source_locator']['text_row_status'], 'ambiguous_repeated_item')
+
+    def test_repeated_ids_can_use_the_matching_item_line_when_it_contains_unique_title(self):
+        stream = make_register_pdf([
+            {'code': '12', 'title': 'Cooling Water Design Criteria', 'title_at_center': True},
+            {'code': '12', 'title': 'Circulation Pump Specification', 'title_at_center': True},
+        ])
+        with pdfplumber.open(stream) as pdf:
+            source_text = '\f'.join(page.extract_text() for page in pdf.pages)
+        rows = extract_pdf_register_rows(stream, extracted_text=source_text)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]['start'], rows[1]['start'])
+        for row in rows:
+            self.assertIn(row['name'], source_text[row['start']:row['end']])
+            self.assertEqual(row['source_locator']['text_row_status'], 'unique_title_in_item_line')
 
 
 if __name__ == '__main__':

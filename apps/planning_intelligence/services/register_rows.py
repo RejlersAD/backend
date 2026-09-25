@@ -396,21 +396,39 @@ def _applicability_text_register_rows(text):
 
 
 def _merge_register_geometry(text, rows, structured_evidence):
-    """Prefer located PDF cells only for the same page and register item."""
+    """Prefer PDF cells, retaining uncertain text locations as review inventory."""
     from .register_geometry_cache import SCHEMA_VERSION
+    from .pdf_register_geometry import GEOMETRY_VERSION
     geometry = (structured_evidence or {}).get('register_geometry') or {}
     if (geometry.get('schema_version') != SCHEMA_VERSION
+            or geometry.get('extractor_version') != GEOMETRY_VERSION
             or geometry.get('text_sha256') != hashlib.sha256(text.encode('utf-8')).hexdigest()
             or geometry.get('status') != 'parsed'):
         return rows
     located = []
     for source in geometry.get('rows') or []:
         start, end = source.get('start'), source.get('end')
-        if not (type(start) is int and type(end) is int and 0 <= start < end <= len(text)
-                and source.get('register_item') is not None and source.get('original_title')):
+        if source.get('register_item') is None or not source.get('original_title'):
             continue
         row = deepcopy(source)
         locator = row.setdefault('source_locator', {})
+        if not (type(start) is int and type(end) is int and 0 <= start < end <= len(text)):
+            page, bbox = locator.get('page'), locator.get('bbox')
+            if (locator.get('text_row_status') not in {'ambiguous_repeated_item', 'item_line_not_located'}
+                    or type(page) is not int or not 1 <= page <= text.count('\f') + 1
+                    or not isinstance(bbox, list) or len(bbox) != 4
+                    or not all(type(value) in (int, float) for value in bbox)):
+                continue
+            # Geometry identifies the source cells, but repeated IDs/titles do
+            # not prove a unique quote in the flattened text. Do not let the
+            # weaker text parser promote those same occurrences on fallback.
+            row.update(start=None, end=None, source_line=None, source_excerpt='', source_text_excerpt='',
+                       title_boundary_status='ambiguous')
+            for key in ('character_start', 'character_end', 'raw_text_start', 'raw_text_end', 'quote', 'line'):
+                locator.pop(key, None)
+            locator['literal_cells'] = deepcopy(row.get('literal_cells') or {})
+            located.append(row)
+            continue
         page = text.count('\f', 0, start) + 1
         if locator.get('page') != page:
             continue
@@ -423,7 +441,12 @@ def _merge_register_geometry(text, rows, structured_evidence):
         (row.get('source_locator') or {}).get('page') or text.count('\f', 0, row['start']) + 1,
         str(row.get('register_item')),
     ) not in identities]
-    return sorted([*fallback, *located], key=lambda row: row['start'])
+    def ordering(row):
+        start = row.get('start')
+        locator = row.get('source_locator') or {}
+        page = locator.get('page') or text.count('\f', 0, start or 0) + 1
+        return (page, start is None, start if start is not None else (locator.get('bbox') or [0, 0])[1])
+    return sorted([*fallback, *located], key=ordering)
 
 
 def register_rows_for_file(file_obj):

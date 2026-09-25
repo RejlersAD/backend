@@ -60,6 +60,24 @@ the evidence. Bulk fact/preview confirmation does not bypass these guards.
 The `6.2-applicability-registers` engine invalidates older extraction caches;
 existing saved analyses are preserved and require an explicit fresh analysis.
 
+The optional `pdf-register-geometry-v2` adapter adds cell evidence for recognized
+ruled applicability registers across projects. It does not select documents by
+project ID, filename, page number or expected row count. Integer, dotted numeric
+and conventional alphanumeric row IDs are recognized inside a verified serial
+column; merged section headings are excluded by cell boundaries. Repeated IDs
+require unique literal code/title evidence for text offsets. Otherwise page/cell
+evidence remains ambiguous review inventory, without invented quotes or offsets.
+Scope inclusion is distinct from bundling into another document. Explicit
+negative X legends and source exclusions take precedence over positive marks.
+
+Cache identity includes original bytes, text, storage identity and extractor
+version. Refresh occurs during authorized parsing/analysis, never an ordinary
+read. Word, workbook, delimited text and other supported inputs keep their own
+adapters; unrecognized PDF layouts retain existing fallback processing. This
+does not certify arbitrary scanned/unruled matrices or unknown mark semantics.
+Changing the geometry version leaves historical analyses and schedules intact;
+the next explicit source refresh creates current geometry evidence.
+
 Client fields require a colon or a spaced hyphen delimiter. Hyphenated phrases
 such as `COMPANY-approved` are not client names. Actual conflicting labeled
 client values and workspace values continue to produce reviewable conflicts.

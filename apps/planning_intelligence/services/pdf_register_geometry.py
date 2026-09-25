@@ -12,15 +12,25 @@ from bisect import bisect_left, bisect_right
 from .register_rows import normalize_register_discipline
 
 
-GEOMETRY_VERSION = 'pdf-register-geometry-v1'
+GEOMETRY_VERSION = 'pdf-register-geometry-v2'
 MAX_PAGES = 500
 MAX_ROWS = 20_000
 MAX_PAGE_WORDS = 150_000
 _CAPTION = re.compile(r'^\s*(?:table\s+\w+\s*[:.\-]?\s*)?(?:applicable\s+deliverables\b.*|deliverables\b.*\bapplicability\b.*)$', re.I)
-_ITEM = re.compile(r'^\d+(?:\.\d+){2,}$')
+# Only applied inside a verified serial column, never to ordinary prose. These
+# are conventional item identifiers, not a project-specific WBS depth.
+_ITEM_PATTERN = r'(?:\d+(?:\.\d+)*|(?:[A-Za-z]{1,12}-)+\d+(?:[.-]\d+)*[A-Za-z]?)'
+_ITEM = re.compile(r'^' + _ITEM_PATTERN + r'$')
+_FIRST_ITEM = re.compile(r'^[ \t]*' + _ITEM_PATTERN + r'(?=\s|$)', re.M)
 _CONDITIONAL = re.compile(r'\b(?:if|unless|as required|where applicable|where required|if required|no new|during detailed engineering|to be assessed)\b', re.I)
 _NOT_REQUIRED = re.compile(r'\b(?:not required|not applicable|not in (?:the )?scope|out of scope)\b', re.I)
-_BUNDLED = re.compile(r'\b(?:no separate (?:report|deliverable|document)|included (?:in|within)|covered (?:in|by)|part of (?:the )?(?:report|document)|repetition)\b', re.I)
+_BUNDLED = re.compile(
+    r'\b(?:no separate (?:report|deliverable|document)|repetition|'
+    r'(?<!not )(?:included (?:in|within)|covered (?:in|by)|part of)\s+(?:'
+    r'(?!(?:this|these)\b)(?:(?:the|a|an)\s+)?(?:[\w&/-]+\s+){0,8}'
+    r'(?:report|document|deliverable)|'
+    r'(?:(?:sr\.?\s*no\.?|item(?:\s+no\.?)?|row)\s*)?\d+(?:[.,]\d+)+))\b', re.I,
+)
 
 
 def _center(word):
@@ -98,7 +108,7 @@ def _header(page, text):
         caption = captions[-1]
         # An explicit inverse legend always takes precedence over an applicable
         # caption. A different annexure cannot inherit this header's meaning.
-        inverse = bool(re.search(r'\bX\s*(?:=|:|means|indicates|denotes)\s*(?:not required|not applicable|excluded)', text, re.I))
+        inverse = bool(re.search(r'\bX\s*(?:[=:\-\u2013\u2014]|means|indicates|denotes)\s*(?:not required|not applicable|excluded)', text, re.I))
         return {
             'caption': caption, 'serial': (serial[0], serial[2]),
             'discipline': (discipline[0], discipline[2]), 'title': (title[0], title[2]),
@@ -162,7 +172,7 @@ class PdfRegisterGeometryExtractor:
 
     def extract_page(self, page, page_number, text=None):
         text = page.extract_text() or '' if text is None else text
-        first_item = re.search(r'^\s*\d+(?:\.\d+){2,}(?=\s|$)', text, re.M)
+        first_item = _FIRST_ITEM.search(text)
         preamble = text[:first_item.start()] if first_item else text
         if self.previous_page is not None and page_number != self.previous_page + 1:
             self.context = None
@@ -197,6 +207,15 @@ class PdfRegisterGeometryExtractor:
             top, bottom = bounds
             # Incomplete ruling that encloses several serials is not a row.
             if sum(top < _center(other)[1] < bottom for other in items) != 1:
+                continue
+            # A discipline heading may merge across the title column. Long
+            # labels then visually cross the header's nominal x boundary; they
+            # are not deliverable titles. Require the real title-cell sides at
+            # this row before using those header-derived boundaries.
+            middle = (top + bottom) / 2
+            if not all(any(edge.get('orientation') == 'v' and abs(edge['x0'] - side) < 1
+                           and edge['top'] < middle < edge['bottom'] for edge in page.edges)
+                       for side in context['title']):
                 continue
             boxes = {key: (context[key][0], top, context[key][1], bottom) for key in ('serial', 'discipline', 'title', 'remarks')}
             remarks_middle = sum(context['remarks']) / 2
@@ -248,9 +267,10 @@ class PdfRegisterGeometryExtractor:
 def extract_pdf_register_rows(file_obj, extracted_text=''):
     """Extract geometry evidence without changing or closing the caller's stream.
 
-    Offsets, when present, identify the original flattened row-code line only;
+    Offsets identify a unique original item line or literal title-cell line;
     ``literal_cells`` and page bounding boxes carry the reconstructed cell text.
-    A wrapped title is not falsely claimed to be a contiguous flattened quote.
+    Ambiguous repeated text retains boxes without fabricated offsets. A wrapped
+    title is never falsely claimed to be one contiguous flattened quotation.
     """
     import pdfplumber
 
@@ -275,15 +295,6 @@ def extract_pdf_register_rows(file_obj, extracted_text=''):
                 extracted = extractor.extract_page(page, index + 1, page_text)
                 for row in extracted:
                     if page_text is not None:
-                        match = re.search(r'^[ \t]*' + re.escape(str(row['register_item'])) + r'(?=\s|$).*$', page_text, re.M)
-                        if match:
-                            row['start'], row['end'] = offsets[index] + match.start(), offsets[index] + match.end()
-                            row['source_line'] = extracted_text.count('\n', 0, row['start']) + 1
-                            row['source_locator']['line'] = row['source_line']
-                            row['source_locator']['raw_text_start'] = row['start']
-                            row['source_locator']['raw_text_end'] = row['end']
-                            row['source_text_excerpt'] = extracted_text[row['start']:row['end']]
-                            row['source_locator']['quote'] = row['source_text_excerpt']
                         ranges = []
                         for field, literal in row['literal_cells'].items():
                             for line in literal.splitlines():
@@ -296,6 +307,36 @@ def extract_pdf_register_rows(file_obj, extracted_text=''):
                                                    'character_end': offsets[index] + located.end(),
                                                    'quote': located.group(0), 'field': field})
                         row['source_locator']['text_ranges'] = ranges
+                        matches = list(re.finditer(r'^[ \t]*' + re.escape(str(row['register_item'])) + r'(?=\s|$).*$', page_text, re.M))
+                        located = None
+                        if len(matches) == 1:
+                            located = (offsets[index] + matches[0].start(), offsets[index] + matches[0].end())
+                        else:
+                            title_ranges = [part for part in ranges if part['field'] == 'title']
+                            title_matches = [match for match in matches if any(
+                                offsets[index] + match.start() <= part['character_start']
+                                < part['character_end'] <= offsets[index] + match.end() for part in title_ranges)]
+                            if len(title_matches) == 1:
+                                match = title_matches[0]
+                                located = (offsets[index] + match.start(), offsets[index] + match.end())
+                                row['source_locator']['text_row_status'] = 'unique_title_in_item_line'
+                            elif title_ranges:
+                                title_part = max(title_ranges, key=lambda part: len(part['quote']))
+                                located = (title_part['character_start'], title_part['character_end'])
+                                row['source_locator']['text_row_status'] = 'unique_title_cell'
+                            else:
+                                # Cell boxes remain exact evidence. Preserve
+                                # ambiguity instead of attaching an unrelated
+                                # first occurrence to a later repeated item.
+                                row['source_locator']['text_row_status'] = 'ambiguous_repeated_item' if matches else 'item_line_not_located'
+                        if located:
+                            row['start'], row['end'] = located
+                            row['source_line'] = extracted_text.count('\n', 0, row['start']) + 1
+                            row['source_locator']['line'] = row['source_line']
+                            row['source_locator']['raw_text_start'] = row['start']
+                            row['source_locator']['raw_text_end'] = row['end']
+                            row['source_text_excerpt'] = extracted_text[row['start']:row['end']]
+                            row['source_locator']['quote'] = row['source_text_excerpt']
                 rows.extend(extracted)
                 if len(rows) > MAX_ROWS:
                     raise ValueError('pdf_register_geometry_row_limit')

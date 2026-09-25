@@ -326,3 +326,131 @@ class CachedOnlyRunRecoveryTests(TestCase):
         self.assertTrue(ai['cached_only'])
         self.assertTrue(ai['resume_available'])
         self.assertEqual(refreshed.summary['resumed_from_run_id'], original.pk)
+
+    def test_cached_only_recovery_rejects_foreign_project_run_with_identical_text(self):
+        from ..models import DocumentIntelligenceRun
+        from ..services.document_intelligence import ResumeSourceChanged, run_document_intelligence
+
+        projects = [PlanningProject.objects.create(name=name) for name in ('First unrelated project', 'Second unrelated project')]
+        for project in projects:
+            PlanningFile.objects.create(project=project, category='sow', original_filename='same-scope.txt',
+                file='same-scope.txt', parse_status='done', extracted_text='Identical source text. ' * 8)
+        configuration = {'provider': 'anthropic', 'model': 'synthetic-model'}
+        with patch.object(intelligence, 'CLAUDE_MAX_INPUT_CHARS', 80), \
+                patch.object(intelligence.project_ai, 'get_project_ai_config', return_value=configuration), \
+                patch.object(intelligence.project_ai, 'call_project_ai', return_value={'text': '{"facts": []}'}) as provider, \
+                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '1'}):
+            original, _ = run_document_intelligence(projects[0])
+            self.assertTrue(original.summary['ai_checkpoint']['chunks'])
+            original_summary = deepcopy(original.summary)
+            provider.reset_mock()
+            with self.assertRaises(ResumeSourceChanged):
+                run_document_intelligence(projects[1], allow_ai=False, resume_run=original)
+            provider.assert_not_called()
+        self.assertEqual(DocumentIntelligenceRun.objects.count(), 1)
+        original.refresh_from_db()
+        self.assertEqual(original.summary, original_summary)
+        self.assertFalse(projects[1].intelligence_runs.exists())
+
+
+class MultiDocumentProviderRecoveryTests(SimpleTestCase):
+    """Shared recovery does not depend on one provider, project or source file."""
+
+    def setUp(self):
+        self.project = SimpleNamespace(pk=987, ai_settings={})
+        self.configuration = {'model': 'synthetic-same-model'}
+        for patcher in [
+                patch.object(intelligence, 'CLAUDE_MAX_INPUT_CHARS', 40),
+                patch.object(project_ai, 'get_project_ai_config', return_value=self.configuration),
+                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64'})]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(project_ai, 'call_project_ai', side_effect=self.literal_response)
+        self.provider = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def prepare(self, provider):
+        self.project.ai_settings = {'provider': provider}
+        self.configuration['provider'] = provider
+        self.sources = [SimpleNamespace(pk=1001 + index, category='other', original_filename=f'unrelated-{index}.txt',
+            extracted_text=quote + 'A' * (80 - len(quote))) for index, quote in enumerate((
+                'Prepare Permit Matrix.', 'Prepare Interface Register.'))]
+        self.provider.side_effect = self.literal_response
+        self.provider.reset_mock()
+
+    def literal_response(self, project, **options):
+        payload = json.loads(options['user_prompt'])
+        facts = []
+        if payload['character_start'] == 0:
+            quote = payload['source_text'].split('.')[0] + '.'
+            facts.append({'type': 'deliverable', 'value': quote.removeprefix('Prepare ').removesuffix('.'),
+                          'source_file_id': payload['source_file_id'], 'quote': quote, 'discipline': None})
+        return {'text': json.dumps({'facts': facts}), 'stop_reason': 'end_turn'}
+
+    def initial(self, provider):
+        self.prepare(provider)
+        with patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '3'}):
+            return intelligence.analyze_project(self.sources, project=self.project)
+
+    def test_both_providers_reuse_facts_across_two_documents_without_requests(self):
+        for provider in ('anthropic', 'gemini'):
+            with self.subTest(provider=provider):
+                initial = self.initial(provider)
+                self.assertEqual(self.provider.call_count, 3)
+                self.assertEqual({fact['source_file_id'] for fact in initial['ai_evidence_facts']}, {1001, 1002})
+                self.provider.reset_mock()
+                recovered = intelligence.analyze_project(self.sources, project=self.project, allow_ai=False,
+                    resume_state=initial['ai_checkpoint'], resume_coverage=initial['ai_processing_coverage'])
+                self.provider.assert_not_called()
+                self.assertEqual(recovered['ai_evidence_facts'], initial['ai_evidence_facts'])
+                ai = recovered['ai_processing_coverage']
+                self.assertEqual((ai['chunks_processed'], ai['chunks_remaining'], ai['calls_this_pass']), (3, 1, 0))
+                self.assertEqual(ai['chunks_skipped'], 1)
+                self.assertTrue(ai['resume_available'])
+                self.assertEqual(recovered['ai_provider_used'], provider)
+
+    def test_both_providers_reject_checkpoint_when_one_document_identity_changes(self):
+        for provider in ('anthropic', 'gemini'):
+            with self.subTest(provider=provider):
+                initial = self.initial(provider)
+                self.sources[0].pk = 9001
+                self.provider.reset_mock()
+                recovered = intelligence.analyze_project(self.sources, project=self.project, allow_ai=False,
+                    resume_state=initial['ai_checkpoint'], resume_coverage=initial['ai_processing_coverage'])
+                self.provider.assert_not_called()
+                self.assertEqual(recovered['ai_evidence_facts'], [])
+                self.assertEqual(recovered['ai_processing_coverage']['chunks_processed'], 0)
+                self.assertEqual(recovered['ai_processing_coverage']['chunks_remaining'], 4)
+                self.assertEqual(recovered['ai_checkpoint']['chunks'], {})
+
+    def test_provider_switch_rejects_cache_even_when_model_and_documents_are_unchanged(self):
+        for provider, replacement in (('anthropic', 'gemini'), ('gemini', 'anthropic')):
+            with self.subTest(provider=provider, replacement=replacement):
+                initial = self.initial(provider)
+                self.project.ai_settings['provider'] = replacement
+                self.configuration['provider'] = replacement
+                self.provider.reset_mock()
+                recovered = intelligence.analyze_project(self.sources, project=self.project, allow_ai=False,
+                    resume_state=initial['ai_checkpoint'])
+                self.provider.assert_not_called()
+                self.assertEqual(recovered['ai_evidence_facts'], [])
+                self.assertEqual(recovered['ai_processing_coverage']['chunks_processed'], 0)
+                self.assertEqual(recovered['ai_processing_coverage']['chunks_remaining'], 4)
+
+    def test_both_providers_pause_all_remaining_document_sections_after_quota_failure(self):
+        for provider in ('anthropic', 'gemini'):
+            with self.subTest(provider=provider):
+                self.prepare(provider)
+
+                def quota(project, **options):
+                    options['error_details'].update(provider=provider, code='quota_exceeded', http_status=429)
+                    return None
+
+                self.provider.side_effect = quota
+                result = intelligence.analyze_project(self.sources, project=self.project)
+                self.provider.assert_called_once()
+                ai = result['ai_processing_coverage']
+                self.assertEqual((ai['chunks_failed'], ai['chunks_skipped'], ai['chunks_remaining']), (1, 3, 4))
+                self.assertEqual(ai['calls_this_pass'], 1)
+                self.assertEqual(ai['pause_error']['provider'], provider)
+                self.assertTrue(all(chunk['reason'] == 'provider_failure_pause' for chunk in ai['chunks'][1:]))

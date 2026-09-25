@@ -92,6 +92,7 @@ def operation_fingerprint(project, job_type, request_data):
         # A completed job from an older extractor must not hide corrected
         # evidence when the planner runs Document Intelligence again.
         from .document_intelligence import ENGINE_VERSION
+        from .pdf_register_geometry import GEOMETRY_VERSION
         from ..config import (
             CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS,
             AI_MIN_CHUNK_CHARS, AI_MAX_SPLIT_DEPTH, AI_MAX_CALLS_PER_PASS,
@@ -103,6 +104,7 @@ def operation_fingerprint(project, job_type, request_data):
         return canonical_fingerprint({
             'operation': 'analyze-v8-register-geometry-provider-recovery', 'project_id': project.id,
             'engine_version': ENGINE_VERSION,
+            'register_geometry_version': GEOMETRY_VERSION,
             'chunk_policy': {
                 'input_chars': CLAUDE_MAX_INPUT_CHARS, 'output_tokens': CLAUDE_INTELLIGENCE_MAX_TOKENS,
                 'minimum_chars': AI_MIN_CHUNK_CHARS, 'maximum_depth': AI_MAX_SPLIT_DEPTH,
