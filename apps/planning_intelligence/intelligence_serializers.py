@@ -12,6 +12,12 @@ from .services.preview_confirmation import confirmation_metadata
 class DocumentProfileSerializer(serializers.ModelSerializer):
     filename = serializers.CharField(source='file.original_filename', read_only=True)
 
+    def to_representation(self, instance):
+        from .services.extraction_coverage import public_coverage
+        result = super().to_representation(instance)
+        result['extraction_coverage'] = public_coverage(result.get('extraction_coverage'))
+        return result
+
     class Meta:
         model = DocumentProfile
         fields = [
@@ -50,6 +56,23 @@ class IntelligenceConflictSerializer(serializers.ModelSerializer):
     def get_facts(self, obj):
         facts = IntelligenceFact.objects.filter(id__in=obj.fact_ids, is_deleted=False).select_related('source_file')
         return IntelligenceFactSerializer(facts, many=True).data
+
+
+class DocumentIntelligenceRunSummarySerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    project = serializers.IntegerField(source='project_id', read_only=True)
+    status = serializers.CharField(read_only=True)
+    engine_version = serializers.CharField(read_only=True)
+    fact_count = serializers.IntegerField(read_only=True)
+    conflict_count = serializers.IntegerField(read_only=True)
+    started_at = serializers.DateTimeField(read_only=True)
+    finished_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
+    detail_url = serializers.SerializerMethodField()
+
+    def get_detail_url(self, obj):
+        return f"/api/v1/planning-intelligence/intelligence-runs/{obj['id']}/"
 
 
 class DocumentIntelligenceRunSerializer(serializers.ModelSerializer):

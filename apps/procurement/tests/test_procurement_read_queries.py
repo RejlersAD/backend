@@ -58,7 +58,7 @@ class ProcurementReadQueryTests(TestCase):
             ) for index in range(count)
         ])
 
-    def test_order_list_joins_every_display_relation_without_loading_receipts(self):
+    def test_order_list_joins_display_relations_and_batches_receiving_evidence(self):
         requisitions = self.requisitions()
         PurchaseOrder.objects.bulk_create([
             PurchaseOrder(po_number=f'RAD-PRJ-PUR-{index + 1:04d}_2026', vendor=self.vendor,
@@ -68,7 +68,9 @@ class ProcurementReadQueryTests(TestCase):
             for index, pr in enumerate(requisitions)
         ])
         for count in (1, 10):
-            with self.subTest(rows=count), self.assertNumQueries(1):
+            # The register includes receiving/lifecycle capabilities, so receipt
+            # evidence is prefetched once for the whole page, never once per PO.
+            with self.subTest(rows=count), self.assertNumQueries(2):
                 data = PurchaseOrderSerializer(PurchaseOrderViewSet.queryset.all()[:count], many=True).data
             self.assertEqual(len(data), count)
             self.assertEqual(data[0]['created_by_name'], 'Account Name')
@@ -82,7 +84,9 @@ class ProcurementReadQueryTests(TestCase):
         for count in (1, 10):
             with self.subTest(rows=count), CaptureQueriesContext(connection) as queries:
                 data = PurchaseRequisitionSerializer(PurchaseRequisitionViewSet.queryset.all()[:count], many=True).data
-            self.assertEqual(len(queries), 5)
+            # Resolve the canonical Level 0 display reference once per page;
+            # all existing name lookups must remain batched as the page grows.
+            self.assertEqual(len(queries), 6)
             self.assertEqual(sum('FROM "hr_employee_master"' in query['sql'] for query in queries), 1)
             self.assertEqual(sum('FROM "onboarding_record"' in query['sql'] for query in queries), 1)
             self.assertEqual(len(data), count)
@@ -95,6 +99,7 @@ class ProcurementReadQueryTests(TestCase):
                 self.assertEqual(row['eng_manager_name_display'], 'Current Onboarding Name')
                 self.assertEqual(row['manager_projects_name_display'], 'Case Fallback')
                 self.assertEqual(row['vp_op_name_display'], 'Preferred Employee')
+                self.assertIsNone(row['default_level_zero_approver'])
                 pending, recorded = row['approval_workflow_config']
                 self.assertEqual(pending['user_name'], 'Preferred Employee')
                 self.assertEqual(pending['user_id'], str(self.canonical.pk))

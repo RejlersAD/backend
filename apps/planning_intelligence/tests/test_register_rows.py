@@ -7,10 +7,155 @@ from openpyxl import Workbook
 from ..services.register_rows import (
     extract_legacy_register_rows, extract_register_rows, extract_workbook_register_rows,
     normalize_register_discipline,
+    register_row_requires_review,
 )
 
 
 class RegisterRowExtractionTests(TestCase):
+    MATRIX_HEADER = ('Table 8: Applicable Deliverables for Work Packages\n'
+                     'Work Packages\nDocument / Deliverable\n'
+                     'S. NO. Discipline Remarks\nDescription 1 2 3\n')
+
+    def test_matrix_retains_applicability_and_remarks_without_assigning_package_columns(self):
+        text = self.MATRIX_HEADER + ('4.2 General\n'
+                '4.2.1 General Access dossier X x Common report\n'
+                '4.2.2 General Optional drawing\n'
+                '4.2.3 General Shelter report X If a new building is required\n'
+                '4.2.4 General Existing study X Already covered in another report\n'
+                '4.2.5 General Release register X\n')
+        rows = extract_register_rows(text)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([row['register_item'] for row in rows], ['4.2.1', '4.2.2', '4.2.3', '4.2.4', '4.2.5'])
+        self.assertEqual([row['applicability_status'] for row in rows], ['marked', 'not_marked', 'conditional', 'conditional', 'marked'])
+        self.assertEqual([row['name'] for row in rows if not register_row_requires_review(row)], ['Access dossier', 'Release register'])
+        self.assertEqual(rows[0]['source_remarks'], 'Common report')
+        self.assertEqual(rows[0]['applicability_marks'], 'X x')
+        self.assertEqual(rows[0]['explicit_dimensions'], {'discipline': {'value': 'General', 'header': 'Discipline'}})
+        for row in rows:
+            self.assertEqual(row['package_columns_status'], 'not_resolved')
+            self.assertNotIn('package', row['explicit_dimensions'])
+            self.assertEqual(text[row['start']:row['end']].strip(), row['source_excerpt'])
+            self.assertEqual(row['source_locator']['register_item'], row['register_item'])
+
+    def test_matrix_requires_caption_and_complete_column_header(self):
+        body = '4.2 General\n4.2.1 General Access dossier X\n'
+        for header in (self.MATRIX_HEADER.replace('Applicable Deliverables', 'Reference Documents'),
+                       self.MATRIX_HEADER.replace('Remarks', ''),
+                       self.MATRIX_HEADER.replace('Discipline', ''),
+                       self.MATRIX_HEADER.split('\n', 1)[1]):
+            self.assertEqual(extract_register_rows(header + body), [])
+
+    def test_matrix_interleaved_text_quarantines_both_possible_title_boundaries(self):
+        text = self.MATRIX_HEADER + ('4.2 General\n4.2.1 General Clear report X\n'
+                'possibly a wrapped title or remark\n4.2.2 General Other report X\n'
+                '4.2.3 General Last report X\n')
+        rows = extract_register_rows(text)
+        self.assertEqual([row['title_boundary_status'] for row in rows], ['ambiguous', 'ambiguous', 'explicit_marked_row'])
+        self.assertEqual([row['name'] for row in rows if not register_row_requires_review(row)], ['Last report'])
+
+    def test_matrix_retains_serial_only_and_wrapped_discipline_rows_as_inventory(self):
+        text = self.MATRIX_HEADER + ('4.2 General\n4.2.1 General Clear report X\n'
+                '4.3 Specialist Team\nSpecialist\n4.3.1 Wrapped report X\nTeam\n'
+                '4.3.2\nAnother wrapped title\n')
+        rows = extract_register_rows(text)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[1]['discipline'], 'not_specified')
+        self.assertEqual(rows[1]['applicability_status'], 'ambiguous')
+        self.assertTrue(register_row_requires_review(rows[2]))
+        self.assertEqual(rows[2]['original_title'], '4.3.2')
+
+    def test_matrix_page_furniture_preserves_rows_but_next_appendix_is_not_scope(self):
+        text = self.MATRIX_HEADER + ('4.2 General\n4.2.1 General First report X\n'
+                'Register.docx 1 / 2\fExample Classification: Internal\n'
+                '4.2.2 General Second report X\nAppendix 9: References\n'
+                '4.2.3 General Existing drawing X\n')
+        rows = extract_register_rows(text)
+        self.assertEqual([row['name'] for row in rows], ['First report', 'Second report'])
+        self.assertTrue(all(not register_row_requires_review(row) for row in rows))
+
+    def test_matrix_multiple_marker_runs_cannot_silently_truncate_a_title_containing_x(self):
+        rows = extract_register_rows(self.MATRIX_HEADER + '4.2 General\n4.2.1 General Equipment X study X\n')
+        self.assertTrue(register_row_requires_review(rows[0]))
+
+    def test_captioned_pdf_register_retains_groups_without_inventing_disciplines(self):
+        text = ('APPENDIX 2 - PROJECT DELIVERABLES\nTable 4: Project Deliverables\n'
+                'S. No. Description\nGeneral\n1 Site access dossier\n2 Survey record (if required)\n'
+                'Community Liaison\n1 Stakeholder briefing pack\n')
+        rows = extract_register_rows(text)
+        self.assertEqual([row['name'] for row in rows], ['Site access dossier', 'Survey record (if required)', 'Stakeholder briefing pack'])
+        self.assertEqual([row['source_group'] for row in rows], ['General', 'General', 'Community Liaison'])
+        self.assertEqual({row['discipline'] for row in rows}, {'not_specified'})
+        self.assertTrue(all(row['explicit_dimensions'] == {} for row in rows))
+        for row in rows:
+            self.assertEqual(text[row['start']:row['end']].strip(), row['source_excerpt'])
+            self.assertEqual(row['source_locator']['source_group'], row['source_group'])
+
+    def test_caption_and_serial_header_are_both_required(self):
+        for text in ('S. No. Description\nGeneral\n1 Site access dossier\n',
+                     'Table 4: Project Deliverables\n1 Site access dossier\n',
+                     'The contractor shall provide deliverables\nS. No. Description\n1 Site access dossier\n',
+                     'Table 4: Project Deliverables\nnot a table\nstill prose\nmore prose\nS. No. Description\n1 Dossier\n'):
+            self.assertEqual(extract_register_rows(text), [], text)
+
+    def test_repeated_pdf_headers_keep_distinct_duplicate_serials_and_skip_furniture(self):
+        furniture = 'Repeated confidential source document header\n'
+        text = (furniture + 'Table 4: Engineering Deliverables\nS. No. Description\nGeneral\n'
+                '12 Interface report\n12 Interface drawing\n' + furniture + 'Page: 8\n'
+                'S. No. Description\n13 Release package\n' + furniture + 'Page: 9\n')
+        rows = extract_register_rows(text)
+        self.assertEqual([row['name'] for row in rows], ['Interface report', 'Interface drawing', 'Release package'])
+        self.assertEqual([row['register_item'] for row in rows], [12, 12, 13])
+        self.assertEqual(len({row['source_line'] for row in rows}), 3)
+        self.assertTrue(all(row['source_group'] == 'General' for row in rows))
+
+    def test_wrapped_interleaved_serial_preserves_quote_and_marks_ambiguous_boundary(self):
+        text = ('Table 2: Deliverable Register\nSerial No Description\nSupport Services\n'
+                '1 Clean boundary drawing\nCondition report for retained\n2\nstructures\n'
+                '3 Subsequent clear report\n')
+        rows = extract_register_rows(text)
+        self.assertEqual([row['name'] for row in rows], ['Clean boundary drawing', 'Condition report for retained structures', 'Subsequent clear report'])
+        self.assertEqual(rows[1]['title_boundary_status'], 'ambiguous')
+        self.assertIn('retained\n2\nstructures', rows[1]['source_excerpt'])
+        self.assertEqual(rows[0]['title_boundary_status'], 'explicit_numbered_row')
+
+    def test_unknown_wrapped_text_is_not_claimed_as_explicit_columns(self):
+        rows = extract_register_rows('Table 3: Deliverables\nS. No. Description\n1 A long title\npossibly a footer\n2 Clear title\n')
+        self.assertEqual(rows[0]['title_boundary_status'], 'ambiguous')
+        self.assertEqual(rows[1]['name'], 'Clear title')
+
+    def test_new_appendices_software_reference_lists_and_notes_are_excluded(self):
+        text = ('Table 4: FEED Deliverables\nS. No. Description\n1 Intended report\n'
+                'Notes:\n1. The list requires review.\n2. Terms are subject to agreement.\n'
+                'APPENDIX 4 - SOFTWARE\nS. No. Description\n1 Spreadsheet application\n'
+                'Table 9: Reference Documents\nS. No. Description\n1 Existing source drawing\n')
+        rows = extract_register_rows(text)
+        self.assertEqual([row['name'] for row in rows], ['Intended report'])
+
+    def test_bare_note_labels_end_table_before_numbered_prose(self):
+        for label in ('Notes', 'Note', 'NOTES', 'Note.', 'Notes:'):
+            text = ('Table 1: Deliverables\nS. No. Description\nGeneral\n'
+                    f'1 Scope dossier\n2 Scope report\n{label}\n1 Review assumptions\n2 Check access\n')
+            self.assertEqual([row['name'] for row in extract_register_rows(text)], ['Scope dossier', 'Scope report'], label)
+
+    def test_possible_title_continuation_before_serial_reset_remains_ambiguous(self):
+        for title, continuation in (('Design criteria for', 'existing facilities'),
+                                    ('Design criteria for', 'Existing Facilities'),
+                                    ('Design criteria', 'for existing facilities'),
+                                    ('Survey records /', 'Supporting Details')):
+            text = ('Table 1: Deliverables\nS. No. Description\nGeneral\n'
+                    f'1 {title}\n{continuation}\n1 Inspection report\n')
+            rows = extract_register_rows(text)
+            self.assertEqual([row['name'] for row in rows], [f'{title} {continuation}', 'Inspection report'])
+            self.assertEqual(rows[0]['title_boundary_status'], 'ambiguous')
+            self.assertEqual(rows[1]['source_group'], 'General')
+            self.assertEqual(rows[1]['title_boundary_status'], 'explicit_numbered_row')
+
+    def test_captioned_and_delimited_tables_preserve_each_source_occurrence(self):
+        text = ('Table 3: Deliverables\nS. No. Description\n1 Captioned report\n'
+                'APPENDIX 4 - DOCUMENT REGISTER\nSerial No|Discipline|Document Title\n'
+                '1|General|Delimited report\n')
+        self.assertEqual([row['name'] for row in extract_register_rows(text)], ['Captioned report', 'Delimited report'])
+
     def workbook(self, rows, sheet_name='MDR'):
         workbook = Workbook()
         sheet = workbook.active

@@ -8,6 +8,7 @@ from collections import defaultdict
 from copy import deepcopy
 
 from django.db import transaction
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -21,11 +22,12 @@ from ..models import (
 from .intelligence import analyze_project
 from .deliverable_matching import find_deliverable_match
 from .preview_confirmation import apply_confirmed_preview, source_fingerprint
-from .register_rows import extract_legacy_register_rows, extract_register_rows
+from .register_rows import extract_legacy_register_rows, register_rows_for_file
 from .extraction_coverage import file_coverage, summarize_coverage, summarize_assertions
 from .planning_fact_extraction import explicit_labeled_assertions, validated_claim
+from .intelligence_review_retention import retain_unchanged_reviews
 
-ENGINE_VERSION = '6.0-broad-quoted-assertions'
+ENGINE_VERSION = '6.2-applicability-registers'
 
 _DOCUMENT_NUMBER_RE = re.compile(
     r'\b(?=[A-Z0-9./_~\-]{6,100}\b)(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,}\b',
@@ -47,7 +49,7 @@ _SCALAR_PATTERNS = [
     ('project_name', 'project_name', re.compile(r'(?:project title|project name)\s*[:\-]\s*([^\n|]{2,255})', re.I), 1, .94),
     ('effective_date', 'effective_date', re.compile(r'(?:effective date|zero date|contract award)\s*[:\-]?\s*(\d{1,2}[\-/][A-Za-z]{3,9}[\-/]\d{2,4}|\d{4}-\d{2}-\d{2})', re.I), 1, .92),
     ('duration_months', 'duration_months', re.compile(r'(?:\b(?:project|contract)\s+duration|(?m:^\s*duration))\s*(?:is|of|:|=)?\s*(\d{1,3})\s*[- ]?months?\b', re.I), 1, .86),
-    ('client', 'client', re.compile(r'(?:client|company)\s*[:\-]\s*([^\n|]{2,255})', re.I), 1, .82),
+    ('client', 'client', re.compile(r'\b(?:client|company)(?:[ \t]*:[ \t]*|[ \t]+-[ \t]+)([^\n|]{2,255})', re.I), 1, .82),
     ('location', 'location', re.compile(r'(?:project location|site location|location)\s*[:\-]\s*([^\n|]{2,255})', re.I), 1, .82),
 ]
 _CALENDAR_PATTERNS = [
@@ -109,14 +111,16 @@ def _add_fact(rows, file_obj, fact_type, key, value, confidence, text, start, en
     if identity in rows['_seen']:
         return
     rows['_seen'].add(identity)
-    locator = _locator(text, start, matched) if text else {'provider': method}
+    located = bool(text and type(start) is int and type(end) is int and 0 <= start < end <= len(text))
+    locator = _locator(text, start, matched) if located else {'provider': method}
     if text and file_obj:
         locator['extracted_text_sha256'] = text_hash
+    if located and file_obj:
         locator['character_end'] = end
     rows['facts'].append(IntelligenceFact(
         run=rows['run'], source_file=file_obj, fact_type=fact_type, key=key[:160], value=value,
         normalized_value=normalized, confidence=confidence, extraction_method=method,
-        source_excerpt=_excerpt(text, start, end) if text else '',
+        source_excerpt=_excerpt(text, start, end) if located else '',
         source_locator=locator,
     ))
     return rows['facts'][-1]
@@ -145,7 +149,7 @@ def profile_document(file_obj, *, extraction_coverage=None):
         flags.append('category_mismatch')
     if extraction_coverage is None:
         existing = DocumentProfile.objects.filter(file=file_obj).values_list('extraction_coverage', flat=True).first()
-        extraction_coverage = file_coverage(file_obj, existing)
+        extraction_coverage = file_coverage(file_obj, existing, include_structured=True)
     if extraction_coverage.get('status') != 'complete':
         flags.append('extraction_coverage_incomplete')
     extension = os.path.splitext(file_obj.original_filename or '')[1].lower().lstrip('.')
@@ -176,7 +180,7 @@ def _register_discipline(value):
 
 def _extract_register_rows(rows, file_obj, text, *, register_mode=False):
     """Extract collapsed PDF/Excel register rows, preserving number/revision/title."""
-    structured = extract_register_rows(text)
+    structured = register_rows_for_file(file_obj)
     if not structured and file_obj.category not in {'mdr', 'eddr'}:
         return
     if not structured and register_mode:
@@ -194,9 +198,13 @@ def _extract_register_rows(rows, file_obj, text, *, register_mode=False):
                     'register_item': row.get('register_item'),
                     'title_boundary_status': row.get('title_boundary_status', 'explicit_columns'),
                     'source_layout': row.get('source_layout', 'table_columns'),
+                    **({'source_group': row['source_group']} if row.get('source_group') else {}),
+                    **({key: row[key] for key in ('applicability_status', 'applicability_marks', 'source_remarks', 'package_columns_status')
+                        if key in row}),
                 }, .99, text, row['start'], row['end'], matched=row['original_title'],
             )
             locator = rows['facts'][-1].source_locator
+            locator.update(row.get('source_locator') or {})
             if row.get('sheet'):
                 locator['sheet'] = row['sheet']
             locator['register_item'] = row.get('register_item')
@@ -352,22 +360,26 @@ def _persist_project_record_facts(rows, project):
 def _create_conflicts(run):
     scalar_types = {'project_name', 'effective_date', 'duration_months', 'client', 'location', 'calendar'}
     grouped = defaultdict(list)
-    for fact in run.facts.filter(is_deleted=False, fact_type__in=scalar_types):
+    related = list(run.facts.filter(is_deleted=False, fact_type__in=scalar_types | {'discipline', 'exclusion'}))
+    for fact in related:
         grouped[(fact.fact_type, fact.key)].append(fact)
     conflicts = []
+    conflicted_ids = set()
     for (fact_type, key), facts in grouped.items():
+        if fact_type not in scalar_types:
+            continue
         values = {fact.normalized_value for fact in facts}
         if len(values) <= 1:
             continue
         ids = [fact.id for fact in facts]
-        run.facts.filter(id__in=ids).update(status='conflicted')
+        conflicted_ids.update(ids)
         conflicts.append(IntelligenceConflict(
             run=run, key=f'{fact_type}:{key}', fact_ids=ids,
             description=f'Conflicting {fact_type.replace("_", " ")} values were found across source evidence.',
         ))
-    exclusions = list(run.facts.filter(is_deleted=False, fact_type='exclusion'))
+    exclusions = [fact for fact in related if fact.fact_type == 'exclusion']
     for code, name in DISCIPLINE_NAME_BY_CODE.items():
-        positive = list(run.facts.filter(is_deleted=False, fact_type='discipline', key=code))
+        positive = grouped.get(('discipline', code), [])
         negative = [
             fact for fact in exclusions
             if code.replace('_', ' ') in fact.normalized_value or name.casefold() in fact.normalized_value
@@ -375,11 +387,13 @@ def _create_conflicts(run):
         if not positive or not negative:
             continue
         ids = [fact.id for fact in [*positive, *negative]]
-        run.facts.filter(id__in=ids).update(status='conflicted')
+        conflicted_ids.update(ids)
         conflicts.append(IntelligenceConflict(
             run=run, key=f'discipline:{code}', conflict_type='explicit_exclusion', fact_ids=ids,
             description=f'{name} is mentioned as scope but also appears in explicit exclusion language.',
         ))
+    if conflicted_ids:
+        run.facts.filter(id__in=conflicted_ids).update(status='conflicted')
     IntelligenceConflict.objects.bulk_create(conflicts)
     return conflicts
 
@@ -387,19 +401,31 @@ def _create_conflicts(run):
 def compile_run_intelligence(run, *, include_confirmation=True):
     """Compile current reviewed facts over the legacy-compatible intelligence payload."""
     intelligence = deepcopy((run.summary or {}).get('base_intelligence') or {})
-    facts = run.facts.filter(is_deleted=False).exclude(status__in=['rejected', 'superseded', 'conflicted'])
     scalar_output = {
         'project_name': 'detected_project_name', 'effective_date': 'detected_effective_date_text',
         'duration_months': 'detected_duration_months', 'client': 'detected_client', 'location': 'detected_location',
     }
-    unresolved_conflict_keys = set(
-        run.conflicts.filter(is_deleted=False, status__in=['open', 'ignored']).values_list('key', flat=True)
+    # Read only the values used by this projection. Large deliverable/requirement
+    # payloads stay in the database; one aggregate supplies counts across all types.
+    # Keep this snapshot local: later review edits must be visible on the next read.
+    active_facts = run.facts.filter(is_deleted=False)
+    facts = list(active_facts.filter(fact_type__in=set(scalar_output) | {'discipline', 'exclusion'})
+        .exclude(status__in=['rejected', 'superseded', 'conflicted']).only(
+            'id', 'run_id', 'fact_type', 'key', 'value', 'status', 'confidence', 'normalized_value',
+        ).order_by('-status', '-confidence', 'id'))
+    counts = active_facts.aggregate(
+        confirmed_count=Count('id', filter=Q(status='confirmed')),
+        rejected_count=Count('id', filter=Q(status='rejected')),
     )
+    conflicts = list(run.conflicts.filter(is_deleted=False, status__in=['open', 'ignored']).values(
+        'id', 'key', 'description', 'status',
+    ))
+    unresolved_conflict_keys = {item['key'] for item in conflicts}
     for fact_type, output_key in scalar_output.items():
         if any(key.startswith(f'{fact_type}:') for key in unresolved_conflict_keys):
             intelligence[output_key] = None
             continue
-        candidates = list(facts.filter(fact_type=fact_type).order_by('-status', '-confidence', 'id'))
+        candidates = [fact for fact in facts if fact.fact_type == fact_type]
         confirmed = [fact for fact in candidates if fact.status == 'confirmed']
         choice = confirmed[0] if confirmed else (candidates[0] if candidates else None)
         if choice:
@@ -407,11 +433,11 @@ def compile_run_intelligence(run, *, include_confirmation=True):
         else:
             intelligence[output_key] = None
     disciplines = intelligence.get('disciplines') or {}
-    confirmed_disciplines = facts.filter(fact_type='discipline', status='confirmed')
+    confirmed_disciplines = [fact for fact in facts if fact.fact_type == 'discipline' and fact.status == 'confirmed']
     for fact in confirmed_disciplines:
         if fact.key in disciplines:
             disciplines[fact.key]['in_scope'] = True
-    for fact in facts.filter(fact_type='exclusion', status='confirmed'):
+    for fact in (fact for fact in facts if fact.fact_type == 'exclusion' and fact.status == 'confirmed'):
         for code, name in DISCIPLINE_NAME_BY_CODE.items():
             if code in disciplines and (
                 code.replace('_', ' ') in fact.normalized_value or name.casefold() in fact.normalized_value
@@ -421,11 +447,11 @@ def compile_run_intelligence(run, *, include_confirmation=True):
         'document_intelligence_run_id': run.id,
         'evidence_summary': {
             'fact_count': run.fact_count,
-            'conflict_count': run.conflicts.filter(is_deleted=False, status='open').count(),
-            'confirmed_count': run.facts.filter(is_deleted=False, status='confirmed').count(),
-            'rejected_count': run.facts.filter(is_deleted=False, status='rejected').count(),
+            'conflict_count': sum(item['status'] == 'open' for item in conflicts),
+            **counts,
         },
-        'open_conflicts': list(run.conflicts.filter(is_deleted=False, status='open').values('id', 'key', 'description')),
+        'open_conflicts': [{key: item[key] for key in ('id', 'key', 'description')}
+                           for item in conflicts if item['status'] == 'open'],
         'processing_coverage': (run.summary or {}).get('processing_coverage') or {},
         'extraction_summary': (run.summary or {}).get('extraction_summary') or {},
     })
@@ -446,18 +472,14 @@ class ResumeSourceChanged(ValueError):
     """Safe, actionable message when queued extraction no longer matches inputs."""
 
 
-def validate_resume_source(project, run, files=None):
-    """Return current source files, or reject a stale/incomplete continuation.
-
-    This read-only preflight is shared by the enqueue endpoint and worker; the
-    worker repeats it because inputs may change after a job is queued.
-    """
+def validate_analysis_source(project, run, files=None):
+    """Validate unchanged inputs independently of the extraction engine version."""
     active = list(project.files.filter(is_deleted=False))
     if not active or any(source.parse_status != 'done' for source in active):
         raise ResumeSourceChanged('Finish parsing all current source documents and start a new analysis before continuing.')
     selected = list(files) if files is not None else active
     manifest = _extraction_source_manifest(selected)
-    if (run.project_id != project.pk or run.is_deleted or run.engine_version != ENGINE_VERSION or
+    if (run.project_id != project.pk or run.is_deleted or
             (run.summary or {}).get('source_fingerprint') != source_fingerprint(project) or
             (run.summary or {}).get('extraction_source_manifest') != manifest or
             _extraction_source_manifest(active) != manifest or
@@ -466,13 +488,28 @@ def validate_resume_source(project, run, files=None):
     return selected
 
 
+def validate_resume_source(project, run, files=None):
+    """Resume requires both unchanged inputs and compatible extraction code.
+
+    The enqueue endpoint and worker repeat this read-only preflight. Viewing
+    saved evidence uses source validation alone and does not resume extraction.
+    """
+    selected = validate_analysis_source(project, run, files)
+    if run.engine_version != ENGINE_VERSION:
+        raise ResumeSourceChanged('The analysis engine changed. Start a new document analysis instead of resuming this run.')
+    return selected
+
+
 @tracked_planning('document_intelligence')
-def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, resume_run=None):
+def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, resume_run=None, progress_callback=None):
     files = list(files if files is not None else project.files.filter(is_deleted=False, parse_status='done'))
     if not files:
         raise ValueError('No successfully parsed files are available.')
     if resume_run is not None:
         files = validate_resume_source(project, resume_run, files)
+    from .register_geometry_cache import ensure_register_geometry
+    for file_obj in files:
+        ensure_register_geometry(file_obj)
     fingerprint = source_fingerprint(project)
     extraction_manifest = _extraction_source_manifest(files)
     resume_state = None
@@ -492,10 +529,14 @@ def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, 
             run.save(update_fields=['summary', 'updated_at'])
 
         legacy = analyze_project(files, project=project, user=user, allow_ai=allow_ai,
-                                 resume_state=resume_state, checkpoint_callback=checkpoint)
+                                 resume_state=resume_state, checkpoint_callback=checkpoint,
+                                 resume_coverage=((resume_run.summary or {}).get('processing_coverage') or {}).get('ai_processing') if resume_run else None,
+                                 progress_callback=progress_callback)
         current_files = project.files.filter(pk__in=[item.pk for item in files], is_deleted=False)
         if source_fingerprint(project) != fingerprint or _extraction_source_manifest(current_files) != extraction_manifest:
             raise ValueError('Source documents changed during analysis. Start a new analysis to use the current sources.')
+        if progress_callback:
+            progress_callback({'phase': 'persistence', 'file_count': len(files)})
         with transaction.atomic():
             for file_obj in files:
                 profile_document(file_obj)
@@ -518,6 +559,7 @@ def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, 
             summary = summarize_assertions(rows['facts'], coverage, coverage['ai_processing'])
             run.summary = {**run.summary, 'base_intelligence': legacy, 'processing_coverage': coverage,
                            'extraction_summary': summary}
+            retain_unchanged_reviews(run, actor=user)
             run.save(update_fields=['fact_count', 'conflict_count', 'status', 'finished_at', 'summary', 'updated_at'])
         return run, compile_run_intelligence(run)
     except Exception as exc:
@@ -528,15 +570,15 @@ def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, 
         raise
 
 
-def get_or_run_document_intelligence(project, *, user=None, force=False, resume_run=None):
+def get_or_run_document_intelligence(project, *, user=None, force=False, resume_run=None, progress_callback=None):
     files = list(project.files.filter(is_deleted=False, parse_status='done'))
     ids = sorted(file_obj.id for file_obj in files)
     if resume_run is not None:
-        return run_document_intelligence(project, user=user, files=files, resume_run=resume_run)
+        return run_document_intelligence(project, user=user, files=files, resume_run=resume_run, progress_callback=progress_callback)
     if not force:
         existing = project.intelligence_runs.filter(
             is_deleted=False, status='succeeded', engine_version=ENGINE_VERSION, source_file_ids=ids,
         ).first()
         if existing and (existing.summary or {}).get('source_fingerprint') == source_fingerprint(project):
             return existing, compile_run_intelligence(existing)
-    return run_document_intelligence(project, user=user, files=files)
+    return run_document_intelligence(project, user=user, files=files, progress_callback=progress_callback)

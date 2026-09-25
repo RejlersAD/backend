@@ -12,6 +12,8 @@ from apps.rbac.module_actions import ensure_module_actions
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.users.models import User
 from ..models import PlanningProject
+from ..services.operational_jobs import get_or_create_job
+from ..services.preview_confirmation import source_fingerprint
 from ..services.byok_crypto import decrypt_api_key, encrypt_api_key
 from ..services import project_ai
 from ..views import PlanningProjectViewSet
@@ -136,3 +138,37 @@ class ProjectAISettingsTests(TestCase):
                 response = self.client.post(url, data, format='json')
                 self.assertEqual(response.status_code, 403, response.data)
         probe.assert_not_called()
+
+    def test_changed_credentials_invalidate_completed_analysis_job_without_overwriting_it(self):
+        self.save_gemini()
+        original_fingerprint = source_fingerprint(self.project)
+        previous, _ = get_or_create_job(self.project, 'analyze', {}, self.owner)
+        previous.status = 'succeeded'
+        previous.result_data = {'extraction_summary': {'status': 'partial', 'chunks_remaining': 2}}
+        previous.save(update_fields=['status', 'result_data'])
+        response = self.client.post(self.url, {'api_key': self.key + '-replacement'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.project.refresh_from_db()
+        self.assertNotEqual(source_fingerprint(self.project), original_fingerprint)
+        current, created = get_or_create_job(self.project, 'analyze', {}, self.owner)
+        self.assertTrue(created)
+        self.assertNotEqual(current.pk, previous.pk)
+        previous.refresh_from_db()
+        self.assertEqual(previous.status, 'succeeded')
+        self.assertEqual(previous.result_data, {'extraction_summary': {'status': 'partial', 'chunks_remaining': 2}})
+
+    def test_unchanged_settings_preserve_review_fingerprint_and_reusable_job(self):
+        self.save_gemini()
+        original_updated_at = self.project.updated_at
+        original_fingerprint = source_fingerprint(self.project)
+        previous, _ = get_or_create_job(self.project, 'analyze', {}, self.owner)
+        response = self.client.post(self.url, {
+            'provider': 'gemini', 'enabled': True, 'model': project_ai.DEFAULT_GEMINI_MODEL,
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.updated_at, original_updated_at)
+        self.assertEqual(source_fingerprint(self.project), original_fingerprint)
+        current, created = get_or_create_job(self.project, 'analyze', {}, self.owner)
+        self.assertFalse(created)
+        self.assertEqual(current.pk, previous.pk)

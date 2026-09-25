@@ -195,7 +195,11 @@ def calculate_schedule_version(version, *, requested_by=None):
                 )
             accepted_inputs = freeze_schedule_inputs(version)
 
-            calendar = WorkdayCalendar(schedule.default_calendar, schedule.planned_start)
+            from .planning_package_boundary import package_context
+            proposal = package_context(version)
+            work_calendar = proposal['calendar'] if proposal else schedule.default_calendar
+            planned_start = proposal['start'] if proposal else schedule.planned_start
+            calendar = WorkdayCalendar(work_calendar, planned_start)
             nodes = {activity.pk: NetworkActivity(activity, _duration(activity)) for activity in activities}
             incoming = defaultdict(list)
             outgoing = defaultdict(list)
@@ -236,7 +240,7 @@ def calculate_schedule_version(version, *, requested_by=None):
                     issues=[{'code': 'dependency_cycle', 'activities': cyclic}],
                 )
 
-            mixed = sorted({item.model.calendar_id for item in nodes.values() if item.model.calendar_id and item.model.calendar_id != schedule.default_calendar_id})
+            mixed = sorted({item.model.calendar_id for item in nodes.values() if item.model.calendar_id and item.model.calendar_id != getattr(work_calendar, 'pk', None)})
             if mixed:
                 issues.append({'code': 'mixed_calendars_normalized', 'calendar_ids': mixed})
             starts = [nodes[pk].model.external_id for pk in order if not incoming[pk]]
@@ -264,7 +268,7 @@ def calculate_schedule_version(version, *, requested_by=None):
                 early[pk] = start
 
             finish_index = max(early[pk] + max(nodes[pk].duration - 1, 0) for pk in order)
-            contractual_finish = schedule.project.planned_end_date
+            contractual_finish = proposal['finish'] if proposal else schedule.project.planned_end_date
             contractual_finish_index = None
             contractual_variance = None
             if contractual_finish:

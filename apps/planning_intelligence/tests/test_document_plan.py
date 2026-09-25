@@ -11,6 +11,57 @@ def upload(text, identifier=1, **overrides):
 
 
 class DocumentPlanTests(SimpleTestCase):
+    def test_matrix_scope_requires_clear_marked_rows_and_retains_all_other_inventory(self):
+        text = ('Table 1: Applicable Deliverables for Work Packages\n'
+                'S. No. Discipline Document / Deliverable Description Work Packages Remarks\n'
+                '4.2 General\n4.2.1 General Survey dossier X X Common report\n'
+                '4.2.2 General Optional drawing\n4.2.3 General Shelter report X If required\n'
+                '4.2.4 General Release register X\n')
+        plan = build_document_plan([upload(text)], project_id=4)
+        self.assertEqual(len(plan['register_inventory']), 4)
+        self.assertEqual([row['name'] for row in plan['activities']], ['Survey dossier', 'Release register'])
+        self.assertEqual(len(simple_tasks(plan)), 2)
+        self.assertEqual(next(row for row in plan['validation'] if row['code'] == 'register_applicability_not_confirmed')['count'], 2)
+        self.assertTrue(all(row['duration_days'] is None and row['start_date'] is None and row['finish_date'] is None for row in plan['activities']))
+        self.assertEqual(plan['logic_matrix'], [])
+        self.assertFalse(plan['ready_for_calculation'])
+        self.assertEqual(plan['activities'][0]['source_evidence']['source_remarks'], 'Common report')
+        self.assertEqual(plan['activities'][0]['source_references'][0]['locator']['package_columns_status'], 'not_resolved')
+
+    def test_captioned_register_quarantines_ambiguous_titles_and_preserves_scope_inventory(self):
+        text = ('Table 3: FEED Deliverables\nS. No. Description\nGeneral\n'
+                '1 Site report\nAmbiguous title for\n2\nretained facilities\n'
+                '3 Clear issue dossier\n3 Clear issue dossier\n')
+        plan = build_document_plan([upload(text, category='sow')], project_id=61)
+        self.assertEqual(len(plan['register_inventory']), 4)
+        self.assertEqual([row['name'] for row in plan['activities']], ['Site report', 'Clear issue dossier', 'Clear issue dossier'])
+        self.assertEqual(len({row['id'] for row in plan['activities']}), 3)
+        issue = next(row for row in plan['validation'] if row['code'] == 'register_title_boundary_ambiguous')
+        self.assertEqual(issue['count'], 1)
+        self.assertEqual(issue['blocks'], ['calculation', 'approval'])
+        self.assertIn('2', issue['source_references'][0]['excerpt'])
+        self.assertEqual(len(simple_tasks(plan)), 3)
+        self.assertTrue(all(row['duration_days'] is None and row['start_date'] is None and row['finish_date'] is None for row in plan['activities']))
+        self.assertTrue(all(row['predecessors'] == [] and row['discipline'] == 'not_specified' for row in plan['activities']))
+        self.assertFalse(plan['ready_for_calculation'])
+        self.assertEqual(plan['applied_dependency_rules'], [])
+
+    def test_captioned_source_groups_remain_reference_metadata_not_wbs_or_discipline(self):
+        plan = build_document_plan([upload('Table 5: Deliverables\nS. No. Description\nCommunity Liaison\n1 Briefing pack\n')])
+        row = plan['activities'][0]
+        self.assertEqual(row['discipline'], 'not_specified')
+        self.assertEqual(row['source_references'][0]['locator']['source_group'], 'Community Liaison')
+        self.assertEqual(len(plan['wbs']), 1)
+
+    def test_numbered_notes_and_uncertain_continuation_cannot_become_activities(self):
+        text = ('Table 1: Deliverables\nS. No. Description\nGeneral\n'
+                '1 Design criteria for\nexisting facilities\n1 Inspection report\n'
+                'Notes\n1 Review assumptions\n2 Check access\n')
+        plan = build_document_plan([upload(text)])
+        self.assertEqual(len(plan['register_inventory']), 2)
+        self.assertEqual([row['name'] for row in plan['activities']], ['Inspection report'])
+        self.assertEqual(next(row for row in plan['validation'] if row['code'] == 'register_title_boundary_ambiguous')['count'], 1)
+
     def test_withheld_reordered_tsv_matches_domain_facts_without_guessing_missing_semantics(self):
         # Constructed after the adapters were implemented. No parser changes
         # accompany this fixture: unfamiliar work, reversed row order, reordered

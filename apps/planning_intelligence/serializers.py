@@ -228,6 +228,11 @@ class PlanningGenerationListSerializer(serializers.ModelSerializer):
 
 
 class PlanningGenerationSerializer(serializers.ModelSerializer):
+    generation_mode = serializers.SerializerMethodField()
+    intelligence_run_id = serializers.SerializerMethodField()
+    schedule_id = serializers.SerializerMethodField()
+    schedule_version_id = serializers.SerializerMethodField()
+
     class Meta:
         model = PlanningGeneration
         fields = [
@@ -235,11 +240,41 @@ class PlanningGenerationSerializer(serializers.ModelSerializer):
             'intelligence', 'wbs', 'activities',
             'logic_matrix', 'eddr', 'milestones', 'manhours', 'validation',
             'narrative', 'generated_by', 'created_at',
+            'generation_mode', 'intelligence_run_id', 'schedule_id', 'schedule_version_id',
         ]
         read_only_fields = fields
 
     def to_representation(self, instance):
         return _json_safe(super().to_representation(instance))
+
+    def get_generation_mode(self, instance):
+        return ((instance.intelligence or {}).get('schedule_engine') or {}).get('policy', 'document_driven')
+
+    def get_intelligence_run_id(self, instance):
+        intelligence = instance.intelligence or {}
+        engine = intelligence.get('schedule_engine') or {}
+        return engine.get('source_analysis_run_id') or engine.get('intelligence_run_id') or intelligence.get('document_intelligence_run_id')
+
+    def _schedule_version(self, instance):
+        if instance.pk is None:
+            # Legacy previews can serialize an unsaved generation. It cannot
+            # have a materialized version, and Django rejects that FK filter.
+            return None
+        from .models import ScheduleVersion
+        cache = getattr(self, '_materialized_versions', {})
+        if instance.pk not in cache:
+            cache[instance.pk] = ScheduleVersion.objects.filter(
+                source_generation=instance, schedule__project=instance.project, is_deleted=False,
+                schedule__is_deleted=False,
+            ).only('id', 'schedule_id').order_by('-version').first()
+            self._materialized_versions = cache
+        return cache[instance.pk]
+
+    def get_schedule_id(self, instance):
+        return getattr(self._schedule_version(instance), 'schedule_id', None)
+
+    def get_schedule_version_id(self, instance):
+        return getattr(self._schedule_version(instance), 'pk', None)
 
 
 class PlanningGenerationEditSerializer(serializers.Serializer):
@@ -268,6 +303,49 @@ class PlanningGenerationEditSerializer(serializers.Serializer):
         if len(codes) != len(set(codes)):
             raise serializers.ValidationError('WBS codes must be unique.')
         return value
+
+
+class PlanningJobProgressSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    project = serializers.IntegerField(source='project_id', read_only=True)
+    job_type = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    progress = serializers.IntegerField(read_only=True)
+    message = serializers.CharField(read_only=True)
+    error_code = serializers.CharField(read_only=True)
+    error_message = serializers.CharField(source='_compact_error_message', read_only=True)
+    heartbeat_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    attempt_count = serializers.IntegerField(read_only=True)
+    started_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    finished_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
+    terminal = serializers.SerializerMethodField()
+    poll_url = serializers.SerializerMethodField()
+    detail_url = serializers.SerializerMethodField()
+    api_contract_version = serializers.SerializerMethodField()
+    progress_context = serializers.SerializerMethodField()
+    result_refs = serializers.SerializerMethodField()
+
+    def get_terminal(self, obj):
+        return obj['status'] in {'succeeded', 'failed', 'cancelled'}
+
+    def get_poll_url(self, obj):
+        return f"/api/v1/planning-intelligence/jobs/{obj['id']}/progress/"
+
+    def get_detail_url(self, obj):
+        return f"/api/v1/planning-intelligence/jobs/{obj['id']}/"
+
+    def get_api_contract_version(self, obj):
+        return 5
+
+    def get_progress_context(self, obj):
+        from .services.job_read import progress_context
+        return progress_context(obj)
+
+    def get_result_refs(self, obj):
+        from .services.job_read import result_references
+        return result_references(obj)
 
 
 class PlanningJobSerializer(serializers.ModelSerializer):

@@ -20,6 +20,8 @@ from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
 from .requisition_concurrency import check_requisition_precondition
 from .requisition_workflow import RequisitionWorkflowService
 from .signed_pr_pdf_import import _find_unique_active_issuer
+from .pr_review_display import is_richa_name, unknown_approver_name
+from .pr_source_approval_review import REVIEW_KEY, prepare_source_approval_review, source_approval_review_from_metadata
 
 
 class SourceApprovalConflict(APIException):
@@ -44,12 +46,13 @@ def _source_row(row):
 
 
 def _name(row):
-    return str(row.get('user_name') or '').strip()
+    name = str(row.get('user_name') or '').strip()
+    return '' if unknown_approver_name(name) else name
 
 
 def _validate_payload(payload):
     allowed = {'document_sha256', 'row_index', 'expected_row', 'approver_name', 'signature_verified', 'approval_date',
-               'expected_updated_at'}
+               'expected_updated_at', 'approval_label', 'special_note'}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise ValidationError({'detail': 'Only the source approver name, signature confirmation, and date may be edited.'})
     digest = payload.get('document_sha256')
@@ -61,8 +64,14 @@ def _validate_payload(payload):
     if not isinstance(payload.get('expected_row'), dict):
         raise ValidationError({'expected_row': 'The saved source row is required. Refresh the recommendation.'})
     name = payload.get('approver_name')
-    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 200 or any(ord(char) < 32 for char in name):
+    if not isinstance(name, str) or unknown_approver_name(name) or len(name.strip()) > 200 or any(ord(char) < 32 for char in name):
         raise ValidationError({'approver_name': 'Enter the source approver name using at most 200 characters.'})
+    note = payload.get('special_note')
+    if not isinstance(note, str) or not note.strip() or len(note.strip()) > 2000:
+        raise ValidationError({'special_note': 'Enter a Special note explaining the correction using at most 2000 characters.'})
+    label = payload.get('approval_label')
+    if label is not None and (not isinstance(label, str) or len(label.strip()) > 20):
+        raise ValidationError({'approval_label': 'Enter a Level label using at most 20 characters.'})
     confirmed = payload.get('signature_verified')
     if type(confirmed) is not bool:
         raise ValidationError({'signature_verified': 'Explicitly confirm whether the source PDF signature was verified.'})
@@ -83,7 +92,7 @@ def _validate_payload(payload):
         raise ValidationError({'approval_date': 'Enter the date shown with the verified source approval.'})
     if not confirmed and approved_on:
         raise ValidationError({'approval_date': 'Confirm the source signature before entering an approval date.'})
-    return digest.lower(), index, name.strip(), confirmed, approved_on
+    return digest.lower(), index, name.strip(), confirmed, approved_on, label.strip() if label is not None else None, note.strip()
 
 
 def _check_original(pr, digest):
@@ -134,7 +143,7 @@ def _approved_at(row):
 
 @transaction.atomic
 def edit_requisition_source_approval(requisition_id, actor, payload):
-    digest, index, name, confirmed, approved_on = _validate_payload(payload)
+    digest, index, name, confirmed, approved_on, label, note = _validate_payload(payload)
     pr = PurchaseRequisition.objects.select_for_update().get(pk=requisition_id)
     if str(pr.issued_by_id) != str(actor.pk) and not RequisitionWorkflowService._is_super_admin(actor):
         raise PermissionDenied('Only the requisition issuer may modify this requisition.')
@@ -165,6 +174,9 @@ def edit_requisition_source_approval(requisition_id, actor, payload):
     before = deepcopy(row)
     signer = _find_unique_active_issuer(name)
     row.update(user_name=name, user_id=str(signer.pk) if signer else None)
+    if label is not None or is_richa_name(name):
+        row['approval_label'] = '0' if is_richa_name(name) else label
+    row['special_note'] = note
     if confirmed:
         approved_at = timezone.make_aware(datetime.combine(approved_on, time(12)))
         row.update(status='approved', signature_verified=True, signature_source='manual', approved_at=approved_at.isoformat())
@@ -181,11 +193,22 @@ def edit_requisition_source_approval(requisition_id, actor, payload):
     verification['source_approval_rows'] = rows
     verification['signed_off'] = complete
     metadata['signed_document_verification'] = verification
+    previous_review = source_approval_review_from_metadata(metadata, digest)
+    desired_review = deepcopy(previous_review)
+    if 'approval_label' in row:
+        if row['approval_label']:
+            desired_review['approval_labels'][role] = row['approval_label']
+        else:
+            desired_review['approval_labels'].pop(role, None)
+    desired_review.setdefault('approver_notes', {})[role] = note
+    _, review_envelope = prepare_source_approval_review(metadata, digest, actor, desired_review, previous_review)
+    evidence[REVIEW_KEY] = review_envelope
     now = timezone.now()
     metadata.setdefault('source_approval_reviews', []).append({
         'document_sha256': digest, 'row_index': index, 'role': row.get('role'),
         'reviewed_by_id': str(actor.pk), 'reviewed_by_name': actor.get_full_name() or actor.email,
         'reviewed_at': now.isoformat(), 'signature_verified': confirmed,
+        'special_note': note,
         'before': before, 'after': deepcopy(row),
     })
     fields = ['price_remarks_data', 'updated_at']

@@ -230,14 +230,17 @@ class GenerationRevisionTests(Phase0Fixture):
             ],
         )
 
-        rendered = JSONRenderer().render(
-            PlanningGenerationSerializer(legacy_generation).data,
-        )
+        with self.assertNumQueries(0):
+            rendered = JSONRenderer().render(
+                PlanningGenerationSerializer(legacy_generation).data,
+            )
         payload = json.loads(rendered)
 
         self.assertIsNone(payload['intelligence']['confidence'])
         self.assertIsNone(payload['activities'][0]['total_float_days'])
         self.assertIsNone(payload['activities'][1]['total_float_days'])
+        self.assertIsNone(payload['schedule_id'])
+        self.assertIsNone(payload['schedule_version_id'])
 
     @patch(
         'rest_framework.mixins.RetrieveModelMixin.retrieve',

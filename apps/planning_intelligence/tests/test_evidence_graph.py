@@ -29,6 +29,20 @@ class EvidenceGraphTests(TestCase):
         self.graph = refresh_evidence_graph(self.project, self.user)
         return self.graph
 
+    def test_matrix_dimensions_without_physical_columns_refresh_as_source_evidence(self):
+        self.file.extracted_text = ('Table 1: Applicable Deliverables for Work Packages\n'
+                                    'S. No. Discipline Document / Deliverable Description Work Packages Remarks\n'
+                                    '4.2 General\n4.2.1 General Survey dossier X\n')
+        self.file.save(update_fields=['extracted_text'])
+        graph = self.refresh()
+        node = graph.nodes.get(current=True, kind='fact', property='discipline')
+        self.assertEqual(node.value, {'name': 'General'})
+        self.assertNotEqual(node.status, 'accepted')
+        self.assertEqual(node.sources[0]['locator']['column_header'], 'Discipline')
+        self.assertNotIn('column', node.sources[0]['locator'])
+        self.assertEqual(node.sources[0]['locator']['package_columns_status'], 'not_resolved')
+        self.assertTrue(node.sources[0]['quote_verified'])
+
     def test_exact_locator_quote_is_verified_instead_of_normalized_context(self):
         self.refresh()
         document = self.graph.documents.get()

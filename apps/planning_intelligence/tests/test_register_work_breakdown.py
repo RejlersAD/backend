@@ -21,6 +21,74 @@ from ..services.schedule_basis import _deliverable_rows, build_schedule_basis
 from ..services.work_breakdown import _initial_tasks
 
 
+class CaptionedRegisterWorkBreakdownTests(TestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(username='captioned-register')
+        self.project = PlanningProject.objects.create(name='Captioned register', created_by=self.owner)
+        self.source = PlanningFile.objects.create(
+            project=self.project, category='sow', file='tests/synthetic-captioned.pdf',
+            original_filename='Synthetic scope.pdf', parse_status='done', uploaded_by=self.owner,
+            extracted_text=('Table 4: FEED Deliverables\nS. No. Description\nSupport Services\n'
+                            '1 Clear source report\nTitle for retained\n2\nstructures\n'
+                            '3 Clear source dossier\n3 Clear source dossier\n'),
+        )
+
+    def test_register_scope_and_group_survive_without_ai_or_discipline_inference(self):
+        run, preview = run_document_intelligence(self.project, user=self.owner, allow_ai=False)
+        self.assertEqual(preview['register_summary']['row_count'], 4)
+        self.assertEqual(set(preview['disciplines']), {'not_specified'})
+        facts = list(run.facts.filter(fact_type='deliverable').order_by('id'))
+        self.assertEqual(len(facts), 4)
+        self.assertTrue(all(fact.value['source_group'] == 'Support Services' for fact in facts))
+        self.assertTrue(all(fact.source_locator['source_group'] == 'Support Services' for fact in facts))
+        self.assertEqual(preview['disciplines']['not_specified']['register_rows'][0]['source_group'], 'Support Services')
+        self.assertEqual(facts[2].value['register_item'], facts[3].value['register_item'])
+        self.assertNotEqual(facts[2].source_locator['line'], facts[3].source_locator['line'])
+
+    def test_matrix_confirmation_cannot_promote_unmarked_conditional_or_ambiguous_scope(self):
+        from ..services.document_plan import project_document_plan
+        self.source.extracted_text = ('Table 2: Applicable Deliverables for Work Packages\n'
+            'S. No. Discipline Document / Deliverable Description Work Packages Remarks\n'
+            '4.2 General\n4.2.1 General Clear dossier X\n'
+            '4.2.2 General Unmarked drawing\n4.2.3 General Conditional report X If required\n'
+            '4.2.4 General Last dossier X\n')
+        self.source.save(update_fields=['extracted_text'])
+        run, preview = run_document_intelligence(self.project, user=self.owner, allow_ai=False)
+        self.assertEqual(preview['register_summary']['row_count'], 4)
+        facts = list(run.facts.filter(fact_type='deliverable').order_by('id'))
+        self.assertEqual([fact.value['applicability_status'] for fact in facts], ['marked', 'not_marked', 'conditional', 'marked'])
+        self.assertEqual(facts[2].value['source_remarks'], 'If required')
+        self.assertEqual(facts[2].source_locator['applicability_status'], 'conditional')
+        run.facts.filter(fact_type='deliverable').update(status='confirmed')
+        reviewed = _deliverable_rows(run, preview)
+        self.assertEqual(sum(row['requires_source_review'] for row in reviewed), 2)
+        self.assertEqual([row['title'] for row in _initial_tasks(run, preview)], ['Clear dossier', 'Last dossier'])
+        plan = project_document_plan(self.project, preview)
+        self.assertEqual(len(plan['register_inventory']), 4)
+        self.assertEqual([row['name'] for row in plan['activities']], ['Clear dossier', 'Last dossier'])
+        basis = build_schedule_basis(run)
+        self.assertEqual(basis.deliverables.filter(status='needs_review').count(), 2)
+
+    def test_bulk_confirmation_does_not_promote_ambiguous_register_title_to_wbs_or_plan(self):
+        from ..services.document_plan import project_document_plan
+        run, preview = run_document_intelligence(self.project, user=self.owner, allow_ai=False)
+        run.facts.filter(fact_type='deliverable').update(status='confirmed')
+        rows = _deliverable_rows(run, preview)
+        ambiguous = [row for row in rows if row.get('requires_source_review')]
+        self.assertEqual(len(ambiguous), 1)
+        self.assertFalse(ambiguous[0]['confirmed'])
+        self.assertFalse(ambiguous[0]['excluded'])
+        tasks = _initial_tasks(run, preview)
+        self.assertEqual(len(tasks), 3)
+        self.assertNotIn('Title for retained structures', [row['title'] for row in tasks])
+        plan = project_document_plan(self.project, preview)
+        self.assertEqual(len(plan['register_inventory']), 4)
+        self.assertEqual(len(plan['activities']), 3)
+        self.assertEqual(next(row for row in plan['validation'] if row['code'] == 'register_title_boundary_ambiguous')['severity'], 'error')
+        basis = build_schedule_basis(run)
+        self.assertEqual(basis.deliverables.filter(status='needs_review', canonical_name='Title for retained structures').count(), 1)
+
+
 class RegisterWorkBreakdownTests(TestCase):
     GROUP_COUNTS = {
         'GENERAL': 34, 'HSE': 81, 'INSTRUMENTATION': 41,

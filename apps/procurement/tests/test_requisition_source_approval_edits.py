@@ -136,6 +136,7 @@ class RequisitionSourceApprovalEditTests(TestCase):
             'document_sha256': DIGEST, 'row_index': index,
             'expected_row': deepcopy(self.pr.price_remarks_data['signed_document_verification']['source_approval_rows'][index]),
             'approver_name': 'Val Verified', 'signature_verified': True, 'approval_date': '2026-01-29',
+            'special_note': 'Name and Level reviewed against the original PDF.',
         }
         payload.update(changes)
         return payload
@@ -197,7 +198,7 @@ class RequisitionSourceApprovalEditTests(TestCase):
         self.assertEqual(self.pr.status, 'draft')
         self.assertEqual(self.pr.approval_workflow_config, [])
         row = self.pr.price_remarks_data['signed_document_verification']['source_approval_rows'][3]
-        self.assertEqual(row, {**self.rows[3], 'user_name': 'Corrected Vice President'})
+        self.assertEqual(row, {**self.rows[3], 'user_name': 'Corrected Vice President', 'special_note': self.payload()['special_note']})
         self.assertFalse(self.pr.price_remarks_data['signed_document_verification']['signed_off'])
 
     def test_current_source_token_returns_fresh_token_for_the_next_form_save(self):
@@ -279,7 +280,7 @@ class RequisitionSourceApprovalEditTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.pr.refresh_from_db()
         updated = self.pr.price_remarks_data['signed_document_verification']['source_approval_rows'][3]
-        self.assertEqual(updated, {**rows[3], 'user_name': 'Val Verified'})
+        self.assertEqual(updated, {**rows[3], 'user_name': 'Val Verified', 'special_note': self.payload()['special_note']})
         self.assertEqual(self.pr.status, 'approved')
         self.assertFalse(self.pr.price_remarks_data['source_approval_reviews'][0]['signature_verified'])
         self.assertEqual(self.pr.vp_op_signature, '/media/original-existing-vp-signature.png')
@@ -326,7 +327,7 @@ class RequisitionSourceApprovalEditTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.pr.refresh_from_db()
         self.assertEqual(self.pr.status, 'approved')
-        self.assertEqual(self.pr.approval_workflow_config[3], {**rows[3], 'user_name': 'Val Verified'})
+        self.assertEqual(self.pr.approval_workflow_config[3], {**rows[3], 'user_name': 'Val Verified', 'special_note': self.payload()['special_note']})
 
     def test_converted_record_keeps_converted_status_when_source_evidence_completes(self):
         self.pr.status = 'converted'

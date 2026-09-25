@@ -17,6 +17,7 @@ URL roots (wired in apps.planning_intelligence.urls):
 from __future__ import annotations
 
 import logging
+import uuid
 
 from django.db import DatabaseError, connection, transaction
 from django.db.models import Count, IntegerField, Max, OuterRef, Subquery, Value
@@ -26,6 +27,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.generics import get_object_or_404
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -35,12 +38,13 @@ from .models import PlanningAuditEvent, PlanningFile, PlanningGeneration, Planni
 from .serializers import (
     PlanningAuditEventSerializer, PlanningFileListSerializer, PlanningFileSerializer,
     PlanningGenerationEditSerializer, PlanningGenerationListSerializer,
-    PlanningGenerationSerializer, PlanningJobSerializer, PlanningProjectSerializer,
+    PlanningGenerationSerializer, PlanningJobProgressSerializer, PlanningJobSerializer, PlanningProjectSerializer,
 )
 from .services import byok_crypto, export_utils, project_ai
 from .services.project_ai_settings import settings_payload, updated_settings
 from .services.audit import record_event
-from .services.operational_jobs import dispatch_job, get_or_create_job, workable_plan_fingerprint
+from .services.operational_jobs import dispatch_job, get_or_create_job, operation_fingerprint, workable_plan_fingerprint
+from .services.job_read import OptionalObjectJSONRenderer
 from .services.validation_engine import validate
 from .services.workflow_configuration import ensure_project_schedule_configuration
 from .tasks import parse_uploaded_planning_file
@@ -142,7 +146,18 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(enterprise_project_id=enterprise_project_id)
         return queryset.order_by('-created_at')
 
+    @transaction.atomic
     def perform_create(self, serializer):
+        enterprise = serializer.validated_data.get('enterprise_project')
+        if enterprise is not None:
+            from apps.core.project_models import Project
+            from rest_framework.exceptions import ValidationError
+            # This legacy link has no database FK constraint. Recheck under the
+            # enterprise lock so a concurrently deleted project cannot gain an orphan.
+            enterprise = Project.objects.select_for_update().filter(pk=enterprise.pk, is_deleted=False).first()
+            if enterprise is None:
+                raise ValidationError({'enterprise_project': 'This project is no longer available.'})
+            serializer.validated_data['enterprise_project'] = serializer.validate_enterprise_project(enterprise)
         project = serializer.save(created_by=self.request.user)
         ensure_project_schedule_configuration(project, actor=self.request.user)
         record_event(project=project, actor=self.request.user, action='project.created', entity=project, after=serializer.data)
@@ -372,9 +387,11 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
     def perform_destroy(self, instance):
-        """Soft-delete only — never hard-delete a project (RADAI global rule:
-        archive/supersede, never destroy). Mirrors the is_deleted filtering
-        already used everywhere else in this app's querysets."""
+        """Legacy standalone workspaces archive; canonical projects use their owner command."""
+        if instance.enterprise_project_id:
+            from apps.core.project_deletion import ProjectDeleteConflict
+            raise ProjectDeleteConflict('Permanently delete the linked project from Project Control.',
+                                        code='project_delete_from_project_control')
         instance.soft_delete()
         record_event(project=instance, actor=self.request.user, action='project.archived', entity=instance)
 
@@ -416,8 +433,13 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='generate')
     def generate(self, request, pk=None):
-        """Persist document evidence for review; publication is a separate action."""
+        """Generate an explicit planning draft or retain source evidence for review."""
         project = self.get_object()
+        from .services.planning_package_request import PlanningPackageRequestError, resolve_generation_options
+        try:
+            resolve_generation_options(project, request.data or {})
+        except PlanningPackageRequestError as exc:
+            return Response(exc.payload, status=exc.status_code)
         generation_options = (request.data or {}).get('generation_options') or {}
         expected_configuration_version = generation_options.get('expected_configuration_version')
         from .models import ProjectScheduleConfiguration
@@ -445,20 +467,61 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='generation-preview')
     def generation_preview(self, request, pk=None):
-        """Preview source evidence without creating a schedule version."""
+        """Preview the selected generation policy without creating a schedule version."""
         project = self.get_object()
+        from .services.planning_package_request import PlanningPackageRequestError, resolve_generation_options
+        try:
+            resolve_generation_options(project, request.data or {})
+        except PlanningPackageRequestError as exc:
+            return Response(exc.payload, status=exc.status_code)
         if not project.files.filter(is_deleted=False, parse_status='done').exists():
             return Response(
                 {'error': 'No successfully parsed files are available.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return self._enqueue_job(project, 'preview', dict(request.data or {}))
+        payload = dict(request.data or {})
+        retry_job_id = payload.pop('retry_queued_job_id', None)
+        if retry_job_id is not None:
+            return self._retry_queued_preview(project, retry_job_id, payload)
+        return self._enqueue_job(project, 'preview', payload)
+
+    def _retry_queued_preview(self, project, job_id, payload):
+        """Explicitly redispatch a never-started preview, preserving its job identity."""
+        if isinstance(job_id, bool) or not str(job_id).isdigit() or int(job_id) <= 0:
+            return Response({'error': 'retry_queued_job_id must identify a preview job.'}, status=400)
+        with transaction.atomic():
+            job = PlanningJob.objects.select_for_update().filter(
+                pk=int(job_id), project=project, job_type='preview', is_deleted=False,
+            ).first()
+            if job is None:
+                raise Http404
+            if job.request_data != payload or job.idempotency_key != operation_fingerprint(project, 'preview', payload):
+                return Response({
+                    'error': 'Preview inputs changed. Start a new preview with the current inputs.',
+                    'code': 'preview_retry_conflict',
+                }, status=409)
+            if job.status == 'queued' and job.started_at is None and job.attempt_count == 0:
+                job.task_id = f'planning-job-{job.pk}-{uuid.uuid4().hex}'
+                job.message = 'Queued preview retry requested'
+                job.progress_log = [*(job.progress_log or []), {
+                    'progress': job.progress, 'message': job.message, 'phase': 'queued_retry',
+                    'at': timezone.now().isoformat(),
+                }][-100:]
+                job.save(update_fields=['task_id', 'message', 'progress_log', 'updated_at'])
+                record_event(project=project, actor=self.request.user, action='job.queued_retry', entity=job)
+                dispatch_job(job)
+        job.refresh_from_db()
+        return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=202)
 
     def _enqueue_job(self, project, job_type, request_data):
         supplied_key = str(self.request.headers.get('Idempotency-Key') or '').strip()[:64] or None
-        job, created = get_or_create_job(
-            project, job_type, request_data, self.request.user, idempotency_key=supplied_key,
-        )
+        from .services.planning_package_request import PlanningPackageRequestError
+        try:
+            job, created = get_or_create_job(
+                project, job_type, request_data, self.request.user, idempotency_key=supplied_key,
+            )
+        except PlanningPackageRequestError as exc:
+            return Response(exc.payload, status=exc.status_code)
         if created or job.status == 'failed':
             if job.status == 'failed':
                 job.status = 'queued'
@@ -482,6 +545,7 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             return Response(settings_payload(project))
         with transaction.atomic():
             project = PlanningProject.objects.select_for_update().get(pk=project.pk)
+            previous_settings = project.ai_settings
             if request.method == 'DELETE':
                 project.ai_settings = {}
                 action_name = 'ai_settings.removed'
@@ -490,7 +554,10 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
                     return Response({'error': 'Secure API key storage is not configured on the server.'}, status=503)
                 project.ai_settings = updated_settings(project.ai_settings or {}, request.data)
                 action_name = 'ai_settings.updated'
-            project.save(update_fields=['ai_settings'])
+            if project.ai_settings != previous_settings:
+                # Provider/key changes must not reuse a completed partial analysis
+                # under the previous settings. Unchanged saves preserve reviews.
+                project.save(update_fields=['ai_settings', 'updated_at'])
             record_event(project=project, actor=request.user, action=action_name, entity=project,
                          after={key: project.ai_settings.get(key) for key in ('enabled', 'provider', 'model')})
         return Response(settings_payload(project))
@@ -816,6 +883,26 @@ class PlanningJobViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = super().get_queryset().filter(project__in=accessible_projects(self.request.user))
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
+
+    @action(detail=True, methods=['get'])
+    def progress(self, request, pk=None):
+        from .services.job_read import compact_job_queryset
+        # The scoped queryset enforces the same project visibility as detail.
+        row = get_object_or_404(compact_job_queryset(self.get_queryset()), pk=pk)
+        return Response(PlanningJobProgressSerializer(row).data)
+
+    @action(detail=False, methods=['get'], renderer_classes=[OptionalObjectJSONRenderer])
+    def active(self, request):
+        from .services.job_read import compact_job_queryset, required_project_id
+        project_id = required_project_id(request)
+        queryset = self.get_queryset().filter(project_id=project_id, status__in=['queued', 'running'])
+        job_type = request.query_params.get('job_type')
+        if job_type:
+            if job_type not in dict(PlanningJob.JOB_TYPE_CHOICES):
+                raise ValidationError({'job_type': 'Choose a valid planning job type.'})
+            queryset = queryset.filter(job_type=job_type)
+        row = compact_job_queryset(queryset).order_by('-created_at', '-pk').first()
+        return Response(PlanningJobProgressSerializer(row).data if row else None)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

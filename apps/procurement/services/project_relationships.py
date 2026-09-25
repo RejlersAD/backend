@@ -166,7 +166,7 @@ def extract_requisition_project_codes(project='', project_details=None) -> list[
     """Return explicit project-code fields from the legacy PR payload."""
     codes = []
     if normalize_project_code(project):
-        codes.append(str(project).strip())
+        codes.extend(part.strip() for part in str(project).split(',') if part.strip())
     for detail in project_details if isinstance(project_details, list) else []:
         if not isinstance(detail, dict):
             continue

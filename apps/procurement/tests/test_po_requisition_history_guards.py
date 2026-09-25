@@ -71,7 +71,12 @@ class PurchaseOrderRequisitionHistoryGuardsTests(SimpleTestCase):
                 order.approval_log[-1]['content_fingerprint'] = purchase_order_content_fingerprint(order)
                 with patch('apps.procurement.services.purchase_order_lifecycle.PODocument.objects.filter') as documents:
                     validate_purchase_order_transition(order, 'sent')
-                    validate_purchase_order_transition(order, 'completed')
+                    # Completion also needs accepted receiving evidence. This
+                    # test isolates PR/PO approval history from that separate guard.
+                    with patch('apps.procurement.services.receiving.receiving_summary',
+                               return_value={'status': 'complete'}) as receiving:
+                        validate_purchase_order_transition(order, 'completed')
+                    receiving.assert_called_once_with(order)
                 documents.assert_not_called()
                 self.assertTrue(commercial_edit_locked(order))
                 with self.assertRaises(ValidationError):

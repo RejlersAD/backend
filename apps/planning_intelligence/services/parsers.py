@@ -396,6 +396,12 @@ def extract_text_with_coverage(file_field, original_filename: str):
                 coverage['structured_evidence'] = {'reference_schedule_geometry': geometry}
         except Exception as exc:
             logger.info('Optional PDF schedule geometry extraction failed: %s', exc)
+        try:
+            from .register_geometry_cache import build_register_geometry
+            geometry = build_register_geometry(file_field, text)
+            coverage.setdefault('structured_evidence', {})['register_geometry'] = geometry
+        except Exception:
+            logger.info('Optional PDF register geometry extraction is unavailable.')
 
     if not text.strip():
         coverage['status'] = 'failed'

@@ -47,12 +47,26 @@ def finish_coverage(coverage, raw_text, retained_text):
     return coverage
 
 
-def file_coverage(file_obj, recorded=None):
+def public_coverage(recorded):
+    """Expose extraction counts without copying retained geometry rows to APIs."""
+    recorded = recorded or {}
+    result = deepcopy({key: value for key, value in recorded.items() if key != 'structured_evidence'})
+    structured = recorded.get('structured_evidence')
+    if isinstance(structured, dict):
+        result['structured_evidence_summary'] = {
+            key: {'status': value.get('status'), 'row_count': len(value.get('rows') or []),
+                  'schema_version': value.get('schema_version') or value.get('adapter')}
+            for key, value in structured.items() if isinstance(value, dict)
+        }
+    return result
+
+
+def file_coverage(file_obj, recorded=None, *, include_structured=False):
     """Old stored text cannot prove that every source page/sheet was extracted."""
     text = file_obj.extracted_text or ''
     digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
     if recorded and recorded.get('text_sha256') == digest:
-        result = deepcopy(recorded)
+        result = deepcopy(recorded) if include_structured else public_coverage(recorded)
     else:
         result = new_coverage()
         result.update({

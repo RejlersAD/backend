@@ -98,7 +98,9 @@ def _network_validation(version, activities, relationships):
 
 
 def _contract_scenarios(version, activities, calculation_run):
-    contract_finish = version.schedule.project.planned_end_date
+    from .planning_package_boundary import package_context
+    proposal = package_context(version)
+    contract_finish = proposal['finish'] if proposal else version.schedule.project.planned_end_date
     forecast = calculation_run.project_finish or version.calculated_finish
     if not contract_finish or not forecast:
         return {'available': False, 'reason': 'Contractual and calculated finish dates are required.', 'scenarios': []}
@@ -262,8 +264,11 @@ def run_schedule_assurance(version, *, requested_by=None):
         findings.append(_finding('contract_finish_overrun', 'warning', f"Forecast exceeds contractual finish by {contract['variance_calendar_days']} calendar days."))
     tasks = activity_check_rows(activities)
     links = relationship_check_rows(relationships)
-    calendar = WorkdayCalendar(version.schedule.default_calendar, version.schedule.planned_start)
-    findings = enrich_schedule_findings(findings, tasks, links, version.schedule.project.planned_end_date, calendar)
+    from .planning_package_boundary import package_context
+    proposal = package_context(version)
+    calendar = WorkdayCalendar(proposal['calendar'], proposal['start']) if proposal else WorkdayCalendar(version.schedule.default_calendar, version.schedule.planned_start)
+    findings = enrich_schedule_findings(findings, tasks, links,
+        proposal['finish'] if proposal else version.schedule.project.planned_end_date, calendar)
     # Persist the same actionable findings exposed by submission, so the
     # assurance tab and the rejected command describe the same corrections.
     network_count = len(network['findings'])

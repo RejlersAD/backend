@@ -10,7 +10,7 @@ from .intelligence_serializers import (
     AddGenerationDependencySerializer, BasisDeliverableReviewSerializer, BasisDeliverableSerializer,
     BulkBasisDeliverableReviewSerializer,
     ConflictResolutionSerializer, ConfirmIntelligencePreviewSerializer,
-    DocumentAuthorityRuleSerializer, DocumentIntelligenceRunSerializer, DocumentProfileSerializer,
+    DocumentAuthorityRuleSerializer, DocumentIntelligenceRunSerializer, DocumentIntelligenceRunSummarySerializer, DocumentProfileSerializer,
     FactReviewSerializer, IntelligenceConflictSerializer, IntelligenceFactSerializer,
     GenerationDependencyReviewSerializer, GenerationDependencySerializer,
     GenerationPlanSerializer, ManualIntelligenceFactSerializer, PlanDeliverableSerializer,
@@ -24,6 +24,7 @@ from .models import (
 from .services.audit import record_event
 from .services.document_intelligence import compile_run_intelligence
 from .services.preview_confirmation import review_fingerprint, source_error, source_fingerprint
+from .services.job_read import OptionalObjectJSONRenderer
 from .services.schedule_basis import approve_schedule_basis, build_schedule_basis, refresh_basis_readiness
 from .services.generation_plan import (
     approve_generation_plan, refresh_generation_plan_readiness,
@@ -60,6 +61,26 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = super().get_queryset().filter(project__in=accessible_projects(self.request.user))
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
+
+    @action(detail=False, methods=['get'], permission_action='read', renderer_classes=[OptionalObjectJSONRenderer])
+    def latest(self, request):
+        from .services.job_read import compact_run_queryset, required_project_id
+        project_id = required_project_id(request)
+        row = compact_run_queryset(self.get_queryset().filter(
+            project_id=project_id, status='succeeded',
+        )).order_by('-created_at', '-pk').first()
+        return Response(DocumentIntelligenceRunSummarySerializer(row).data if row else None)
+
+    @action(detail=True, methods=['get'], url_path='schedule-workspace', permission_action='read')
+    def schedule_workspace(self, request, pk=None):
+        """Open exact completed analysis evidence without creating a generation."""
+        from .services.analysis_workspace import AnalysisWorkspaceUnavailable, analysis_schedule_workspace
+        run = self.get_object()
+        try:
+            payload = analysis_schedule_workspace(run)
+        except AnalysisWorkspaceUnavailable as exc:
+            return Response({'error': str(exc), 'code': exc.code}, status=status.HTTP_409_CONFLICT)
+        return Response(payload)
 
     @action(detail=True, methods=['post'], permission_action='update')
     def resume(self, request, pk=None):

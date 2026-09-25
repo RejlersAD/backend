@@ -119,6 +119,32 @@ depends on configured transport, worker availability and recipient eligibility.
 These assignment flows do not request email delivery. Saving or seeing a
 notification record does not prove delivery through an external channel.
 
+## Review commercial fields from an uploaded PO
+
+The signed PO importer reads Seller reference, Payment terms, Payment method
+and Delivery terms from their labeled source fields. Seller reference retains
+the literal contact name/title without requiring an honorific; email remains a
+separate supplier field. Cover coordinates keep wrapped labels and adjacent
+columns separate, so delivery text cannot absorb payment details or contract pages.
+
+Native cover fields take precedence, including explicit blanks. One bounded
+cover OCR pass can recover unresolved scanned fields in a partially native
+document; OCR failure preserves readable native and bounded text values. Terms
+first printed later in the existing four-page extraction range remain supported.
+The original complete PDF, length validation, reviewed overrides, vendor
+ownership, approval evidence and import/attachment commands are unchanged.
+
+Run the existing preview extraction again to refresh an open review. This
+correction does not rewrite saved records or silently replace reviewed input.
+The workspace extraction brief records verification evidence and limits.
+
+Verified on 25 September 2026: 133 isolated backend tests passed, including 17
+commercial-extraction cases and existing reviewed-save/permission regressions.
+Fresh read-only OCR of the reported 27-page source returned all four correct
+cover values. No schema, sidebar, original PDF or saved business record changed;
+the workspace artifact folder procurement-po-commercial-extraction-20260925
+contains the test ledger and bounded original-source result.
+
 ## Edit the PO Buyer/Seller introduction and download Word
 
 In the PO editor, open **PO Description & Scope** and edit **Buyer / Seller

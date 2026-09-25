@@ -155,6 +155,61 @@ class SimplePlanningTests(TestCase):
         self.assertEqual(cycle.status_code, 400)
         self.assertEqual(self.read()['revision'], plan['revision'])
 
+    def test_mdr_labeled_schedule_recovers_explicit_activities_and_survives_reload(self):
+        from io import BytesIO
+        from openpyxl import Workbook
+        from ..services.parsers import extract_text_with_coverage
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = 'Delivery roadmap'
+        sheet.append(['Pilot and rollout schedule'])
+        sheet.append(['Phase Name', 'Module ID & Name', 'Target Completion Date', 'Duration (Days)', 'Owner / Lead'])
+        sheet.append(['Pilot', 'Module 8: Sensor onboarding', '2038-06-14', 4, 'Controls lead'])
+        sheet.append(['Expansion', 'Module 12: Telemetry archive', '2038-07-09', 6, 'Data team'])
+        summary = workbook.create_sheet('Phase summary')
+        summary.append(['Phase', 'Module Name', 'Target Window', 'Milestone Focus'])
+        summary.append(['Pilot', 'Sensor onboarding', 'June 2038', 'Improve field-data capture'])
+        stream = BytesIO()
+        workbook.save(stream)
+        text, _, _ = extract_text_with_coverage(stream, 'delivery-roadmap.xlsx')
+        source = PlanningFile.objects.create(
+            project=self.project, category='mdr', file='test/delivery-roadmap.xlsx',
+            original_filename='delivery-roadmap.xlsx', parse_status='done',
+            extracted_text=text, uploaded_by=self.owner,
+        )
+        with patch('apps.planning_intelligence.services.claude_client.call_claude') as ai:
+            plan = self.action('analyse', 0)
+        ai.assert_not_called()
+        self.assertEqual([row['title'] for row in plan['tasks']],
+                         ['Module 8: Sensor onboarding', 'Module 12: Telemetry archive'])
+        self.assertEqual(plan['analysis_result']['status'], 'activities_created')
+        self.assertEqual([row['duration_days'] for row in plan['tasks']], [4, 6])
+        for task in plan['tasks']:
+            self.assertEqual(task['source_references'][0]['file_id'], source.pk)
+            self.assertEqual(task['source_references'][0]['locator']['sheet'], 'Delivery roadmap')
+            self.assertEqual(task['depends_on'], [])
+            self.assertIn('dependencies', task['source_missing_fields'])
+            self.assertIn('start', task['source_missing_fields'])
+            self.assertFalse(task['owner'])
+        self.assertEqual(self.read()['tasks'], plan['tasks'])
+        self.assertEqual(self.action('analyse', plan['revision'])['tasks'], plan['tasks'])
+        self.assertEqual(self.project.intelligence_runs.count(), 1)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.planned_end_date, date(2026, 12, 20))
+        self.assertFalse(self.project.schedules.exists())
+        self.assertFalse(ScheduleBaseline.objects.exists())
+
+    def test_mdr_label_with_only_narrative_does_not_invent_activities(self):
+        PlanningFile.objects.create(
+            project=self.project, category='mdr', file='test/requirements.txt',
+            original_filename='requirements.txt', parse_status='done',
+            extracted_text='Contractor shall keep operating records available.', uploaded_by=self.owner,
+        )
+        plan = self.action('analyse', 0)
+        self.assertEqual(plan['tasks'], [])
+        self.assertEqual(plan['analysis_result']['status'], 'no_activities')
+
     def test_submit_requires_one_approval_only_and_publishing_is_idempotent(self):
         plan = self.save()
         submitted = self.action('submit', plan['revision'])

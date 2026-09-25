@@ -14,6 +14,7 @@ from django.utils.text import slugify
 
 from ..config import DISCIPLINE_NAME_BY_CODE
 from .identity_policy import IDENTITY_POLICY_VERSION, occurrence_key, stable_digest
+from .register_rows import register_row_requires_review
 from ..models import BasisDeliverable, DocumentAuthorityRule, ScheduleBasis
 
 
@@ -105,13 +106,15 @@ def _fact_deliverable_row(fact):
         return None
     reference = _source_reference(fact)
     identity = occurrence_key(reference, identifier=value.get('document_number'), fact_id=fact.pk)
+    requires_source_review = register_row_requires_review(value)
     return {
         'discipline': 'hse' if fact.fact_type == 'hse_study' else value.get('discipline') or 'not_specified',
         'canonical_name': title, 'original_title': title,
         'document_number': value.get('document_number') or '',
         'document_revision': value.get('document_revision') or '',
         'confidence': fact.confidence, 'fact_ids': [fact.pk],
-        'references': [reference], 'aliases': [], 'confirmed': fact.status == 'confirmed',
+        'references': [reference], 'aliases': [], 'confirmed': fact.status == 'confirmed' and not requires_source_review,
+        'requires_source_review': requires_source_review,
         'source_identity': identity, 'identity_policy': IDENTITY_POLICY_VERSION,
         'identity_status': 'distinct_source_record',
     }
@@ -124,8 +127,9 @@ def _apply_preview_selection(groups, run, preview):
     for row in groups:
         # Legacy previews select a complete list of source titles. This updates
         # inclusion only; two selected records never become one identity.
-        row['confirmed'] = row['original_title'] in selected.get(row['discipline'], [])
-        row['excluded'] = not row['confirmed']
+        included = row['original_title'] in selected.get(row['discipline'], [])
+        row['confirmed'] = included and not row.get('requires_source_review')
+        row['excluded'] = not included
     for discipline, names in selected.items():
         for index, name in enumerate(names):
             if any(row['discipline'] == discipline and row['original_title'] == name for row in groups):

@@ -6,6 +6,7 @@ from django.db.models import Max
 
 from ..models import PlanningGeneration, PlanningProject
 from .document_plan import POLICY, project_document_plan
+from .planning_package_request import PlanningPackageRequestError
 
 
 def _document_payload(project, intelligence):
@@ -53,28 +54,71 @@ def apply_intelligence_overrides(intelligence, overrides):
     return merged
 
 
-def analyze_documents(project, user=None, *, force=False):
+def analyze_documents(project, user=None, *, force=False, progress_callback=None):
     from .document_intelligence import get_or_run_document_intelligence
-    _run, intelligence = get_or_run_document_intelligence(project, user=user, force=force)
+    _run, intelligence = get_or_run_document_intelligence(project, user=user, force=force, progress_callback=progress_callback)
     return intelligence
 
 
-def preview_schedule(project, *, user=None, overrides=None):
-    """Build a deterministic, non-persistent generation-wizard preview."""
+def _package_input_fingerprint(project, run):
+    from .operational_jobs import generation_fingerprint
+    current = PlanningProject.objects.get(pk=project.pk)
+    if current.updated_at != project.updated_at:
+        raise PlanningPackageRequestError('Planning project inputs changed. Refresh before building the Planning Package.')
+    return generation_fingerprint(current, {'generation_options': {
+        'mode': 'planning_package', 'intelligence_run_id': run.pk,
+    }})
+
+
+def _generation_payload(project, *, user=None, overrides=None, mode=POLICY, intelligence_run=None):
+    if mode == 'planning_package':
+        from .planning_package import build_planning_package
+        from .planning_package_request import validate_package_sources
+        from .preview_confirmation import review_fingerprint
+        if intelligence_run is None:
+            raise PlanningPackageRequestError('Select the completed analysis for this Planning Package.')
+        validate_package_sources(project, intelligence_run)
+        reviewed = review_fingerprint(intelligence_run)
+        planned = _package_input_fingerprint(project, intelligence_run)
+        payload = build_planning_package(project, intelligence_run)
+        intelligence_run.refresh_from_db()
+        validate_package_sources(project, intelligence_run)
+        if reviewed != review_fingerprint(intelligence_run):
+            raise PlanningPackageRequestError('Evidence review changed while building the Planning Package. Refresh and try again.')
+        if planned != _package_input_fingerprint(project, intelligence_run):
+            raise PlanningPackageRequestError('Planning configuration changed while building this package. Refresh and try again.')
+        payload['intelligence']['schedule_engine']['review_fingerprint'] = reviewed
+        from .planning_package_request import package_preview_selection
+        from .operational_jobs import canonical_fingerprint
+        payload['intelligence']['schedule_engine']['preview_selection_fingerprint'] = canonical_fingerprint(
+            package_preview_selection(intelligence_run, review_token=reviewed))
+        payload['intelligence']['schedule_engine']['planning_input_fingerprint'] = planned
+        return payload
+    if mode != POLICY:
+        raise PlanningPackageRequestError('Unknown planning generation mode.')
     intelligence = analyze_documents(project, user=user)
     if isinstance(overrides, dict) and overrides:
         intelligence = apply_intelligence_overrides(intelligence, overrides)
-    payload = _document_payload(project, intelligence)
+    return _document_payload(project, intelligence)
+
+
+def preview_schedule(project, *, user=None, overrides=None, mode=POLICY, intelligence_run=None):
+    """Build a deterministic, non-persistent generation-wizard preview."""
+    payload = _generation_payload(project, user=user, overrides=overrides, mode=mode, intelligence_run=intelligence_run)
+    intelligence = payload['intelligence']
     wbs, activities, validation = payload['wbs'], payload['activities'], payload['validation']
     schedule = {**payload['intelligence']['schedule_engine'], 'logic_matrix': payload['logic_matrix']}
     return {
         'wbs_node_count': len(wbs),
-        'deliverable_count': len(schedule['register_inventory']),
+        'deliverable_count': len(schedule.get('source_deliverables', schedule['register_inventory'])),
         'activity_count': len(activities),
         'relationship_count': len(schedule.get('logic_matrix') or []),
         'milestone_count': sum(1 for item in activities if item.get('is_milestone')),
-        'configured_workflow_activity_count': 0,
-        'evidence_policy': POLICY,
+        'configured_workflow_activity_count': schedule.get('configured_workflow_activity_count', 0),
+        'evidence_policy': schedule['policy'],
+        'generation_mode': mode,
+        'intelligence_run_id': getattr(intelligence_run, 'pk', None),
+        'assumptions': schedule.get('assumptions', []),
         'processing_coverage': intelligence.get('processing_coverage') or {},
         'missing_information': schedule['missing_information'],
         'extraction_reports': schedule['extraction_reports'],
@@ -102,22 +146,37 @@ def preview_schedule(project, *, user=None, overrides=None):
 
 
 @tracked_planning('generate_schedule')
-def generate_schedule(project, *, user=None, overrides=None, input_fingerprint=None):
+def generate_schedule(project, *, user=None, overrides=None, input_fingerprint=None, mode=POLICY, intelligence_run=None):
     if input_fingerprint:
         from .operational_jobs import canonical_fingerprint
-        input_fingerprint = canonical_fingerprint({'policy': POLICY, 'input': input_fingerprint})
+        input_fingerprint = canonical_fingerprint({'policy': mode, 'input': input_fingerprint})
     if input_fingerprint:
         existing = project.generations.filter(
             is_deleted=False, input_fingerprint=input_fingerprint,
         ).first()
         if existing:
             return existing
-    intelligence = analyze_documents(project, user=user)
-    if isinstance(overrides, dict) and overrides:
-        intelligence = apply_intelligence_overrides(intelligence, overrides)
-    payload = _document_payload(project, intelligence)
+    payload = _generation_payload(project, user=user, overrides=overrides, mode=mode, intelligence_run=intelligence_run)
     with transaction.atomic():
         locked_project = PlanningProject.objects.select_for_update().get(pk=project.pk)
+        if mode == 'planning_package':
+            from .planning_package_request import validate_package_sources
+            from .preview_confirmation import review_fingerprint
+            intelligence_run.refresh_from_db()
+            validate_package_sources(locked_project, intelligence_run)
+            engine = payload['intelligence']['schedule_engine']
+            if (locked_project.updated_at != project.updated_at
+                    or engine['review_fingerprint'] != review_fingerprint(intelligence_run)):
+                raise PlanningPackageRequestError('Planning inputs changed while generating this package. Refresh and try again.')
+            if engine['planning_input_fingerprint'] != _package_input_fingerprint(locked_project, intelligence_run):
+                raise PlanningPackageRequestError('Planning configuration changed while generating this package. Refresh and try again.')
+            if engine.get('configuration_id'):
+                from ..models import ProjectScheduleConfiguration
+                current_version = ProjectScheduleConfiguration.objects.filter(
+                    pk=engine['configuration_id'], project=locked_project, is_deleted=False,
+                ).values_list('configuration_version', flat=True).first()
+                if current_version != engine['configuration_version']:
+                    raise PlanningPackageRequestError('The workflow configuration changed while generating this package. Refresh and try again.')
         if input_fingerprint:
             existing = locked_project.generations.filter(
                 is_deleted=False, input_fingerprint=input_fingerprint,

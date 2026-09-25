@@ -374,7 +374,12 @@ CLAUDE_BYOK_ENABLED = config('PLANNING_CLAUDE_BYOK_ENABLED', default=True, cast=
 
 # Cost/latency guardrails — soft-coded so they can be tuned without touching
 # services/claude_client.py or services/intelligence.py.
-CLAUDE_MAX_INPUT_CHARS = int(config('PLANNING_CLAUDE_MAX_INPUT_CHARS', default='60000'))
+CLAUDE_MAX_INPUT_CHARS = int(config('PLANNING_CLAUDE_MAX_INPUT_CHARS', default='6000'))
+# Output-limited document chunks may be divided within the same bounded pass.
+# Every parent/child request consumes the shared call budget; no hidden retry.
+AI_MIN_CHUNK_CHARS = int(config('PLANNING_AI_MIN_CHUNK_CHARS', default='750'))
+AI_MAX_SPLIT_DEPTH = int(config('PLANNING_AI_MAX_SPLIT_DEPTH', default='3'))
+AI_MAX_CALLS_PER_PASS = int(config('PLANNING_AI_MAX_CHUNKS', default='64'))
 CLAUDE_INTELLIGENCE_MAX_TOKENS = int(config('PLANNING_CLAUDE_INTELLIGENCE_MAX_TOKENS', default='6000'))
 # Scope pass can be asked to enumerate authoritative_deliverables_by_discipline
 # for every in-scope discipline — a much longer response than the first pass's
@@ -382,4 +387,6 @@ CLAUDE_INTELLIGENCE_MAX_TOKENS = int(config('PLANNING_CLAUDE_INTELLIGENCE_MAX_TO
 # truncating mid-JSON (which fails the whole pass, not just that one field).
 CLAUDE_SCOPE_MAX_TOKENS = int(config('PLANNING_CLAUDE_SCOPE_MAX_TOKENS', default='6000'))
 CLAUDE_NARRATIVE_MAX_TOKENS = int(config('PLANNING_CLAUDE_NARRATIVE_MAX_TOKENS', default='800'))
+# Per-I/O inactivity timeout, not an end-to-end generation deadline. Document
+# intelligence streams responses and does not silently retry provider requests.
 CLAUDE_REQUEST_TIMEOUT_SECONDS = int(config('PLANNING_CLAUDE_TIMEOUT_SECONDS', default='45'))
