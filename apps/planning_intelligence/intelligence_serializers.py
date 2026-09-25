@@ -12,6 +12,12 @@ from .services.preview_confirmation import confirmation_metadata
 class DocumentProfileSerializer(serializers.ModelSerializer):
     filename = serializers.CharField(source='file.original_filename', read_only=True)
 
+    def to_representation(self, instance):
+        from .services.extraction_coverage import public_coverage
+        result = super().to_representation(instance)
+        result['extraction_coverage'] = public_coverage(result.get('extraction_coverage'))
+        return result
+
     class Meta:
         model = DocumentProfile
         fields = [

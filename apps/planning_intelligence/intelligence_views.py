@@ -61,6 +61,17 @@ class DocumentIntelligenceRunViewSet(viewsets.ReadOnlyModelViewSet):
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
 
+    @action(detail=True, methods=['get'], url_path='schedule-workspace', permission_action='read')
+    def schedule_workspace(self, request, pk=None):
+        """Open exact completed analysis evidence without creating a generation."""
+        from .services.analysis_workspace import AnalysisWorkspaceUnavailable, analysis_schedule_workspace
+        run = self.get_object()
+        try:
+            payload = analysis_schedule_workspace(run)
+        except AnalysisWorkspaceUnavailable as exc:
+            return Response({'error': str(exc), 'code': exc.code}, status=status.HTTP_409_CONFLICT)
+        return Response(payload)
+
     @action(detail=True, methods=['post'], permission_action='update')
     def resume(self, request, pk=None):
         """Continue a bounded extraction in a new auditable run via durable jobs."""

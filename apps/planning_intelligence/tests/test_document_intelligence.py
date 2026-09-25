@@ -27,6 +27,31 @@ class DocumentIntelligenceFixture(TestCase):
 
 
 class DocumentClassificationAndExtractionTests(DocumentIntelligenceFixture):
+    def test_hyphenated_company_adjectives_do_not_create_client_conflicts(self):
+        self.project.client = 'Example Owner'
+        self.project.save(update_fields=['client'])
+        self.source('scope.txt', 'sow',
+                    'The contractor shall engage COMPANY-approved third-party consultants.\n'
+                    'Issue enquiries to company-approved vendors.\n'
+                    'Use client-supplied drawings.\nSubcompany: Not the client\n')
+
+        run, _ = run_document_intelligence(self.project, user=self.owner)
+
+        self.assertEqual(list(run.facts.filter(fact_type='client').values_list('value', flat=True)), ['Example Owner'])
+        self.assertFalse(run.conflicts.filter(key='client:client').exists())
+        self.assertTrue(run.facts.filter(fact_type='requirement').exists())
+
+    def test_explicit_colon_and_spaced_hyphen_clients_retain_real_conflict(self):
+        self.project.client = 'Workspace Owner'
+        self.project.save(update_fields=['client'])
+        self.source('scope.txt', 'sow', 'Client: Source Owner\nCompany - Other Owner\n')
+
+        run, _ = run_document_intelligence(self.project, user=self.owner)
+
+        facts = run.facts.filter(fact_type='client')
+        self.assertEqual(set(facts.values_list('value', flat=True)), {'Workspace Owner', 'Source Owner', 'Other Owner'})
+        self.assertEqual(set(run.conflicts.get(key='client:client').fact_ids), set(facts.values_list('pk', flat=True)))
+
     def test_profile_classifies_document_and_flags_declared_mismatch(self):
         file_obj = self.source(
             'scope.txt', 'other',

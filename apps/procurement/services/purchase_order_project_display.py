@@ -30,6 +30,14 @@ def requisition_project_numbers(requisition):
             for match in HISTORICAL_PROJECT_NUMBER.finditer(label):
                 add(match.group(1))
     if not numbers:
+        # Native Project Number and reviewed imports use an explicit CSV.
+        # Preserve conservative parsing for historical free-text labels.
+        project = str(getattr(requisition, 'project', '') or '').strip()
+        references = [item.strip() for item in project.split(',') if item.strip()]
+        if references and all(re.fullmatch(r'(?=.*\d)[A-Za-z0-9._/-]+', item) for item in references):
+            for reference in references:
+                add(reference)
+    if not numbers:
         legacy_reference = str(getattr(requisition, 'project_department', '') or getattr(requisition, 'project', '') or '')
         for match in HISTORICAL_PROJECT_NUMBER.finditer(legacy_reference):
             add(match.group(1))

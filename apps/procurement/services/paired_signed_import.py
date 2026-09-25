@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from copy import deepcopy
 
 from rest_framework.exceptions import PermissionDenied
 
@@ -13,6 +14,12 @@ from .signed_po_pdf_import import (
     SignedPOImportError, _approval_evidence, ensure_retained_po_source, import_signed_po_pdf, preview_signed_po_pdf,
 )
 from .signed_pr_pdf_import import import_signed_pr_pdf, preview_signed_pr_pdf
+from .pr_source_approval_review import (
+    REVIEW_KEY, REVIEW_UNSET, prepare_source_approval_review, source_approval_review_from_metadata,
+)
+from .pr_review_display import default_level_zero_approver
+from .pr_project_references import prepare_reviewed_project_references
+from .purchase_order_project_display import requisition_project_numbers
 
 
 def preview_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, expected_pr_number=''):
@@ -54,6 +61,9 @@ def _existing_pair_result(pr, po, source):
         'signature_verified': bool(verified.get('signed_off')), 'document_signed_off': bool(verified.get('signed_off')),
         'extracted_data': verified.get('approved_fields') or {},
         'approval_detection': metadata.get('signed_approval_evidence') or {},
+        'source_approval_review': source_approval_review_from_metadata(metadata, verified.get('document_sha256')),
+        'default_level_zero_approver': default_level_zero_approver(),
+        'project_numbers': requisition_project_numbers(pr),
         'po_link': link, 'purchase_order_id': str(po.pk),
         'purchase_order': order_result,
     }
@@ -84,8 +94,35 @@ def import_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, request,
                 source = PODocument.objects.filter(confirmed_po=po, document_type='purchase_order').order_by('-created_at', '-id').first() if po else None
                 current_pr_digest = ((existing.price_remarks_data or {}).get('signed_document_verification') or {}).get('document_sha256')
                 if po and source and current_pr_digest == pr_digest and (source.extracted_data or {}).get('source_sha256') == po_digest:
+                    _, review_envelope = prepare_source_approval_review(
+                        existing.price_remarks_data, pr_digest, request.user,
+                        pr_options.get('source_approval_review', REVIEW_UNSET),
+                        pr_options.get('expected_source_approval_review', REVIEW_UNSET),
+                    )
+                    project_changed = False
+                    if 'reviewed_project_references' in pr_options:
+                        before_project = (existing.project, deepcopy(existing.project_details), existing.enterprise_project_id)
+                        prepare_reviewed_project_references(existing, pr_options['reviewed_project_references'], request.user, document_sha256=pr_digest)
+                        project_changed = before_project != (existing.project, existing.project_details, existing.enterprise_project_id)
+                    metadata = deepcopy(existing.price_remarks_data or {})
+                    if project_changed:
+                        verification = metadata.get('signed_document_verification') or {}
+                        approved_fields = dict(verification.get('approved_fields') or {})
+                        approved_fields.update(project_number=existing.project, project_numbers=requisition_project_numbers(existing))
+                        verification['approved_fields'] = approved_fields
+                        metadata['signed_document_verification'] = verification
+                    approval_evidence = metadata.get('signed_approval_evidence') or {}
+                    review_changed = review_envelope != approval_evidence.get(REVIEW_KEY)
+                    if (review_changed or project_changed) and not request_action_allowed(request, 'procurement_requisitions', 'update'):
+                        raise PermissionDenied('Purchase requisition update permission is required to change its source signatory review.')
                     ensure_retained_po_source(source, po_bytes, {**(source.extracted_data or {}), 'po_number': po.po_number},
                                               request.user, allow_restore=request_action_allowed(request, 'procurement_orders', 'update'))
+                    if review_changed:
+                        approval_evidence[REVIEW_KEY] = review_envelope
+                        metadata['signed_approval_evidence'] = approval_evidence
+                    if review_changed or project_changed:
+                        existing.price_remarks_data = metadata
+                        existing.save(update_fields=['price_remarks_data', 'project', 'project_details', 'enterprise_project', 'updated_at'])
                     return _existing_pair_result(existing, po, source)
                 raise ProcurementDeleteConflict('The saved PR or PO source changed after this paired import. Refresh and review the current documents before saving again.')
         result = import_signed_pr_pdf(

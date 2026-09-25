@@ -228,6 +228,11 @@ class PlanningGenerationListSerializer(serializers.ModelSerializer):
 
 
 class PlanningGenerationSerializer(serializers.ModelSerializer):
+    generation_mode = serializers.SerializerMethodField()
+    intelligence_run_id = serializers.SerializerMethodField()
+    schedule_id = serializers.SerializerMethodField()
+    schedule_version_id = serializers.SerializerMethodField()
+
     class Meta:
         model = PlanningGeneration
         fields = [
@@ -235,11 +240,37 @@ class PlanningGenerationSerializer(serializers.ModelSerializer):
             'intelligence', 'wbs', 'activities',
             'logic_matrix', 'eddr', 'milestones', 'manhours', 'validation',
             'narrative', 'generated_by', 'created_at',
+            'generation_mode', 'intelligence_run_id', 'schedule_id', 'schedule_version_id',
         ]
         read_only_fields = fields
 
     def to_representation(self, instance):
         return _json_safe(super().to_representation(instance))
+
+    def get_generation_mode(self, instance):
+        return ((instance.intelligence or {}).get('schedule_engine') or {}).get('policy', 'document_driven')
+
+    def get_intelligence_run_id(self, instance):
+        intelligence = instance.intelligence or {}
+        engine = intelligence.get('schedule_engine') or {}
+        return engine.get('source_analysis_run_id') or engine.get('intelligence_run_id') or intelligence.get('document_intelligence_run_id')
+
+    def _schedule_version(self, instance):
+        from .models import ScheduleVersion
+        cache = getattr(self, '_materialized_versions', {})
+        if instance.pk not in cache:
+            cache[instance.pk] = ScheduleVersion.objects.filter(
+                source_generation=instance, schedule__project=instance.project, is_deleted=False,
+                schedule__is_deleted=False,
+            ).only('id', 'schedule_id').order_by('-version').first()
+            self._materialized_versions = cache
+        return cache[instance.pk]
+
+    def get_schedule_id(self, instance):
+        return getattr(self._schedule_version(instance), 'schedule_id', None)
+
+    def get_schedule_version_id(self, instance):
+        return getattr(self._schedule_version(instance), 'pk', None)
 
 
 class PlanningGenerationEditSerializer(serializers.Serializer):

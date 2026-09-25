@@ -43,29 +43,66 @@ _GEMINI_ERROR_MESSAGES = {
     'provider_unavailable': 'Google Gemini is temporarily unavailable. Retry analysis shortly.',
     'request_rejected': 'Google Gemini rejected the request. Check the saved key, model and Google project settings.',
     'empty_response': 'Google Gemini returned no usable text. Retry the analysis.',
+    'output_limit': 'Google Gemini reached the response token or context limit before completing the analysis. Existing source findings remain available; retry the unfinished analysis.',
     'incomplete_response': 'Google Gemini could not complete the response. Review the input and retry.',
     'timeout': 'Google Gemini timed out. Retry analysis shortly.',
     'connection_error': 'Could not connect to Google Gemini. Retry analysis shortly.',
     'invalid_response': 'Google Gemini returned an invalid response. Retry analysis shortly.',
 }
+_ANTHROPIC_ERROR_MESSAGES = {
+    'invalid_api_key': 'Anthropic rejected the API key. Open AI settings, save an active Anthropic key, and test the connection.',
+    'permission_denied': 'Anthropic denied access. Check the saved key and account permissions, then test the connection.',
+    'quota_exceeded': 'Anthropic quota or rate limit was reached. Check account limits and billing, then retry.',
+    'credit_balance_exhausted': 'Anthropic reported insufficient API credits. Check the API account billing balance, then resume the unfinished analysis. Saved source findings are retained.',
+    'model_unavailable': 'The selected Anthropic model is unavailable for this key. Select an available model and test again.',
+    'provider_unavailable': 'Anthropic is temporarily unavailable. Retry analysis shortly.',
+    'request_rejected': 'Anthropic rejected the analysis request. The saved diagnostic does not identify a more specific cause. Review the provider account and request settings before resuming the unfinished analysis.',
+    'request_configuration_error': 'Anthropic rejected the analysis request parameters. Review the model and request configuration before resuming; repeating unchanged requests will not resolve this error.',
+    'input_limit': 'Anthropic rejected a source section because it exceeded the input limit. Retry the unfinished analysis in smaller sections. Saved source findings are retained.',
+    'empty_response': 'Anthropic returned no usable text. Retry the analysis.',
+    'output_limit': 'Anthropic reached the response token or context limit before completing the analysis. Existing source findings remain available; retry the unfinished analysis.',
+    'incomplete_response': 'Anthropic did not complete the response. The partial response was not used; retry the analysis.',
+    'timeout': 'Anthropic timed out. Retry analysis shortly.',
+    'connection_error': 'Could not connect to Anthropic. Retry analysis shortly.',
+    'invalid_response': 'Anthropic returned an invalid response. Retry analysis shortly.',
+}
 
 
 def ai_failure_guidance(error):
     """Render only recognized codes, never a stored/provider-supplied message."""
-    if not isinstance(error, dict) or error.get('provider') != 'gemini':
+    if not isinstance(error, dict) or error.get('provider') not in ('gemini', 'anthropic'):
         return None
+    provider = error['provider']
+    messages = _GEMINI_ERROR_MESSAGES if provider == 'gemini' else _ANTHROPIC_ERROR_MESSAGES
     code = error.get('code')
-    message = _GEMINI_ERROR_MESSAGES.get(code) if isinstance(code, str) else None
+    message = messages.get(code) if isinstance(code, str) else None
     if not message:
         return None
     http_status = error.get('http_status')
     if type(http_status) is not int or not 400 <= http_status <= 599:
         http_status = None
     if http_status:
-        message = f'Google Gemini returned HTTP {http_status}. {message}'
-    settings_errors = {'invalid_api_key', 'permission_denied', 'model_unavailable', 'failed_precondition', 'request_rejected'}
+        label = 'Google Gemini' if provider == 'gemini' else 'Anthropic'
+        message = f'{label} returned HTTP {http_status}. {message}'
+    settings_errors = {'invalid_api_key', 'permission_denied', 'model_unavailable', 'failed_precondition',
+                       'request_rejected', 'request_configuration_error', 'credit_balance_exhausted'}
     return {'code': code, 'http_status': http_status, 'message': message,
             'next_action': 'ai_settings' if code in settings_errors else 'retry_analysis'}
+
+
+def pauses_analysis(error, *, consecutive_failures=1):
+    """Stop a pass when further source sections cannot fix the provider error.
+
+    Unknown 400s can be section-specific, so require two consecutive rejections.
+    A later explicit continuation gets a fresh attempt with completed work cached.
+    """
+    if not isinstance(error, dict) or error.get('provider') not in {'anthropic', 'gemini'}:
+        return False
+    code = error.get('code')
+    if code in {'invalid_api_key', 'permission_denied', 'model_unavailable', 'failed_precondition',
+                'credit_balance_exhausted', 'quota_exceeded', 'request_configuration_error'}:
+        return True
+    return code == 'request_rejected' and error.get('http_status') == 400 and consecutive_failures >= 2
 
 
 def _settings(project):
@@ -217,7 +254,7 @@ def _call_gemini(project, configuration, *, system_prompt, user_prompt, max_toke
 
 
 @sensitive_variables()
-def call_project_ai(project, *, system_prompt, user_prompt, max_tokens, feature, user=None, json_output=False, error_details=None):
+def call_project_ai(project, *, system_prompt, user_prompt, max_tokens, feature, user=None, json_output=False, error_details=None, progress_callback=None):
     """Return None on failure; optionally collect safe codes for run diagnostics."""
     if error_details is not None:
         error_details.clear()
@@ -225,8 +262,10 @@ def call_project_ai(project, *, system_prompt, user_prompt, max_tokens, feature,
     if configuration is None:
         return None
     if configuration['provider'] == 'anthropic':
+        progress = {'progress_callback': progress_callback} if progress_callback is not None else {}
         return claude_client.call_claude(project, system_prompt=system_prompt, user_prompt=user_prompt,
-                                         max_tokens=max_tokens, feature=feature, user=user)
+                                         max_tokens=max_tokens, feature=feature, user=user, error_details=error_details,
+                                         **progress)
     result, _error = _call_gemini(project, configuration, system_prompt=system_prompt, user_prompt=user_prompt,
                                  max_tokens=max_tokens, feature=feature, user=user, json_output=json_output,
                                  error_details=error_details)
@@ -248,9 +287,11 @@ def test_project_ai_connection(project, user=None):
     if provider == 'gemini':
         result, response['error'] = _call_gemini(project, configuration, **prompts, json_output=False)
     else:
-        result = claude_client.call_claude(project, **prompts)
+        errors = {}
+        result = claude_client.call_claude(project, **prompts, error_details=errors)
         if result is None:
-            response['error'] = 'Could not connect to Anthropic. Check the saved key, model and account access, then retry.'
+            guidance = ai_failure_guidance(errors)
+            response['error'] = guidance['message'] if guidance else 'Could not connect to Anthropic. Check the saved key, model and account access, then retry.'
     response['success'] = bool(result and result.get('stop_reason') not in {'max_tokens', 'model_context_window_exceeded'})
     if result and not response['success']:
         response['error'] = 'The AI connection returned an incomplete response. Try again.'

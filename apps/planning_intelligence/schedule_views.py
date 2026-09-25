@@ -318,6 +318,13 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         schedule = version.schedule
         project = schedule.project
         intelligence_run = project.intelligence_runs.filter(is_deleted=False, status='succeeded').first()
+        from .services.planning_package_boundary import package_origin, package_context
+        proposal_generation = package_origin(version)
+        proposal_context = package_context(version) if proposal_generation else None
+        if proposal_generation:
+            intelligence_run = project.intelligence_runs.filter(
+                pk=version.evidence_input_snapshot.get('source_analysis_run_id'), is_deleted=False,
+            ).first()
         activities = list(
             version.activities.filter(is_deleted=False).select_related('wbs_node', 'calendar')
         )
@@ -333,7 +340,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'activity_type', 'relationship_to_previous', 'lag_days', 'progress_weight',
         )) if configuration else []
         dependency_template = configuration.dependency_template if configuration else None
-        source_generation = version.source_generation
+        source_generation = proposal_generation or version.source_generation
         assurance = current_assurance(version)
         dependency_assumptions = [
             item for item in (source_generation.logic_matrix or [])
@@ -349,7 +356,16 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             },
             'schedule': ScheduleSerializer(schedule).data,
             'version': self.get_serializer(version).data,
-            'calendar': WorkCalendarSerializer(schedule.default_calendar).data if schedule.default_calendar else None,
+            'calendar': WorkCalendarSerializer(proposal_context['calendar']).data if proposal_context and proposal_context['calendar']
+                else WorkCalendarSerializer(schedule.default_calendar).data if schedule.default_calendar else None,
+            'planning_package': ({
+                'generation_id': proposal_generation.pk,
+                'intelligence_run_id': version.evidence_input_snapshot.get('source_analysis_run_id'),
+                'project_start': proposal_context['start'], 'contractual_finish': proposal_context['finish'],
+                'calendar': version.evidence_input_snapshot.get('calendar'),
+                'assumptions': version.evidence_input_snapshot.get('assumptions') or [],
+                'status': 'proposed',
+            } if proposal_generation else None),
             'wbs': ScheduleWBSNodeSerializer(
                 version.wbs_nodes.filter(is_deleted=False).select_related('parent'), many=True,
             ).data,

@@ -78,6 +78,7 @@ def input_fingerprint(project):
 
 
 def _document(graph, file):
+    from .extraction_coverage import public_coverage
     text = file.extracted_text or ''
     text_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
     digest, integrity = '', 'unavailable'
@@ -97,7 +98,7 @@ def _document(graph, file):
         'storage_name': file.file.name, 'file_sha256': digest, 'text_sha256': text_hash,
         'extracted_text': text, 'integrity_status': integrity,
         'extraction_method': getattr(profile, 'extraction_method', ''),
-        'coverage': deepcopy(getattr(profile, 'extraction_coverage', {})),
+        'coverage': public_coverage(getattr(profile, 'extraction_coverage', {}) or {}),
     })
     return document
 
@@ -318,11 +319,12 @@ def refresh_evidence_graph(project, actor):
             if dimension not in {'discipline', 'phase', 'package', 'area'} or not cell.get('value'):
                 continue
             references = deepcopy(row.get('source_references') or [])
-            # No inherited or normalized labels: retain the literal cell value
-            # and exact column together with the verified original row quote.
+            # Flattened matrix rows retain their literal header and quote but
+            # have no verified physical column. Preserve only known locators.
             for reference in references:
                 reference['locator'] = {**(reference.get('locator') or {}),
-                                        'column': cell['column'], 'column_header': cell['header']}
+                                        **({'column': cell['column']} if cell.get('column') is not None else {}),
+                                        **({'column_header': cell['header']} if cell.get('header') else {})}
             value = {'name': cell['value']} if dimension in {'discipline', 'package'} else cell['value']
             builder.fact(entity, row.get('title') or row.get('name') or '', dimension, value, references)
         if not row.get('schedule_activity_ids'):

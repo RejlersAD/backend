@@ -306,6 +306,7 @@ system_activity_dump.sql
 !apps/planning_intelligence/tests/test_planning_resume_api.py
 !apps/planning_intelligence/tests/test_evidence_resume_identity.py
 !docs/planning-extraction-boundaries.md
+!docs/project-permanent-deletion.md
 !docs/unified-planning-foundation.md
 !apps/planning_intelligence/tests/test_planning_builds.py
 !apps/planning_intelligence/tests/test_planning_release_two.py
@@ -361,3 +362,12 @@ apps/finance/data/invoice_performance_summary.json
 !config/test_procurement_ci_runner.py
 !requirements-procurement-ci.txt
 !docs/SYSTEM_HEALTH_NOTIFICATION_HISTORY.md
+!docs/PR_SOURCE_APPROVAL_REVIEW.md
+!apps/planning_intelligence/tests/test_analysis_workspace.py
+!apps/planning_intelligence/tests/test_pdf_register_geometry.py
+!apps/planning_intelligence/tests/test_planning_package_api.py
+!apps/planning_intelligence/tests/test_planning_package_jobs.py
+!apps/planning_intelligence/tests/test_planning_package_sources.py
+!apps/planning_intelligence/tests/test_preview_job_dispatch.py
+!apps/planning_intelligence/tests/test_register_geometry_integration.py
+!docs/RELEASE_20260925_PLANNING_PROCUREMENT.md

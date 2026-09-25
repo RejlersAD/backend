@@ -18,6 +18,9 @@ CALCULATION_RULE_VERSION = 'working-day-cpm/2.1'
 
 
 def is_document_driven_version(version):
+    from .planning_package_boundary import package_origin
+    if package_origin(version) is not None:
+        return False
     seen = set()
     while version is not None and version.pk not in seen:
         seen.add(version.pk)
@@ -52,6 +55,9 @@ def _whole_number(value):
 
 def accepted_input_validation(version):
     """Return current readiness without materializing or changing any inputs."""
+    if (version.evidence_input_snapshot or {}).get('schema') == 'planning-package-proposal/1':
+        from .planning_package_boundary import package_readiness
+        return package_readiness(version)
     if (version.evidence_input_snapshot or {}).get('schema') == 'planner-schedule-revision/1':
         from .gantt_editing import planner_revision_readiness
         return planner_revision_readiness(version)
@@ -188,9 +194,12 @@ def freeze_schedule_inputs(version):
     from ..schedule_serializers import WorkCalendarSerializer, ScheduleResourceSerializer, ActivityAssignmentSerializer
     from ..models import ActivityAssignment
     project = version.schedule.project
+    from .planning_package_boundary import package_context
+    proposal = package_context(version)
+    default_calendar_id = (getattr(proposal['calendar'], 'pk', None) if proposal else version.schedule.default_calendar_id)
     calendar_ids = set(version.activities.filter(is_deleted=False).exclude(calendar_id=None).values_list('calendar_id', flat=True))
-    if version.schedule.default_calendar_id:
-        calendar_ids.add(version.schedule.default_calendar_id)
+    if default_calendar_id:
+        calendar_ids.add(default_calendar_id)
     calendars = project.work_calendars.filter(pk__in=calendar_ids).order_by('pk')
     from .evidence_graph import evidence_graph_snapshot
     graph = evidence_graph_snapshot(project)
@@ -203,8 +212,9 @@ def freeze_schedule_inputs(version):
                              'enterprise_project_id': project.enterprise_project_id,
                              'code': project.enterprise_project.code if project.enterprise_project_id else None},
         'schedule_identity': {'id': version.schedule.pk, 'name': version.schedule.name, 'code': version.schedule.code},
-        'project_start': version.schedule.planned_start, 'project_finish': project.planned_end_date,
-        'default_calendar_id': version.schedule.default_calendar_id,
+        'project_start': proposal['start'] if proposal else version.schedule.planned_start,
+        'project_finish': proposal['finish'] if proposal else project.planned_end_date,
+        'default_calendar_id': default_calendar_id,
         'calendars': WorkCalendarSerializer(calendars, many=True).data,
         'resources': ScheduleResourceSerializer(project.schedule_resources.filter(is_deleted=False), many=True).data,
         'assignments': ActivityAssignmentSerializer(ActivityAssignment.objects.filter(
@@ -237,7 +247,8 @@ def freeze_schedule_inputs(version):
 
 def calculation_inputs_current(version):
     """Document-plan approval must use the exact inputs of its successful CPM."""
-    if not is_document_driven_version(version):
+    from .planning_package_boundary import package_origin
+    if not is_document_driven_version(version) and package_origin(version) is None:
         return True
     from ..models import PlanningAuditEvent
     run = version.calculation_runs.filter(is_deleted=False, status='succeeded').order_by('-finished_at', '-pk').first()

@@ -46,6 +46,33 @@ summary must remain visible and must not be displayed as complete understanding.
 Raw provider checkpoints are kept in the run summary, outside the compiled UI
 intelligence response.
 
+## Persisted input review
+
+`POST intelligence-runs/{id}/confirm-preview/` stores the submitted `preview`
+selection separately from raw extraction, with the actual reviewer, time and
+atomic audit event. The run response exposes `preview_confirmation.is_current`.
+Confirmed/rejected finding decisions also survive reopening the run. Project or
+source changes, later reviews and unresolved conflicts invalidate full-preview
+confirmation; confirming a preview does not approve a schedule or baseline.
+
+Re-analysis creates a new run and preserves the previous evidence. When the
+latest preceding run has the same engine, project/source fingerprint and exact
+extracted-source manifest, uniquely matching assertions retain their saved
+confirmed/rejected decisions and original actor/time. Matching includes source,
+type, key, value, method, excerpt and locator. Changed assertions remain
+unreviewed. Conflict decisions carry forward only when the complete competing
+assertion set matches; new conflicts remain unresolved.
+
+The full preview is retained only if its prior review fingerprint is still valid
+and the complete findings, review states, confidence, raw extraction and coverage
+are unchanged. Newly discovered findings require another preview confirmation.
+The new run records the preceding run and old/new fact/conflict IDs in its
+`review_retention` summary and atomic `intelligence.reviews_retained` audit event.
+No schema change or historical backfill is required. These rules apply to new
+analyses after deployment; already superseded reviews are not silently repaired.
+
+## Assertion type migration
+
 Migration `0038_planning_assertion_types` adds the new assertion choices after
 `0037_planning_profiles`; it changes no project or schedule data. Tests live in
 `test_planning_fact_extraction` and the existing generic coverage/intelligence suites.

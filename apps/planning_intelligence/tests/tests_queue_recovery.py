@@ -2,13 +2,13 @@ import datetime as dt
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 
 from ..models import PlanningJob, PlanningProject
 from ..services.operational_jobs import dispatch_job
 
 
-class PlanningQueueRecoveryTests(TestCase):
+class PlanningQueueRecoveryTests(TransactionTestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username='queue-recovery-planner')
         self.project = PlanningProject.objects.create(

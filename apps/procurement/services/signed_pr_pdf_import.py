@@ -25,6 +25,13 @@ from .pr_pdf_semantics import apply_pr_layout_semantics, approval_role
 from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
+from .pr_source_approval_review import (
+    REVIEW_KEY, REVIEW_UNSET, normalize_source_approval_submission,
+    prepare_source_approval_review, source_approval_review_from_metadata, review_for_approver_names,
+)
+from .pr_review_display import default_level_zero_approver, unknown_approver_name
+from .pr_project_references import normalize_project_references, apply_project_references, prepare_reviewed_project_references
+from .purchase_order_project_display import requisition_project_numbers
 
 
 class SignedPRImportError(ValueError):
@@ -442,7 +449,7 @@ def extract_signed_pr_fields_from_text(text: str, filename: str, *, allow_missin
     if not project_numbers:
         project_numbers = project_reference_numbers
         project_number_source = "unclassified_project_reference"
-    project_number = project_numbers[0] if len(project_numbers) == 1 else ""
+    project_number = ', '.join(project_numbers)
     price_remarks = _clean(" | ".join(dict.fromkeys(row.get("remarks", "") for row in price_lines if row.get("remarks"))))
     extracted_values = {
         "pr_number": pr_number,
@@ -498,8 +505,8 @@ def extract_signed_pr_fields_from_text(text: str, filename: str, *, allow_missin
         extraction_issues.extend(money_issues)
     field_provenance["project_number"] = {"source": project_number_source, "evidence": project_department if project_number_source != "service_project_reference" else _clean(f"{product} {description}")}
     if len(project_numbers) > 1:
-        field_confidence["project_number"] = "conflict"
-        extraction_issues.append("Multiple project numbers were found; select the correct project instead of assuming the first number.")
+        field_confidence["project_number"] = "medium"
+        extraction_issues.append("Multiple project numbers were found; review the complete comma-separated list.")
     elif project_number and project_number_source != "project_department":
         field_confidence["project_number"] = "medium"
     field_provenance["net_total_aed"] = {"source": net_aed_source, "evidence": explicit_aed.group(0) if explicit_aed else money_evidence if net_total_aed else ""}
@@ -576,7 +583,6 @@ def _apply_manual_overrides(fields: dict, overrides: dict | None) -> dict:
         "supplier_name": 300,
         "supplier_business_id": 100,
         "project_department": 1000,
-        "project_number": 100,
         "description_reason": 5000,
         "preferred_supplier": 300,
         "price_remarks": 5000,
@@ -589,6 +595,9 @@ def _apply_manual_overrides(fields: dict, overrides: dict | None) -> dict:
     for field, max_length in text_fields.items():
         if field in overrides:
             corrected[field] = _clean(str(overrides.get(field) or ""))[:max_length]
+    if 'project_number' in overrides:
+        corrected['project_numbers'] = normalize_project_references(overrides['project_number'])
+        corrected['project_number'] = ', '.join(corrected['project_numbers'])
 
     if "issued_date" in overrides:
         corrected["issued_date"] = _date(str(overrides.get("issued_date") or ""))
@@ -766,9 +775,15 @@ def preview_signed_pr_pdf(pdf_bytes: bytes, *, filename: str, expected_pr_number
         "pr_number": fields.get("pr_number", ""),
         "extracted_data": _serialize_extracted_fields(fields),
         "approval_detection": detected,
+        "source_approval_review": review_for_approver_names(source_approval_review_from_metadata(
+            existing_pr.price_remarks_data if existing_pr else {}, hashlib.sha256(pdf_bytes).hexdigest(),
+        ), detected.get('approver_names')),
         "document_signed_off": document_is_signed_off(detected),
         "document_comparison": comparison,
         "requisition_id": str(existing_pr.pk) if existing_pr else None,
+        "requisition_updated_at": existing_pr.updated_at.isoformat() if existing_pr else None,
+        "default_level_zero_approver": default_level_zero_approver(),
+        "project_numbers": requisition_project_numbers(existing_pr) if existing_pr else fields.get('project_numbers', []),
         "mapping_issues": mapping_issues,
         "workflow_issues": [],
     }
@@ -861,7 +876,13 @@ def import_signed_pr_pdf(
     manual_signature_overrides: dict | None = None,
     create_new: bool = False,
     attach_only: bool = False,
+    source_approval_review=REVIEW_UNSET,
+    expected_source_approval_review=REVIEW_UNSET,
+    reviewed_project_references=REVIEW_UNSET,
 ) -> dict:
+    source_approval_review, expected_source_approval_review = normalize_source_approval_submission(
+        source_approval_review, expected_source_approval_review,
+    )
     if not isinstance(create_new, bool):
         raise SignedPRImportError("Create recommendation must be true or false.")
     if not isinstance(attach_only, bool):
@@ -904,6 +925,8 @@ def import_signed_pr_pdf(
         )
     previous_verification = previous_metadata.get("signed_document_verification") or {}
     same_document = previous_verification.get("document_sha256") == digest
+    reviewed_signatories = source_approval_review_from_metadata(previous_metadata, digest) if source_approval_review is REVIEW_UNSET else source_approval_review
+    source_review_envelope = None
     effective_signature_overrides = manual_signature_overrides
     if same_document and signatures_verified is not False and (
         manual_signature_overrides is None
@@ -926,7 +949,36 @@ def import_signed_pr_pdf(
         for row in (previous_verification.get("source_approval_rows") or [])
         if same_document and isinstance(row, dict) and row.get("user_name")
     }
-    approval_names = {**detected["approver_names"], **recorded_names, **(approvals or {})}
+    source_approval_names = {**detected['approver_names'], **recorded_names}
+    approval_names = {**source_approval_names, **(approvals or {})}
+    unknown_name_corrections = []
+    for role, name in (approvals or {}).items():
+        original_name = recorded_names.get(role) or detected['approver_names'].get(role, '')
+        captured_rows = [row for row in detected.get('approval_rows', []) if row.get('role_key') == role]
+        if name.strip() == original_name.strip():
+            continue
+        if captured_rows and unknown_approver_name(original_name):
+            note = reviewed_signatories.get('approver_notes', {}).get(role)
+            if not note or unknown_approver_name(name):
+                raise SignedPRImportError('Enter the source approver name and a Special note explaining its correction.')
+            unknown_name_corrections.append({'role_key': role, 'before': original_name, 'after': name.strip(), 'special_note': note})
+        elif document_is_signed_off(detected):
+            raise SignedPRImportError('A completed, named source approval cannot be changed through PDF import.')
+    if source_approval_review is not REVIEW_UNSET:
+        previous_review = source_approval_review_from_metadata(previous_metadata, digest)
+        normalized_review = review_for_approver_names(source_approval_review, approval_names)
+        for role in APPROVAL_ROLES:
+            original_name = recorded_names.get(role) or detected['approver_names'].get(role, '')
+            name_changed = bool((approvals or {}).get(role) and approvals[role].strip() != original_name.strip())
+            label_changed = normalized_review['approval_labels'].get(role, '') != previous_review['approval_labels'].get(role, '')
+            captured_role = any(row.get('role_key') == role for row in detected.get('approval_rows', []))
+            if captured_role and unknown_approver_name(original_name) and (name_changed or label_changed) and not normalized_review.get('approver_notes', {}).get(role):
+                raise SignedPRImportError('Enter a Special note explaining the unknown approver name or Level correction.')
+        source_approval_review = normalized_review
+    reviewed_signatories, source_review_envelope = prepare_source_approval_review(
+        previous_metadata, digest, uploaded_by, source_approval_review, expected_source_approval_review,
+        source_approver_names=source_approval_names,
+    )
     if not detected.get("approval_rows") and all(
         detected["manual_signature_overrides"].get(role)
         and isinstance(approval_names.get(role), str) and approval_names[role].strip()
@@ -957,6 +1009,10 @@ def import_signed_pr_pdf(
             "Create reviewed PR, or import its register record first. Nothing was changed."
         )
 
+    if reviewed_project_references is not REVIEW_UNSET:
+        if pr is None or create_new or not attach_only:
+            raise SignedPRImportError('Reviewed project references require an existing recommendation attachment.')
+        prepare_reviewed_project_references(pr, reviewed_project_references, uploaded_by, document_sha256=digest)
     comparison = compare_existing_pr(pr, source_fields) if pr is not None else None
     if attach_only and not comparison["identity_matched"]:
         raise SignedPRImportError("The PR number printed on this PDF does not match the selected recommendation. Nothing was attached.")
@@ -1015,7 +1071,8 @@ def import_signed_pr_pdf(
         pr.supplier_name = fields["supplier_name"] or pr.supplier_name
         pr.supplier_business_id = fields["supplier_business_id"] or pr.supplier_business_id
         pr.project_department = fields["project_department"] or pr.project_department
-        pr.project = fields["project_number"] or pr.project
+        if fields['project_number'] or 'project_number' in (manual_overrides or {}):
+            apply_project_references(pr, normalize_project_references(fields['project_number']))
         pr.description_reason = fields["description_reason"] or pr.description_reason
         pr.preferred_supplier_if_any = fields["preferred_supplier"] or pr.preferred_supplier_if_any
         pr.price_description = pr.product_service
@@ -1053,6 +1110,9 @@ def import_signed_pr_pdf(
         # extraction and the commercial corrections already reviewed for them.
         source_snapshot = previous_verification.get("source_fields") or source_snapshot
         approved_snapshot = previous_verification.get("approved_fields") or approved_snapshot
+    if reviewed_project_references is not REVIEW_UNSET:
+        approved_snapshot = dict(approved_snapshot)
+        approved_snapshot.update(project_number=pr.project, project_numbers=requisition_project_numbers(pr))
     metadata.update({
         "import_source": "signed_pr_pdf",
         "import_operation": "create" if create_new else "update",
@@ -1087,6 +1147,7 @@ def import_signed_pr_pdf(
         "ocr_extraction_issues": fields.get("extraction_issues", []),
         "mapping_issues": mapping_issues,
         "signed_approval_evidence": {
+            **({REVIEW_KEY: source_review_envelope} if source_review_envelope is not None else {}),
             "table_detected": detected.get("table_detected", False),
             "rows": detected.get("approval_rows", []),
             "signatures": detected.get("signatures", {}),
@@ -1107,6 +1168,12 @@ def import_signed_pr_pdf(
             "approval_date_evidence": detected.get("approval_date_evidence", {}),
         },
     })
+    for correction in unknown_name_corrections:
+        metadata.setdefault('source_approval_reviews', []).append({
+            **correction, 'document_sha256': digest, 'reviewed_by_id': str(uploaded_by.pk),
+            'reviewed_at': timezone.now().isoformat(), 'signature_verified': False,
+            'review_kind': 'unknown_name_correction',
+        })
     if attach_only and original_import_source:
         metadata["import_source"] = original_import_source
     if attach_only:
@@ -1196,7 +1263,7 @@ def import_signed_pr_pdf(
     }
     external_history = []
     last_signer = None
-    for row in source_rows:
+    for row_index, row in enumerate(source_rows):
         role = row.get("role_key")
         if role not in approval_fields:
             continue
@@ -1221,6 +1288,10 @@ def import_signed_pr_pdf(
             "signature_candidate": bool(row.get("signature_candidate") or detected.get("signature_candidates", {}).get(role)),
             "source": "signed_purchase_requisition_pdf", "external": True,
         })
+        previous_rows = previous_verification.get('source_approval_rows') or []
+        if same_document and row_index < len(previous_rows) and previous_rows[row_index].get('role_key') == role:
+            external_history[-1].update({key: previous_rows[row_index][key] for key in ('approval_label', 'special_note')
+                                         if key in previous_rows[row_index]})
     if signatures_verified:
         if pr.status != "converted":
             pr.status = "approved"
@@ -1278,6 +1349,9 @@ def import_signed_pr_pdf(
             **detected,
             "approval_date": approved_on.isoformat() if approved_on else None,
         },
+        "source_approval_review": reviewed_signatories,
+        "default_level_zero_approver": default_level_zero_approver(),
+        "project_numbers": requisition_project_numbers(pr),
         "mapping_issues": mapping_issues,
         "workflow_issues": workflow_issues,
         "manual_review_applied": bool(manual_overrides) or any(detected.get("manual_signature_overrides", {}).values()),

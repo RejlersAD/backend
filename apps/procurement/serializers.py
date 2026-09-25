@@ -258,6 +258,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
     # API alias for frontend compatibility
     approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
+    source_approval_review = serializers.SerializerMethodField()
+    default_level_zero_approver = serializers.SerializerMethodField()
+    project_numbers = serializers.SerializerMethodField()
     can_approve = serializers.SerializerMethodField()
     can_reopen = serializers.SerializerMethodField()
     current_approval = serializers.SerializerMethodField()
@@ -278,6 +281,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         '_retained_attachment_sources',
         'approval_reassignment_history',
         'approval_revision_history',
+        'project_reference_reviews',
     )
 
     DISPLAY_USER_FIELDS = (
@@ -344,7 +348,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Enhanced Project Selection (Feedback: Multiple projects)
             'project_details', 'enterprise_project', 'enterprise_project_code',
-            'enterprise_project_name',
+            'enterprise_project_name', 'project_numbers',
             
             # Description Section (Field 8)
             'description_reason',
@@ -367,6 +371,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Dynamic Approval Workflow
             'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
+            'source_approval_review', 'default_level_zero_approver',
             'can_approve', 'current_approval', 'registration_warnings',
             'can_reassign_approvers', 'reassignable_approval_stage_indices', 'approval_reassignments', 'can_reopen',
             
@@ -725,10 +730,27 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     'total_price': 'Total price must equal the sum of the line items.'
                 })
 
+        if 'project' in attrs:
+            from .services.pr_project_references import normalize_project_references
+            references = normalize_project_references(attrs['project'])
+            attrs['project'] = ', '.join(references)
+        self._derive_project_details = 'project' in attrs and 'project_details' not in attrs
+        if self._derive_project_details:
+            self._set_reviewed_project_details(attrs, self.instance)
         self._explicit_enterprise_project = 'enterprise_project' in attrs
         self._set_automatic_enterprise_project(attrs, self.instance)
 
         return attrs
+
+    @staticmethod
+    def _set_reviewed_project_details(attrs, instance):
+        from .services.pr_project_references import normalize_project_references, project_details_for_references
+        references = normalize_project_references(attrs['project'])
+        current = normalize_project_references(getattr(instance, 'project', '') or '')
+        if instance is None or [code.casefold() for code in references] != [code.casefold() for code in current]:
+            attrs['project_details'] = project_details_for_references(
+                references, getattr(instance, 'project_details', []),
+            )
 
     @staticmethod
     def _project_reference_key(project, project_details):
@@ -770,6 +792,21 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
+
+    def get_source_approval_review(self, obj):
+        from .services.pr_source_approval_review import source_approval_review_from_metadata
+        metadata = obj.price_remarks_data or {}
+        return source_approval_review_from_metadata(metadata, (metadata.get('signed_document_verification') or {}).get('document_sha256'))
+
+    def get_default_level_zero_approver(self, obj):
+        from .services.pr_review_display import default_level_zero_approver
+        if not hasattr(self, '_default_level_zero_reference'):
+            self._default_level_zero_reference = default_level_zero_approver()
+        return self._default_level_zero_reference
+
+    def get_project_numbers(self, obj):
+        from .services.purchase_order_project_display import requisition_project_numbers
+        return requisition_project_numbers(obj)
 
     def get_issued_by_name(self, obj):
         return self._display_name(obj.issued_by) if obj.issued_by_id else ''
@@ -963,6 +1000,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if canonicalize_pr_status(instance.status) == 'rejected':
             raise serializers.ValidationError({'error': 'Reopen this rejected requisition before editing it. Its previous review will be retained.'})
         check_requisition_precondition(instance, validated_data.pop('expected_updated_at', serializers.empty))
+        if getattr(self, '_derive_project_details', False):
+            # Rebuild derived references from the locked record. A concurrent
+            # reconciliation may have already saved these same project codes.
+            validated_data.pop('project_details', None)
+            self._set_reviewed_project_details(validated_data, instance)
         if not getattr(self, '_explicit_enterprise_project', 'enterprise_project' in validated_data):
             # Reconciliation may have committed after form validation. Decide
             # automatic linkage against the locked current references/link.

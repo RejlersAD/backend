@@ -15,6 +15,7 @@ from ..models import (
     ScheduleResource, ScheduleVersion, ScheduleWBSNode, WorkCalendar,
 )
 from .cpm import calculate_schedule_version
+from .planning_package_request import PlanningPackageRequestError
 
 
 def _as_date(value):
@@ -57,23 +58,41 @@ def materialize_generation(generation, *, requested_by=None):
             'message': 'Review the source evidence and Not Specified fields before calculating a schedule.'}]
 
     project = generation.project
+    package = engine.get('policy') == 'planning_package'
+    package_calendar = engine.get('calendar') or {}
     overrides = project.calendar_overrides or {}
-    calendar, _ = WorkCalendar.objects.get_or_create(
-        project=project,
-        name='Project Standard Calendar',
-        defaults={
-            'working_weekdays': _weekdays(overrides.get('working_days_per_week', DEFAULT_CALENDAR['working_days_per_week'])),
-            'hours_per_day': _as_decimal(overrides.get('hours_per_day', DEFAULT_CALENDAR['hours_per_day']), 8),
-            'timezone': overrides.get('timezone') or 'Asia/Dubai',
-            'is_default': True,
-        },
-    )
-    if not calendar.is_default:
+    if package and package_calendar.get('id'):
+        calendar = WorkCalendar.objects.get(pk=package_calendar['id'], project=project, is_deleted=False)
+        current = {'working_weekdays': list(calendar.working_weekdays), 'hours_per_day': float(calendar.hours_per_day),
+                   'timezone': calendar.timezone,
+                   'exceptions': [{'date': item.date.isoformat(), 'is_working': item.is_working}
+                                  for item in calendar.exceptions.filter(is_deleted=False).order_by('date')]}
+        if any(current[key] != package_calendar.get(key) for key in current):
+            raise PlanningPackageRequestError('The planning calendar changed after generation. Refresh the Planning Package.')
+    elif package:
+        calendar, _ = WorkCalendar.objects.get_or_create(
+            project=project, name=f'Planning Package {generation.pk} Calendar',
+            defaults={'working_weekdays': package_calendar['working_weekdays'],
+                      'hours_per_day': _as_decimal(package_calendar['hours_per_day']),
+                      'timezone': package_calendar['timezone'], 'is_default': False},
+        )
+    else:
+        calendar, _ = WorkCalendar.objects.get_or_create(
+            project=project,
+            name='Project Standard Calendar',
+            defaults={
+                'working_weekdays': _weekdays(overrides.get('working_days_per_week', DEFAULT_CALENDAR['working_days_per_week'])),
+                'hours_per_day': _as_decimal(overrides.get('hours_per_day', DEFAULT_CALENDAR['hours_per_day']), 8),
+                'timezone': overrides.get('timezone') or 'Asia/Dubai',
+                'is_default': True,
+            },
+        )
+    if not package and not calendar.is_default:
         calendar.is_default = True
         calendar.save(update_fields=['is_default', 'updated_at'])
 
     activity_dates = [_as_date(item.get('start_date')) for item in generation.activities or []]
-    planned_start = project.effective_date or min((value for value in activity_dates if value), default=timezone.localdate())
+    planned_start = (_as_date(engine.get('project_start')) if package else None) or project.effective_date or min((value for value in activity_dates if value), default=timezone.localdate())
     schedule, _ = Schedule.objects.select_for_update().get_or_create(
         project=project,
         code='MASTER',
@@ -84,10 +103,10 @@ def materialize_generation(generation, *, requested_by=None):
         },
     )
     changed = []
-    if not schedule.default_calendar_id:
+    if not package and not schedule.default_calendar_id:
         schedule.default_calendar = calendar
         changed.append('default_calendar')
-    if planned_start < schedule.planned_start:
+    if not package and planned_start < schedule.planned_start:
         schedule.planned_start = planned_start
         changed.append('planned_start')
     if changed:
@@ -99,6 +118,16 @@ def materialize_generation(generation, *, requested_by=None):
         schedule=schedule, version=next_version, parent_version=parent,
         source_generation=generation, change_summary=generation.change_summary,
         created_by=requested_by or generation.generated_by,
+        evidence_input_snapshot=({
+            'schema': 'planning-package-proposal/1', 'source_analysis_run_id': engine.get('source_analysis_run_id'),
+            'project_start': engine['project_start'], 'contractual_finish': engine.get('contractual_finish'),
+            'calendar': {**package_calendar, 'id': calendar.pk}, 'assumptions': engine.get('assumptions') or [],
+            'engine_version': engine.get('engine_version'), 'configuration_id': engine.get('configuration_id'),
+            'configuration_version': engine.get('configuration_version'), 'source_deliverables': engine.get('source_deliverables') or [],
+            'review_fingerprint': engine.get('review_fingerprint'),
+            'preview_selection_fingerprint': engine.get('preview_selection_fingerprint'),
+            'planning_input_fingerprint': engine.get('planning_input_fingerprint'),
+        } if package else {}),
     )
 
     wbs_by_code = {}
@@ -138,7 +167,8 @@ def materialize_generation(generation, *, requested_by=None):
             version=version, wbs_node=wbs_by_code.get(str(item.get('wbs_code') or '')),
             calendar=calendar, external_id=external_id,
             name=str(item.get('name') or external_id)[:500],
-            activity_type=('start_milestone' if is_milestone and not item.get('predecessors') else 'finish_milestone') if is_milestone else 'task',
+            activity_type=(item.get('activity_type') if package and item.get('activity_type') else
+                           ('start_milestone' if is_milestone and not item.get('predecessors') else 'finish_milestone') if is_milestone else 'task'),
             duration_days=max(Decimal('0'), _as_decimal(item.get('original_duration_days'), 0 if is_milestone else 1)),
             discipline=str(item.get('discipline') or '')[:64],
             responsible_role=str(item.get('responsible_role') or '')[:120],
@@ -163,9 +193,13 @@ def materialize_generation(generation, *, requested_by=None):
                 'recurrence_occurrence': item.get('recurrence_occurrence'),
                 'source_references': item.get('source_references') or [],
                 'evidence_entity_id': item.get('evidence_entity_id') or str(item.get('id') or ''),
-                'source_start': item.get('start_date'),
-                'source_finish': item.get('finish_date'),
+                'source_start': None if package else item.get('start_date'),
+                'source_finish': None if package else item.get('finish_date'),
                 'date_authority': 'relational_cpm',
+                **({key: item.get(key) for key in (
+                    'source_entity_id', 'source_fact_ids', 'analysis_run_id', 'evidence_policy', 'proposal_status',
+                    'duration_source', 'duration_unit', 'duration_basis', 'discipline_basis', 'source_group',
+                )} if package else {}),
             },
         )
         activities_by_external_id[external_id] = activity
@@ -201,6 +235,8 @@ def materialize_generation(generation, *, requested_by=None):
                     'rationale': predecessor_data.get('rationale', ''),
                     'source_references': predecessor_data.get('source_references') or [],
                     'lag_unit': predecessor_data.get('lag_unit'),
+                    **({key: predecessor_data.get(key) for key in ('source_fact_ids', 'review_status', 'rule_version')}
+                       if package else {}),
                 },
             ))
             seen_relationships.add(key)

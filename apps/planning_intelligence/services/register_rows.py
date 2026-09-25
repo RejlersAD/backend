@@ -7,9 +7,12 @@ Excel parses, but labels their provenance as extracted lines, not worksheet rows
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
+import hashlib
 import io
 import re
 import unicodedata
+from collections import Counter
 
 
 _SHEET = re.compile(r'^---\s*Sheet:\s*(.*?)\s*---$')
@@ -182,11 +185,261 @@ def _delimiter(text):
     return None
 
 
-def extract_register_rows(text):
-    """Return exact source rows from header-driven CSV, TSV or pipe-joined text."""
+def _captioned_text_register_rows(text):
+    """Recover a captioned serial/title PDF table, never a prose obligation list.
+
+    Whitespace does not establish a discipline column. Literal section labels
+    remain source groups. Interleaved serial/title text remains ambiguous and
+    must be quarantined by consumers that turn register rows into activities.
+    """
+    lines, offset = [], 0
+    for raw in text.splitlines(keepends=True):
+        lines.append({'text': raw.strip(), 'start': offset, 'end': offset + len(raw)})
+        offset += len(raw)
+    repeated = Counter(line['text'] for line in lines)
+    caption_re = re.compile(r'^(?:table\s+\d+[a-z]?\s*[:.\-–—]?\s*)?(?:[\w &/()-]+\s+)?(?:deliverables|deliverable register|document register)$', re.I)
+    row_re = re.compile(r'^(?P<item>\d{1,4})\s+(?P<title>\S.*)$')
+    header_names = {f'{serial} {title}' for serial in ('s no', 'sl no', 'sr no', 'serial no', 'serial number', 'item', 'item no')
+                    for title in ('description', 'deliverable', 'deliverable title', 'document title')}
+    rows, caption, caption_at, active = [], '', -10, False
+    group, group_line, pending = '', None, None
+
+    def finish():
+        nonlocal pending
+        if pending and pending['parts']:
+            title = ' '.join(pending.pop('parts'))
+            start, end = pending['start'], pending['end']
+            locator = {'line': text[:start].count('\n') + 1, 'table_caption': caption}
+            if group:
+                locator.update(source_group=group, source_group_line=group_line)
+            pending.update(
+                name=title, original_title=title, discipline='not_specified', discipline_label='Not Specified',
+                source_group=group, explicit_dimensions={}, document_number='', document_revision='',
+                source_layout='captioned_text_register', sheet='', row_number=None,
+                source_line=locator['line'], source_locator=locator, source_excerpt=text[start:end].strip(),
+            )
+            rows.append(pending)
+        pending = None
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        value = line['text']
+        index += 1
+        if not value:
+            continue
+        if caption_re.fullmatch(value) and not re.search(r'\b(?:shall|must|required|not)\b', value, re.I):
+            finish()
+            caption, caption_at, active, group, group_line = value, index, False, '', None
+            continue
+        if re.match(r'^(?:appendix\s+\w+|table\s+\d+\b)', value, re.I):
+            finish()
+            caption, active, group, group_line = '', False, '', None
+            continue
+        if _words(value) in header_names:
+            finish()
+            # Repeated page headers may resume only a previously opened table.
+            active = bool(caption) and (active or caption_at == -1 or index - caption_at <= 3)
+            if active:
+                caption_at = -1
+            continue
+        if not active:
+            continue
+        match = row_re.fullmatch(value)
+        if match:
+            finish()
+            pending = {'register_item': int(match['item']), 'parts': [match['title']],
+                       'start': line['start'], 'end': line['end'], 'title_boundary_status': 'explicit_numbered_row'}
+            continue
+        if (re.match(r'^(?:page\s*[:.]?\s*\d|rev(?:ision)?\s*[.:]?\s*\w)', value, re.I)
+                or (len(value) > 24 and repeated[value] >= 3)):
+            finish()
+            active = False
+            continue
+        if re.fullmatch(r'notes?\s*[:.]?', value, re.I):
+            finish()
+            caption, active, group, group_line = '', False, '', None
+            continue
+        next_line = lines[index] if index < len(lines) else None
+        next_match = row_re.fullmatch(next_line['text']) if next_line else None
+        if next_match and (pending is None or int(next_match['item']) == 1) and len(value) <= 100 and not re.search(r'[.;:]$|\b(?:shall|must)\b', value, re.I):
+            # A reset serial alone cannot distinguish a section heading from
+            # a wrapped title. These cues flag uncertainty; they do not prove
+            # the recovered title boundary or assign a discipline.
+            if pending and (not pending['parts'] or value[0].islower() or re.search(
+                    r'(?:\b(?:for|of|and|or|with|to|in|on|from|by|the|a|an)|[/&,:-])\s*$',
+                    pending['parts'][-1], re.I)):
+                pending['parts'].append(value)
+                pending['end'] = line['end']
+                pending['title_boundary_status'] = 'ambiguous'
+                continue
+            finish()
+            group, group_line = value, text[:line['start']].count('\n') + 1
+            continue
+        # PDF reading order can place a centered serial between wrapped title
+        # lines. Keep its full located text but do not claim a proven boundary.
+        if next_line and re.fullmatch(r'\d{1,4}', next_line['text']):
+            finish()
+            pending = {'register_item': int(next_line['text']), 'parts': [value],
+                       'start': line['start'], 'end': next_line['end'], 'title_boundary_status': 'ambiguous'}
+            index += 1
+            continue
+        if re.fullmatch(r'\d{1,4}', value):
+            finish()
+            pending = {'register_item': int(value), 'parts': [], 'start': line['start'],
+                       'end': line['end'], 'title_boundary_status': 'ambiguous'}
+            continue
+        if pending and not re.match(r'^(?:\d+[.)]\s|notes?\s*[:.]|please\s)', value, re.I):
+            pending['parts'].append(value)
+            pending['end'] = line['end']
+            pending['title_boundary_status'] = 'ambiguous'
+        else:
+            finish()
+            active = False
+    finish()
+    return rows
+
+
+def register_row_requires_review(row):
+    """A preview selection cannot resolve missing matrix scope or text geometry."""
+    return (
+        row.get('source_layout') in {'captioned_text_register', 'applicability_text_register', 'pdf_geometry_register'}
+        and row.get('title_boundary_status') == 'ambiguous'
+    ) or row.get('applicability_status', 'marked') != 'marked'
+
+
+def _applicability_text_register_rows(text):
+    """Read explicit hierarchical deliverables matrices conservatively.
+
+    Flattened PDF text does not retain package-column positions. X marks can
+    establish only that a row is marked, never which package it belongs to.
+    Wrapped/interleaved cells and unmarked/conditional rows remain inventory.
+    """
+    lines, offset = [], 0
+    for raw in text.splitlines(keepends=True):
+        lines.append({'text': raw.strip(), 'start': offset, 'end': offset + len(raw)})
+        offset += len(raw)
+    caption_re = re.compile(r'^table\s+\d+[a-z]?\s*[:.\-]?\s+(?:applicable\s+deliverables\b.*|deliverables\b.*\bapplicability\b.*)$', re.I)
+    section_re = re.compile(r'^(\d+(?:\.\d+)+)\s+(.+)$')
+    row_re = re.compile(r'^(\d+(?:\.\d+){2,})(?:\s+(.*))?$')
+    marker_re = re.compile(r'(?<!\S)[xX](?:[ \t]+[xX])*(?!\S)')
+    furniture_re = re.compile(r'^.+\.(?:docx?|pdf)\s+\d+\s*/\s*\d+$|^[\w .&/-]{1,80}Classification:\s*\w.*$', re.I)
+    conditional_re = re.compile(r'\b(?:if|unless|as required|where applicable|not required|not applicable|covered|repetition|no new|during detailed engineering)\b', re.I)
+    rows = []
+    for caption_index, caption_line in enumerate(lines):
+        if not caption_re.fullmatch(caption_line['text']):
+            continue
+        # All column labels must be present together immediately after the
+        # caption. A mention of deliverables or a numbered prose list is not a
+        # matrix. The body starts at the first hierarchical section/item.
+        header_end = caption_index + 1
+        while header_end < min(len(lines), caption_index + 9):
+            if section_re.fullmatch(lines[header_end]['text']):
+                break
+            header_end += 1
+        header = _words(' '.join(line['text'] for line in lines[caption_index + 1:header_end]))
+        if not (re.search(r'\b(?:s no|sl no|serial no|item no)\b', header)
+                and all(re.search(r'\b' + word + r'\b', header) for word in ('discipline', 'deliverable', 'description', 'remarks'))
+                and re.search(r'\b(?:packages?|applicability)\b', header)):
+            continue
+        body = []
+        for line in lines[header_end:]:
+            value = line['text']
+            if not value or furniture_re.fullmatch(value):
+                continue
+            if re.match(r'^(?:table\s+\d|annexure\b|appendix\b|document\s+no\s*[.:])', value, re.I):
+                break
+            body.append(line)
+        group, group_id = '', ''
+        for index, line in enumerate(body):
+            value = line['text']
+            match = row_re.fullmatch(value)
+            if not match:
+                section = section_re.fullmatch(value)
+                if section:
+                    group_id, group = section.groups()
+                continue
+            item, fragment = match[1], match[2] or ''
+            explicit_label = group if item.rsplit('.', 1)[0] == group_id and fragment.startswith(group + ' ') else ''
+            contents = fragment[len(explicit_label):].strip() if explicit_label else fragment
+            mark = marker_re.search(contents) if explicit_label else None
+            title = contents[:mark.start()].strip() if mark else contents
+            remarks = contents[mark.end():].strip() if mark else ''
+            surrounding = [body[pos]['text'] for pos in (index - 1, index + 1) if 0 <= pos < len(body)]
+            interleaved = any(not row_re.fullmatch(other) and not section_re.fullmatch(other) for other in surrounding)
+            clear = bool(explicit_label and title and mark and not interleaved and not marker_re.search(remarks))
+            applicability = 'marked' if mark else ('not_marked' if explicit_label else 'ambiguous')
+            if mark and (conditional_re.search(remarks) or conditional_re.search(title)):
+                applicability = 'conditional'
+            title = title or fragment or value
+            locator = {'line': text[:line['start']].count('\n') + 1,
+                       'table_caption': caption_line['text'], 'register_item': item,
+                       'applicability_status': applicability, 'package_columns_status': 'not_resolved'}
+            if explicit_label:
+                locator['discipline_label'] = explicit_label
+            rows.append({
+                'name': title, 'original_title': title, 'register_item': item,
+                'discipline': normalize_register_discipline(explicit_label),
+                'discipline_label': explicit_label or 'Not Specified',
+                'source_group': group if item.rsplit('.', 1)[0] == group_id else '',
+                'explicit_dimensions': ({'discipline': {'value': explicit_label, 'header': 'Discipline'}} if explicit_label else {}),
+                'document_number': '', 'document_revision': '',
+                'source_layout': 'applicability_text_register',
+                'title_boundary_status': 'explicit_marked_row' if clear else 'ambiguous',
+                'applicability_status': applicability, 'applicability_marks': mark[0] if mark else '',
+                'source_remarks': remarks, 'package_columns_status': 'not_resolved',
+                'sheet': '', 'row_number': None, 'source_line': locator['line'], 'source_locator': locator,
+                'source_excerpt': text[line['start']:line['end']].strip(),
+                'start': line['start'], 'end': line['end'],
+            })
+    return rows
+
+
+def _merge_register_geometry(text, rows, structured_evidence):
+    """Prefer located PDF cells only for the same page and register item."""
+    from .register_geometry_cache import SCHEMA_VERSION
+    geometry = (structured_evidence or {}).get('register_geometry') or {}
+    if (geometry.get('schema_version') != SCHEMA_VERSION
+            or geometry.get('text_sha256') != hashlib.sha256(text.encode('utf-8')).hexdigest()
+            or geometry.get('status') != 'parsed'):
+        return rows
+    located = []
+    for source in geometry.get('rows') or []:
+        start, end = source.get('start'), source.get('end')
+        if not (type(start) is int and type(end) is int and 0 <= start < end <= len(text)
+                and source.get('register_item') is not None and source.get('original_title')):
+            continue
+        row = deepcopy(source)
+        locator = row.setdefault('source_locator', {})
+        page = text.count('\f', 0, start) + 1
+        if locator.get('page') != page:
+            continue
+        # Literal text offsets remain distinct from reconstructed cell titles.
+        row['source_excerpt'] = text[start:end]
+        locator.update(character_start=start, character_end=end, quote=text[start:end])
+        located.append(row)
+    identities = {(row['source_locator']['page'], str(row['register_item'])) for row in located}
+    fallback = [row for row in rows if (
+        (row.get('source_locator') or {}).get('page') or text.count('\f', 0, row['start']) + 1,
+        str(row.get('register_item')),
+    ) not in identities]
+    return sorted([*fallback, *located], key=lambda row: row['start'])
+
+
+def register_rows_for_file(file_obj):
+    from .register_geometry_cache import cached_register_geometry
+    geometry = cached_register_geometry(file_obj)
+    return extract_register_rows(file_obj.extracted_text or '', structured_evidence={
+        'register_geometry': geometry,
+    } if geometry else None)
+
+
+def extract_register_rows(text, *, structured_evidence=None):
+    """Return located register rows from delimited or captioned PDF text tables."""
     delimiter = _delimiter(text or '')
     if not delimiter:
-        return []
+        rows = sorted([*_captioned_text_register_rows(text or ''), *_applicability_text_register_rows(text or '')], key=lambda row: row['start'])
+        return _merge_register_geometry(text or '', rows, structured_evidence)
     offsets = [0]
     for line in text.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
@@ -213,7 +466,8 @@ def extract_register_rows(text):
                 'source_excerpt': text[start:end].strip(), 'start': start, 'end': end,
             })
             rows.append(row)
-    return rows
+    rows = sorted([*rows, *_captioned_text_register_rows(text), *_applicability_text_register_rows(text)], key=lambda row: row['start'])
+    return _merge_register_geometry(text, rows, structured_evidence)
 
 
 def extract_workbook_register_rows(file_obj):

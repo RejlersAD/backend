@@ -203,10 +203,10 @@ class SignedPRTableAndEvidenceTests(SimpleTestCase):
         self.assertIsNone(fields["net_total"])
         self.assertEqual(fields["price_lines"], [])
 
-    def test_multiple_project_codes_require_selection(self):
+    def test_multiple_project_codes_retain_the_complete_reviewable_list(self):
         fields = self.parse(self.REFERENCE_TEXT.replace("(27041 & 27042), 5907771", "5907771 & 5907772"))
-        self.assertEqual(fields["project_number"], "")
-        self.assertEqual(fields["field_confidence"]["project_number"], "conflict")
+        self.assertEqual(fields["project_number"], "5907771, 5907772")
+        self.assertEqual(fields["field_confidence"]["project_number"], "medium")
         self.assertCountEqual(fields["project_numbers"], ["5907771", "5907772"])
 
     def test_notes_can_end_at_document_end_without_approval_heading(self):

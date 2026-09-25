@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task
+from django.db import transaction
 from django.utils import timezone
 from apps.rbac.ai_telemetry import tracked_planning_job
 
@@ -64,42 +65,94 @@ def parse_uploaded_planning_file(self, file_id):
     bind=True, acks_late=True, reject_on_worker_lost=True,
     name='apps.planning_intelligence.tasks.run_planning_job',
 )
-@tracked_planning_job
-def run_planning_job(self, job_id):
+def run_planning_job(self, job_id, *, dispatch_token=None):
     """Run a durable analysis/generation job and persist progress for polling."""
+    from .models import PlanningJob
+
+    with transaction.atomic():
+        try:
+            job = PlanningJob.objects.select_for_update(of=('self',)).select_related(
+                'project', 'requested_by',
+            ).get(pk=job_id, is_deleted=False)
+        except PlanningJob.DoesNotExist:
+            return {'job_id': job_id, 'error': 'not_found'}
+        delivery_id = dispatch_token or self.request.id
+        if delivery_id and job.task_id and delivery_id != job.task_id:
+            return {'job_id': job_id, 'status': job.status, 'stale_dispatch': True}
+        if job.status == 'cancelled':
+            return {'job_id': job_id, 'status': 'cancelled'}
+        if job.status == 'succeeded':
+            return {'job_id': job.id, 'status': job.status, 'idempotent_replay': True}
+        if job.status == 'running' and not (self.request.delivery_info or {}).get('redelivered'):
+            return {'job_id': job.id, 'status': job.status, 'already_running': True}
+
+        job.status = 'running'
+        job.started_at = timezone.now()
+        job.heartbeat_at = job.started_at
+        job.attempt_count += 1
+        job.task_id = delivery_id or job.task_id
+        job.save(update_fields=['status', 'started_at', 'heartbeat_at', 'attempt_count', 'task_id', 'updated_at'])
+    return _execute_planning_job(self, job_id)
+
+
+@tracked_planning_job
+def _execute_planning_job(task, job_id):
+    """Only an accepted delivery enters workflow telemetry or domain work."""
     from .models import PlanningJob
     from .services.audit import record_event
     from .services.operational_jobs import update_job_progress
     from .services.pipeline import analyze_documents, generate_schedule
 
-    try:
-        job = PlanningJob.objects.select_related('project', 'requested_by').get(pk=job_id, is_deleted=False)
-    except PlanningJob.DoesNotExist:
-        return {'job_id': job_id, 'error': 'not_found'}
-    if job.status == 'cancelled':
-        return {'job_id': job_id, 'status': 'cancelled'}
-    if job.status == 'succeeded':
-        return {'job_id': job.id, 'status': job.status, 'idempotent_replay': True}
-
-    job.status = 'running'
-    job.started_at = timezone.now()
-    job.heartbeat_at = job.started_at
-    job.attempt_count += 1
-    job.task_id = self.request.id or job.task_id
-    job.save(update_fields=['status', 'started_at', 'heartbeat_at', 'attempt_count', 'task_id', 'updated_at'])
+    job = PlanningJob.objects.select_related('project', 'requested_by').get(pk=job_id, is_deleted=False)
     update_job_progress(job, 5, 'Worker accepted the job', phase='started')
 
     try:
         if job.job_type == 'analyze':
             update_job_progress(job, 15, 'Reading parsed project documents', phase='documents')
+
+            def report_analysis(event):
+                phase = event['phase']
+                if phase == 'source_extraction':
+                    progress, message = 20, 'Extracting source facts from parsed project documents'
+                elif phase == 'ai_not_run':
+                    progress, message = 75, 'AI analysis not run; preparing source findings'
+                elif phase == 'persistence':
+                    progress, message = 85, 'Saving extracted findings and review gaps'
+                elif phase == 'ai_review':
+                    total = event['chunks_total']
+                    # Splitting a limited response changes the number of chunks,
+                    # but not the source length or work already completed.
+                    finished = event.get('characters_finished', event['chunks_finished'])
+                    whole = event.get('characters_total', total)
+                    progress = 25 + int(50 * finished / max(1, whole))
+                    chunk = f"document chunk {event['chunk_number']} of {total}"
+                    provider = {'anthropic': 'Anthropic', 'gemini': 'Google Gemini'}.get(event['provider'], 'AI provider')
+                    messages = {
+                        'waiting': f'Waiting for {provider} to review {chunk}',
+                        'receiving': f"RADAI is reviewing {chunk} ({event.get('response_characters_received', 0):,} response characters received)",
+                        'processed': f'AI processed {chunk}',
+                        'partial': f'AI response incomplete for {chunk}',
+                        'failed': f'AI request failed for {chunk}; continuing with available source evidence',
+                        'skipped': f'AI review deferred for {chunk}',
+                        'cached': f'Reused saved AI result for {chunk}',
+                        'splitting': f'Splitting {chunk} into smaller sections after the AI response limit',
+                    }
+                    message = messages[event['chunk_status']]
+                else:
+                    return
+                update_job_progress(job, progress, message, phase=phase, details=event)
+
             from .models import DocumentIntelligenceRun
             resume_id = (job.request_data or {}).get('resume_run_id')
             if resume_id:
                 from .services.document_intelligence import get_or_run_document_intelligence
                 previous = DocumentIntelligenceRun.objects.get(pk=resume_id, project=job.project, is_deleted=False)
-                _resumed, intelligence = get_or_run_document_intelligence(job.project, user=job.requested_by, resume_run=previous)
+                _resumed, intelligence = get_or_run_document_intelligence(
+                    job.project, user=job.requested_by, resume_run=previous, progress_callback=report_analysis,
+                )
             else:
-                intelligence = analyze_documents(job.project, user=job.requested_by, force=True)
+                intelligence = analyze_documents(job.project, user=job.requested_by, force=True, progress_callback=report_analysis)
+            update_job_progress(job, 95, 'Updating the planning basis from saved findings', phase='basis')
             from .services.schedule_basis import build_schedule_basis
             run = DocumentIntelligenceRun.objects.get(pk=intelligence['document_intelligence_run_id'])
             basis = run.schedule_bases.filter(is_deleted=False).first() or build_schedule_basis(run)
@@ -120,20 +173,36 @@ def run_planning_job(self, job_id):
             )
         elif job.job_type == 'preview':
             from .services.pipeline import preview_schedule
+            from .services.planning_package_request import resolve_generation_options, PlanningPackageRequestError
+            options = resolve_generation_options(job.project, job.request_data or {})
+            if options['mode'] == 'planning_package':
+                from .services.operational_jobs import operation_fingerprint
+                if (job.result_data or {}).get('planning_input_fingerprint') != operation_fingerprint(job.project, job.job_type, job.request_data):
+                    raise PlanningPackageRequestError('Planning inputs changed while this request was queued. Open a fresh planning request.', code='planning_request_conflict', status_code=409)
+            package_options = options if options['mode'] == 'planning_package' else {}
             update_job_progress(job, 20, 'Building deterministic schedule preview', phase='preview')
             preview = preview_schedule(
                 job.project, user=job.requested_by,
                 overrides=(job.request_data or {}).get('intelligence_overrides'),
+                **package_options,
             )
             update_job_progress(job, 90, 'Persisting preview validation results', phase='preview_persistence')
-            job.result_data = {'preview': preview}
+            job.result_data = {**(job.result_data or {}), 'preview': preview}
             job.message = 'Schedule preview completed'
         elif job.job_type == 'generate':
-            update_job_progress(job, 20, 'Building evidence-controlled WBS and activities', phase='generation')
+            from .services.planning_package_request import resolve_generation_options, PlanningPackageRequestError
+            options = resolve_generation_options(job.project, job.request_data or {})
+            if options['mode'] == 'planning_package':
+                from .services.operational_jobs import operation_fingerprint
+                if (job.result_data or {}).get('planning_input_fingerprint') != operation_fingerprint(job.project, job.job_type, job.request_data):
+                    raise PlanningPackageRequestError('Planning inputs changed while this request was queued. Open a fresh planning request.', code='planning_request_conflict', status_code=409)
+            package_options = options if options['mode'] == 'planning_package' else {}
+            update_job_progress(job, 20, 'Building WBS, workflow activities and planning logic', phase='generation')
             generation = generate_schedule(
                 job.project, user=job.requested_by,
                 overrides=(job.request_data or {}).get('intelligence_overrides'),
                 input_fingerprint=job.idempotency_key,
+                **package_options,
             )
             update_job_progress(job, 65, 'Materializing the relational schedule', phase='materialization')
             from .services.schedule_materializer import materialize_generation
@@ -142,7 +211,7 @@ def run_planning_job(self, job_id):
             )
             update_job_progress(job, 90, 'Finalizing CPM dates and persistent results', phase='finalizing')
             job.result_generation = generation
-            job.result_data = {
+            job.result_data = {**(job.result_data or {}),
                 'generation_id': generation.id,
                 'version': generation.version,
                 'schedule_id': schedule_version.schedule_id if schedule_version else None,
@@ -150,6 +219,8 @@ def run_planning_job(self, job_id):
                 'calculation_run_id': calculation_run.id if calculation_run else None,
                 'materialization_issues': materialization_issues,
                 'state': 'calculated' if schedule_version else 'needs_evidence_review',
+                'generation_mode': options['mode'],
+                'intelligence_run_id': options['intelligence_run'].pk if options['intelligence_run'] else None,
             }
             job.message = f'Schedule version {generation.version} completed' if schedule_version else 'Source evidence extracted; review Not Specified fields.'
             record_event(
@@ -157,7 +228,6 @@ def run_planning_job(self, job_id):
                 entity=generation, after={'version': generation.version}, metadata={'job_id': job.id},
             )
         elif job.job_type == 'build_plan':
-            from django.db import transaction
             from .models import ScheduleBasis
             from .services.generation_plan import build_generation_plan
             basis = ScheduleBasis.objects.get(
@@ -300,10 +370,15 @@ def run_planning_job(self, job_id):
         logger.exception('Planning job %s failed', job_id)
         from .services.document_intelligence import ResumeSourceChanged
         from .services.evidence_graph import EvidenceError
+        from .services.planning_package_request import PlanningPackageRequestError
         job.status = 'failed'
         job.error_code = 'intelligence_resume_sources_changed' if isinstance(exc, ResumeSourceChanged) else 'planning_job_failed'
         job.error_message = str(exc) if isinstance(exc, ResumeSourceChanged) else f'Planning job failed. Contact support with job id {job.id}.'
         job.message = 'Source documents changed; start a new analysis' if isinstance(exc, ResumeSourceChanged) else 'Planning job failed'
+        if isinstance(exc, PlanningPackageRequestError):
+            job.error_code = exc.code
+            job.error_message = str(exc)
+            job.message = 'Planning inputs need attention'
         if job.job_type in {'evidence_bulk', 'agreement_setup'} and isinstance(exc, EvidenceError):
             job.error_code = exc.payload['code']
             job.error_message = str(exc)

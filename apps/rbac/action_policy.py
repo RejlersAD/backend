@@ -133,7 +133,7 @@ READ_OPERATIONS = {'list', 'retrieve', 'preview', 'stats', 'statistics', 'summar
                    'check_permission', 'check_access', 'check_pr_number', 'by_module', 'options',
                    'discover_svc_url', 'test_connection', 'ai_settings_test', 'payment_batch_status'}
 UPDATE_OPERATIONS = {'update', 'partial_update', 'assign', 'unassign', 'reassign',
-                     'source_approvals', 'link_purchase_order',
+                     'source_approvals', 'source_review', 'link_purchase_order',
                      'revoke', 'cancel', 'submit', 'restore', 'resolve', 'ignore',
                      'implement', 'transition', 'complete', 'close', 'reopen',
                      'activate', 'deactivate', 'mark', 'set', 'edit', 'save',

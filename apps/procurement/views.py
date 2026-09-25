@@ -461,10 +461,30 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     def source_approvals(self, request, pk=None):
         """Review only incomplete evidence from this PR's original signed PDF."""
         from .services.requisition_source_approvals import edit_requisition_source_approval
+        from .services.pr_source_approval_review import SourceApprovalReviewError
 
         pr = self.get_object()
         self._enforce_owner_mutation(pr)
-        updated = edit_requisition_source_approval(pr.pk, request.user, request.data)
+        try:
+            updated = edit_requisition_source_approval(pr.pk, request.user, request.data)
+        except SourceApprovalReviewError as exc:
+            raise ValidationError({'error': str(exc)}) from exc
+        return Response(self.get_serializer(updated).data)
+
+    @action(detail=True, methods=['post'], url_path='source-review')
+    def source_review(self, request, pk=None):
+        from apps.rbac.action_policy import request_action_allowed
+        from .services.pr_source_review_commands import edit_requisition_source_review
+        from .services.pr_source_approval_review import SourceApprovalReviewError
+
+        if not request_action_allowed(request, 'procurement_requisitions', 'update'):
+            raise PermissionDenied('Purchase requisition update permission is required to change its source review.')
+        pr = self.get_object()
+        self._enforce_owner_mutation(pr)
+        try:
+            updated = edit_requisition_source_review(pr.pk, request.user, request.data)
+        except SourceApprovalReviewError as exc:
+            raise ValidationError({'error': str(exc)}) from exc
         return Response(self.get_serializer(updated).data)
 
     def destroy(self, request, *args, **kwargs):
@@ -555,6 +575,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         from apps.rbac.action_policy import request_action_allowed
         from .services.signed_po_pdf_import import SignedPOImportError
         from .services.po_pdf_approval import POApprovalPreviewError
+        from .services.pr_source_approval_review import SourceApprovalReviewError
         from .services.signed_pr_pdf_import import (
             SignedPRImportError,
             SignedPRStorageError,
@@ -609,6 +630,14 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise SignedPRImportError('Manual signature verification must be a valid JSON object.') from exc
 
+            source_review_options = {}
+            for field in ('source_approval_review', 'expected_source_approval_review', 'reviewed_project_references'):
+                if field in request.data:
+                    try:
+                        source_review_options[field] = json.loads(request.data[field])
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise SignedPRImportError(f'{field} must be a valid JSON object.') from exc
+
             create_value = str(request.data.get('create_new', 'false')).strip().lower()
             if create_value not in {'true', 'false', '1', '0'}:
                 raise SignedPRImportError('Create recommendation must be true or false.')
@@ -619,6 +648,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 create_value, attach_value = 'false', 'true'
                 if not request_action_allowed(request, 'procurement_requisitions', 'update'):
                     raise PermissionDenied('Purchase requisition update permission is required to attach this PR PDF.')
+            if (source_review_options and create_value in {'false', '0'}
+                    and not request_action_allowed(request, 'procurement_requisitions', 'update')):
+                raise PermissionDenied('Purchase requisition update permission is required to change its source signatory review.')
 
             pr_options = {
                 'approvals': approvals, 'signatures_verified': None,
@@ -626,6 +658,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 'expected_pr_number': expected_pr_number, 'manual_overrides': manual_overrides,
                 'manual_signature_overrides': manual_signature_overrides,
                 'create_new': create_value in {'true', '1'}, 'attach_only': attach_value in {'true', '1'},
+                **source_review_options,
             }
             if po_file:
                 from .services.paired_signed_import import import_signed_pair
@@ -655,7 +688,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 result = import_signed_pr_pdf(pdf_bytes, filename=pdf_file.name, uploaded_by=request.user, **pr_options)
         except SignedPRStorageError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        except (SignedPRImportError, SignedPOImportError, POApprovalPreviewError) as exc:
+        except (SignedPRImportError, SignedPOImportError, POApprovalPreviewError, SourceApprovalReviewError) as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_201_CREATED if result.get('created') else status.HTTP_200_OK)
 

@@ -91,6 +91,25 @@ class OperationalJobTests(TestCase):
         self.assertTrue(changed_created)
         self.assertNotEqual(changed.id, first.id)
 
+    def test_corrected_extractor_invalidates_cached_preview_and_generation_jobs(self):
+        for job_type in ('preview', 'generate'):
+            with self.subTest(job_type=job_type):
+                with patch('apps.planning_intelligence.services.document_intelligence.ENGINE_VERSION', 'previous-extractor'):
+                    previous, _ = get_or_create_job(self.project, job_type, {}, self.user)
+                previous.status = 'succeeded'
+                previous.result_data = {'preview': {'activities': []}}
+                previous.save(update_fields=['status', 'result_data'])
+                with patch('apps.planning_intelligence.services.document_intelligence.ENGINE_VERSION', 'corrected-extractor'):
+                    current, created = get_or_create_job(self.project, job_type, {}, self.user)
+                    replay, replay_created = get_or_create_job(self.project, job_type, {}, self.user)
+                self.assertTrue(created)
+                self.assertNotEqual(current.pk, previous.pk)
+                self.assertFalse(replay_created)
+                self.assertEqual(replay.pk, current.pk)
+                previous.refresh_from_db()
+                self.assertEqual(previous.status, 'succeeded')
+                self.assertEqual(previous.result_data, {'preview': {'activities': []}})
+
 class RegressionLibraryTests(SimpleTestCase):
     def test_all_reference_projects_match_expected_topology(self):
         results = run_regression_library()

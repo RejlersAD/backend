@@ -108,11 +108,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
         else:
             serializer.save()
 
-    @transaction.atomic
-    def perform_destroy(self, instance):
-        # DRF's default hard delete traverses protected schedule-basis records.
-        from .project_archival import archive_project
-        archive_project(instance.pk, self.request.user)
+    def destroy(self, request, *args, **kwargs):
+        from .project_deletion import PermanentProjectDeleteSerializer, delete_project
+        instance = self.get_object()
+        serializer = PermanentProjectDeleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = delete_project(instance.pk, request.user,
+                                expected_updated_at=serializer.validated_data['expected_updated_at'])
+        if result['cleanup_pending']:
+            return Response({**result, 'code': 'project_file_cleanup_pending',
+                             'message': 'Project removed. Some uploaded files are awaiting deletion.'},
+                            status=status.HTTP_202_ACCEPTED)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @transaction.atomic
     def update(self, request, *args, **kwargs):

@@ -2,6 +2,18 @@
 
 The core engine lives inside Project Control. Open a project, then **Plan & Baseline → Schedule → Master Schedule**. Existing projects, approval workflows and published baselines remain the basis for planning and reporting.
 
+The Project Control route now retains the original relational Planner Workspace
+as its single Master Schedule. Performance is an internal tab sharing its selected
+schedule/version. The newer simple-draft screen is removed from this navigation;
+its saved data and APIs remain intact. The eleven-step Document Intelligence and
+generation workflow remains available beside Master Schedule, and opens generated
+results in the same planner. Read-only master selection metadata chooses an
+existing relational version; opening the page does not create or replace tasks.
+
+Legacy `scheduleMode=planner` links open this workspace; `scheduleMode=management`
+opens its Performance tab. `scheduleMode=documents` opens Document Intelligence.
+Scope and approval guards continue to be enforced by existing backend commands.
+
 ## Work breakdown and schedule
 
 Create or edit a manual activity and provide its **Phase** and **Deliverable** to organize the WBS as Project → Phase → Deliverable → Activity. Existing activities without these labels retain their existing grouping. The hierarchy is retained when the draft becomes a relational schedule version.

@@ -7,6 +7,28 @@ from ..services.structured_schedule_evidence import parse_structured_schedule_ev
 
 
 class StructuredScheduleEvidenceTests(TestCase):
+    def test_module_roadmap_keeps_combined_title_and_target_date_as_source_evidence(self):
+        rows = parse_structured_schedule_evidence(
+            'Phase Name|Module ID & Name|Target Completion Date|Duration (Days)|Owner / Lead\n'
+            'Pilot|Module 8: Sensor onboarding|2038-06-14|4|Controls lead\n'
+            'Expansion|Module 12: Telemetry archive|2038-07-09|6|Data team\n')['rows']
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['title'], 'Module 8: Sensor onboarding')
+        self.assertIsNone(rows[0]['activity_id'])  # A combined label is not a separate ID column.
+        self.assertEqual(rows[0]['values']['planned_finish_date'], '2038-06-14')
+        self.assertEqual(rows[0]['field_columns']['planned_finish_date']['label'], 'Target Completion Date')
+        self.assertEqual(rows[0]['values']['original_duration_days'], 4)
+        self.assertIsNone(rows[0]['values']['planned_start_date'])
+        self.assertIsNone(rows[0]['values']['predecessors'])
+        self.assertIsNone(rows[0]['values']['constraint_type'])
+        self.assertIn('Controls lead', rows[0]['source_excerpt'])
+
+    def test_module_summary_without_schedule_columns_does_not_become_activities(self):
+        result = parse_structured_schedule_evidence(
+            'Phase|Module Name|Target Window|Milestone Focus\n'
+            'Pilot|Sensor onboarding|June 2038|Improve field-data capture\n')
+        self.assertEqual(result['rows'], [])
+
     def test_construction_csv_reordered_columns_preserves_explicit_working_days_and_lag(self):
         text = ('Task Name,Finish,Task ID,Planned Duration (working days),Start,Predecessors\n'
                 'Install formwork,2028-04-14,C-20,3,2028-04-10,"C-10:FS+2d;C-15:SS-1d"\n')

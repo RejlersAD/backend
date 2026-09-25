@@ -1292,7 +1292,11 @@ def analyse_plan(project, actor, *, revision=0, rebuild=False):
             selected['hse_studies'] = list(run.facts.filter(fact_type='hse_study', is_deleted=False).values_list('value', flat=True))
         proposed = [_seed_task(task) for task in _initial_tasks(run, selected)]
         document_plan = project_document_plan(project, preview)
-        if not register and document_plan['activities']:
+        # An upload category is a parsing hint, not proof of register scope.
+        # A schedule uploaded as MDR/EDDR can still provide explicit activities.
+        # Preserve actual register scope (including exclusions) when recovered.
+        use_source_activities = not register or (not proposed and not document_plan['register_inventory'])
+        if use_source_activities and document_plan['activities']:
             proposed = [_seed_task(task) for task in simple_tasks(document_plan)]
         if not proposed and state['tasks']:
             _error('No supported source activities were recovered. The saved draft has been retained; review extraction coverage before rebuilding.',

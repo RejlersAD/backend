@@ -26,6 +26,7 @@ from .pr_excel_import import _match_vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
 from .po_supplier_extraction import complete_wrapped_seller_name, extract_seller_cover_details, needs_seller_layout
 from .po_supplier_contacts import parse_vendor_contact_block
+from .po_commercial_extraction import extract_po_commercial_fields
 
 
 # Cover, scope, payment terms and price summary; retain all PDF pages as evidence.
@@ -331,6 +332,7 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
                 break
     project_number = _match(r"Project\s*:\s*(\d{5,12})", text)
     summary = normalize_po_summary(text)
+    commercial = extract_po_commercial_fields(pdf_bytes, text)
 
     return {
         "ocr_text_length": len(text),
@@ -347,13 +349,13 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
         "ocr_vendor_name_raw": raw_vendor_name,
         "vendor_name_source": "native" if native_vendor_name else "ocr",
         **seller_details,
-        "seller_reference": _match(r"Seller\s+Reference\s*:\s*(Mr\.\s+[A-Za-z ]+)", text),
+        "seller_reference": commercial["seller_reference"],
         "quote_ref": _match(r"Quote\s+Ref\.\s*:\s*([^\n]+)", text),
         "project_number": project_number,
         "summary": summary,
-        "payment_terms": _match(r"Payment\s+Terms?\s*:\s*(.+?)(?:Delivery\s+terms|Payment\s+Mode)", text),
-        "payment_mode": _match(r"Payment\s+Mode\s*:\s*([^\n]+)", text),
-        "delivery_terms": _match(r"Delivery\s+terms\s*:\s*(.+?)(?:Payment|Delivery\s+date)", text),
+        "payment_terms": commercial["payment_terms"],
+        "payment_mode": commercial["payment_mode"],
+        "delivery_terms": commercial["delivery_terms"],
         "expected_delivery": _date(delivery_text),
         "total_amount": net or Decimal("0.00"),
         "tax_amount": vat or Decimal("0.00"),

@@ -21,11 +21,12 @@ from ..models import (
 from .intelligence import analyze_project
 from .deliverable_matching import find_deliverable_match
 from .preview_confirmation import apply_confirmed_preview, source_fingerprint
-from .register_rows import extract_legacy_register_rows, extract_register_rows
+from .register_rows import extract_legacy_register_rows, register_rows_for_file
 from .extraction_coverage import file_coverage, summarize_coverage, summarize_assertions
 from .planning_fact_extraction import explicit_labeled_assertions, validated_claim
+from .intelligence_review_retention import retain_unchanged_reviews
 
-ENGINE_VERSION = '6.0-broad-quoted-assertions'
+ENGINE_VERSION = '6.2-applicability-registers'
 
 _DOCUMENT_NUMBER_RE = re.compile(
     r'\b(?=[A-Z0-9./_~\-]{6,100}\b)(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,}\b',
@@ -47,7 +48,7 @@ _SCALAR_PATTERNS = [
     ('project_name', 'project_name', re.compile(r'(?:project title|project name)\s*[:\-]\s*([^\n|]{2,255})', re.I), 1, .94),
     ('effective_date', 'effective_date', re.compile(r'(?:effective date|zero date|contract award)\s*[:\-]?\s*(\d{1,2}[\-/][A-Za-z]{3,9}[\-/]\d{2,4}|\d{4}-\d{2}-\d{2})', re.I), 1, .92),
     ('duration_months', 'duration_months', re.compile(r'(?:\b(?:project|contract)\s+duration|(?m:^\s*duration))\s*(?:is|of|:|=)?\s*(\d{1,3})\s*[- ]?months?\b', re.I), 1, .86),
-    ('client', 'client', re.compile(r'(?:client|company)\s*[:\-]\s*([^\n|]{2,255})', re.I), 1, .82),
+    ('client', 'client', re.compile(r'\b(?:client|company)(?:[ \t]*:[ \t]*|[ \t]+-[ \t]+)([^\n|]{2,255})', re.I), 1, .82),
     ('location', 'location', re.compile(r'(?:project location|site location|location)\s*[:\-]\s*([^\n|]{2,255})', re.I), 1, .82),
 ]
 _CALENDAR_PATTERNS = [
@@ -145,7 +146,7 @@ def profile_document(file_obj, *, extraction_coverage=None):
         flags.append('category_mismatch')
     if extraction_coverage is None:
         existing = DocumentProfile.objects.filter(file=file_obj).values_list('extraction_coverage', flat=True).first()
-        extraction_coverage = file_coverage(file_obj, existing)
+        extraction_coverage = file_coverage(file_obj, existing, include_structured=True)
     if extraction_coverage.get('status') != 'complete':
         flags.append('extraction_coverage_incomplete')
     extension = os.path.splitext(file_obj.original_filename or '')[1].lower().lstrip('.')
@@ -176,7 +177,7 @@ def _register_discipline(value):
 
 def _extract_register_rows(rows, file_obj, text, *, register_mode=False):
     """Extract collapsed PDF/Excel register rows, preserving number/revision/title."""
-    structured = extract_register_rows(text)
+    structured = register_rows_for_file(file_obj)
     if not structured and file_obj.category not in {'mdr', 'eddr'}:
         return
     if not structured and register_mode:
@@ -194,9 +195,13 @@ def _extract_register_rows(rows, file_obj, text, *, register_mode=False):
                     'register_item': row.get('register_item'),
                     'title_boundary_status': row.get('title_boundary_status', 'explicit_columns'),
                     'source_layout': row.get('source_layout', 'table_columns'),
+                    **({'source_group': row['source_group']} if row.get('source_group') else {}),
+                    **({key: row[key] for key in ('applicability_status', 'applicability_marks', 'source_remarks', 'package_columns_status')
+                        if key in row}),
                 }, .99, text, row['start'], row['end'], matched=row['original_title'],
             )
             locator = rows['facts'][-1].source_locator
+            locator.update(row.get('source_locator') or {})
             if row.get('sheet'):
                 locator['sheet'] = row['sheet']
             locator['register_item'] = row.get('register_item')
@@ -446,18 +451,14 @@ class ResumeSourceChanged(ValueError):
     """Safe, actionable message when queued extraction no longer matches inputs."""
 
 
-def validate_resume_source(project, run, files=None):
-    """Return current source files, or reject a stale/incomplete continuation.
-
-    This read-only preflight is shared by the enqueue endpoint and worker; the
-    worker repeats it because inputs may change after a job is queued.
-    """
+def validate_analysis_source(project, run, files=None):
+    """Validate unchanged inputs independently of the extraction engine version."""
     active = list(project.files.filter(is_deleted=False))
     if not active or any(source.parse_status != 'done' for source in active):
         raise ResumeSourceChanged('Finish parsing all current source documents and start a new analysis before continuing.')
     selected = list(files) if files is not None else active
     manifest = _extraction_source_manifest(selected)
-    if (run.project_id != project.pk or run.is_deleted or run.engine_version != ENGINE_VERSION or
+    if (run.project_id != project.pk or run.is_deleted or
             (run.summary or {}).get('source_fingerprint') != source_fingerprint(project) or
             (run.summary or {}).get('extraction_source_manifest') != manifest or
             _extraction_source_manifest(active) != manifest or
@@ -466,13 +467,28 @@ def validate_resume_source(project, run, files=None):
     return selected
 
 
+def validate_resume_source(project, run, files=None):
+    """Resume requires both unchanged inputs and compatible extraction code.
+
+    The enqueue endpoint and worker repeat this read-only preflight. Viewing
+    saved evidence uses source validation alone and does not resume extraction.
+    """
+    selected = validate_analysis_source(project, run, files)
+    if run.engine_version != ENGINE_VERSION:
+        raise ResumeSourceChanged('The analysis engine changed. Start a new document analysis instead of resuming this run.')
+    return selected
+
+
 @tracked_planning('document_intelligence')
-def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, resume_run=None):
+def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, resume_run=None, progress_callback=None):
     files = list(files if files is not None else project.files.filter(is_deleted=False, parse_status='done'))
     if not files:
         raise ValueError('No successfully parsed files are available.')
     if resume_run is not None:
         files = validate_resume_source(project, resume_run, files)
+    from .register_geometry_cache import ensure_register_geometry
+    for file_obj in files:
+        ensure_register_geometry(file_obj)
     fingerprint = source_fingerprint(project)
     extraction_manifest = _extraction_source_manifest(files)
     resume_state = None
@@ -492,10 +508,14 @@ def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, 
             run.save(update_fields=['summary', 'updated_at'])
 
         legacy = analyze_project(files, project=project, user=user, allow_ai=allow_ai,
-                                 resume_state=resume_state, checkpoint_callback=checkpoint)
+                                 resume_state=resume_state, checkpoint_callback=checkpoint,
+                                 resume_coverage=((resume_run.summary or {}).get('processing_coverage') or {}).get('ai_processing') if resume_run else None,
+                                 progress_callback=progress_callback)
         current_files = project.files.filter(pk__in=[item.pk for item in files], is_deleted=False)
         if source_fingerprint(project) != fingerprint or _extraction_source_manifest(current_files) != extraction_manifest:
             raise ValueError('Source documents changed during analysis. Start a new analysis to use the current sources.')
+        if progress_callback:
+            progress_callback({'phase': 'persistence', 'file_count': len(files)})
         with transaction.atomic():
             for file_obj in files:
                 profile_document(file_obj)
@@ -518,6 +538,7 @@ def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, 
             summary = summarize_assertions(rows['facts'], coverage, coverage['ai_processing'])
             run.summary = {**run.summary, 'base_intelligence': legacy, 'processing_coverage': coverage,
                            'extraction_summary': summary}
+            retain_unchanged_reviews(run, actor=user)
             run.save(update_fields=['fact_count', 'conflict_count', 'status', 'finished_at', 'summary', 'updated_at'])
         return run, compile_run_intelligence(run)
     except Exception as exc:
@@ -528,15 +549,15 @@ def run_document_intelligence(project, *, user=None, files=None, allow_ai=True, 
         raise
 
 
-def get_or_run_document_intelligence(project, *, user=None, force=False, resume_run=None):
+def get_or_run_document_intelligence(project, *, user=None, force=False, resume_run=None, progress_callback=None):
     files = list(project.files.filter(is_deleted=False, parse_status='done'))
     ids = sorted(file_obj.id for file_obj in files)
     if resume_run is not None:
-        return run_document_intelligence(project, user=user, files=files, resume_run=resume_run)
+        return run_document_intelligence(project, user=user, files=files, resume_run=resume_run, progress_callback=progress_callback)
     if not force:
         existing = project.intelligence_runs.filter(
             is_deleted=False, status='succeeded', engine_version=ENGINE_VERSION, source_file_ids=ids,
         ).first()
         if existing and (existing.summary or {}).get('source_fingerprint') == source_fingerprint(project):
             return existing, compile_run_intelligence(existing)
-    return run_document_intelligence(project, user=user, files=files)
+    return run_document_intelligence(project, user=user, files=files, progress_callback=progress_callback)

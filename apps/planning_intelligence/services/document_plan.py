@@ -8,7 +8,7 @@ from copy import deepcopy
 from uuid import NAMESPACE_URL, uuid5
 
 from .source_timing_constraints import source_timing_evidence, _reference
-from .register_rows import extract_register_rows
+from .register_rows import extract_register_rows, register_row_requires_review
 from .identity_policy import (
     IDENTITY_POLICY_VERSION, identifier_key, identity_candidates, occurrence_key,
     same_source_location, stable_digest,
@@ -22,6 +22,7 @@ NOT_SPECIFIED = 'Not Specified'
 
 def source_files(project):
     from .reference_schedule_geometry import cached_schedule_geometry
+    from .register_geometry_cache import cached_register_geometry
     sources = []
     for item in project.files.filter(is_deleted=False).select_related('document_profile').order_by('pk'):
         source = {'id': item.pk, 'filename': item.original_filename, 'category': item.category,
@@ -30,6 +31,9 @@ def source_files(project):
         geometry = cached_schedule_geometry(item)
         if geometry:
             source['structured_evidence'] = {'reference_schedule_geometry': geometry}
+        register_geometry = cached_register_geometry(item)
+        if register_geometry:
+            source.setdefault('structured_evidence', {})['register_geometry'] = register_geometry
         sources.append(source)
     return sources
 
@@ -60,11 +64,16 @@ def _register_records(files):
         if (source.get('parse_status') != 'done' or source.get('id') is None
                 or source.get('is_deleted') or source.get('category') == 'output_schedule_sample'):
             continue
-        for row in extract_register_rows(source.get('text') or ''):
+        for row in extract_register_rows(source.get('text') or '', structured_evidence=source.get('structured_evidence')):
             records.append({
                 'title': row['original_title'], 'activity_id': row.get('document_number') or None,
                 'document_revision': row.get('document_revision'), 'discipline': row.get('discipline'),
                 'discipline_label': row.get('discipline_label'),
+                'source_group': row.get('source_group'),
+                'title_boundary_status': row.get('title_boundary_status', 'explicit_columns'),
+                'source_layout': row.get('source_layout', 'table_columns'),
+                **({key: row[key] for key in ('applicability_status', 'applicability_marks', 'source_remarks', 'package_columns_status')
+                    if key in row}),
                 'explicit_dimensions': deepcopy(row.get('explicit_dimensions') or {}),
                 'kind': 'activity', 'basis': 'document_register', 'values': {},
                 'field_status': {'duration': 'not_specified', 'predecessors': 'not_specified'},
@@ -86,12 +95,27 @@ def build_document_plan(files, *, project_name='', project_id=None, additional_r
     records = [deepcopy(row) for row in evidence.get('evidence_records') or []
                if row.get('kind') == 'activity']
     register_records = _register_records(files)
+    ambiguous_register = [row for row in register_records if row['title_boundary_status'] == 'ambiguous']
     if not records:
-        records = deepcopy(register_records)
+        records = deepcopy([row for row in register_records if not register_row_requires_review(row)])
     if not records:
         records = deepcopy(additional_records or [])
     summaries = [row for row in evidence.get('evidence_records') or [] if row.get('kind') == 'summary']
     activities, issues = [], []
+    if ambiguous_register:
+        issues.append({'code': 'register_title_boundary_ambiguous',
+                       'severity': 'error',
+                       'message': 'Some register titles have ambiguous PDF text boundaries. Their source rows are retained for review and were not converted into activities.',
+                       'count': len(ambiguous_register),
+                       'source_references': [reference for row in ambiguous_register for reference in row['source_references']],
+                       'blocks': ['calculation', 'approval']})
+    unresolved_scope = [row for row in register_records if row.get('applicability_status', 'marked') != 'marked']
+    if unresolved_scope:
+        issues.append({'code': 'register_applicability_not_confirmed', 'severity': 'error',
+                       'message': 'Some matrix rows are unmarked, conditional or have unresolved applicability. They remain source inventory and were not converted into activities.',
+                       'count': len(unresolved_scope),
+                       'source_references': [reference for row in unresolved_scope for reference in row['source_references']],
+                       'blocks': ['calculation', 'approval']})
     identities = defaultdict(list)
     source_id_counts = Counter(_record_identity(record) for record in records if _record_identity(record) is not None)
     for record in records:
@@ -230,6 +254,8 @@ def project_document_plan(project, intelligence=None):
         for fact in run.facts.filter(fact_type='deliverable', status__in=['detected', 'confirmed'], is_deleted=False):
             source = by_file.get(fact.source_file_id)
             value = fact.value if isinstance(fact.value, dict) else {}
+            if register_row_requires_review(value):
+                continue
             title = value.get('original_title') or value.get('name')
             excerpt = fact.source_excerpt or ''
             if fact.extraction_method == 'deterministic' and not value.get('source_register') and fact.status != 'confirmed':
