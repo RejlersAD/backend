@@ -225,6 +225,21 @@ class PdfRegisterGeometryTests(unittest.TestCase):
         ], continuation=True, next_annex=True))
         self.assertEqual([row['name'] for row in rows], ['First Report'])
 
+    def test_page_number_above_new_annexure_cannot_hide_the_physical_section_boundary(self):
+        class NumberedCanvas(Canvas):
+            def drawString(self, x, y, text, *args, **kwargs):
+                if text.startswith('ANNEXURE 2:'):
+                    super().drawString(40, 780, '2')
+                return super().drawString(x, y, text, *args, **kwargs)
+
+        with patch(__name__ + '.Canvas', NumberedCanvas):
+            stream = make_register_pdf([
+                {'code': '7.4.1', 'title': 'Cooling Water Design Criteria'},
+                {'code': '7.4.2', 'title': 'Reference Standard Only'},
+            ], continuation=True, next_annex=True)
+        rows = extract_pdf_register_rows(stream)
+        self.assertEqual([row['register_item'] for row in rows], ['7.4.1'])
+
     def test_stream_position_and_original_flattened_source_are_preserved(self):
         stream = make_register_pdf([{'code': '3.1.1', 'title': 'Wrapped\nReport'}])
         with pdfplumber.open(stream) as pdf:

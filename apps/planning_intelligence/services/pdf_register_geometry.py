@@ -21,7 +21,6 @@ _CAPTION = re.compile(r'^\s*(?:table\s+\w+\s*[:.\-]?\s*)?(?:applicable\s+deliver
 # are conventional item identifiers, not a project-specific WBS depth.
 _ITEM_PATTERN = r'(?:\d+(?:\.\d+)*|(?:[A-Za-z]{1,12}-)+\d+(?:[.-]\d+)*[A-Za-z]?)'
 _ITEM = re.compile(r'^' + _ITEM_PATTERN + r'$')
-_FIRST_ITEM = re.compile(r'^[ \t]*' + _ITEM_PATTERN + r'(?=\s|$)', re.M)
 _CONDITIONAL = re.compile(r'\b(?:if|unless|as required|where applicable|where required|if required|no new|during detailed engineering|to be assessed)\b', re.I)
 _NOT_REQUIRED = re.compile(r'\b(?:not required|not applicable|not in (?:the )?scope|out of scope)\b', re.I)
 _BUNDLED = re.compile(
@@ -141,6 +140,13 @@ def _row_bounds(page, context, word):
     return top, bottom
 
 
+def _title_cell_is_ruled(page, context, top, bottom):
+    middle = (top + bottom) / 2
+    return all(any(edge.get('orientation') == 'v' and abs(edge['x0'] - side) < 1
+                   and edge['top'] < middle < edge['bottom'] for edge in page.edges)
+               for side in context['title'])
+
+
 def _applicability(page, words, context, top, bottom):
     left, right = context['title'][1], context['remarks'][0]
     middle = (top + bottom) / 2
@@ -172,21 +178,38 @@ class PdfRegisterGeometryExtractor:
 
     def extract_page(self, page, page_number, text=None):
         text = page.extract_text() or '' if text is None else text
-        first_item = _FIRST_ITEM.search(text)
-        preamble = text[:first_item.start()] if first_item else text
+        words = None
         if self.previous_page is not None and page_number != self.previous_page + 1:
             self.context = None
         self.previous_page = page_number
         fresh = _header(page, text)
         if fresh:
             self.context = fresh
-        elif self.context and (abs(float(page.width) - self.context['width']) > 1
-                               or re.search(r'^\s*(?:ANNEXURE|APPENDIX)\b', preamble, re.I | re.M)):
-            self.context = None
+        elif self.context:
+            if abs(float(page.width) - self.context['width']) > 1:
+                self.context = None
+            elif re.search(r'\b(?:ANNEXURE|APPENDIX)\b', text, re.I):
+                words = page.extract_words(x_tolerance=1, y_tolerance=2)
+                # A page number before an annex heading is not a register row.
+                # Anchor this boundary to actual serial/title cell rules, while
+                # allowing the original annex's footer below continuation rows.
+                first_row_top = None
+                left, right = self.context['serial']
+                for word in sorted(words, key=lambda value: value['top']):
+                    if not (left < _center(word)[0] < right and _ITEM.fullmatch(word['text'])):
+                        continue
+                    bounds = _row_bounds(page, self.context, word)
+                    if bounds and _title_cell_is_ruled(page, self.context, *bounds):
+                        first_row_top = bounds[0]
+                        break
+                if any(re.match(r'^(?:ANNEXURE|APPENDIX)\b', word['text'], re.I)
+                       and (first_row_top is None or word['top'] < first_row_top) for word in words):
+                    self.context = None
         context = self.context
         if not context:
             return []
-        words = page.extract_words(x_tolerance=1, y_tolerance=2)
+        if words is None:
+            words = page.extract_words(x_tolerance=1, y_tolerance=2)
         if len(words) > MAX_PAGE_WORDS:
             raise ValueError('pdf_register_geometry_page_word_limit')
         serial_left, serial_right = context['serial']
@@ -212,10 +235,7 @@ class PdfRegisterGeometryExtractor:
             # labels then visually cross the header's nominal x boundary; they
             # are not deliverable titles. Require the real title-cell sides at
             # this row before using those header-derived boundaries.
-            middle = (top + bottom) / 2
-            if not all(any(edge.get('orientation') == 'v' and abs(edge['x0'] - side) < 1
-                           and edge['top'] < middle < edge['bottom'] for edge in page.edges)
-                       for side in context['title']):
+            if not _title_cell_is_ruled(page, context, top, bottom):
                 continue
             boxes = {key: (context[key][0], top, context[key][1], bottom) for key in ('serial', 'discipline', 'title', 'remarks')}
             remarks_middle = sum(context['remarks']) / 2
