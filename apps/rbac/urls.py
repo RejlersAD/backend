@@ -25,6 +25,7 @@ from .views_admin import (
     module_catalogue_sync_status, module_catalogue_sync_run,
 )
 from .database_maintenance_views import database_tables, database_table_action
+from apps.notifications.admin_history import NotificationHistoryViewSet
 
 router = DefaultRouter()
 # RBAC Core
@@ -46,6 +47,7 @@ router.register(r'analytics/predictions', PredictiveInsightViewSet, basename='pr
 router.register(r'analytics/feature-usage', FeatureUsageAnalyticsViewSet, basename='feature-usage')
 router.register(r'analytics/error-logs', ErrorLogAnalyticsViewSet, basename='error-logs')
 router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='health-checks')
+router.register(r'analytics/notification-history', NotificationHistoryViewSet, basename='notification-history')
 
 # AI Champion of the Month — gamification, tracking, cost analytics
 router.register(r'ai-champion', AIChampionViewSet, basename='ai-champion')
