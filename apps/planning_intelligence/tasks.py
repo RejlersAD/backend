@@ -7,6 +7,7 @@ from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 from apps.rbac.ai_telemetry import tracked_planning_job
+from .services.operational_jobs import update_job_progress
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,6 @@ def _execute_planning_job(task, job_id):
     """Only an accepted delivery enters workflow telemetry or domain work."""
     from .models import PlanningJob
     from .services.audit import record_event
-    from .services.operational_jobs import update_job_progress
     from .services.pipeline import analyze_documents, generate_schedule
 
     job = PlanningJob.objects.select_related('project', 'requested_by').get(pk=job_id, is_deleted=False)

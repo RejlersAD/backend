@@ -1,5 +1,6 @@
 """Analysis progress reflects real chunk work and preserves evidence on failure."""
 from copy import deepcopy
+from threading import Event, get_ident
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -25,7 +26,7 @@ class AnalysisChunkProgressTests(SimpleTestCase):
         self.events = []
         configuration = patch('apps.planning_intelligence.services.project_ai.get_project_ai_config', return_value=PROVIDER_CONFIGURATION)
         provider = patch('apps.planning_intelligence.services.project_ai.call_project_ai', return_value=EMPTY_EXTRACTION)
-        budget = patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '16'})
+        budget = patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '16', 'PLANNING_AI_CONCURRENCY': '1'})
         self.configuration, self.provider = configuration.start(), provider.start()
         budget.start()
         self.addCleanup(configuration.stop)
@@ -80,10 +81,11 @@ class AnalysisChunkProgressTests(SimpleTestCase):
         self.provider.side_effect = provider
         result = self.analyze()
         receiving = self.ai_events('receiving')
-        self.assertEqual([(row['chunk_number'], row['response_characters_received']) for row in receiving],
-                         [(1, 12), (1, 31), (2, 12), (2, 31)])
-        self.assertEqual([(row['chunks_finished'], row['chunks_processed']) for row in receiving],
-                         [(0, 0), (0, 0), (1, 1), (1, 1)])
+        for number in (1, 2):
+            updates = [row for row in receiving if row['chunk_number'] == number]
+            self.assertEqual(updates[-1]['response_characters_received'], 31)
+            self.assertTrue(all((row['chunks_finished'], row['chunks_processed']) == (number - 1, number - 1)
+                                for row in updates))
         self.assertEqual(result['ai_processing_coverage']['chunks_processed'], 2)
 
     def test_explicit_ai_disabled_does_not_emit_waiting_or_claim_complete_analysis(self):
@@ -142,6 +144,23 @@ class AnalysisChunkProgressTests(SimpleTestCase):
 
 class PersistedAnalysisProgressTests(TransactionTestCase):
     def setUp(self):
+        from ..tasks import update_job_progress
+        self.coordinator = get_ident()
+        self.saved_progress = []
+        self.progress_listener = lambda current: None
+
+        def persist_progress(*args, **kwargs):
+            self.assertEqual(get_ident(), self.coordinator)
+            self.assertFalse(connection.in_atomic_block)
+            result = update_job_progress(*args, **kwargs)
+            current = PlanningJob.objects.get(pk=args[0].pk)
+            self.saved_progress.append(current)
+            self.progress_listener(current)
+            return result
+
+        progress = patch('apps.planning_intelligence.tasks.update_job_progress', side_effect=persist_progress)
+        progress.start()
+        self.addCleanup(progress.stop)
         self.project = PlanningProject.objects.create(name='Synthetic progress project')
         self.sources = [PlanningFile.objects.create(
             project=self.project, category='sow', file=f'tests/progress-{index}.txt',
@@ -152,7 +171,7 @@ class PersistedAnalysisProgressTests(TransactionTestCase):
         provider = patch('apps.planning_intelligence.services.project_ai.call_project_ai', return_value=EMPTY_EXTRACTION)
         basis = patch('apps.planning_intelligence.services.schedule_basis.build_schedule_basis',
                       return_value=SimpleNamespace(id=9001, version=1, readiness={'ready': False}))
-        budget = patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '16'})
+        budget = patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '16', 'PLANNING_AI_CONCURRENCY': '1'})
         self.configuration, self.provider = configuration.start(), provider.start()
         basis.start()
         budget.start()
@@ -168,8 +187,10 @@ class PersistedAnalysisProgressTests(TransactionTestCase):
         # This assertion runs inside the mocked provider BEFORE it returns.
         # TransactionTestCase avoids a surrounding test transaction masking
         # a provider call that accidentally holds the database transaction open.
-        self.assertFalse(connection.in_atomic_block)
-        current = PlanningJob.objects.get(pk=job.pk)
+        # The coordinator reads the committed row; provider workers never query
+        # the database. This snapshot was captured before dispatch.
+        current = self.saved_progress[-1]
+        self.assertEqual(current.pk, job.pk)
         self.assertEqual(current.status, 'running')
         self.assertGreaterEqual(current.progress, 25)
         self.assertLess(current.progress, 85)
@@ -227,17 +248,28 @@ class PersistedAnalysisProgressTests(TransactionTestCase):
 
     def test_stream_heartbeat_is_persisted_without_increasing_chunk_completion(self):
         job, observed = self.job(), []
+        received = Event()
 
-        def provider(*args, **kwargs):
-            before = self.assert_waiting_is_saved(job, len(observed) + 1)
-            kwargs['progress_callback']({'response_characters_received': 23})
-            after = PlanningJob.objects.get(pk=job.pk)
+        def on_progress(after):
+            entry = after.progress_log[-1]
+            if entry.get('details', {}).get('chunk_status') != 'receiving':
+                return
+            before = next(row for row in reversed(self.saved_progress[:-1])
+                          if row.progress_log[-1].get('details', {}).get('chunk_status') == 'waiting')
             self.assertEqual(after.progress, before.progress)
-            self.assertEqual(after.progress_log[-1]['details']['chunk_status'], 'receiving')
-            self.assertEqual(after.progress_log[-1]['details']['response_characters_received'], 23)
-            self.assertEqual(after.progress_log[-1]['details']['chunks_finished'], len(observed))
+            self.assertEqual(entry['details']['response_characters_received'], 23)
+            self.assertEqual(entry['details']['chunks_finished'], len(observed))
             self.assertGreaterEqual(after.heartbeat_at, before.heartbeat_at)
             observed.append(after.progress)
+            received.set()
+
+        self.progress_listener = on_progress
+
+        def provider(*args, **kwargs):
+            self.assert_waiting_is_saved(job, len(observed) + 1)
+            received.clear()
+            kwargs['progress_callback']({'response_characters_received': 23})
+            self.assertTrue(received.wait(10))
             return EMPTY_EXTRACTION
 
         self.provider.side_effect = provider

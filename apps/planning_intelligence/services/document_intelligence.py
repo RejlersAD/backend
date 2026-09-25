@@ -8,6 +8,7 @@ from collections import defaultdict
 from copy import deepcopy
 
 from django.db import transaction
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -359,22 +360,26 @@ def _persist_project_record_facts(rows, project):
 def _create_conflicts(run):
     scalar_types = {'project_name', 'effective_date', 'duration_months', 'client', 'location', 'calendar'}
     grouped = defaultdict(list)
-    for fact in run.facts.filter(is_deleted=False, fact_type__in=scalar_types):
+    related = list(run.facts.filter(is_deleted=False, fact_type__in=scalar_types | {'discipline', 'exclusion'}))
+    for fact in related:
         grouped[(fact.fact_type, fact.key)].append(fact)
     conflicts = []
+    conflicted_ids = set()
     for (fact_type, key), facts in grouped.items():
+        if fact_type not in scalar_types:
+            continue
         values = {fact.normalized_value for fact in facts}
         if len(values) <= 1:
             continue
         ids = [fact.id for fact in facts]
-        run.facts.filter(id__in=ids).update(status='conflicted')
+        conflicted_ids.update(ids)
         conflicts.append(IntelligenceConflict(
             run=run, key=f'{fact_type}:{key}', fact_ids=ids,
             description=f'Conflicting {fact_type.replace("_", " ")} values were found across source evidence.',
         ))
-    exclusions = list(run.facts.filter(is_deleted=False, fact_type='exclusion'))
+    exclusions = [fact for fact in related if fact.fact_type == 'exclusion']
     for code, name in DISCIPLINE_NAME_BY_CODE.items():
-        positive = list(run.facts.filter(is_deleted=False, fact_type='discipline', key=code))
+        positive = grouped.get(('discipline', code), [])
         negative = [
             fact for fact in exclusions
             if code.replace('_', ' ') in fact.normalized_value or name.casefold() in fact.normalized_value
@@ -382,11 +387,13 @@ def _create_conflicts(run):
         if not positive or not negative:
             continue
         ids = [fact.id for fact in [*positive, *negative]]
-        run.facts.filter(id__in=ids).update(status='conflicted')
+        conflicted_ids.update(ids)
         conflicts.append(IntelligenceConflict(
             run=run, key=f'discipline:{code}', conflict_type='explicit_exclusion', fact_ids=ids,
             description=f'{name} is mentioned as scope but also appears in explicit exclusion language.',
         ))
+    if conflicted_ids:
+        run.facts.filter(id__in=conflicted_ids).update(status='conflicted')
     IntelligenceConflict.objects.bulk_create(conflicts)
     return conflicts
 
@@ -394,19 +401,31 @@ def _create_conflicts(run):
 def compile_run_intelligence(run, *, include_confirmation=True):
     """Compile current reviewed facts over the legacy-compatible intelligence payload."""
     intelligence = deepcopy((run.summary or {}).get('base_intelligence') or {})
-    facts = run.facts.filter(is_deleted=False).exclude(status__in=['rejected', 'superseded', 'conflicted'])
     scalar_output = {
         'project_name': 'detected_project_name', 'effective_date': 'detected_effective_date_text',
         'duration_months': 'detected_duration_months', 'client': 'detected_client', 'location': 'detected_location',
     }
-    unresolved_conflict_keys = set(
-        run.conflicts.filter(is_deleted=False, status__in=['open', 'ignored']).values_list('key', flat=True)
+    # Read only the values used by this projection. Large deliverable/requirement
+    # payloads stay in the database; one aggregate supplies counts across all types.
+    # Keep this snapshot local: later review edits must be visible on the next read.
+    active_facts = run.facts.filter(is_deleted=False)
+    facts = list(active_facts.filter(fact_type__in=set(scalar_output) | {'discipline', 'exclusion'})
+        .exclude(status__in=['rejected', 'superseded', 'conflicted']).only(
+            'id', 'run_id', 'fact_type', 'key', 'value', 'status', 'confidence', 'normalized_value',
+        ).order_by('-status', '-confidence', 'id'))
+    counts = active_facts.aggregate(
+        confirmed_count=Count('id', filter=Q(status='confirmed')),
+        rejected_count=Count('id', filter=Q(status='rejected')),
     )
+    conflicts = list(run.conflicts.filter(is_deleted=False, status__in=['open', 'ignored']).values(
+        'id', 'key', 'description', 'status',
+    ))
+    unresolved_conflict_keys = {item['key'] for item in conflicts}
     for fact_type, output_key in scalar_output.items():
         if any(key.startswith(f'{fact_type}:') for key in unresolved_conflict_keys):
             intelligence[output_key] = None
             continue
-        candidates = list(facts.filter(fact_type=fact_type).order_by('-status', '-confidence', 'id'))
+        candidates = [fact for fact in facts if fact.fact_type == fact_type]
         confirmed = [fact for fact in candidates if fact.status == 'confirmed']
         choice = confirmed[0] if confirmed else (candidates[0] if candidates else None)
         if choice:
@@ -414,11 +433,11 @@ def compile_run_intelligence(run, *, include_confirmation=True):
         else:
             intelligence[output_key] = None
     disciplines = intelligence.get('disciplines') or {}
-    confirmed_disciplines = facts.filter(fact_type='discipline', status='confirmed')
+    confirmed_disciplines = [fact for fact in facts if fact.fact_type == 'discipline' and fact.status == 'confirmed']
     for fact in confirmed_disciplines:
         if fact.key in disciplines:
             disciplines[fact.key]['in_scope'] = True
-    for fact in facts.filter(fact_type='exclusion', status='confirmed'):
+    for fact in (fact for fact in facts if fact.fact_type == 'exclusion' and fact.status == 'confirmed'):
         for code, name in DISCIPLINE_NAME_BY_CODE.items():
             if code in disciplines and (
                 code.replace('_', ' ') in fact.normalized_value or name.casefold() in fact.normalized_value
@@ -428,11 +447,11 @@ def compile_run_intelligence(run, *, include_confirmation=True):
         'document_intelligence_run_id': run.id,
         'evidence_summary': {
             'fact_count': run.fact_count,
-            'conflict_count': run.conflicts.filter(is_deleted=False, status='open').count(),
-            'confirmed_count': run.facts.filter(is_deleted=False, status='confirmed').count(),
-            'rejected_count': run.facts.filter(is_deleted=False, status='rejected').count(),
+            'conflict_count': sum(item['status'] == 'open' for item in conflicts),
+            **counts,
         },
-        'open_conflicts': list(run.conflicts.filter(is_deleted=False, status='open').values('id', 'key', 'description')),
+        'open_conflicts': [{key: item[key] for key in ('id', 'key', 'description')}
+                           for item in conflicts if item['status'] == 'open'],
         'processing_coverage': (run.summary or {}).get('processing_coverage') or {},
         'extraction_summary': (run.summary or {}).get('extraction_summary') or {},
     })

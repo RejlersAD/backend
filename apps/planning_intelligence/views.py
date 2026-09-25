@@ -27,6 +27,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.generics import get_object_or_404
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -36,12 +38,13 @@ from .models import PlanningAuditEvent, PlanningFile, PlanningGeneration, Planni
 from .serializers import (
     PlanningAuditEventSerializer, PlanningFileListSerializer, PlanningFileSerializer,
     PlanningGenerationEditSerializer, PlanningGenerationListSerializer,
-    PlanningGenerationSerializer, PlanningJobSerializer, PlanningProjectSerializer,
+    PlanningGenerationSerializer, PlanningJobProgressSerializer, PlanningJobSerializer, PlanningProjectSerializer,
 )
 from .services import byok_crypto, export_utils, project_ai
 from .services.project_ai_settings import settings_payload, updated_settings
 from .services.audit import record_event
 from .services.operational_jobs import dispatch_job, get_or_create_job, operation_fingerprint, workable_plan_fingerprint
+from .services.job_read import OptionalObjectJSONRenderer
 from .services.validation_engine import validate
 from .services.workflow_configuration import ensure_project_schedule_configuration
 from .tasks import parse_uploaded_planning_file
@@ -880,6 +883,26 @@ class PlanningJobViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = super().get_queryset().filter(project__in=accessible_projects(self.request.user))
         project_id = self.request.query_params.get('project')
         return queryset.filter(project_id=project_id) if project_id else queryset
+
+    @action(detail=True, methods=['get'])
+    def progress(self, request, pk=None):
+        from .services.job_read import compact_job_queryset
+        # The scoped queryset enforces the same project visibility as detail.
+        row = get_object_or_404(compact_job_queryset(self.get_queryset()), pk=pk)
+        return Response(PlanningJobProgressSerializer(row).data)
+
+    @action(detail=False, methods=['get'], renderer_classes=[OptionalObjectJSONRenderer])
+    def active(self, request):
+        from .services.job_read import compact_job_queryset, required_project_id
+        project_id = required_project_id(request)
+        queryset = self.get_queryset().filter(project_id=project_id, status__in=['queued', 'running'])
+        job_type = request.query_params.get('job_type')
+        if job_type:
+            if job_type not in dict(PlanningJob.JOB_TYPE_CHOICES):
+                raise ValidationError({'job_type': 'Choose a valid planning job type.'})
+            queryset = queryset.filter(job_type=job_type)
+        row = compact_job_queryset(queryset).order_by('-created_at', '-pk').first()
+        return Response(PlanningJobProgressSerializer(row).data if row else None)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

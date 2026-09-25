@@ -9,6 +9,7 @@ import json
 import hashlib
 import os
 import re
+from collections import deque
 from copy import deepcopy
 
 from ..config import (
@@ -248,6 +249,10 @@ def _augment_with_ai(intelligence, files, project, user, *, resume_state=None, r
     pause_error = None
     previous_failure = None
     consecutive_failures = 0
+    concurrency = project_ai.analysis_concurrency()
+    coverage['concurrency'] = concurrency
+    checkpoint_revision = 0
+    persisted_revision = -1
 
     def checkpoint_state():
         return {'schema_version': ASSERTION_SCHEMA_VERSION, 'source_fingerprint': fingerprint,
@@ -255,8 +260,10 @@ def _augment_with_ai(intelligence, files, project, user, *, resume_state=None, r
                 'partial_responses': deepcopy(partial_responses), 'chunks': deepcopy(saved)}
 
     def save_checkpoint():
-        if checkpoint_callback is not None:
+        nonlocal persisted_revision
+        if checkpoint_callback is not None and persisted_revision != checkpoint_revision:
             checkpoint_callback(checkpoint_state())
+            persisted_revision = checkpoint_revision
 
     def collect_claims(parsed, chunk):
         for raw in parsed['facts']:
@@ -283,136 +290,156 @@ def _augment_with_ai(intelligence, files, project, user, *, resume_state=None, r
         if isinstance(parsed.get('review_summary'), str):
             summaries.append(parsed['review_summary'])
 
-    for key, parsed in partial_responses.items():
-        collect_claims(parsed, source_by_key[key])
-
     def report_chunk(index, status, *, response_characters_received=0):
         if progress_callback:
             progress_callback({
                 'phase': 'ai_review', 'provider': configuration['provider'],
                 'chunks_total': len(plan), 'chunks_finished': len(coverage['chunks']),
                 'chunks_processed': coverage['chunks_processed'], 'chunks_failed': coverage['chunks_failed'],
-                'chunks_skipped': coverage['chunks_skipped'], 'chunk_number': index + 1,
+                'chunks_skipped': coverage['chunks_skipped'], 'chunks_partial': coverage['chunks_partial'],
+                'chunk_number': index + 1,
                 'chunk_status': status, 'response_characters_received': response_characters_received,
                 'characters_finished': coverage['characters_finished'], 'characters_total': coverage['characters_total'],
                 'calls_this_pass': calls, 'call_budget': budget, 'split_count': len(split_keys),
+                'active_requests': len(requests.pending) + int(status == 'waiting'),
+                'max_concurrency': concurrency,
             })
 
-    index = 0
-    while index < len(plan):
-        key, chunk = plan[index]
-        unit = {key: value for key, value in chunk.items() if key != 'text'}
-        unit['chunk_key'] = key
-        previous = saved.get(key) or {}
-        cached = previous.get('status') == 'processed'
-        if not cached and not allow_requests:
-            old_unit = previous_units.get(key) or {}
-            unit['status'] = old_unit.get('status') if old_unit.get('status') in {'failed', 'partial'} else 'skipped'
-            unit['reason'] = 'requests_disabled'
-            if unit['status'] in {'failed', 'partial'}:
-                unit['failure_from_previous_pass'] = True
-                previous_error = old_unit.get('error')
-                guidance = project_ai.ai_failure_guidance(previous_error)
-                if guidance:
-                    unit['error'] = {'provider': previous_error['provider'], **guidance}
-            coverage[{'failed': 'chunks_failed', 'partial': 'chunks_partial', 'skipped': 'chunks_skipped'}[unit['status']]] += 1
-            coverage['chunks'].append(unit)
-            coverage['characters_finished'] += len(chunk['text'])
-            report_chunk(index, unit['status'])
-            index += 1
-            continue
-        if not cached and (pause_error or calls >= budget):
-            unit['status'] = 'skipped'
-            unit['reason'] = 'provider_failure_pause' if pause_error else 'call_budget_reached'
-            coverage['chunks_skipped'] += 1
-            coverage['chunks'].append(unit)
-            coverage['characters_finished'] += len(chunk['text'])
-            report_chunk(index, 'skipped')
-            index += 1
-            continue
-        provider_error = {}
-        parsed, result = None, None
-        if not cached:
-            report_chunk(index, 'waiting')
-        try:
-            if cached:
-                parsed, result = previous['response'], {}
-            else:
-                calls += 1
-                result = project_ai.call_project_ai(
-                    project, system_prompt=_CLAUDE_SYSTEM_PROMPT,
-                    user_prompt=ai_chunk_prompt(chunk),
-                    max_tokens=CLAUDE_INTELLIGENCE_MAX_TOKENS,
-                    feature='document_intelligence', user=user, json_output=True, error_details=provider_error,
-                    **({'progress_callback': lambda event: report_chunk(
-                        index, 'receiving', response_characters_received=event['response_characters_received'],
-                    )} if progress_callback else {}),
-                )
-                parsed = json.loads(result['text']) if result else None
-            if not isinstance(parsed, dict) or not isinstance(parsed.get('facts'), list):
-                raise ValueError('Invalid extraction shape')
-        except Exception:
-            parsed = None
-        result = result if isinstance(result, dict) else {}
-        limited = (provider_error.get('code') in {'output_limit', 'input_limit'}
-                   or (result or {}).get('stop_reason') in {'max_tokens', 'model_context_window_exceeded'})
-        if limited and not provider_error:
-            provider_error = {'provider': configuration['provider'], 'code': 'output_limit', 'http_status': None,
-                              'stop_reason': result['stop_reason']}
-        children = _split_ai_chunk(key, chunk) if limited else None
-        if children:
-            previous_failure, consecutive_failures = None, 0
-            if parsed is not None:
-                partial_responses[key] = parsed
-                collect_claims(parsed, chunk)
-            split_keys.add(key)
-            parents[key] = chunk
-            saved.pop(key, None)
-            plan[index:index + 1] = children
-            coverage['chunks_total'] = len(plan)
-            coverage['split_count'] = len(split_keys)
-            save_checkpoint()
-            report_chunk(index, 'splitting')
-            continue
-        if parsed is None:
-            unit['status'] = 'failed'
-            if provider_error:
-                unit['error'] = {**provider_error, **(project_ai.ai_failure_guidance(provider_error) or {})}
-            coverage['chunks_failed'] += 1
-            coverage['chunks'].append(unit)
-            coverage['characters_finished'] += len(chunk['text'])
-            signature = (provider_error.get('provider'), provider_error.get('code'), provider_error.get('http_status'))
-            consecutive_failures = consecutive_failures + 1 if signature == previous_failure else 1
-            previous_failure = signature
-            if project_ai.pauses_analysis(provider_error, consecutive_failures=consecutive_failures):
-                pause_error = {**provider_error, **(project_ai.ai_failure_guidance(provider_error) or {})}
-                coverage['pause_reason'] = 'provider_error'
-                coverage['pause_error'] = pause_error
-                # Preserve the successful checkpoint even if the pass paused
-                # before producing another usable response.
-                save_checkpoint()
-            report_chunk(index, 'failed')
-            index += 1
-            continue
-        if not cached:
-            previous_failure, consecutive_failures = None, 0
-        if limited:
-            unit['status'] = 'partial'
-            unit['reason'] = 'AI response reached its output or context limit.'
-            unit['error'] = {**provider_error, **(project_ai.ai_failure_guidance(provider_error) or {})}
-            partial_responses[key] = parsed
-            coverage['chunks_partial'] += 1
-        else:
-            unit['status'] = 'processed'
-            coverage['chunks_processed'] += 1
-            coverage['characters_processed'] += len(chunk['text'])
-            saved[key] = {'status': 'processed', 'response': parsed}
-        save_checkpoint()
+    def finish(key, chunk, status, *, reason=None, error=None, historical=False):
+        unit = {field: value for field, value in chunk.items() if field != 'text'}
+        unit.update(chunk_key=key, status=status)
+        if reason:
+            unit['reason'] = reason
+        if error:
+            unit['error'] = error
+        if historical:
+            unit['failure_from_previous_pass'] = True
+        coverage[{'failed': 'chunks_failed', 'partial': 'chunks_partial',
+                  'skipped': 'chunks_skipped', 'processed': 'chunks_processed'}[status]] += 1
         coverage['chunks'].append(unit)
         coverage['characters_finished'] += len(chunk['text'])
-        report_chunk(index, 'cached' if cached else unit['status'])
-        collect_claims(parsed, chunk)
-        index += 1
+        if status == 'processed':
+            coverage['characters_processed'] += len(chunk['text'])
+
+    def report(key, status, **kwargs):
+        report_chunk(next(index for index, (candidate, _) in enumerate(plan) if candidate == key), status, **kwargs)
+
+    ready = deque(key for key, _ in plan)
+    if checkpoint:
+        # Continuation normally creates a NEW run. Make its inherited completed
+        # work durable before a provider wait or progress callback can fail.
+        save_checkpoint()
+    # Workers only perform provider I/O. The coordinator applies every result,
+    # stream update, telemetry row and checkpoint, including out-of-order success.
+    with project_ai.AnalysisRequests(project, user, concurrency) as requests:
+        while ready or requests.pending:
+            while ready and len(requests.pending) < concurrency:
+                # A peer may have failed while the previous result checkpoint
+                # was being persisted. Observe it before starting replacement work.
+                if requests.has_completed():
+                    break
+                key = ready.popleft()
+                chunk = source_by_key[key]
+                if key in saved:
+                    finish(key, chunk, 'processed')
+                    report(key, 'cached')
+                    continue
+                if not allow_requests:
+                    old_unit = previous_units.get(key) or {}
+                    status = old_unit.get('status') if old_unit.get('status') in {'failed', 'partial'} else 'skipped'
+                    error = None
+                    if status in {'failed', 'partial'}:
+                        previous_error = old_unit.get('error')
+                        guidance = project_ai.ai_failure_guidance(previous_error)
+                        if guidance:
+                            error = {'provider': previous_error['provider'], **guidance}
+                    finish(key, chunk, status, reason='requests_disabled', error=error, historical=status in {'failed', 'partial'})
+                    report(key, status)
+                    continue
+                if pause_error or calls >= budget:
+                    finish(key, chunk, 'skipped', reason='provider_failure_pause' if pause_error else 'call_budget_reached')
+                    report(key, 'skipped')
+                    continue
+                calls += 1
+                report(key, 'waiting')
+                requests.submit(key, system_prompt=_CLAUDE_SYSTEM_PROMPT,
+                                user_prompt=ai_chunk_prompt(chunk),
+                                max_tokens=CLAUDE_INTELLIGENCE_MAX_TOKENS,
+                                feature='document_intelligence', json_output=True)
+            if not requests.pending:
+                continue
+            progress, completed = requests.receive()
+            for key, count in progress.items():
+                report(key, 'receiving', response_characters_received=count)
+            # Do not start replacements until all available outcomes have been
+            # checked for a systemic failure. Already-started calls are drained.
+            for key, (result, provider_error, usage) in completed:
+                requests.persist_usage(usage)
+                chunk = source_by_key[key]
+                try:
+                    parsed = json.loads(result['text']) if result else None
+                    if not isinstance(parsed, dict) or not isinstance(parsed.get('facts'), list):
+                        raise ValueError('Invalid extraction shape')
+                except (ValueError, TypeError, KeyError):
+                    parsed = None
+                result = result if isinstance(result, dict) else {}
+                limited = (provider_error.get('code') in {'output_limit', 'input_limit'}
+                           or result.get('stop_reason') in {'max_tokens', 'model_context_window_exceeded'})
+                if limited and not provider_error:
+                    provider_error = {'provider': configuration['provider'], 'code': 'output_limit', 'http_status': None,
+                                      'stop_reason': result['stop_reason']}
+                children = _split_ai_chunk(key, chunk) if limited else None
+                if children:
+                    previous_failure, consecutive_failures = None, 0
+                    if parsed is not None:
+                        partial_responses[key] = parsed
+                    split_keys.add(key)
+                    parents[key] = chunk
+                    saved.pop(key, None)
+                    index = next(index for index, (candidate, _) in enumerate(plan) if candidate == key)
+                    plan[index:index + 1] = children
+                    source_by_key.update(children)
+                    ready.extendleft(child_key for child_key, _ in reversed(children))
+                    coverage['chunks_total'] = len(plan)
+                    coverage['split_count'] = len(split_keys)
+                    checkpoint_revision += 1
+                    save_checkpoint()
+                    report_chunk(index, 'splitting')
+                    continue
+                if parsed is None:
+                    error = {**provider_error, **(project_ai.ai_failure_guidance(provider_error) or {})} if provider_error else None
+                    finish(key, chunk, 'failed', error=error)
+                    signature = (provider_error.get('provider'), provider_error.get('code'), provider_error.get('http_status'))
+                    consecutive_failures = consecutive_failures + 1 if signature == previous_failure else 1
+                    previous_failure = signature
+                    if project_ai.pauses_analysis(provider_error, consecutive_failures=consecutive_failures):
+                        pause_error = {**provider_error, **(project_ai.ai_failure_guidance(provider_error) or {})}
+                        coverage['pause_reason'] = 'provider_error'
+                        coverage['pause_error'] = pause_error
+                        # Preserve the successful checkpoint even if the pass paused
+                        # before producing another usable response.
+                        save_checkpoint()
+                    report(key, 'failed')
+                    continue
+                previous_failure, consecutive_failures = None, 0
+                if limited:
+                    partial_responses[key] = parsed
+                    finish(key, chunk, 'partial', reason='AI response reached its output or context limit.',
+                           error={**provider_error, **(project_ai.ai_failure_guidance(provider_error) or {})})
+                else:
+                    saved[key] = {'status': 'processed', 'response': parsed}
+                    finish(key, chunk, 'processed')
+                checkpoint_revision += 1
+                save_checkpoint()
+                report(key, 'partial' if limited else 'processed')
+    # Keep evidence and summaries deterministic regardless of response order.
+    for key in sorted(partial_responses, key=lambda item: tuple(map(int, item.split('.')))):
+        collect_claims(partial_responses[key], source_by_key[key])
+    for key, chunk in plan:
+        if key in saved:
+            collect_claims(saved[key]['response'], chunk)
+    order = {key: index for index, (key, _) in enumerate(plan)}
+    coverage['chunks'].sort(key=lambda unit: order[unit['chunk_key']])
     coverage['status'] = 'complete' if coverage['chunks_processed'] == len(plan) else 'partial'
     coverage['chunks_remaining'] = len(plan) - coverage['chunks_processed']
     coverage['resume_available'] = coverage['chunks_remaining'] > 0

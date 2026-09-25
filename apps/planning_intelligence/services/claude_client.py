@@ -159,6 +159,7 @@ def call_claude(
     user=None,
     error_details=None,
     progress_callback=None,
+    usage_callback=None,
 ) -> dict | None:
     """
     Make one Claude Messages API call scoped to `project`'s BYOK key.
@@ -251,6 +252,7 @@ def call_claude(
         project=project, user=user, model=model, feature=feature,
         tokens_input=tokens_input, tokens_output=tokens_output,
         latency_ms=latency_ms, success=success, error_code=error_code,
+        usage_callback=usage_callback,
     )
 
     if error_details is not None and failure:
@@ -268,13 +270,13 @@ def call_claude(
     }
 
 
-def _log_usage(*, project, user, model, feature, tokens_input, tokens_output, latency_ms, success, error_code):
+def _log_usage(*, project, user, model, feature, tokens_input, tokens_output, latency_ms, success, error_code, usage_callback=None):
     if user is None:
         # No authenticated user context (e.g. background/system call) — skip
         # logging rather than writing a row with a null FK.
         return
     from apps.rbac.ai_telemetry import record_usage
-    record_usage(user=user, provider='anthropic', model=model, feature=feature,
+    (usage_callback or record_usage)(user=user, provider='anthropic', model=model, feature=feature,
                  application='planning_intelligence', tokens_input=tokens_input,
                  tokens_output=tokens_output, latency_ms=latency_ms,
                  success=success, error_code=error_code,

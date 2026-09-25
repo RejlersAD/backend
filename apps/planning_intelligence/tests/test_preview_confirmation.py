@@ -2,18 +2,32 @@
 from copy import deepcopy
 from unittest.mock import patch
 
+from django.test import override_settings
+from django.urls import include, path
 from django.utils import timezone
+from rest_framework.routers import DefaultRouter
 from rest_framework.test import APIClient
 
 from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, RolePermission, UserProfile, UserRole
 from apps.rbac.module_actions import ensure_module_actions
+from apps.rbac.route_guard import secure_module_endpoints
 
+from ..intelligence_views import DocumentIntelligenceRunViewSet, IntelligenceConflictViewSet, IntelligenceFactViewSet
 from ..models import DocumentIntelligenceRun, IntelligenceConflict, IntelligenceFact, PlanningAuditEvent
 from ..services.preview_confirmation import current_confirmed_preview, source_fingerprint
 from ..services.document_intelligence import run_document_intelligence
 from .test_document_intelligence import DocumentIntelligenceFixture
 
 
+router = DefaultRouter()
+router.register('intelligence-runs', DocumentIntelligenceRunViewSet, basename='preview-retention-run')
+router.register('intelligence-facts', IntelligenceFactViewSet, basename='preview-retention-fact')
+router.register('intelligence-conflicts', IntelligenceConflictViewSet, basename='preview-retention-conflict')
+urlpatterns = [path('api/v1/planning-intelligence/', include(router.urls))]
+secure_module_endpoints(urlpatterns)
+
+
+@override_settings(ROOT_URLCONF=__name__)
 class PreviewConfirmationTests(DocumentIntelligenceFixture):
     def setUp(self):
         super().setUp()
@@ -65,6 +79,12 @@ class PreviewConfirmationTests(DocumentIntelligenceFixture):
 
     def confirm(self):
         return self.client.post(self.url, {'preview': self.selection}, format='json')
+
+    def grant_fact_rejection(self):
+        # The existing route policy treats an explicit rejected status as a
+        # decision. Review-retention fixtures must carry that capability.
+        for permission in Permission.objects.filter(module__code='planning_package', action='approve', is_active=True):
+            RolePermission.objects.get_or_create(role=self.role, permission=permission)
 
     def test_confirm_restores_edits_and_preserves_raw_evidence(self):
         response = self.confirm()
@@ -224,13 +244,14 @@ class PreviewConfirmationTests(DocumentIntelligenceFixture):
         return self.run
 
     def test_reanalysis_preserves_exact_reviews_and_confirmed_preview_after_reload(self):
+        self.grant_fact_rejection()
         previous = self.analysed_preview()
         requirement = previous.facts.get(fact_type='requirement')
         response = self.client.post(
             f'/api/v1/planning-intelligence/intelligence-facts/{requirement.pk}/review/',
             {'status': 'rejected'}, format='json',
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.data)
         self.selection['detected_project_name'] = 'Planner reviewed title'
         self.assertEqual(self.confirm().status_code, 200)
         previous.refresh_from_db()
@@ -273,6 +294,7 @@ class PreviewConfirmationTests(DocumentIntelligenceFixture):
                 self.assertFalse(current.facts.filter(reviewed_at__isnull=False).exists())
 
     def test_review_changed_after_confirmation_is_retained_without_stale_preview(self):
+        self.grant_fact_rejection()
         previous = self.analysed_preview()
         self.assertEqual(self.confirm().status_code, 200)
         requirement = previous.facts.get(fact_type='requirement')
@@ -280,12 +302,23 @@ class PreviewConfirmationTests(DocumentIntelligenceFixture):
             f'/api/v1/planning-intelligence/intelligence-facts/{requirement.pk}/review/',
             {'status': 'rejected'}, format='json',
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.data)
 
         current, _ = run_document_intelligence(self.project, user=self.owner, allow_ai=False)
 
         self.assertEqual(current.facts.get(fact_type='requirement').status, 'rejected')
         self.assertNotIn('preview_confirmation', current.summary)
+
+    def test_source_rejection_retains_existing_decision_permission_guard(self):
+        response = self.client.post(
+            f'/api/v1/planning-intelligence/intelligence-facts/{self.fact.pk}/review/',
+            {'status': 'rejected'}, format='json',
+        )
+        self.assertEqual(response.status_code, 403, response.data)
+        self.fact.refresh_from_db()
+        self.assertEqual(self.fact.status, 'detected')
+        self.assertIsNone(self.fact.reviewed_at)
+        self.assertFalse(PlanningAuditEvent.objects.filter(action='intelligence.fact_rejected').exists())
 
     def test_new_assertions_keep_old_decisions_but_require_preview_confirmation(self):
         self.analysed_preview()

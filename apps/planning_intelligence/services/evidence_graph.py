@@ -47,37 +47,50 @@ def _require_write(project, actor):
         raise EvidenceError('Your project permissions do not allow evidence changes.', 'evidence_write_forbidden', 403)
 
 
-def source_manifest(project):
-    """Read-only freshness token; original file hashes are captured at refresh."""
+def _source_manifest(files):
     return [{'id': file.pk, 'filename': file.original_filename, 'category': file.category, 'storage_name': file.file.name,
              'size': file.size_bytes, 'updated_at': file.updated_at.isoformat(), 'parse_status': file.parse_status,
              'text_sha256': hashlib.sha256((file.extracted_text or '').encode('utf-8')).hexdigest()}
-            for file in project.files.filter(is_deleted=False).order_by('pk')]
+            for file in files]
 
 
-def input_fingerprint(project):
+def source_manifest(project):
+    """Read-only freshness token; original file hashes are captured at refresh."""
+    return _source_manifest(project.files.filter(is_deleted=False).order_by('pk'))
+
+
+def _input_snapshot(project, *, with_profiles=False):
+    """Read related inputs once per operation, never cache across review edits."""
+    files = project.files.filter(is_deleted=False).order_by('pk')
+    if with_profiles:
+        files = files.select_related('document_profile')
+    files = list(files)
+    manifest = _source_manifest(files)
     tasks = project.simple_planning_state.get('tasks') or []
     fields = ('id', 'title', 'source_activity_id', 'source_evidence', 'duration_evidence', 'duration_days', 'duration_unit',
               'activity_type', 'depends_on', 'dependency_details', 'calendar_id', 'constraint_type', 'constraint_date')
-    run = project.intelligence_runs.filter(status='succeeded', is_deleted=False).order_by('-pk').first()
+    run = project.intelligence_runs.filter(status='succeeded', is_deleted=False).only('id', 'project_id', 'engine_version').order_by('-pk').first()
     # Analysis can change without a new upload. Include the actual assertions,
     # including rejected/deleted states, so bulk review updates also invalidate
     # downstream knowledge even when a caller does not touch updated_at.
-    analysis = None if run is None else {
-        'id': run.pk, 'engine_version': run.engine_version,
-        'facts': list(run.facts.order_by('pk').values(
+    facts = [] if run is None else list(run.facts.order_by('pk').values(
             'id', 'fact_type', 'key', 'value', 'source_file_id', 'source_locator',
-            'source_excerpt', 'extraction_method', 'status', 'is_deleted')),
-    }
-    return _hash({'sources': source_manifest(project), 'schema': SCHEMA_VERSION, 'rules': RULE_VERSION,
+            'source_excerpt', 'extraction_method', 'status', 'is_deleted'))
+    analysis = None if run is None else {'id': run.pk, 'engine_version': run.engine_version, 'facts': facts}
+    fingerprint = _hash({'sources': manifest, 'schema': SCHEMA_VERSION, 'rules': RULE_VERSION,
                   'register_evidence_version': 'explicit-cells-1',
                   'analysis': analysis,
                   'tasks': [{key: row.get(key) for key in fields} for row in tasks],
                   'start': project.effective_date, 'finish': project.planned_end_date,
                   'calendar': project.calendar_overrides})
+    return {'fingerprint': fingerprint, 'manifest': manifest, 'files': files, 'run': run, 'facts': facts}
 
 
-def _document(graph, file):
+def input_fingerprint(project):
+    return _input_snapshot(project)['fingerprint']
+
+
+def _document_candidate(graph, file):
     from .extraction_coverage import public_coverage
     text = file.extracted_text or ''
     text_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
@@ -93,14 +106,21 @@ def _document(graph, file):
         pass
     profile = getattr(file, 'document_profile', None)
     doc_id = _id(graph.project_id, file.pk, file.file.name, digest, text_hash, SCHEMA_VERSION)
-    document, _ = EvidenceDocumentVersion.objects.get_or_create(pk=doc_id, defaults={
-        'graph': graph, 'source_file': file, 'filename': file.original_filename,
-        'storage_name': file.file.name, 'file_sha256': digest, 'text_sha256': text_hash,
-        'extracted_text': text, 'integrity_status': integrity,
-        'extraction_method': getattr(profile, 'extraction_method', ''),
-        'coverage': public_coverage(getattr(profile, 'extraction_coverage', {}) or {}),
-    })
-    return document
+    return EvidenceDocumentVersion(id=doc_id, graph=graph, source_file=file, filename=file.original_filename,
+        storage_name=file.file.name, file_sha256=digest, text_sha256=text_hash,
+        extracted_text=text, integrity_status=integrity,
+        extraction_method=getattr(profile, 'extraction_method', ''),
+        coverage=public_coverage(getattr(profile, 'extraction_coverage', {}) or {}))
+
+
+def _documents(candidates):
+    # The caller holds the project lock and has verified every original upload.
+    # Resolve immutable versions in one read instead of one query per source.
+    existing = EvidenceDocumentVersion.objects.in_bulk([item.pk for item in candidates])
+    missing = [item for item in candidates if item.pk not in existing]
+    if missing:
+        EvidenceDocumentVersion.objects.bulk_create(missing, batch_size=500)
+    return {item.source_file_id: existing.get(item.pk, item) for item in candidates}
 
 
 def _source(document, reference):
@@ -286,16 +306,18 @@ def refresh_evidence_graph(project, actor):
     _require_write(project, actor)
     project = PlanningProject.objects.select_for_update().get(pk=project.pk)
     graph, _ = EvidenceGraph.objects.get_or_create(project=project, defaults={'schema_version': SCHEMA_VERSION, 'rule_version': RULE_VERSION})
-    fingerprint = input_fingerprint(project)
+    inputs = _input_snapshot(project, with_profiles=True)
+    fingerprint = inputs['fingerprint']
     # Explicit refresh also rechecks original storage bytes. Otherwise restoring
     # an unavailable upload (or replacing bytes outside RADAI) would remain an
     # idempotent no-op forever despite the displayed integrity review issue.
-    documents = {file.pk: _document(graph, file) for file in project.files.filter(is_deleted=False).select_related('document_profile')}
+    candidates = [_document_candidate(graph, file) for file in inputs['files']]
     current_documents = set(graph.nodes.filter(current=True, kind='document').values_list('document_version_id', flat=True))
-    if graph.source_fingerprint == fingerprint and current_documents == {item.pk for item in documents.values()}:
+    if graph.source_fingerprint == fingerprint and current_documents == {item.pk for item in candidates}:
         return graph
+    documents = _documents(candidates)
     from .document_plan import project_document_plan
-    plan = project_document_plan(project)
+    plan = project_document_plan(project, files=inputs['files'])
     builder = GraphBuilder(graph, documents)
     for document in documents.values():
         builder.node(kind='document', entity=f'document:{document.pk}', name=document.filename,
@@ -345,12 +367,14 @@ def refresh_evidence_graph(project, actor):
     builder.fact('project', project.name, 'scope_complete', None)
     # Preserve all other supported intelligence assertions without allowing an
     # AI score or a previous inferred template to establish accepted knowledge.
-    run = project.intelligence_runs.filter(status='succeeded', is_deleted=False).order_by('-pk').first()
+    run = inputs['run']
     if run:
-        for item in run.facts.filter(is_deleted=False).exclude(status__in=['superseded', 'rejected']).iterator():
-            refs = [{'file_id': item.source_file_id, 'locator': item.source_locator, 'excerpt': item.source_excerpt,
-                     'extraction_method': item.extraction_method, 'extraction_run_id': str(run.pk)}]
-            builder.fact(f'assertion:{item.source_file_id}:{item.key}', str(item.key), item.fact_type, item.value, refs)
+        for item in inputs['facts']:
+            if item['is_deleted'] or item['status'] in {'superseded', 'rejected'}:
+                continue
+            refs = [{'file_id': item['source_file_id'], 'locator': item['source_locator'], 'excerpt': item['source_excerpt'],
+                     'extraction_method': item['extraction_method'], 'extraction_run_id': str(run.pk)}]
+            builder.fact(f"assertion:{item['source_file_id']}:{item['key']}", str(item['key']), item['fact_type'], item['value'], refs)
     previous_ids = set(graph.nodes.filter(current=True).values_list('id', flat=True))
     graph.nodes.filter(current=True).update(current=False)
     graph.edges.filter(current=True).update(current=False)
@@ -376,7 +400,7 @@ def refresh_evidence_graph(project, actor):
             pending.remove(edge)
     graph.edges.filter(relationship='same_as', source__current=True, target__current=True).update(current=True)
     graph.revision += 1
-    graph.source_fingerprint, graph.source_manifest = fingerprint, source_manifest(project)
+    graph.source_fingerprint, graph.source_manifest = fingerprint, inputs['manifest']
     graph.schema_version, graph.rule_version, graph.built_at = SCHEMA_VERSION, RULE_VERSION, timezone.now()
     graph.save()
     record_event(project=project, actor=actor, action='evidence_graph.refreshed', entity=graph,

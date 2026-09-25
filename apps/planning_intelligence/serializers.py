@@ -305,6 +305,49 @@ class PlanningGenerationEditSerializer(serializers.Serializer):
         return value
 
 
+class PlanningJobProgressSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    project = serializers.IntegerField(source='project_id', read_only=True)
+    job_type = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    progress = serializers.IntegerField(read_only=True)
+    message = serializers.CharField(read_only=True)
+    error_code = serializers.CharField(read_only=True)
+    error_message = serializers.CharField(source='_compact_error_message', read_only=True)
+    heartbeat_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    attempt_count = serializers.IntegerField(read_only=True)
+    started_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    finished_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
+    terminal = serializers.SerializerMethodField()
+    poll_url = serializers.SerializerMethodField()
+    detail_url = serializers.SerializerMethodField()
+    api_contract_version = serializers.SerializerMethodField()
+    progress_context = serializers.SerializerMethodField()
+    result_refs = serializers.SerializerMethodField()
+
+    def get_terminal(self, obj):
+        return obj['status'] in {'succeeded', 'failed', 'cancelled'}
+
+    def get_poll_url(self, obj):
+        return f"/api/v1/planning-intelligence/jobs/{obj['id']}/progress/"
+
+    def get_detail_url(self, obj):
+        return f"/api/v1/planning-intelligence/jobs/{obj['id']}/"
+
+    def get_api_contract_version(self, obj):
+        return 5
+
+    def get_progress_context(self, obj):
+        from .services.job_read import progress_context
+        return progress_context(obj)
+
+    def get_result_refs(self, obj):
+        from .services.job_read import result_references
+        return result_references(obj)
+
+
 class PlanningJobSerializer(serializers.ModelSerializer):
     api_contract_version = serializers.SerializerMethodField()
     poll_url = serializers.SerializerMethodField()

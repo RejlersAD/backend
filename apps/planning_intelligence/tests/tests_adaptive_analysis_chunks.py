@@ -33,7 +33,7 @@ class AdaptiveAnalysisChunkTests(SimpleTestCase):
         configuration = patch.object(intelligence.project_ai, 'get_project_ai_config', return_value=deepcopy(CONFIGURATION))
         self.configuration = configuration.start()
         self.addCleanup(configuration.stop)
-        budget = patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '16'})
+        budget = patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '16', 'PLANNING_AI_CONCURRENCY': '1'})
         budget.start()
         self.addCleanup(budget.stop)
 

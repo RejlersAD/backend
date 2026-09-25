@@ -20,11 +20,14 @@ VERSION = 'document-evidence-v2'
 NOT_SPECIFIED = 'Not Specified'
 
 
-def source_files(project):
+def source_files(project, *, files=None):
     from .reference_schedule_geometry import cached_schedule_geometry
     from .register_geometry_cache import cached_register_geometry
     sources = []
-    for item in project.files.filter(is_deleted=False).select_related('document_profile').order_by('pk'):
+    records = project.files.filter(is_deleted=False).select_related('document_profile').order_by('pk') if files is None else files
+    for item in records:
+        if item.project_id != project.pk or item.is_deleted:
+            continue
         source = {'id': item.pk, 'filename': item.original_filename, 'category': item.category,
                   'project_id': project.pk, 'parse_status': item.parse_status, 'text': item.extracted_text,
                   'updated_at': item.updated_at.isoformat()}
@@ -242,8 +245,8 @@ def build_document_plan(files, *, project_name='', project_id=None, additional_r
     }
 
 
-def project_document_plan(project, intelligence=None):
-    files = source_files(project)
+def project_document_plan(project, intelligence=None, *, files=None):
+    files = source_files(project, files=files)
     facts = []
     run_id = (intelligence or {}).get('document_intelligence_run_id')
     run = project.intelligence_runs.filter(pk=run_id, status='succeeded', is_deleted=False).first() if run_id else None

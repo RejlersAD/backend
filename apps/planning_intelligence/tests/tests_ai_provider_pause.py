@@ -86,7 +86,7 @@ class ResumableProviderPauseTests(SimpleTestCase):
                 patch.object(intelligence, 'AI_MIN_CHUNK_CHARS', 25),
                 patch.object(intelligence.project_ai, 'get_project_ai_config', return_value=self.configuration),
                 patch.object(intelligence.project_ai, 'call_project_ai', side_effect=self.provider),
-                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64'})]:
+                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64', 'PLANNING_AI_CONCURRENCY': '1'})]:
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -152,12 +152,13 @@ class ResumableProviderPauseTests(SimpleTestCase):
         self.assertEqual(result['ai_processing_coverage']['chunks_processed'], 3)
         self.assertNotIn('pause_error', result['ai_processing_coverage'])
 
-    def test_transient_timeout_is_not_misclassified_as_systemic_rejection(self):
+    def test_repeated_timeouts_pause_without_misclassifying_the_failure(self):
         self.handler = lambda payload, options: self.failure(options, 'timeout', None)
         result = self.analyze()
-        self.assertEqual(len(self.requests), 5)
-        self.assertEqual(result['ai_processing_coverage']['chunks_failed'], 5)
-        self.assertNotIn('pause_error', result['ai_processing_coverage'])
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(result['ai_processing_coverage']['chunks_failed'], 2)
+        self.assertEqual(result['ai_processing_coverage']['chunks_skipped'], 3)
+        self.assertEqual(result['ai_processing_coverage']['pause_error']['code'], 'timeout')
 
     def test_processed_chunks_after_failed_early_section_survive_later_pause(self):
         self.handler = lambda payload, options: (self.failure(options, 'timeout', None)
@@ -208,11 +209,12 @@ class ResumableProviderPauseTests(SimpleTestCase):
         self.assertEqual(refreshed['ai_evidence_facts'], first['ai_evidence_facts'])
         self.assertEqual(len(refreshed['ai_evidence_facts']), 1)
         coverage = refreshed['ai_processing_coverage']
-        self.assertEqual((coverage['chunks_processed'], coverage['chunks_failed'], coverage['chunks_remaining']), (1, 4, 4))
+        self.assertEqual((coverage['chunks_processed'], coverage['chunks_failed'], coverage['chunks_remaining']), (1, 2, 4))
         self.assertEqual(coverage['calls_this_pass'], 0)
         self.assertTrue(coverage['cached_only'])
         self.assertTrue(coverage['resume_available'])
-        self.assertTrue(all(unit['failure_from_previous_pass'] for unit in coverage['chunks'][1:]))
+        self.assertTrue(all(unit['failure_from_previous_pass'] for unit in coverage['chunks'] if unit['status'] == 'failed'))
+        self.assertEqual(coverage['chunks_skipped'], 2)
         self.assertEqual(old_checkpoint, first['ai_checkpoint'])
         self.assertEqual(old_coverage, first['ai_processing_coverage'])
 
@@ -286,6 +288,34 @@ class ResumableProviderPauseTests(SimpleTestCase):
 
 
 class CachedOnlyRunRecoveryTests(TestCase):
+    def test_interrupted_continuation_persists_inherited_checkpoint_on_the_new_run(self):
+        from ..services.document_intelligence import run_document_intelligence
+
+        project = PlanningProject.objects.create(name='Synthetic interrupted continuation')
+        for index in range(2):
+            PlanningFile.objects.create(project=project, category='sow', original_filename=f'scope-{index}.txt',
+                file=f'scope-{index}.txt', parse_status='done', extracted_text=f'Prepare deliverable {index}.')
+
+        def interrupted(event):
+            if event.get('chunk_status') == 'waiting':
+                raise RuntimeError('Synthetic coordinator interruption')
+
+        with patch.object(project_ai, 'get_project_ai_config', return_value={'provider': 'anthropic', 'model': 'synthetic'}), \
+                patch.object(project_ai, 'call_project_ai', return_value={'text': '{"facts": []}'}) as provider:
+            with patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '1'}):
+                original, _ = run_document_intelligence(project)
+            provider.reset_mock()
+            with self.assertRaisesMessage(RuntimeError, 'Synthetic coordinator interruption'):
+                run_document_intelligence(project, resume_run=original, progress_callback=interrupted)
+            provider.assert_not_called()
+            failed = project.intelligence_runs.exclude(pk=original.pk).get()
+            self.assertEqual(failed.status, 'failed')
+            self.assertEqual(failed.summary['ai_checkpoint'], original.summary['ai_checkpoint'])
+            recovered, result = run_document_intelligence(project, resume_run=failed)
+            provider.assert_called_once()
+        self.assertNotEqual(recovered.pk, failed.pk)
+        self.assertEqual(result['processing_coverage']['ai_processing']['chunks_processed'], 2)
+
     def test_new_run_rebuilds_facts_from_saved_responses_and_preserves_original_run(self):
         from ..services.document_intelligence import run_document_intelligence
 
@@ -306,7 +336,7 @@ class CachedOnlyRunRecoveryTests(TestCase):
         with patch.object(intelligence, 'CLAUDE_MAX_INPUT_CHARS', 100), \
                 patch.object(intelligence.project_ai, 'get_project_ai_config', return_value=configuration), \
                 patch.object(intelligence.project_ai, 'call_project_ai', side_effect=first_pass) as provider, \
-                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64'}):
+                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64', 'PLANNING_AI_CONCURRENCY': '1'}):
             original, _ = run_document_intelligence(project)
             original_summary = deepcopy(original.summary)
             original_fact_count = original.facts.count()
@@ -320,7 +350,8 @@ class CachedOnlyRunRecoveryTests(TestCase):
         self.assertEqual(refreshed.facts.filter(extraction_method='ai', fact_type='deliverable').count(), 1)
         ai = result['processing_coverage']['ai_processing']
         self.assertEqual((ai['chunks_processed'], ai['chunks_remaining'], ai['calls_this_pass']), (1, 4, 0))
-        self.assertEqual(ai['chunks_failed'], 4)
+        self.assertEqual(ai['chunks_failed'], 2)
+        self.assertEqual(ai['chunks_skipped'], 2)
         self.assertEqual(ai['chunks'][1]['error']['code'], 'timeout')
         self.assertTrue(ai['chunks'][1]['failure_from_previous_pass'])
         self.assertTrue(ai['cached_only'])
@@ -362,7 +393,7 @@ class MultiDocumentProviderRecoveryTests(SimpleTestCase):
         for patcher in [
                 patch.object(intelligence, 'CLAUDE_MAX_INPUT_CHARS', 40),
                 patch.object(project_ai, 'get_project_ai_config', return_value=self.configuration),
-                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64'})]:
+                patch.dict('os.environ', {'PLANNING_AI_MAX_CHUNKS': '64', 'PLANNING_AI_CONCURRENCY': '1'})]:
             patcher.start()
             self.addCleanup(patcher.stop)
         patcher = patch.object(project_ai, 'call_project_ai', side_effect=self.literal_response)
