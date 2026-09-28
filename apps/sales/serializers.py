@@ -3,8 +3,8 @@ Sales Serializers
 DRF serializers for Sales Management API
 """
 
-import re
-from datetime import datetime
+from .email_extraction import extract_email_information
+from .email_permissions import can_create_email_opportunity
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -30,6 +30,7 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
         source='duplicate_of.subject', read_only=True,
     )
     extracted_information = serializers.SerializerMethodField()
+    can_create_opportunity = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesEmailIntake
@@ -40,125 +41,23 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             'opportunity_name', 'reviewed_by', 'reviewed_by_name',
             'reviewed_at', 'resolution_note', 'duplicate_of',
             'duplicate_of_subject', 'created_at', 'updated_at',
-            'extracted_information',
+            'extracted_information', 'can_create_opportunity',
         ]
         read_only_fields = fields
 
     def get_extracted_information(self, obj):
-        content = f'{obj.subject}\n{obj.body_preview}'
-        lower_content = content.lower()
-        request_types = [
-            ('rfq', 'Request for quotation'),
-            ('request for quotation', 'Request for quotation'),
-            ('rfp', 'Request for proposal'),
-            ('request for proposal', 'Request for proposal'),
-            ('itt', 'Invitation to tender'),
-            ('tender', 'Tender'),
-            ('clarification', 'Clarification'),
-            ('purchase order', 'Purchase order'),
-            ('complaint', 'Complaint'),
-            ('invoice', 'Invoice'),
-            ('meeting', 'Meeting request'),
-        ]
-        request_type = next(
-            (label for keyword, label in request_types if keyword in lower_content),
-            'General client email',
+        return extract_email_information(
+            subject=obj.subject,
+            body_text=obj.body_preview,
+            sender_email=obj.sender_email,
         )
-        direct_reference_match = re.search(
-            r'\b((?:RFQ|RFP|ITT)[-_/][A-Z0-9][A-Z0-9._/-]{2,})\b',
-            content,
-            flags=re.IGNORECASE,
-        )
-        labelled_reference_match = re.search(
-            r'\b(?:RFQ|RFP|ITT|Tender)\s*(?:No\.?|Number|Ref(?:erence)?|#)\s*[:#-]?\s*'
-            r'([A-Z0-9][A-Z0-9._/-]{2,})',
-            content,
-            flags=re.IGNORECASE,
-        )
-        deadline_match = re.search(
-            r'\b(?:proposal deadline|submission deadline|required by|proposal required by|'
-            r'required submission date|submission date|due date|deadline)\s*[:\-]?\s*'
-            r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
-            r'\d{4}-\d{2}-\d{2})',
-            content,
-            flags=re.IGNORECASE,
-        )
-        award_date_match = re.search(
-            r'\b(?:expected award date|anticipated award date|contract award date|award expected by)\s*[:\-]?\s*'
-            r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
-            r'\d{4}-\d{2}-\d{2})',
-            content,
-            flags=re.IGNORECASE,
-        )
-        field_patterns = {
-            'company_name': r'^\s*(?:Company|Client|Customer|Organisation|Organization) name\s*:\s*(.+?)\s*$',
-            'declared_client_domain': r'^\s*Client domain\s*:\s*([^\s]+)\s*$',
-            'contact_name': r'^\s*Contact person\s*:\s*(.+?)\s*$',
-            'contact_email': r'^\s*Contact email\s*:\s*([^\s]+)\s*$',
-            'contact_phone': r'^\s*Contact phone\s*:\s*(.+?)\s*$',
-            'location': r'^\s*Project location\s*:\s*(.+?)\s*$',
-            'industry': r'^\s*Industry\s*:\s*(.+?)\s*$',
-            'scope_summary': r'^\s*(?:Scope summary|Project scope|Scope of work)\s*:\s*(.+?)\s*$',
-        }
-        extracted_fields = {}
-        for name, pattern in field_patterns.items():
-            match = re.search(pattern, content, flags=re.IGNORECASE | re.MULTILINE)
-            extracted_fields[name] = match.group(1).strip() if match else ''
 
-        value_match = re.search(
-            r'^\s*(?:Estimated contract value|Estimated value|Contract value|Budget)\s*:\s*'
-            r'([A-Z]{3})?\s*([\d,]+(?:\.\d{1,2})?)',
-            content,
-            flags=re.IGNORECASE | re.MULTILINE,
+    def get_can_create_opportunity(self, obj):
+        request = self.context.get('request')
+        return bool(
+            request and obj.status in {'received', 'under_review'}
+            and can_create_email_opportunity(request.user)
         )
-        deadline_text = deadline_match.group(1) if deadline_match else ''
-        award_date_text = award_date_match.group(1) if award_date_match else ''
-
-        def parse_email_date(value):
-            for date_format in ('%d %B %Y', '%d %b %Y', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d'):
-                try:
-                    return datetime.strptime(value, date_format).date().isoformat()
-                except ValueError:
-                    continue
-            return ''
-
-        deadline_date = parse_email_date(deadline_text)
-        expected_award_date = parse_email_date(award_date_text)
-
-        industry_text = extracted_fields['industry'].lower()
-        industry_type = 'other'
-        if any(term in industry_text for term in ('energy', 'power', 'utilities')):
-            industry_type = 'power_generation'
-        elif any(term in industry_text for term in ('oil', 'gas')):
-            industry_type = 'oil_gas'
-        elif 'water' in industry_text:
-            industry_type = 'water_treatment'
-
-        scope_type = 'other'
-        if 'pre-feed' in lower_content or 'pre feed' in lower_content:
-            scope_type = 'pre_feed'
-        elif 'feed' in lower_content:
-            scope_type = 'feed'
-        elif 'feasibility' in lower_content or 'study' in lower_content:
-            scope_type = 'feasibility'
-        sender_domain = obj.sender_email.rsplit('@', 1)[-1].lower()
-        return {
-            'request_type': request_type,
-            'client_domain': sender_domain,
-            'tender_reference': (
-                direct_reference_match.group(1)
-                if direct_reference_match
-                else labelled_reference_match.group(1) if labelled_reference_match else ''
-            ),
-            'deadline_text': deadline_text,
-            'deadline_date': deadline_date,
-            'expected_award_date': expected_award_date,
-            'estimated_value': value_match.group(2).replace(',', '') if value_match else '',
-            'currency': value_match.group(1).upper() if value_match and value_match.group(1) else 'AED',
-            'industry_type': industry_type,
-            'scope_type': scope_type,
-            **extracted_fields,
-        }
 
 
 # ==============================================================================

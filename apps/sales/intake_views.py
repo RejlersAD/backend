@@ -18,10 +18,16 @@ from rest_framework.decorators import (
     throttle_classes,
 )
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 
 from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.action_policy import module_action_allowed
+
+from .email_permissions import (
+    require_email_opportunity_access, visible_email_clients, visible_email_opportunities,
+)
 
 from .models import Client, Contact, OpportunityAuditEvent, SalesEmailIntake
 from .serializers import (
@@ -212,9 +218,16 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='convert-to-opportunity')
     def convert_to_opportunity(self, request, pk=None):
+        require_email_opportunity_access(request.user)
+        permitted_intake = self.get_object()
         with transaction.atomic():
-            intake = SalesEmailIntake.objects.select_for_update().get(pk=pk)
+            # Preserve the scoped queryset, but lock only the intake row. The
+            # list/detail joins include nullable relations that PostgreSQL
+            # cannot lock through an outer join.
+            intake = self.get_queryset().select_related(None).select_for_update().get(pk=permitted_intake.pk)
             if intake.opportunity_id:
+                if not visible_email_opportunities(request.user).filter(pk=intake.opportunity_id).exists():
+                    raise PermissionDenied('The linked opportunity is not available to you.')
                 return Response({
                     'intake': self.get_serializer(intake).data,
                     'opportunity': DealDetailSerializer(intake.opportunity).data,
@@ -228,19 +241,25 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             client = None
             client_id = request.data.get('client')
             if client_id:
-                client = Client.objects.filter(pk=client_id).first()
+                try:
+                    client_id = serializers.UUIDField().run_validation(client_id)
+                except serializers.ValidationError:
+                    raise serializers.ValidationError({'client': 'Select an accessible client.'}) from None
+                client = visible_email_clients(request.user).filter(pk=client_id).first()
                 if not client:
                     raise serializers.ValidationError({
                         'client': 'The selected client could not be found.',
                     })
             else:
+                if not module_action_allowed(request.user, 'sales_clients', 'create'):
+                    raise PermissionDenied('You do not have access to create clients.')
                 new_client = request.data.get('new_client') or {}
                 company_name = str(new_client.get('company_name', '')).strip()
                 if not company_name:
                     raise serializers.ValidationError({
                         'client': 'Select a client or provide a new client name.',
                     })
-                client = Client.objects.filter(
+                client = visible_email_clients(request.user).filter(
                     company_name__iexact=company_name,
                 ).first()
                 if not client:
