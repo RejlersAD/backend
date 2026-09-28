@@ -742,6 +742,16 @@ class Receipt(TimeStampedModel):
         ('rejected', 'Rejected'),
         ('partial', 'Partially Accepted'),
     ]
+    CONDITION_CHOICES = [
+        ('good', 'Accepted with no damage'),
+        ('damaged', 'Damage observed'),
+        ('not_inspected', 'Not inspected'),
+    ]
+    DELIVERY_STATUS_CHOICES = [
+        ('full', 'Full'),
+        ('partial', 'Partial'),
+        ('rejected', 'Rejected'),
+    ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     receipt_number = models.CharField(max_length=50, unique=True, db_index=True)
@@ -774,6 +784,12 @@ class Receipt(TimeStampedModel):
     
     # Metadata
     delivery_note_number = models.CharField(max_length=100, blank=True)
+    delivery_location = models.CharField(max_length=300, blank=True)
+    supplier_reference = models.CharField(max_length=100, blank=True)
+    condition = models.CharField(max_length=20, choices=CONDITION_CHOICES, blank=True)
+    # Delivery declarations do not change pending/accepted inspection disposition.
+    delivery_status = models.CharField(max_length=20, choices=DELIVERY_STATUS_CHOICES, blank=True)
+    exception_reason = models.TextField(max_length=4000, blank=True)
     notes = models.TextField(blank=True)
     attachments = models.JSONField(default=list, blank=True)
     operation_key = models.UUIDField(null=True, blank=True, unique=True, editable=False)

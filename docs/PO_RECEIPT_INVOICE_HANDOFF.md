@@ -102,6 +102,20 @@ The awaiting-invoice action opens reviewed import with the PO selected, but stil
 
 Service acceptance records net value while allocations use invoice value; unproved net/line correspondence remains a matching exception. A header-only invoice does not become verified merely because one partial receipt exists. Rechecks validate the current PO status and approvals; repeated lines within an invoice share their accepted quantity balance. There is no per-line receipt-consumption ledger across separate invoices; that policy remains unresolved, independently of aggregate PO value checks. This change does not approve tax, non-PO expense, tolerance, posting or payment policy.
 
+## Delivery information follow-up - 28 September 2026
+
+The requested receipt entry panel now saves optional delivery location, supplier
+reference, condition, declared full/partial/rejected delivery and exception
+reason. The [delivery information contract](RECEIPT_DELIVERY_INFORMATION.md)
+documents exact field names, canonical balance validation, history, retry and
+immutable-evidence boundaries. Migration 0047 adds blank-compatible columns;
+legacy clients can omit them. Recorded delivery declarations do not change
+Pending creation, recorder ownership or configured inspection authority.
+The guarded local-development application of 0047 is verified: 529 current
+migrations applied, zero pending, unchanged receipt/permission snapshots and
+healthy reloaded local workers. See that contract for the precise local scope;
+this does not certify any remote deployment.
+
 ## Schema and rollout
 
 `procurement.0045_receipt_command_evidence` adds nullable unique operation identity, a command fingerprint and workflow history to Receipt. Four inspection booleans become nullable with unknown defaults for new records; prior stored inspection declarations are preserved.

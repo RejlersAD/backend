@@ -1688,7 +1688,9 @@ class ReceiptSerializer(serializers.ModelSerializer):
             'inspection_agency', 'inspection_report_number', 'ndt_performed',
             'ndt_results', 'dimensional_check_passed',
             'visual_inspection_passed', 'material_verification_passed',
-            'delivery_note_number', 'notes', 'attachments', 'created_at', 'updated_at',
+            'delivery_note_number', 'delivery_location', 'supplier_reference',
+            'condition', 'delivery_status', 'exception_reason',
+            'notes', 'attachments', 'created_at', 'updated_at',
             'operation_key', 'workflow_history', 'expected_po_updated_at', 'expected_updated_at', 'reason',
         ]
         read_only_fields = ['id', 'receipt_number', 'received_by', 'created_at', 'updated_at', 'workflow_history']

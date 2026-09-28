@@ -28,6 +28,7 @@ from .receipt_numbering import ReceiptNumberService
 OPEN_STATUSES = ('sent', 'acknowledged', 'in_progress', 'partially_received')
 SERVICE_CATEGORIES = {'engineering_services', 'maintenance_services'}
 INSPECTION_FLAGS = ('quality_check_passed', 'dimensional_check_passed', 'visual_inspection_passed', 'material_verification_passed')
+DELIVERY_FIELDS = ('delivery_location', 'supplier_reference', 'condition', 'delivery_status', 'exception_reason')
 
 
 class ReceivingConflict(APIException):
@@ -225,6 +226,35 @@ def _history(receipt, request, action, **extra):
         'action': action, 'actor_id': request.user.pk, 'at': timezone.now().isoformat(),
         'status': receipt.status, **extra,
     }]
+
+
+def _validate_delivery_declaration(data, summary):
+    """Match optional delivery declarations to the locked canonical evidence.
+
+    Older callers may omit these declarations. They never grant acceptance or
+    populate technical inspection checks, even when every line was rejected.
+    """
+    declared = data.get('delivery_status', '')
+    if not declared:
+        return
+    required = {field: 'This delivery information is required.' for field in ('delivery_location', 'condition')
+                if not data.get(field, '').strip()}
+    if required:
+        raise ValidationError(required)
+    suffix = 'amount' if summary['basis'] == 'service_value' else 'qty'
+    accepted = {item['line_id']: amount(item[f'accepted_{suffix}']) for item in data['items_received']}
+    rejected = any(amount(item[f'rejected_{suffix}']) > 0 for item in data['items_received'])
+    if not any(accepted.values()):
+        actual = 'rejected'
+    elif not rejected and all(accepted.get(line['line_id'], Decimal(0)) == amount(line['available'])
+                              for line in summary['lines']):
+        actual = 'full'
+    else:
+        actual = 'partial'
+    if declared != actual:
+        raise ValidationError({'delivery_status': f'The entered delivery quantities require {actual} delivery status.'})
+    if declared in {'partial', 'rejected'} and not data.get('exception_reason', '').strip():
+        raise ValidationError({'exception_reason': 'Record the reason for a partial or rejected delivery.'})
 
 
 def lock_receipt(observed):
@@ -439,12 +469,14 @@ def record_receipt(validated, request, *, reconciliation=False):
     if not summary[capability]:
         raise ValidationError({'purchase_order': summary['blocked_reason'] or 'Use completed-order reconciliation for this purchase order.'})
     data['items_received'] = _canonical_items(data.get('items_received'), summary)
+    _validate_delivery_declaration(data, summary)
     data['status'] = 'pending'
     receipt = Receipt(purchase_order=po, received_by=request.user, operation_key=key,
                       command_fingerprint=fingerprint, **data)
     _history(receipt, request, 'reconciled' if reconciliation else 'recorded',
              reason=reason, po_status=po.status, po_updated_at=po.updated_at.isoformat(),
-             basis=summary['basis'], items_received=data['items_received'], receipt_date=receipt.receipt_date.isoformat())
+             basis=summary['basis'], items_received=data['items_received'], receipt_date=receipt.receipt_date.isoformat(),
+             delivery_information={field: getattr(receipt, field) for field in DELIVERY_FIELDS})
     receipt.receipt_number = ReceiptNumberService.next_number()
     try:
         with transaction.atomic():
@@ -528,6 +560,16 @@ def update_pending_receipt(observed, validated, request):
     require_fresh(token, receipt.updated_at, 'expected_updated_at')
     if 'receipt_date' in data:
         raise ValidationError({'receipt_date': 'The recorded receipt date cannot be changed. Reject incorrect evidence and record its replacement.'})
+    if 'delivery_status' in data:
+        raise ValidationError({'delivery_status': 'The recorded delivery status cannot be changed independently of its receipt lines.'})
+    if receipt.delivery_status:
+        required = {field: 'Keep the recorded delivery information.' for field in ('delivery_location', 'condition')
+                    if field in data and not data[field].strip()}
+        if required:
+            raise ValidationError(required)
+    if (receipt.delivery_status in {'partial', 'rejected'} and 'exception_reason' in data
+            and not data['exception_reason'].strip()):
+        raise ValidationError({'exception_reason': 'Keep a reason for the partial or rejected delivery.'})
     if any(key in data for key in ('purchase_order', 'items_received', 'operation_key', 'expected_po_updated_at', 'reason')):
         raise ValidationError('Order and recorded receipt lines cannot be replaced. Reject incorrect evidence and record its replacement.')
     data.pop('status', None)
