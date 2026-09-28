@@ -2077,6 +2077,13 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     pagination_class = VendorPagination
     parser_classes = [FormParser, MultiPartParser, JSONParser]
 
+    @action(detail=True, methods=['post'], url_path='correct-number')
+    def correct_number(self, request, pk=None):
+        from .services.purchase_order_number_correction import correct_purchase_order_number
+
+        order = correct_purchase_order_number(self.get_object(), request)
+        return Response(self.get_serializer(order).data)
+
     def destroy(self, request, *args, **kwargs):
         from .services.procurement_lifecycle import delete_order
 

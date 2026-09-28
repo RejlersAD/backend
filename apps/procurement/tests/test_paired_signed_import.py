@@ -288,6 +288,42 @@ class PairedSignedImportTests(TestCase):
         self.assertEqual(response.status_code, 409, response.data)
         self.assert_no_pair()
 
+    def test_matching_five_digit_po_reference_preserves_month_through_save_and_retry(self):
+        number = 'RAD-PRJ-PUR-10085_JUL2026'
+        self.fields.update(po_number=number, source_po_number=number)
+        self.po_reviewed['po_number'] = number
+        self.pr_fields['po_reference'] = number
+
+        response = self.upload()
+        self.assertEqual(response.status_code, 201, response.data)
+        po = PurchaseOrder.objects.get()
+        pr = PurchaseRequisition.objects.get()
+        source = PODocument.objects.get()
+        self.assertEqual(po.po_number, number)
+        self.assertEqual(po.pr_reference_id, pr.pk)
+        self.assertEqual(pr.po_number_reference, number)
+        self.assertEqual(source.extracted_data['source_po_number'], number)
+        self.assertEqual(source.extracted_data['po_number'], number)
+        self.assertEqual(response.data['purchase_order']['po_number'], number)
+
+        repeated = self.upload()
+        self.assertEqual(repeated.status_code, 200, repeated.data)
+        self.assertEqual(repeated.data['purchase_order_id'], str(po.pk))
+        self.assertEqual(repeated.data['purchase_order']['po_number'], number)
+        self.assertEqual(PurchaseOrder.objects.count(), 1)
+        self.assertEqual(PurchaseRequisition.objects.count(), 1)
+        self.assertEqual(PODocument.objects.count(), 1)
+
+    def test_different_five_digit_po_reference_rolls_back_both_records_and_sources(self):
+        number = 'RAD-PRJ-PUR-10085_JUL2026'
+        self.fields.update(po_number=number, source_po_number=number)
+        self.po_reviewed['po_number'] = number
+        self.pr_fields['po_reference'] = 'RAD-PRJ-PUR-10086_JUL2026'
+
+        response = self.upload()
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assert_no_pair()
+
     def test_exact_retry_does_not_duplicate_or_rewrite_the_saved_pair(self):
         first = self.upload()
         self.assertEqual(first.status_code, 201, first.data)

@@ -5,7 +5,7 @@ from copy import deepcopy
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .po_excel_import import canonical_po_number
+from .purchase_order_numbering import source_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict
 from .procurement_vat import CONFIRMED_BASES, confirmed_totals, decimal_amount
 from .signed_po_pdf_import import _serializable_fields
@@ -41,7 +41,7 @@ def reviewed_document_fields(saved_fields, validated_data, *, user):
         fields['pr_number'] = pr.pr_number if pr else ''
     if 'po_number' in values:
         supplied = values.pop('po_number')
-        fields.update(po_number=canonical_po_number(supplied), source_po_number=supplied)
+        fields.update(po_number=source_po_number(supplied), source_po_number=supplied)
     if 'vendor_name' in values and values['vendor_name'] != fields.get('vendor_name'):
         fields['vendor_id'] = None
         fields['vendor_name_source'] = 'manual'

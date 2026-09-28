@@ -1,5 +1,6 @@
 """Keep commercial terms bound to the purchase order that was approved."""
 
+from copy import copy
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -14,6 +15,7 @@ COMMERCIAL_LOCK_REASON = (
 CONTENT_REVIEW_REASON = (
     'The purchase order commercial details differ from the recorded approval. Approval review is required.'
 )
+PO_NUMBER_CORRECTIONS = '_retained_po_number_corrections'
 MONEY_FIELDS = frozenset({
     'net_amount', 'total_amount', 'tax_amount', 'vat_percentage', 'discount_amount',
 })
@@ -115,6 +117,42 @@ def purchase_order_content_fingerprint(order):
     return 'po-v1:' + hashlib.sha256(encoded).hexdigest()
 
 
+def _approved_content_fingerprints(order):
+    """Recognize only recorded number corrections over otherwise identical terms.
+
+    Approval rows retain the exact fingerprint originally signed. The guarded
+    correction command records a bridge between the old and new identifiers;
+    ordinary form writes cannot create or replace that server-owned history.
+    Recompute each earlier fingerprint with only the number changed, so a
+    correction cannot hide later price, supplier or other commercial changes.
+    """
+    current = purchase_order_content_fingerprint(order)
+    fingerprints = {current}
+    contacts = getattr(order, 'contact_persons', None)
+    corrections = contacts.get(PO_NUMBER_CORRECTIONS, []) if isinstance(contacts, dict) else []
+    if not isinstance(corrections, list):
+        return fingerprints
+    original = copy(order)
+    for correction in reversed(corrections):
+        if not isinstance(correction, dict):
+            break
+        old_number = correction.get('old_number')
+        if (
+            not isinstance(old_number, str) or not old_number
+            or old_number == original.po_number
+            or correction.get('new_number') != original.po_number
+            or correction.get('after_fingerprint') != current
+        ):
+            break
+        original.po_number = old_number
+        previous = purchase_order_content_fingerprint(original)
+        if correction.get('before_fingerprint') != previous:
+            break
+        fingerprints.add(previous)
+        current = previous
+    return fingerprints
+
+
 def purchase_order_content_issue(order):
     fingerprints = [
         row['content_fingerprint'] for row in (getattr(order, 'approval_log', None) or [])
@@ -122,6 +160,8 @@ def purchase_order_content_issue(order):
         and not is_requisition_approval_history(row)
         and row.get('content_fingerprint')
     ]
-    if fingerprints and any(value != purchase_order_content_fingerprint(order) for value in fingerprints):
-        return CONTENT_REVIEW_REASON
+    if fingerprints:
+        approved_content = _approved_content_fingerprints(order)
+        if any(not isinstance(value, str) or value not in approved_content for value in fingerprints):
+            return CONTENT_REVIEW_REASON
     return ''

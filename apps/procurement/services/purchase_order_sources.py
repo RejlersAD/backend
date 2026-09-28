@@ -2,6 +2,8 @@
 
 from pathlib import PurePosixPath
 
+from .procurement_lifecycle import RETAINED_ATTACHMENTS
+
 
 def is_safe_source_storage_key(key):
     """Accept only normalized relative storage keys, never URLs or local paths."""
@@ -46,6 +48,12 @@ def uploaded_purchase_order_sources(order, *, documents=None):
         })
 
     order_prefix = f'procurement/orders/{order.po_number}/'
+    contacts = getattr(order, 'contact_persons', None)
+    contacts = contacts if isinstance(contacts, dict) else {}
+    retained_keys = contacts.get(RETAINED_ATTACHMENTS, [])
+    retained_keys = {
+        key for key in retained_keys if is_safe_source_storage_key(key)
+    } if isinstance(retained_keys, list) else set()
     for index, attachment in enumerate(order.attachments or []):
         if not isinstance(attachment, dict) or attachment.get('type') != 'signed_purchase_order_pdf':
             continue
@@ -59,7 +67,7 @@ def uploaded_purchase_order_sources(order, *, documents=None):
             key = ''
         else:
             key = str(attachment.get('s3_key') or '').strip()
-            if not key.startswith(order_prefix) or '\\' in key or '..' in PurePosixPath(key).parts:
+            if not is_safe_source_storage_key(key) or not (key.startswith(order_prefix) or key in retained_keys):
                 key = ''
         if key and key in storage_keys:
             continue

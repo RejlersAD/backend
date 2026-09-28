@@ -239,6 +239,7 @@ def operation_action(request, view):
             ('ReceiptViewSet', 'confirm_delivery'): 'create',
             ('ReceiptViewSet', 'destroy'): 'delete',
             ('PurchaseOrderViewSet', 'receiving_summary'): 'read',
+            ('PurchaseOrderViewSet', 'correct_number'): 'update',
         }
         receiving_action = receipt_actions.get((view.__class__.__name__, operation))
         if receiving_action:
