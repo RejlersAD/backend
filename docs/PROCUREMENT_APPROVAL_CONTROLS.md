@@ -25,6 +25,15 @@ register/document imports may retain an already issued status. Importing that
 record does not dispatch it to a vendor, and subsequent lifecycle changes still
 use the approval gate.
 
+Receiving has a narrow exception for an already issued/completed, unlinked
+uploaded PO with explicitly complete verified source approval: the two recognized
+importer notices about a pending PR link do not invalidate its receiving approval.
+That exception requires a nonempty, well-formed issue list containing only those
+notices. Other or mixed reconciliation issues, signature/content failures and
+unapproved stages still block. Source flags and PR links are preserved; ordinary
+issuance/completion and Finance retain the strict gate. See the receiving contract
+in [PO_RECEIPT_INVOICE_HANDOFF.md](PO_RECEIPT_INVOICE_HANDOFF.md).
+
 The serializer exposes `can_send_to_vendor`, `can_complete`, and
 `lifecycle_block_reason`. Screens additionally check the user's action
 permissions. The server rechecks current data under locks even when a screen

@@ -12,6 +12,10 @@ from .purchase_order_content import is_requisition_approval_history
 
 PROGRESSED_STATUSES = ('sent', 'acknowledged', 'in_progress', 'partially_received', 'completed')
 STATUS_SEQUENCE = ('draft', *PROGRESSED_STATUSES)
+PENDING_PR_LINK_ISSUES = frozenset({
+    'PR link pending. Link the correct purchase recommendation during reconciliation.',
+    'PR link pending. Upload saved; link the correct purchase recommendation during reconciliation.',
+})
 
 
 def lock_purchase_order(order):
@@ -32,7 +36,7 @@ def lock_purchase_order(order):
     return locked
 
 
-def _verified_source_row(order, row):
+def _verified_source_row(order, row, *, allow_pending_pr_link=False):
     """An external flag alone is not proof of a reviewed original document."""
     if row.get('signature_verified') is not True or row.get('approval_evidence_complete') is False:
         return False
@@ -44,15 +48,30 @@ def _verified_source_row(order, row):
     if document is None or document.document_type != 'purchase_order':
         return False
     evidence = document.extracted_data if isinstance(document.extracted_data, dict) else {}
+    issues = evidence.get('reconciliation_issues')
+    # Receiving an already-issued source PO does not resolve its missing PR.
+    # Only the importer's exact link notices qualify; commercial mismatches,
+    # incomplete approval evidence and malformed source state remain blocked.
+    pending_pr_link_only = (
+        allow_pending_pr_link
+        and order.status in PROGRESSED_STATUSES
+        and order.pr_reference_id is None
+        and row.get('approval_evidence_complete') is True
+        and evidence.get('approval_evidence_complete') is True
+        and evidence.get('reconciliation_required') is True
+        and isinstance(issues, list) and bool(issues)
+        and all(isinstance(issue, str) and issue in PENDING_PR_LINK_ISSUES for issue in issues)
+    )
     return (
         evidence.get('signature_verified') is True
         and evidence.get('approval_evidence_complete') is not False
-        and not evidence.get('reconciliation_required')
-        and not evidence.get('reconciliation_issues')
+        and (pending_pr_link_only or (
+            not evidence.get('reconciliation_required') and not issues
+        ))
     )
 
 
-def require_purchase_order_approval(order):
+def require_purchase_order_approval(order, *, allow_pending_pr_link=False):
     """Require every recorded stage to be approved with usable evidence.
 
     Existing named or assigned approvals remain valid historical evidence when
@@ -73,7 +92,7 @@ def require_purchase_order_approval(order):
         if str(row.get('status') or '').strip().lower() != 'approved':
             raise ValidationError({'status': 'All purchase order approval stages must be approved before progressing this order.'})
         if row.get('external') or row.get('evidence_document_id'):
-            if not _verified_source_row(order, row):
+            if not _verified_source_row(order, row, allow_pending_pr_link=allow_pending_pr_link):
                 raise ValidationError({'status': 'Verify the signed source document approval before progressing this order.'})
         elif not any(row.get(key) for key in (
             'user_id', 'user_email', 'approver_email', 'email', 'approver', 'approved_by_name',

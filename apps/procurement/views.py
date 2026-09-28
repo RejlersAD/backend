@@ -2604,6 +2604,13 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         response = Response(receiving_summary(po, request=request))
         response['Cache-Control'] = 'private, no-store'
         return response
+
+    @action(detail=True, methods=['post'], url_path='receiving-basis')
+    def receiving_basis(self, request, pk=None):
+        from .services.receiving import review_receiving_basis
+        response = Response(review_receiving_basis(self.get_object(), request))
+        response['Cache-Control'] = 'private, no-store'
+        return response
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
