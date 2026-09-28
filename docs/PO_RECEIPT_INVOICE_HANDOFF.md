@@ -34,6 +34,13 @@ supports completed orders through the existing reconciliation flow. It requires
 current Purchase Order read and Receipt create access; it does not grant approval
 or change the PO's issued/approved state.
 
+Receiving accepts an otherwise verified, approved and already-issued/completed
+source PO whose only source reconciliation issue is the importer's recognized
+pending PR-link message. The original pending link and source evidence remain
+unchanged. Unknown, mixed, commercial and actual approval/signature issues still
+block. This opt-in applies only to receiving; generic issuance/completion and
+Finance checks retain their existing strict behavior.
+
 The JSON command accepts exactly `operation_key`, `expected_updated_at`, `basis`
 and `lines`. Each line accepts exactly `description`, `uom` and `ordered`.
 `quantity` requires 1–100 source lines with positive decimal quantities, up to
@@ -330,3 +337,27 @@ PO/receipt columns and all seven permission tables were unchanged. Existing POs
 received empty receiving metadata; no receipt or receiving basis was fabricated.
 This is local activation only, not production migration evidence. Local logs are
 under workspace `.codex-temp/receipt-basis-release-20260928/`.
+
+### Final pending-PR receipt correction verification
+
+The final application passed **248 tests in one clean PostgreSQL run** (116.324
+seconds, PostgreSQL 15.18, Python 3.11.16/Django 5.0). This supersedes the earlier
+split-run backend evidence above. All 34 receiving-basis cases and 13 observed
+row-lock races passed. The eight added cases cover both recognized PR-link notices
+through PO discovery, goods/service basis entry, recording and confirmation;
+completed-order reconciliation; unchanged source evidence; and strict signature,
+document identity, commercial fingerprint, internal approval, malformed/mixed
+issue, lifecycle and Finance denials. No schema change followed migration 0048.
+
+All 2,457 tested Python/config hashes matched after the run. Evidence is under
+workspace `.codex-temp/backend-pr-link-release-20260928/`: `release.log`,
+`release.exit`, `release-source-manifest.json` and `release-source-check.json`.
+The earlier focused run's one permission-fixture assertion was corrected before
+this complete passing run. Only disposable PostgreSQL data was used by tests.
+
+After reloading local Gunicorn workers, read-only verification confirmed the
+reported PO is eligible for receiving-basis entry, all 530 migrations remain
+applied and permission hashes remain unchanged. No receipt, source approval or
+PR link was created or changed by this verification. Reloading was necessary
+because a running worker had retained the old approval-function signature while
+the changed receipt service was imported later during local development.

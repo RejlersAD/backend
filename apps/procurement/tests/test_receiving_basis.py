@@ -9,8 +9,13 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings
+from rest_framework.exceptions import ValidationError
 
-from apps.procurement.models import PurchaseOrder, Receipt
+from apps.procurement.models import PODocument, PurchaseOrder, PurchaseRequisition, Receipt
+from apps.procurement.services.purchase_order_content import purchase_order_content_fingerprint
+from apps.procurement.services.purchase_order_lifecycle import (
+    require_purchase_order_approval, validate_purchase_order_transition,
+)
 from apps.procurement.services.receiving import INSPECTION_FLAGS, receiving_summary
 from apps.rbac.models import RolePermission, UserPermissionOverride, UserProfile, UserRole
 from . import test_receiving_handoff as fixtures
@@ -65,6 +70,200 @@ class ReceivingBasisTests(TestCase):
         fields = [field.attname for field in PurchaseOrder._meta.concrete_fields
                   if field.name not in {'receiving_basis', 'updated_at'}]
         return PurchaseOrder.objects.filter(pk=po.pk).values(*fields).get()
+
+    def unlinked_signed_order(self, *, attached=False, **extra):
+        po = self.missing_order(pr_reference=None, **extra)
+        issue = (
+            'PR link pending. Link the correct purchase recommendation during reconciliation.'
+            if attached else
+            'PR link pending. Upload saved; link the correct purchase recommendation during reconciliation.'
+        )
+        document = PODocument.objects.create(
+            original_filename='synthetic-signed-source.pdf', document_type='purchase_order',
+            extraction_status='completed', confirmed_po=po, uploaded_by=self.user,
+            extracted_data={'signature_verified': True, 'approval_evidence_complete': True,
+                            'approved_by_name': 'Recorded source signer', 'approved_date': '2026-07-01',
+                            'reconciliation_required': True, 'reconciliation_issues': [issue]},
+        )
+        po.approval_log = [{
+            'stage': 'Signed PO document approval', 'status': 'Approved',
+            'approver': 'Recorded source signer', 'signature_verified': True,
+            'approval_evidence_complete': True, 'evidence_document_id': str(document.pk),
+            'content_fingerprint': purchase_order_content_fingerprint(po),
+        }]
+        po.save(update_fields=['approval_log'])
+        return po, document
+
+    def assert_source_recovery_blocked(self, po):
+        before = self.source_snapshot(po)
+        summary = self.client.get(fixtures.BASE + f'orders/{po.pk}/receiving-summary/')
+        self.assertEqual(summary.status_code, 200, summary.data)
+        self.assertFalse(summary.data['can_review_basis'])
+        self.assertFalse(summary.data['can_record'])
+        response = self.post(po, self.command(po))
+        self.assertEqual(response.status_code, 400, response.data)
+        po.refresh_from_db()
+        self.assertEqual(po.receiving_basis, {})
+        self.assertEqual(self.source_snapshot(po), before)
+
+    def test_signed_import_with_only_pending_pr_link_can_recover_receive_and_confirm(self):
+        for attached in (False, True):
+            for basis in ('quantity', 'service_value'):
+                with self.subTest(attached=attached, basis=basis):
+                    po, document = self.unlinked_signed_order(attached=attached, currency='USD')
+                    original = self.source_snapshot(po)
+                    source = PODocument.objects.filter(pk=document.pk).values().get()
+                    summary = self.client.get(fixtures.BASE + f'orders/{po.pk}/receiving-summary/')
+                    self.assertTrue(summary.data['can_review_basis'])
+                    queue = self.client.get(fixtures.BASE + 'receipts/available-orders/', {'search': po.po_number})
+                    self.assertEqual(queue.status_code, 200, queue.data)
+                    self.assertEqual(queue.data['count'], 1)
+                    self.assertTrue(queue.data['results'][0]['receiving']['can_review_basis'])
+                    self.recover(po, basis=basis, lines=[{
+                        'description': 'Reviewed source delivery', 'uom': 'USD' if basis == 'service_value' else 'EA',
+                        'ordered': '10.50',
+                    }])
+                    po.refresh_from_db()
+                    receipt = self.record_reviewed(po, '10.50')
+                    confirmed = self.decide(receipt, 'confirm_delivery')
+                    self.assertEqual(confirmed.status_code, 200, confirmed.data)
+                    self.assertEqual(confirmed.data['status'], 'accepted')
+                    self.assertEqual(receiving_summary(po)['status'], 'complete')
+                    self.assertEqual(self.source_snapshot(po), original)
+                    self.assertEqual(PODocument.objects.filter(pk=document.pk).values().get(), source)
+
+    def test_pr_link_receiving_exception_does_not_authorize_lifecycle_or_finance(self):
+        from apps.finance.services.purchase_order_handoff import approved_order
+        po, _ = self.unlinked_signed_order()
+        require_purchase_order_approval(po, allow_pending_pr_link=True)
+        with self.assertRaises(ValidationError):
+            require_purchase_order_approval(po)
+        for target in ('acknowledged', 'completed'):
+            with self.subTest(target=target), self.assertRaises(ValidationError):
+                validate_purchase_order_transition(po, target)
+        self.assertFalse(approved_order(po))
+        response = self.client.post(fixtures.BASE + f'orders/{po.pk}/acknowledge/', {}, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        po.refresh_from_db()
+        self.assertEqual(po.status, 'sent')
+
+    def test_pending_pr_link_requires_issued_unlinked_po_and_cannot_issue_draft(self):
+        self.grant('procurement_orders', 'create')
+        for status in ('draft', 'cancelled'):
+            with self.subTest(status=status):
+                po, _ = self.unlinked_signed_order(status=status)
+                self.assert_source_recovery_blocked(po)
+                with self.assertRaises(ValidationError):
+                    require_purchase_order_approval(po, allow_pending_pr_link=True)
+                if status == 'draft':
+                    response = self.client.post(fixtures.BASE + f'orders/{po.pk}/send_to_vendor/', {}, format='json')
+                    self.assertEqual(response.status_code, 400, response.data)
+        po, _ = self.unlinked_signed_order()
+        po.pr_reference = PurchaseRequisition.objects.create(
+            pr_number='PR-' + str(uuid4()), issued_by=self.user, requested_by=self.user, vendor=self.vendor,
+        )
+        po.save(update_fields=['pr_reference'])
+        self.assert_source_recovery_blocked(po)
+
+    def test_pr_link_exception_rejects_other_mixed_unknown_and_malformed_source_issues(self):
+        pending = 'PR link pending. Upload saved; link the correct purchase recommendation during reconciliation.'
+        cases = [[], None, {}, pending, [None], [{}], [['nested']],
+                 ['PR link pending. Unrecognized source notice.'],
+                 ['The PDF amount differs from the saved order. Review the order amount before reconciling.'],
+                 [pending, 'The PDF currency differs from the saved order.']]
+        for issues in cases:
+            with self.subTest(issues=issues):
+                po, document = self.unlinked_signed_order()
+                document.extracted_data['reconciliation_issues'] = issues
+                document.save(update_fields=['extracted_data'])
+                self.assert_source_recovery_blocked(po)
+        for flag in (False, 'true', 1, None):
+            with self.subTest(reconciliation_required=flag):
+                po, document = self.unlinked_signed_order()
+                document.extracted_data['reconciliation_required'] = flag
+                document.save(update_fields=['extracted_data'])
+                self.assert_source_recovery_blocked(po)
+
+    def test_pr_link_exception_retains_complete_signature_and_matched_document_guards(self):
+        for location in ('row', 'document'):
+            for field in ('signature_verified', 'approval_evidence_complete'):
+                for value in (False, None, 'true', 1):
+                    with self.subTest(location=location, field=field, value=value):
+                        po, document = self.unlinked_signed_order()
+                        target = po.approval_log[0] if location == 'row' else document.extracted_data
+                        if value is None:
+                            target.pop(field)
+                        else:
+                            target[field] = value
+                        if location == 'row':
+                            po.save(update_fields=['approval_log'])
+                        else:
+                            document.save(update_fields=['extracted_data'])
+                        self.assert_source_recovery_blocked(po)
+        for change in ('different_order', 'wrong_document_type', 'missing_document'):
+            with self.subTest(change=change):
+                po, document = self.unlinked_signed_order()
+                if change == 'missing_document':
+                    document.delete()
+                elif change == 'different_order':
+                    document.confirmed_po = self.order()
+                    document.save(update_fields=['confirmed_po'])
+                else:
+                    document.document_type = 'purchase_requisition'
+                    document.save(update_fields=['document_type'])
+                self.assert_source_recovery_blocked(po)
+
+    def test_pr_link_exception_preserves_internal_approval_and_commercial_fingerprint_guards(self):
+        for row in ({'stage': 'Internal', 'approver': 'Assigned signer', 'status': 'Pending'},
+                    {'stage': 'Internal', 'approver': 'Assigned signer', 'status': 'Rejected'},
+                    {'stage': 'Internal', 'approver_email': 'assigned@example.test', 'status': 'Approved',
+                     'approved_by_email': 'different@example.test'}):
+            with self.subTest(row=row):
+                po, _ = self.unlinked_signed_order()
+                po.approval_log.append(row)
+                po.save(update_fields=['approval_log'])
+                self.assert_source_recovery_blocked(po)
+        po, _ = self.unlinked_signed_order()
+        po.total_amount = Decimal('200.00')
+        po.save(update_fields=['total_amount'])
+        self.assert_source_recovery_blocked(po)
+
+    def test_source_reconciliation_is_rechecked_before_recording_and_confirmation(self):
+        po, document = self.unlinked_signed_order()
+        self.recover(po)
+        po.refresh_from_db()
+        receipt = self.record_reviewed(po)
+        document.extracted_data['reconciliation_issues'].append('The PDF currency differs from the saved order.')
+        document.save(update_fields=['extracted_data'])
+        summary = receiving_summary(po)
+        self.assertFalse(summary['can_record'])
+        payload = self.receipt_payload(po, items_received=[{
+            'line_id': summary['lines'][0]['line_id'], 'received_qty': '1',
+        }])
+        self.assertEqual(self.client.post(fixtures.BASE + 'receipts/', payload, format='json').status_code, 400)
+        confirmed = self.decide(receipt, 'confirm_delivery')
+        self.assertEqual(confirmed.status_code, 400, confirmed.data)
+        self.assertEqual(Receipt.objects.get(pk=receipt['id']).status, 'pending')
+        self.assertEqual(Receipt.objects.filter(purchase_order=po).count(), 1)
+
+    def test_completed_pr_pending_source_still_uses_reconciliation_only(self):
+        po, document = self.unlinked_signed_order(status='completed')
+        summary = self.recover(po)
+        self.assertTrue(summary['can_reconcile'])
+        self.assertFalse(summary['can_record'])
+        payload = self.receipt_payload(po, items_received=[{
+            'line_id': summary['lines'][0]['line_id'], 'received_qty': '10.50',
+        }])
+        self.assertEqual(self.client.post(fixtures.BASE + 'receipts/', payload, format='json').status_code, 400)
+        payload['reason'] = 'Reviewed retained delivery evidence'
+        response = self.client.post(fixtures.BASE + 'receipts/reconcile/', payload, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(self.decide(response.data, 'confirm_delivery').status_code, 200)
+        po.refresh_from_db()
+        document.refresh_from_db()
+        self.assertEqual(po.status, 'completed')
+        self.assertIsNone(po.pr_reference_id)
+        self.assertTrue(document.extracted_data['reconciliation_required'])
 
     def test_missing_uploaded_goods_can_be_reviewed_recorded_and_confirmed_without_source_edits(self):
         po = self.missing_order()

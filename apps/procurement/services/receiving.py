@@ -151,7 +151,7 @@ def _basis(po):
 
 def _basis_review_capability(po, request):
     """Keep approval/access/lifecycle denials ahead of the missing-basis hint."""
-    require_purchase_order_approval(po)
+    require_purchase_order_approval(po, allow_pending_pr_link=True)
     if po.status not in (*OPEN_STATUSES, 'completed'):
         raise ValidationError('The purchase order must be issued before receiving.')
     if request is not None:
@@ -237,7 +237,7 @@ def receiving_summary(po, *, request=None, exclude_receipt=None):
         pending = any(line['pending'] > 0 for line in lines.values())
         result['status'] = 'complete' if complete else 'partial' if any_accepted else 'pending' if pending else 'none'
         result['lines'] = [{key: decimal_text(value) if isinstance(value, Decimal) else value for key, value in line.items()} for line in lines.values()]
-        require_purchase_order_approval(po)
+        require_purchase_order_approval(po, allow_pending_pr_link=True)
         if po.status not in (*OPEN_STATUSES, 'completed'):
             result['blocked_reason'] = 'The purchase order must be issued before receiving.'
         elif complete:
@@ -292,7 +292,7 @@ def review_receiving_basis(observed, request):
     except (ValueError, TypeError, AttributeError) as exc:
         raise ValidationError({'operation_key': 'A request UUID is required.'}) from exc
     po = lock_purchase_order(observed)
-    require_purchase_order_approval(po)
+    require_purchase_order_approval(po, allow_pending_pr_link=True)
     if po.status not in (*OPEN_STATUSES, 'completed'):
         raise ValidationError({'purchase_order': 'The purchase order must be issued before receiving.'})
     basis = payload['basis']
@@ -423,7 +423,7 @@ def lock_receipt(observed):
 
 def _acceptance_items(po, receipt):
     """One source/balance gate for inspection and recorder confirmation."""
-    require_purchase_order_approval(po)
+    require_purchase_order_approval(po, allow_pending_pr_link=True)
     if po.status not in (*OPEN_STATUSES, 'completed'):
         raise ValidationError({'purchase_order': 'Only an issued order can be accepted.'})
     current = receiving_summary(po)
