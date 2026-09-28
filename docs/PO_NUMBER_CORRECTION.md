@@ -130,3 +130,9 @@ Local evidence is retained under the parent workspace
 `backend-source-hashes.json` and `migrations/local-readonly-final.log`.
 An initial permission-test command failed before test execution because of
 Windows command-line quoting; the corrected isolated run passed all 30 cases.
+
+Release CI inspection also found a pre-existing missing import dependency in the
+focused PostgreSQL test environment: the shared release URL registry imports
+`claude_client`, which requires `httpx`. The focused requirements now include
+`httpx`, constrained by the existing application pin `httpx==0.27.2`. No
+application dependency version or test/permission gate is changed.

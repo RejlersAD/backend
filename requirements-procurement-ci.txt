@@ -14,6 +14,7 @@ python-dotenv
 dj-database-url
 celery
 requests
+httpx
 cryptography
 
 # The verified release test settings load the shared functional URL registry.
