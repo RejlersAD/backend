@@ -121,6 +121,21 @@ notification record does not prove delivery through an external channel.
 
 ## Review commercial fields from an uploaded PO
 
+The 28 September 2026 PDF-number correction preserves a printed identifier such
+as `RAD-PRJ-PUR-0085_JUL2026` through extraction, reviewed save and reconciliation
+of newly staged uploads. It no longer uses the Excel register's month-stripping
+normalizer. PDF text takes precedence over the bounded filename fallback;
+existing native numbering validation and base shipment marking are unchanged.
+Legacy year-only orders are lookup candidates only: a matching retained full
+source number is required before attaching a new suffix-preserving upload, and
+ambiguous/unproven matches conflict before writes. Existing orders and saved
+extraction snapshots are not automatically renamed. No UI or schema changes.
+
+The later explicit request adds [saved PO number correction](PO_NUMBER_CORRECTION.md)
+through the compact detail-header editor. It uses a separate audited command,
+including for approved/completed orders, and preserves their other commercial
+locks, original approval records and source files.
+
 The signed PO importer reads Seller reference, Payment terms, Payment method
 and Delivery terms from their labeled source fields. Seller reference retains
 the literal contact name/title without requiring an honorific; email remains a

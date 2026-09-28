@@ -14,6 +14,38 @@ PO_NUMBER_PATTERN = re.compile(
     r'(?P<year>\d{4})$'
 )
 PR_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PR-(\d{4,})_(\d{4})$')
+SOURCE_PO_NUMBER_PATTERN = re.compile(
+    r'(?<![A-Z0-9_-])RAD\s*-\s*(?P<scope>GEN|PRJ)\s*-\s*PUR\s*-\s*'
+    r'(?P<sequence>[0-9]{4,})\s*_\s*'
+    r'(?P<month>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?\s*'
+    r'(?P<year>[0-9]{4})(?![A-Z0-9_-])',
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def source_po_number(value, *, search=False):
+    """Keep the complete printed identifier, including its month when present."""
+    text = str(value or '').strip()
+    matches = SOURCE_PO_NUMBER_PATTERN.finditer(text) if search else [SOURCE_PO_NUMBER_PATTERN.fullmatch(text)]
+    for match in matches:
+        if match:
+            number = (
+                f"RAD-{match['scope'].upper()}-PUR-{match['sequence']}_"
+                f"{(match['month'] or '').upper()}{match['year']}"
+            )
+            if (len(number) <= PurchaseOrder._meta.get_field('po_number').max_length
+                    and PO_NUMBER_PATTERN.fullmatch(number)):
+                return number
+    return None
+
+
+def legacy_po_number(value):
+    """Return an old year-only lookup candidate; this does not prove identity."""
+    number = source_po_number(value)
+    if not number:
+        return None
+    match = SOURCE_PO_NUMBER_PATTERN.fullmatch(number)
+    return f"RAD-{match['scope']}-PUR-{match['sequence']}_{match['year']}"
 
 
 class PurchaseOrderNumberService:

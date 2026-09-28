@@ -9,6 +9,8 @@ from django.db import models
 from rest_framework.exceptions import ValidationError
 
 from ..models import PurchaseOrder, Vendor
+from .procurement_lifecycle import RETAINED_ATTACHMENTS, RETAINED_SOURCES
+from .purchase_order_content import PO_NUMBER_CORRECTIONS
 from .requisition_validation import sanitize_attachment_name, validate_attachments
 
 
@@ -143,6 +145,12 @@ def document_preview_order(snapshot, *, base=None, attachment_metadata=None, upl
     changed = base is None
     for name in DOCUMENT_FIELDS & snapshot.keys():
         value = _field_value(name, snapshot[name])
+        if name == 'contact_persons':
+            saved_contacts = getattr(base, 'contact_persons', None)
+            for key in (PO_NUMBER_CORRECTIONS, RETAINED_ATTACHMENTS, RETAINED_SOURCES):
+                value.pop(key, None)
+                if isinstance(saved_contacts, dict) and key in saved_contacts:
+                    value[key] = deepcopy(saved_contacts[key])
         changed = changed or value != getattr(order, name, '' if name == 'summary' else None)
         setattr(order, name, value)
     if 'summary' in snapshot:

@@ -3,7 +3,77 @@ from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
-from apps.procurement.services.purchase_order_numbering import PurchaseOrderNumberService
+from apps.procurement.services.purchase_order_numbering import (
+    PurchaseOrderNumberService,
+    legacy_po_number,
+    source_po_number,
+)
+
+
+class SourcePurchaseOrderNumberTests(SimpleTestCase):
+    def test_preserves_printed_month_year_and_long_sequences(self):
+        for value in (
+            'RAD-PRJ-PUR-0085_JUL2026',
+            'RAD-PRJ-PUR-0085_2026',
+            'RAD-GEN-PUR-10000_SEP2026',
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(source_po_number(value), value)
+
+    def test_repairs_only_case_and_layout_whitespace(self):
+        self.assertEqual(
+            source_po_number(' rad - prj - pur - 0085 _\n jul 2026 '),
+            'RAD-PRJ-PUR-0085_JUL2026',
+        )
+
+    def test_search_reads_complete_document_and_filename_identifiers(self):
+        for text in (
+            'Purchase Order: RAD-PRJ-PUR-0085_JUL2026\nSeller: Example',
+            'RAD-PRJ-PUR-0085_JUL2026.pdf',
+            'Archive RAD-PRJ-PUR-10000_2026 copy.pdf',
+        ):
+            with self.subTest(text=text):
+                expected = ('RAD-PRJ-PUR-10000_2026' if '10000' in text
+                            else 'RAD-PRJ-PUR-0085_JUL2026')
+                self.assertEqual(source_po_number(text, search=True), expected)
+                self.assertIsNone(source_po_number(text))
+
+    def test_rejects_invalid_or_truncated_identifier_tokens(self):
+        for value in (
+            '', None, 'RAD-PRJ-PUR-85_JUL2026',
+            'RAD-PRJ-PUR-0085_JULL2026', 'RAD-PRJ-PUR-0085_ABC2026',
+            'RAD-PRJ-PUR-0085_JUL20260', 'RAD-PRJ-PUR-0085_JUL2026A',
+            'RAD-PRJ-PUR-0085_JUL2026_REV', 'RAD-PRJ-PUR-0085_JUL2026-REV',
+            'XRAD-PRJ-PUR-0085_JUL2026',
+            'RAD-PRJ-PUR-' + '0' * 40 + '_JUL2026',
+        ):
+            with self.subTest(value=value):
+                self.assertIsNone(source_po_number(value))
+                self.assertIsNone(source_po_number(value, search=True))
+
+    def test_legacy_lookup_does_not_change_full_source_identity(self):
+        july = 'RAD-PRJ-PUR-0085_JUL2026'
+        january = 'RAD-PRJ-PUR-0085_JAN2026'
+        self.assertEqual(legacy_po_number(july), 'RAD-PRJ-PUR-0085_2026')
+        self.assertEqual(legacy_po_number(january), legacy_po_number(july))
+        self.assertNotEqual(source_po_number(july), source_po_number(january))
+        self.assertIsNone(legacy_po_number('invalid'))
+
+    def test_review_serializer_preserves_valid_full_identity(self):
+        from apps.procurement.serializers import PODocumentReviewSerializer
+
+        serializer = PODocumentReviewSerializer(data={'po_number': 'RAD-PRJ-PUR-0085_JUL2026'})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data['po_number'], 'RAD-PRJ-PUR-0085_JUL2026')
+
+    def test_review_serializer_rejects_embedded_or_overlong_number(self):
+        from apps.procurement.serializers import PODocumentReviewSerializer
+
+        for number in ('Prefix RAD-PRJ-PUR-0085_JUL2026', 'RAD-PRJ-PUR-' + '0' * 40 + '_JUL2026'):
+            with self.subTest(number=number):
+                serializer = PODocumentReviewSerializer(data={'po_number': number})
+                self.assertFalse(serializer.is_valid())
+                self.assertIn('po_number', serializer.errors)
 
 
 class PurchaseOrderNumberServiceTests(SimpleTestCase):

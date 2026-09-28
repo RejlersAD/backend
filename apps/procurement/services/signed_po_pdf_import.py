@@ -13,17 +13,16 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import APIException, PermissionDenied
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition, Vendor
 from ..models_master import Project
-from .po_excel_import import canonical_po_number
 from .po_tesseract_extractor import PDFTextUnreadableError, extract_text_from_pdf_tesseract
 from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
-from .purchase_order_numbering import PurchaseOrderNumberService
+from .purchase_order_numbering import PurchaseOrderNumberService, legacy_po_number, source_po_number
 from .po_supplier_extraction import complete_wrapped_seller_name, extract_seller_cover_details, needs_seller_layout
 from .po_supplier_contacts import parse_vendor_contact_block
 from .po_commercial_extraction import extract_po_commercial_fields
@@ -275,10 +274,10 @@ def extract_signed_po_fields(pdf_bytes: bytes, filename: str) -> dict[str, Any]:
             source_page_count = len(document)
     except (ImportError, RuntimeError, ValueError):
         pass
-    source_number = _match(r"(RAD-(?:GEN|PRJ)-PUR-\d{4}_\s*[A-Z]{3}\d{4})", text)
+    source_number = source_po_number(text, search=True)
     if not source_number:
-        source_number = re.sub(r"\.pdf$", "", filename, flags=re.IGNORECASE)
-    po_number = canonical_po_number(source_number)
+        source_number = source_po_number(filename, search=True)
+    po_number = source_number
     if not po_number:
         raise SignedPOImportError("The signed PDF does not contain a valid RAD PO number.")
 
@@ -525,7 +524,7 @@ def validate_originating_requisition(pr, fields, *, po=None):
     origin = fields.get('originating_pr_id')
     if origin and str(origin) != str(pr.pk):
         raise ProcurementDeleteConflict('This PDF was uploaded for another purchase recommendation. Its original PR link was kept.')
-    number = canonical_po_number(fields.get('po_number') or fields.get('source_po_number'))
+    number = source_po_number(fields.get('po_number') or fields.get('source_po_number'))
     valid, message = PurchaseOrderNumberService.verify(number, pr.pr_number)
     if not valid:
         raise ProcurementDeleteConflict(message)
@@ -670,16 +669,39 @@ def _attach_existing_order(po, fields, pdf_bytes, filename, user, *, signature_v
     }
 
 
+def _import_number_aliases(po_number, source_number):
+    """Find older year-only records without treating different months as equal."""
+    numbers = {source_po_number(value) for value in (po_number, source_number)} - {None}
+    return numbers | {legacy_po_number(value) for value in numbers}
+
+
+def _validate_existing_number(po, po_number, source_number):
+    """A legacy alias needs retained evidence of the same complete source ID."""
+    from .pr_document_reconciliation import _order_references
+    from .procurement_lifecycle import ProcurementDeleteConflict
+
+    if po is None:
+        return
+    exact = {source_po_number(value) for value in (po_number, source_number)} - {None}
+    if po.po_number in exact or exact.intersection(_order_references(po)[0]):
+        return
+    raise ProcurementDeleteConflict(
+        'A saved order uses the year-only version of this PO number without matching '
+        'source evidence. Review the existing order before uploading.'
+    )
+
+
 def _lock_import_relationships(po_number, source_number, *, originating_pr=None):
     """Lock every observed PR before the PO, including implicit source links."""
     from .procurement_lifecycle import ProcurementDeleteConflict
 
     order_query = PurchaseOrder.objects.filter(
-        Q(po_number=po_number) | Q(po_number=source_number),
-    ).annotate(
-        canonical_first=Case(When(po_number=po_number, then=Value(0)), default=Value(1), output_field=IntegerField()),
-    ).order_by('canonical_first', 'pk')
-    observed = order_query.only('pk', 'pr_reference_id').first()
+        po_number__in=_import_number_aliases(po_number, source_number),
+    ).order_by('pk')
+    observed_orders = list(order_query.only('pk', 'pr_reference_id')[:2])
+    if len(observed_orders) > 1:
+        raise ProcurementDeleteConflict('More than one saved order matches this PDF number. Resolve the duplicate references before uploading.')
+    observed = observed_orders[0] if observed_orders else None
     if originating_pr:
         # The public entrypoint already holds this PR. Never acquire another
         # PR after that lock just to discover an incompatible existing link.
@@ -701,10 +723,14 @@ def _lock_import_relationships(po_number, source_number, *, originating_pr=None)
         raise ProcurementDeleteConflict('A matching recommendation changed. Refresh and retry the upload.')
     if not originating_pr and list(source_query.values_list('pk', flat=True)[:2]) != candidate_ids:
         raise ProcurementDeleteConflict('The matching recommendations changed. Refresh and retry the upload.')
-    po = order_query.select_for_update().first()
+    locked_orders = list(order_query.select_for_update()[:2])
+    if len(locked_orders) > 1:
+        raise ProcurementDeleteConflict('More than one saved order matches this PDF number. Resolve the duplicate references before uploading.')
+    po = locked_orders[0] if locked_orders else None
     if ((po.pk if po else None) != (observed.pk if observed else None)
             or (po and po.pr_reference_id != observed.pr_reference_id)):
         raise ProcurementDeleteConflict('The linked recommendation changed. Refresh and retry the upload.')
+    _validate_existing_number(po, po_number, source_number)
     pr = (
         locked_prs[originating_pr.pk] if originating_pr else
         locked_prs[po.pr_reference_id] if po and po.pr_reference_id else
@@ -729,6 +755,7 @@ def _import_signed_po_pdf(
     register_missing_vendor: bool = False,
     allow_vendor_create: bool = False,
     previous_evidence=None,
+    expected_po_id=None,
 ) -> dict[str, Any]:
     if not pdf_bytes.startswith(b"%PDF"):
         raise SignedPOImportError("The uploaded file is not a valid PDF.")
@@ -739,6 +766,9 @@ def _import_signed_po_pdf(
         raise SignedPOImportError(message)
 
     po, pr = _lock_import_relationships(po_number, source_number, originating_pr=originating_pr)
+    if expected_po_id and (po is None or str(po.pk) != str(expected_po_id)):
+        from .procurement_lifecycle import ProcurementDeleteConflict
+        raise ProcurementDeleteConflict('This original PDF is already linked to another purchase order. Its saved number was kept.')
     retained_document = None
     if po:
         if not allow_existing_update:
@@ -900,7 +930,7 @@ def _import_signed_po_pdf(
     po.payment_terms = fields["payment_terms"]
     po.payment_mode = fields["payment_mode"] or "Bank Transfer"
     po.delivery_terms = fields["delivery_terms"]
-    po.marking = re.sub(r"_\d{4}$", "", po_number)
+    po.marking = po_number.rsplit('_', 1)[0]
     po.expected_delivery = fields["expected_delivery"]
     po.items = fields["items"] or po.items or []
     po.seller_reference = fields["seller_reference"]
@@ -1096,11 +1126,12 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, r
             raise ValidationError({'currency': 'Enter a three-letter purchase order currency.'})
     if pr:
         candidates = list(PurchaseOrder.objects.select_for_update().filter(
-            po_number__in={fields['po_number'], fields['source_po_number']},
+            po_number__in=_import_number_aliases(fields['po_number'], fields['source_po_number']),
         )[:2])
         if len(candidates) > 1:
             raise ProcurementDeleteConflict('More than one saved order matches this PDF number. Resolve the duplicate references before uploading.')
         existing = candidates[0] if candidates else None
+        _validate_existing_number(existing, fields['po_number'], fields['source_po_number'])
         if previous:
             validate_originating_requisition(pr, previous, po=existing)
         validate_originating_requisition(pr, fields, po=existing)
@@ -1123,7 +1154,8 @@ def import_signed_po_pdf(pdf_bytes: bytes, *, filename: str, user, pr_id=None, r
                 'mapping_issues': previous.get('mapping_issues', []), 'workflow_issues': previous.get('workflow_issues', []),
             }
     result = _import_signed_po_pdf(
-        pdf_bytes, filename=filename, user=user, originating_pr=pr, extracted_fields=fields, previous_evidence=previous, **options,
+        pdf_bytes, filename=filename, user=user, originating_pr=pr, extracted_fields=fields, previous_evidence=previous,
+        expected_po_id=retained.confirmed_po_id if retained else None, **options,
     )
     if require_complete and not result.get('purchase_order_id'):
         raise SignedPOImportError('The PO was not saved. ' + ' '.join(result.get('reconciliation_issues') or ['Review the supplier and PO details.']))

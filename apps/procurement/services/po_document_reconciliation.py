@@ -11,12 +11,12 @@ from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition
-from .po_excel_import import canonical_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict, mark_requisition_converted
-from .purchase_order_numbering import PurchaseOrderNumberService
+from .purchase_order_numbering import PurchaseOrderNumberService, source_po_number
 from .pr_document_reconciliation import verify_originating_po_link
 from .signed_po_pdf_import import (
-    _approval_evidence, _attach_existing_order, _date, validate_originating_requisition,
+    _approval_evidence, _attach_existing_order, _date, _import_number_aliases,
+    _validate_existing_number, validate_originating_requisition,
 )
 
 
@@ -91,18 +91,19 @@ def reconcile_saved_po_document(document_id, request, mapping):
         raise ValidationError({'pr_id': 'Select the matching purchase recommendation before reconciliation.'})
     pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
     vendor = mapping.get('vendor_id')
-    number = canonical_po_number(snapshot.get('po_number') or snapshot.get('source_po_number'))
+    number = source_po_number(snapshot.get('po_number') or snapshot.get('source_po_number'))
     verified, message = PurchaseOrderNumberService.verify(number, pr.pr_number)
     if not verified:
         raise ValidationError({'po_number': message})
-    aliases = {number}
+    aliases = _import_number_aliases(number, snapshot.get('source_po_number'))
     for alias in (snapshot.get('source_po_number'), (snapshot.get('source_extracted_data') or {}).get('source_po_number')):
-        if alias and canonical_po_number(alias) == number:
+        if alias and source_po_number(alias) == number:
             aliases.add(alias)
     candidates = list(PurchaseOrder.objects.select_for_update().filter(po_number__in=aliases)[:2])
     if len(candidates) > 1:
         raise ProcurementDeleteConflict('More than one saved order matches this PDF number. Resolve the duplicate references before reconciliation.')
     existing = candidates[0] if candidates else None
+    _validate_existing_number(existing, number, snapshot.get('source_po_number'))
     if origin_id:
         validate_originating_requisition(pr, snapshot, po=existing)
     document = get_object_or_404(PODocument.objects.select_for_update(), pk=document_id, uploaded_by=request.user)

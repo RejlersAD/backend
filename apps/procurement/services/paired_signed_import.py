@@ -8,7 +8,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition
 from .atomic_source_import import atomic_source_import
-from .po_excel_import import canonical_po_number
+from .purchase_order_numbering import legacy_po_number
 from .procurement_lifecycle import ProcurementDeleteConflict
 from .signed_po_pdf_import import (
     SignedPOImportError, _approval_evidence, ensure_retained_po_source, import_signed_po_pdf, preview_signed_po_pdf,
@@ -142,8 +142,10 @@ def import_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, request,
         po = PurchaseOrder.objects.get(pk=order_result['purchase_order_id'], pr_reference=pr)
         metadata = dict(pr.price_remarks_data or {})
         source_pr = (metadata.get('signed_document_verification') or {}).get('source_fields') or {}
-        if source_pr.get('po_reference') and canonical_po_number(source_pr['po_reference']) != canonical_po_number(po.po_number):
-            raise ProcurementDeleteConflict('The PR PDF references a different purchase order. Review both source documents before saving them together.')
+        if source_pr.get('po_reference'):
+            reference = legacy_po_number(source_pr['po_reference'])
+            if not reference or reference != legacy_po_number(po.po_number):
+                raise ProcurementDeleteConflict('The PR PDF references a different purchase order. Review both source documents before saving them together.')
         metadata['paired_signed_import'] = {
             'fingerprint': fingerprint, 'pr_sha256': pr_digest, 'po_sha256': po_digest,
             'purchase_order_id': str(po.pk),

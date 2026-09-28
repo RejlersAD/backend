@@ -57,7 +57,8 @@ from .services.approval_integrity import (
 from .services.procurement_vat import apply_confirmed_input, CONFIRMED_BASES
 from .services.requisition_supplier_contacts import requisition_supplier_contacts
 from .services.purchase_order_content import (
-    COMMERCIAL_LOCK_REASON, commercial_edit_locked, protect_purchase_order_content, purchase_order_content_issue,
+    COMMERCIAL_LOCK_REASON, PO_NUMBER_CORRECTIONS, commercial_edit_locked,
+    protect_purchase_order_content, purchase_order_content_issue,
 )
 from .services.purchase_order_lifecycle import (
     purchase_order_transition_issue, validate_purchase_order_transition,
@@ -1328,7 +1329,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(exc.detail['contact_persons']) from exc
         value = dict(value)
         existing = getattr(self.instance, 'contact_persons', None) or {}
-        for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES):
+        for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES, PO_NUMBER_CORRECTIONS):
             value.pop(key, None)
             if key in existing:
                 value[key] = existing[key]
@@ -1635,7 +1636,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if 'contact_persons' in validated_data:
             from .services.procurement_lifecycle import RETAINED_ATTACHMENTS, RETAINED_SOURCES
             contacts = instance.contact_persons or {}
-            for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES):
+            for key in (RETAINED_ATTACHMENTS, RETAINED_SOURCES, PO_NUMBER_CORRECTIONS):
                 validated_data['contact_persons'].pop(key, None)
                 if key in contacts:
                     validated_data['contact_persons'][key] = contacts[key]
@@ -1767,8 +1768,8 @@ class PODocumentReviewSerializer(serializers.Serializer):
         return value
 
     def validate_po_number(self, value):
-        from .services.po_excel_import import canonical_po_number
-        if not canonical_po_number(value):
+        from .services.purchase_order_numbering import source_po_number
+        if not source_po_number(value):
             raise serializers.ValidationError('Enter a valid RAD purchase order number.')
         return value
 
