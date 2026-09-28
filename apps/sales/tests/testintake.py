@@ -84,7 +84,7 @@ class SalesEmailIntakeReviewTests(TestCase):
             email='reviewer@example.com',
             password='test-password',
         )
-        grant_sales_actions(self.user, 'sales_email_intake', 'sales_proposals')
+        grant_sales_actions(self.user, 'sales_email_intake', 'sales_proposals', 'sales_opportunities', 'sales_clients')
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         self.intake = SalesEmailIntake.objects.create(

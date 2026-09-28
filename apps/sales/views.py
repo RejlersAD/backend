@@ -7,15 +7,18 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.exceptions import APIException
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess, IsAdmin
 from django.db.models import Q, Count, Sum, Avg, F
 from django.utils import timezone
+from django.utils.cache import patch_vary_headers
 from django.conf import settings
 from django.core import signing
 from django.core.cache import cache
 from django.shortcuts import redirect
+from django.http import Http404
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import timedelta
 from decimal import Decimal
@@ -35,7 +38,9 @@ from .serializers import (
     SalesMailboxConnectionSerializer,
 )
 from .ai_service import SalesAIService
-from .microsoft_graph import SalesMicrosoftGraphService
+from .microsoft_graph import SalesMailboxReadError, SalesMicrosoftGraphService
+from .email_permissions import can_create_email_opportunity, require_email_opportunity_access
+from .mailbox_opportunities import convert_mailbox_message, email_review_token
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
 from .workflow import (
     _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
@@ -54,6 +59,75 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
     serializer_class = SalesMailboxConnectionSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        if self.action in {'messages', 'message', 'convert_to_opportunity'}:
+            response['Cache-Control'] = 'private, no-store, max-age=0'
+            response['Pragma'] = 'no-cache'
+            patch_vary_headers(response, ('Authorization', 'Cookie'))
+        return response
+
+    @action(detail=True, methods=['get'])
+    def messages(self, request, pk=None):
+        connection = self.get_object()
+        if (
+            set(request.query_params) - {'cursor'}
+            or len(request.query_params.getlist('cursor')) > 1
+        ):
+            return Response({'detail': 'The email page request is invalid.'}, status=400)
+        try:
+            result = SalesMicrosoftGraphService(connection).list_messages(
+                user_id=request.user.pk, cursor=request.query_params.get('cursor'),
+            )
+        except SalesMailboxReadError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except Exception:
+            # Provider/configuration failures must not expose payloads or secrets.
+            return Response({'detail': 'The emails could not be loaded from Microsoft.'}, status=502)
+        return Response(result)
+
+    @action(detail=True, methods=['get'])
+    def message(self, request, pk=None):
+        connection = self.get_object()
+        if (
+            set(request.query_params) - {'message_id'}
+            or len(request.query_params.getlist('message_id')) != 1
+        ):
+            return Response({'detail': 'Select a valid email to view.'}, status=400)
+        try:
+            result = SalesMicrosoftGraphService(connection).get_message(
+                request.query_params.get('message_id'),
+            )
+        except SalesMailboxReadError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except Exception:
+            return Response({'detail': 'The email could not be loaded from Microsoft.'}, status=502)
+        result['can_create_opportunity'] = can_create_email_opportunity(request.user)
+        result['source_token'] = email_review_token(connection, request.user, result)
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='convert-to-opportunity')
+    def convert_to_opportunity(self, request, pk=None):
+        require_email_opportunity_access(request.user)
+        connection = self.get_object()
+        if request.query_params:
+            return Response({'detail': 'The opportunity request is invalid.'}, status=400)
+        try:
+            opportunity, created = convert_mailbox_message(
+                connection=connection, connection_queryset=self.get_queryset,
+                user=request.user, data=request.data,
+            )
+        except SalesMailboxReadError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except (APIException, Http404):
+            raise
+        except Exception:
+            return Response({'detail': 'The opportunity could not be created. Your reviewed fields have not been changed.'}, status=503)
+        return Response({
+            'opportunity': DealDetailSerializer(opportunity, context={'request': request}).data,
+            'created': created,
+        }, status=201 if created else 200)
 
     def get_permissions(self):
         if self.action == 'oauth_callback':
