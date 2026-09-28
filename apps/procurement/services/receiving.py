@@ -8,7 +8,7 @@ from copy import copy
 import hashlib
 import json
 import re
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.db import IntegrityError, transaction
 from django.core.serializers.json import DjangoJSONEncoder
@@ -52,7 +52,7 @@ def decimal_text(value):
     return format(value, 'f')
 
 
-def _basis(po):
+def _purchase_order_basis(po):
     items = po.items
     if not isinstance(items, list):
         raise ValueError('The purchase order item basis needs review.')
@@ -86,6 +86,83 @@ def _basis(po):
                               'ordered': po.net_amount}]
 
 
+def _reviewed_lines(basis, raw, currency):
+    """Validate explicitly reviewed source values without commercial defaults."""
+    if not isinstance(basis, str) or basis not in {'quantity', 'service_value'}:
+        raise ValidationError({'basis': 'Choose quantity or service_value.'})
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 100:
+        raise ValidationError({'lines': 'Review between one and 100 receiving lines.'})
+    if basis == 'service_value' and len(raw) != 1:
+        raise ValidationError({'lines': 'Review exactly one service net value.'})
+    result = []
+    for index, item in enumerate(raw, 1):
+        try:
+            if not isinstance(item, dict) or set(item) != {'description', 'uom', 'ordered'}:
+                raise ValueError('Each line accepts only description, uom and ordered.')
+            description, uom = item['description'], item['uom']
+            if not isinstance(description, str) or not 1 <= len(description.strip()) <= 2000:
+                raise ValueError('Enter a source description of at most 2000 characters.')
+            if not isinstance(uom, str) or not 1 <= len(uom.strip()) <= 30:
+                raise ValueError('Enter the source unit of at most 30 characters.')
+            ordered = amount(item['ordered'])
+            if ordered <= 0:
+                raise ValueError('Enter a positive ordered quantity or net value.')
+            if basis == 'service_value':
+                if not re.fullmatch(r'[A-Z]{3}', uom.strip()) or uom.strip() != str(currency or '').strip().upper():
+                    raise ValueError('Use the purchase order currency as three uppercase letters.')
+                if ordered != ordered.quantize(Decimal('0.01')):
+                    raise ValueError('Service net values must use at most two decimal places.')
+            result.append({'description': description.strip(), 'uom': uom.strip(), 'ordered': decimal_text(ordered)})
+        except (ValueError, InvalidOperation) as exc:
+            raise ValidationError({'lines': f'Line {index}: {exc}'}) from exc
+    return result
+
+
+def _basis(po):
+    reviewed = getattr(po, 'receiving_basis', None)
+    if isinstance(reviewed, dict) and not reviewed:
+        return _purchase_order_basis(po)
+    try:
+        if not isinstance(reviewed, dict) or type(reviewed.get('version')) is not int or reviewed['version'] != 1:
+            raise ValueError('The reviewed receiving basis needs review.')
+        raw = reviewed.get('lines')
+        if not isinstance(raw, list):
+            raise ValueError('The reviewed receiving basis needs review.')
+        values = _reviewed_lines(reviewed.get('basis'), [
+            {field: line.get(field) for field in ('description', 'uom', 'ordered')}
+            for line in raw if isinstance(line, dict)
+        ], po.currency)
+        if len(values) != len(raw):
+            raise ValueError('The reviewed receiving basis needs review.')
+        if not isinstance(reviewed.get('identity'), str):
+            raise ValueError('The reviewed receiving identity needs review.')
+        key = str(UUID(reviewed['identity']))
+        lines = []
+        for index, (line, value) in enumerate(zip(raw, values), 1):
+            identifier = f'reviewed:{key}:{index}'
+            if line.get('line_id') != identifier or line.get('line_number') != index or line.get('po_item_reference') != identifier:
+                raise ValueError('The reviewed receiving line identity needs review.')
+            lines.append({**value, 'ordered': amount(value['ordered']), 'line_id': identifier,
+                          'line_number': index, 'po_item_reference': identifier})
+        return reviewed['basis'], lines
+    except (KeyError, TypeError, ValueError, ValidationError) as exc:
+        raise ValueError('The reviewed receiving basis needs review.') from exc
+
+
+def _basis_review_capability(po, request):
+    """Keep approval/access/lifecycle denials ahead of the missing-basis hint."""
+    require_purchase_order_approval(po)
+    if po.status not in (*OPEN_STATUSES, 'completed'):
+        raise ValidationError('The purchase order must be issued before receiving.')
+    if request is not None:
+        _require_access(request)
+    reviewed = getattr(po, 'receiving_basis', None)
+    if not isinstance(reviewed, dict) or reviewed:
+        raise ValidationError('The reviewed receiving basis cannot be replaced.')
+    if po.receipts.exists():
+        raise ValidationError('Existing receipt evidence must be reconciled before reviewing the receiving basis.')
+
+
 def _line_id(item, lines):
     identifier = item.get('line_id') or item.get('po_line_id')
     if identifier is not None and str(identifier) in lines:
@@ -105,10 +182,24 @@ def _line_id(item, lines):
 def receiving_summary(po, *, request=None, exclude_receipt=None):
     result = {'basis': 'unavailable', 'status': 'blocked', 'lines': [], 'blocked_reason': '',
               'can_record': False, 'can_reconcile': False, 'requires_reconciliation': po.status == 'completed',
-              'po_updated_at': po.updated_at.isoformat() if po.updated_at else None, 'value_basis': None}
+              'po_updated_at': po.updated_at.isoformat() if po.updated_at else None, 'value_basis': None,
+              'needs_basis_review': False, 'can_review_basis': False, 'basis_source': None}
     try:
-        basis, values = _basis(po)
+        try:
+            basis, values = _basis(po)
+        except ValueError as exc:
+            reviewed = getattr(po, 'receiving_basis', None)
+            result['needs_basis_review'] = isinstance(reviewed, dict) and not reviewed
+            try:
+                _basis_review_capability(po, request)
+            except (ValidationError, PermissionDenied) as blocked:
+                result['blocked_reason'] = _message(blocked)
+            else:
+                result['can_review_basis'] = result['needs_basis_review']
+                result['blocked_reason'] = str(exc)
+            return result
         result['basis'] = basis
+        result['basis_source'] = 'reviewed_receiving' if getattr(po, 'receiving_basis', None) else 'purchase_order'
         result['value_basis'] = 'net_excluding_vat' if basis == 'service_value' else None
         lines = {line['line_id']: {**line, 'accepted': Decimal(0), 'pending': Decimal(0)} for line in values}
         receipts = po.receipts.all()
@@ -186,6 +277,63 @@ def _require_access(request):
     if not (request_action_allowed(request, 'procurement_orders', 'read')
             and request_action_allowed(request, 'procurement_receipts', 'create')):
         raise PermissionDenied('Purchase order read and receipt create access are required.')
+
+
+@transaction.atomic
+def review_receiving_basis(observed, request):
+    """Capture missing source lines without rewriting approved commercial terms."""
+    _require_access(request)
+    payload = request.data
+    expected = {'operation_key', 'expected_updated_at', 'basis', 'lines'}
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise ValidationError({'detail': 'Submit only operation_key, expected_updated_at, basis and lines.'})
+    try:
+        operation_key = str(UUID(str(payload['operation_key'])))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValidationError({'operation_key': 'A request UUID is required.'}) from exc
+    po = lock_purchase_order(observed)
+    require_purchase_order_approval(po)
+    if po.status not in (*OPEN_STATUSES, 'completed'):
+        raise ValidationError({'purchase_order': 'The purchase order must be issued before receiving.'})
+    basis = payload['basis']
+    lines = _reviewed_lines(basis, payload['lines'], po.currency)
+    fingerprint = hashlib.sha256(json.dumps({
+        'basis': basis, 'lines': lines, 'expected_updated_at': payload['expected_updated_at'],
+    }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    previous = getattr(po, 'receiving_basis', None)
+    if not isinstance(previous, dict) or previous:
+        if (isinstance(previous, dict) and previous.get('operation_key') == operation_key
+                and previous.get('actor_id') == request.user.pk
+                and previous.get('command_fingerprint') == fingerprint):
+            return receiving_summary(po, request=request)
+        raise ReceivingConflict('The receiving basis is already recorded and cannot be replaced.')
+    require_fresh(payload['expected_updated_at'], po.updated_at, 'expected_updated_at')
+    if po.receipts.exists():
+        raise ReceivingConflict('Existing receipt evidence must be reconciled before reviewing the receiving basis.')
+    try:
+        _purchase_order_basis(po)
+    except ValueError:
+        pass
+    else:
+        raise ReceivingConflict('This purchase order already has a valid receiving basis.')
+    identity = str(uuid4())
+    canonical = [{**line, 'line_id': f'reviewed:{identity}:{index}', 'line_number': index,
+                  'po_item_reference': f'reviewed:{identity}:{index}'} for index, line in enumerate(lines, 1)]
+    po.receiving_basis = {
+        'version': 1, 'identity': identity, 'basis': basis, 'lines': canonical,
+        'actor_id': request.user.pk, 'recorded_at': timezone.now().isoformat(),
+        'operation_key': operation_key, 'command_fingerprint': fingerprint,
+        'expected_updated_at': payload['expected_updated_at'],
+    }
+    po.save(update_fields=['receiving_basis', 'updated_at'])
+    create_audit_log(
+        user=request.user, action='update', resource_type='PurchaseOrder',
+        resource_id=str(po.pk), resource_repr=po.po_number,
+        changes={'receiving_basis': {'before': previous or {}, 'after': po.receiving_basis}},
+        metadata={'command': 'review_receiving_basis', 'operation_key': operation_key,
+                  'expected_updated_at': payload['expected_updated_at']},
+    )
+    return receiving_summary(po, request=request)
 
 
 def _canonical_items(raw, summary, *, decision=False):

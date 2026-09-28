@@ -16,6 +16,7 @@ Finance PO discovery requires Incoming Invoice read and Purchase Order read. Imp
 | --- | --- |
 | `GET /api/v1/procurement/receipts/available-orders/` | `queue=awaiting` or `reconciliation`, `search`, `page`, `page_size`; DRF paginated PO rows with decimal-string receiving balances, capabilities and blocked reasons. |
 | `GET /api/v1/procurement/orders/{id}/receiving-summary/` | Current basis, line balances and exact `po_updated_at` token. |
+| `POST /api/v1/procurement/orders/{id}/receiving-basis/` | Explicit missing-source review with UUID `operation_key`, exact PO `expected_updated_at`, `basis` and source `lines`; returns the refreshed receiving summary. |
 | `POST /api/v1/procurement/receipts/` | Pending receipt, required UUID `operation_key`, exact `expected_po_updated_at`, `purchase_order`, canonical `items_received` and recorded metadata, including optional date-only `receipt_date` (`YYYY-MM-DD`). |
 | `POST /api/v1/procurement/receipts/reconcile/` | Same command plus a nonempty `reason`, only for completed orders with missing accepted coverage. Creates pending evidence and preserves PO completion and approval history. |
 | `POST /api/v1/procurement/receipts/{id}/accept/` | Configured inspector decision with exact receipt `expected_updated_at`. Mixed accepted/rejected lines use the existing Partial disposition. |
@@ -23,7 +24,47 @@ Finance PO discovery requires Incoming Invoice read and Purchase Order read. Imp
 | `POST /api/v1/procurement/receipts/{id}/reject_delivery/` | Configured inspector decision, exact receipt token and rejection reason. |
 | `PATCH /api/v1/procurement/receipts/{id}/` | Pending metadata only, with exact receipt token. Decided evidence, recorded receipt date and PO/line identities cannot be replaced. |
 
-Quantity lines submit `line_id`, `received_qty` and `rejected_qty`. Service-value lines submit `line_id`, `received_amount` and `rejected_amount`. Values are decimal strings. Service acceptance uses recorded engineering/maintenance service scope and positive confirmed net value in the PO currency, never an invented quantity of one or a guessed gross-to-net conversion. Missing/ambiguous source data stays blocked and visible.
+Quantity lines submit `line_id`, `received_qty` and `rejected_qty`. Service-value lines submit `line_id`, `received_amount` and `rejected_amount`. Values are decimal strings. The canonical service fallback uses recorded engineering/maintenance scope and confirmed net value. Missing source values require the explicit receiving-only review below; quantities and gross-to-net conversions are never inferred.
+
+### Uploaded and legacy PO receiving basis — 28 September 2026
+
+An approved issued PO without usable structured items or a canonical service
+basis can now record an explicit receiving-only source review. The same action
+supports completed orders through the existing reconciliation flow. It requires
+current Purchase Order read and Receipt create access; it does not grant approval
+or change the PO's issued/approved state.
+
+The JSON command accepts exactly `operation_key`, `expected_updated_at`, `basis`
+and `lines`. Each line accepts exactly `description`, `uom` and `ordered`.
+`quantity` requires 1–100 source lines with positive decimal quantities, up to
+18 integer digits and six decimal places. Descriptions are nonblank with at most
+2000 characters; units are nonblank with at most 30. `service_value` requires
+exactly one actual service scope and explicitly reviewed positive net value
+in whole cents. Its unit is the three-letter uppercase PO currency. A missing
+net value, unit, quantity or description has no automatic default.
+
+Migration `0048_purchase_order_receiving_basis` adds an empty-default JSON field
+to the PO. Only this locked command writes it; generic PO writes reject that
+field. The metadata retains a server-generated identity namespace, stable line
+IDs, reviewed values, actual actor/time, UUID and command fingerprint. It remains
+outside the approved commercial-content fingerprint. Original PO items, category,
+VAT/net/gross values, approval evidence and source files remain unchanged.
+
+Existing valid canonical bases and any existing receipt prevent replacement.
+The first command locks PR then PO, checks source approval and freshness, and
+commits the metadata, updated PO timestamp and audit together. An identical
+same-actor/key/payload replay rechecks current access and approval, returns the
+current summary, and creates no new effects. Conflicting reuse/replacement or
+stale input returns 409. Operation identity belongs to that PO's source review.
+
+Receiving summaries expose `needs_basis_review`, `can_review_basis` and
+`basis_source` (`purchase_order`, `reviewed_receiving`, or null while unavailable).
+Recovery capability is false for denied, unapproved, unissued or already-received
+source records. Normal receipt creation still starts Pending and uses the same
+balance reservations and explicit recorder/inspection commands. Reviewed line
+IDs use a separate server UUID namespace; they do not manufacture canonical
+commercial PO items or automatic Finance matching evidence. No historical PO or
+receipt backfill is performed.
 
 Received minus rejected values reserve the available balance while inspection is pending. Accepted/partially accepted evidence consumes the balance; rejected receipts do not. Legacy evidence must map unambiguously to the saved PO line basis. Duplicate, invalid or over-limit evidence cannot silently increase availability.
 
@@ -236,3 +277,56 @@ retained attachment bytes after later PO cleanup, and audit/delete/parent-write
 rollback. Log: workspace `.codex-temp/receipt-actions-20260924/backend-permissions.log`.
 These model-sync tests do not certify migrations or PostgreSQL row locking;
 the separate concurrency verification is recorded by the scoped feature brief.
+
+### Receiving-basis recovery verification - 28 September 2026
+
+All 240 distinct release scenarios are verified on isolated PostgreSQL 15.18 and
+Python 3.11.16. The initial integrated run executed 240 cases in 332.012 seconds:
+229 passed, while 11 existing PO-number cases encountered a test-client cleanup
+error. Those fixtures explicitly closed an already consumed streaming response,
+closing PostgreSQL's connection inside the test transaction. They now assert
+that Django already closed the stream. All 63 PO-number correction, extraction
+and approval-guard cases then passed in 48.014 seconds. No application code was
+changed after the integrated run.
+
+The verified coverage includes 26 new recovery cases, receipt delivery metadata,
+creation, confirmation, deletion, inspection, Finance handoff and invoice field
+guards. Thirteen concurrency cases observed actual PostgreSQL row-lock waits,
+including competing receiving-basis reviews and identical simultaneous retries.
+Reviewed goods/service evidence remains separate from commercial PO lines and
+cannot manufacture a verified Finance match. Denied, stale, malformed, conflicting
+and rollback paths preserve source records and audit consistency.
+
+Real PostgreSQL DDL verification applied procurement migrations 0045 through 0048
+over the historical 0044 schema. Original PO and receipt columns were preserved;
+0047's blank defaults and delivery values persisted. Migration 0048's empty JSON
+default, new JSON persistence, reversal and reapplication passed on synthetic
+records. Procurement has zero pending migrations and consistent history in that
+disposable database. The full 58-app registry, 530-node graph and model-drift check
+also passed.
+
+The complete historical replay was intentionally stopped after 400 nodes because
+of its unrelated migration cost. Focused verification finished with 404 applied
+nodes and 126 unrelated nodes remaining; it is not a claim that all 530 migrations
+were replayed on a fresh database. These checks used only a disposable database.
+Activation and migration status of any existing application database are separate
+verification steps.
+
+The migration runner used a native Linux copy to avoid Windows bind-mount import
+latency. All 2,836 copied files matched their source hashes before execution, and
+all 2,457 frozen Python/requirements hashes matched after validation. Real dotenv
+files were masked; source data, cache, email and task transports were isolated.
+
+Evidence under workspace `.codex-temp/backend-release-20260928/`:
+`postgresql.log`, `po-regressions.log`, `postgresql-manifest.txt`,
+`po-regressions-manifest.txt`, `procurement-migrations-native.log`,
+`backend-source-manifest.json` and `native-source-manifest.json`.
+The intentionally incomplete replay is retained in `migrations-partial-history.log`.
+
+The independently verified existing local Docker development database was then
+updated with migration 0048. All 530 current graph migrations are applied, with
+zero pending and consistent history. Before/after hashes confirmed that all old
+PO/receipt columns and all seven permission tables were unchanged. Existing POs
+received empty receiving metadata; no receipt or receiving basis was fabricated.
+This is local activation only, not production migration evidence. Local logs are
+under workspace `.codex-temp/receipt-basis-release-20260928/`.

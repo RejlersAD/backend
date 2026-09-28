@@ -1449,6 +1449,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         attrs = super().validate(attrs)
         # Result fields are written only by the decision or reviewed-source
         # services. Older forms may still echo this optional date on save.
+        if 'receiving_basis' in getattr(self, 'initial_data', {}):
+            raise serializers.ValidationError({
+                'receiving_basis': 'Use the guarded receiving-basis action to review receiving lines.',
+            })
         attrs.pop('approved_date', None)
         try:
             attrs = apply_confirmed_input(attrs, self.instance, 'po')

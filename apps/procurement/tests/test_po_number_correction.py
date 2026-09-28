@@ -240,7 +240,7 @@ class PurchaseOrderNumberCorrectionTests(TestCase):
             response = self.client.get(self.url + f'uploaded-documents/{identifier}/content/')
             self.assertEqual(response.status_code, 200)
             self.assertEqual(b''.join(response.streaming_content), source_bytes)
-            response.close()
+            self.assertTrue(response.closed)
 
     def test_read_or_create_permission_without_update_does_not_allow_correction(self):
         before = self.snapshots()
@@ -585,7 +585,7 @@ class ImportedPurchaseOrderNumberCorrectionTests(TestCase):
         source = self.client.get(url + f'uploaded-documents/{document.pk}/content/')
         self.assertEqual(source.status_code, 200)
         self.assertEqual(b''.join(source.streaming_content), self.content)
-        source.close()
+        self.assertTrue(source.closed)
 
         commercial_edit = self.client.patch(url, {'payment_terms': 'Unapproved payment terms'}, format='json')
         self.assertEqual(commercial_edit.status_code, 400, commercial_edit.data)

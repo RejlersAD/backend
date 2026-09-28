@@ -550,6 +550,10 @@ class PurchaseOrder(TimeStampedModel):
     
     # Items
     items = models.JSONField(default=list, blank=True)
+    receiving_basis = models.JSONField(
+        default=dict, blank=True,
+        help_text='Audited receiving-only source review; written by the receiving-basis command.',
+    )
     items_table_headers = models.JSONField(
         default=dict,
         blank=True,
