@@ -28,6 +28,7 @@ REVIEW_FIELDS = (
 SOURCE_FIELDS = (
     'id', 'subject', 'sender_name', 'sender_email', 'received_at', 'sent_at',
     'body_text', 'body_content', 'to_recipients', 'cc_recipients', 'has_attachments',
+    'analysis_source_hash',
 )
 
 
@@ -58,8 +59,11 @@ def _connection_scope(connection):
     }
 
 
-def _source_digest(message):
-    return _digest({field: message.get(field) for field in SOURCE_FIELDS})
+def _source_digest(message, *, version=2):
+    fields = SOURCE_FIELDS if version == 2 else tuple(
+        field for field in SOURCE_FIELDS if field != 'analysis_source_hash'
+    )
+    return _digest({field: message.get(field) for field in fields})
 
 
 def _source_identity(connection, message_id):
@@ -160,9 +164,14 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
                     'An opportunity already exists for this email with different reviewed fields.',
                     code='email_already_converted',
                 )
-            if previous.data.get('source_content_hash') != review['source']:
+            previous_source = previous.data.get('source_content_hash')
+            legacy_same_selected = (
+                previous.data.get('source_hash_version', 1) == 1
+                and previous_source == _source_digest(message, version=1)
+            )
+            if previous_source != review['source'] and not legacy_same_selected:
                 raise EmailReviewConflict(
-                    'This email changed after its opportunity was created.', code='email_already_converted',
+                    'The email or conversation evidence differs from the recorded opportunity.', code='email_already_converted',
                 )
             return opportunity, False
         source = {
@@ -183,6 +192,7 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
             data={
                 **source, 'mailbox_source_hash': source_hash,
                 'reviewed_payload_hash': payload_hash, 'source_content_hash': review['source'],
+                'source_hash_version': 2,
             },
         )
         return opportunity, True

@@ -682,6 +682,12 @@ SALES_EMAIL_INTAKE_WEBHOOK_KEY = config(
     'SALES_EMAIL_INTAKE_WEBHOOK_KEY',
     default='',
 )
+# Automatic readers require both deployment opt-in and a separately authorized
+# application mailbox. No scheduled source import is enabled by a migration.
+SALES_MAILBOX_SYNC_ENABLED = config('SALES_MAILBOX_SYNC_ENABLED', default=False, cast=bool)
+SALES_MAILBOX_SYNC_INTERVAL_SECONDS = config('SALES_MAILBOX_SYNC_INTERVAL_SECONDS', default=60, cast=int)
+SALES_MAILBOX_SYNC_MAX_STEPS = config('SALES_MAILBOX_SYNC_MAX_STEPS', default=30, cast=int)
+SALES_MAILBOX_SYNC_WORK_SECONDS = config('SALES_MAILBOX_SYNC_WORK_SECONDS', default=60, cast=int)
 MICROSOFT_GRAPH_TIMEOUT = config('MICROSOFT_GRAPH_TIMEOUT', default=30, cast=int)
 HR_ASSISTANT_MODEL = config('HR_ASSISTANT_MODEL', default='gpt-4o-mini')
 HR_ASSISTANT_LLM_ENABLED = config('HR_ASSISTANT_LLM_ENABLED', default=False, cast=bool)
@@ -1147,6 +1153,12 @@ for _app_config_module in (
 from apps.portfolio.schedule import portfolio_beat_schedule
 CELERY_BEAT_SCHEDULE.update(portfolio_beat_schedule(
     enabled=PORTFOLIO_SYNC_ENABLED, interval_seconds=PORTFOLIO_SYNC_INTERVAL_SECONDS))
+
+from apps.sales.schedule import mailbox_sync_beat_schedule
+CELERY_BEAT_SCHEDULE.update(mailbox_sync_beat_schedule(
+    enabled=SALES_MAILBOX_SYNC_ENABLED,
+    interval_seconds=SALES_MAILBOX_SYNC_INTERVAL_SECONDS,
+))
 
 # ==============================================================================
 # End of Celery Configuration

@@ -828,6 +828,58 @@ class SalesMailboxConnection(TimeStampedModel):
         return f'{self.name} ({self.mailbox_address})'
 
 
+class SalesMailboxSyncState(TimeStampedModel):
+    """Private durable progress and explicit authority for a mailbox reader."""
+
+    connection = models.OneToOneField(SalesMailboxConnection, on_delete=models.PROTECT, related_name='sync_state')
+    authorized_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='+')
+    identity = models.JSONField(default=dict)
+    status = models.CharField(max_length=24, default='paused')
+    folder_cursor = models.TextField(blank=True)
+    folder_discovery_completed_at = models.DateTimeField(null=True, blank=True)
+    folder_discovery_due_at = models.DateTimeField(null=True, blank=True)
+    initial_sync_completed_at = models.DateTimeField(null=True, blank=True)
+    last_started_at = models.DateTimeField(null=True, blank=True)
+    last_successful_sync_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    last_error_code = models.CharField(max_length=40, blank=True)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'sales_mailbox_sync_states'
+
+
+class SalesMailboxSyncFolder(TimeStampedModel):
+    sync = models.ForeignKey(SalesMailboxSyncState, on_delete=models.CASCADE, related_name='folders')
+    folder_id = models.CharField(max_length=512)
+    cursor = models.TextField(blank=True)
+    is_removed = models.BooleanField(default=False)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_error_code = models.CharField(max_length=40, blank=True)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'sales_mailbox_sync_folders'
+        constraints = [models.UniqueConstraint(fields=['sync', 'folder_id'], name='sales_sync_folder_uq')]
+
+
+class SalesMailboxSyncItem(TimeStampedModel):
+    sync = models.ForeignKey(SalesMailboxSyncState, on_delete=models.CASCADE, related_name='items')
+    message_id = models.CharField(max_length=512)
+    status = models.CharField(max_length=24, default='pending', db_index=True)
+    intake = models.ForeignKey('SalesEmailIntake', null=True, blank=True, on_delete=models.PROTECT, related_name='+')
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_error_code = models.CharField(max_length=40, blank=True)
+
+    class Meta:
+        db_table = 'sales_mailbox_sync_items'
+        constraints = [models.UniqueConstraint(fields=['sync', 'message_id'], name='sales_sync_message_uq')]
+
+
 class SalesEmailIntake(TimeStampedModel):
     """Immutable source record received from an approved email automation."""
 
@@ -840,12 +892,23 @@ class SalesEmailIntake(TimeStampedModel):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    source_message_id = models.CharField(max_length=512, unique=True, db_index=True)
+    source_message_id = models.CharField(max_length=512, db_index=True)
+    mailbox_connection = models.ForeignKey(
+        SalesMailboxConnection, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='email_intakes',
+    )
+    source_mailbox_address = models.EmailField(blank=True)
+    source_tenant_id = models.CharField(max_length=100, blank=True)
+    conversation_id = models.CharField(max_length=512, blank=True, db_index=True)
+    captured_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
     internet_message_id = models.CharField(max_length=512, blank=True, db_index=True)
     subject = models.CharField(max_length=500)
     sender_name = models.CharField(max_length=255, blank=True)
     sender_email = models.EmailField()
     received_at = models.DateTimeField(db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
     body_preview = models.TextField(blank=True)
     has_attachments = models.BooleanField(default=False)
     importance = models.CharField(max_length=20, blank=True)
@@ -883,6 +946,17 @@ class SalesEmailIntake(TimeStampedModel):
         db_table = 'sales_email_intakes'
         ordering = ['-received_at']
         indexes = [models.Index(fields=['status', '-received_at'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['mailbox_connection', 'source_message_id'],
+                name='sales_intake_mailbox_message_uq',
+            ),
+            models.UniqueConstraint(
+                fields=['source_message_id'],
+                condition=models.Q(mailbox_connection__isnull=True),
+                name='sales_intake_legacy_message_uq',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.sender_email}: {self.subject}'
