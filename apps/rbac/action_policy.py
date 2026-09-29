@@ -172,7 +172,7 @@ CREATE_OPERATIONS = {
     'generate_upload_url', 'governance_comments', 'governance_items', 'import_boq', 'import_excel',
     'import_full_xlsx', 'import_reviewed', 'import_signed_pdf', 'import_xlsx', 'intelligent_generate',
     'library_watch_start', 'materialize', 'my_signature', 'my_digital_stamp', 'output_drawings', 'process',
-    'quality_check', 're_extract', 'recommend_vendors', 'reserve_number', 'run_assurance',
+    'force_fresh_extract', 'quality_check', 're_extract', 'recommend_vendors', 'reserve_number', 'run_assurance',
     'run_three_way_match', 'save_output', 'score_lead', 'send_email', 'send_test_mail',
     'send_test_teams', 'send_to_client', 'send_to_vendor', 'smart_upload', 'snapshots', 'start',
     'start_checklist_stage', 'start_it_checklist', 'start_review', 'start_verification',
