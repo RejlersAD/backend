@@ -97,6 +97,105 @@ class SalesMailboxBrowsingServiceTests(SimpleTestCase):
         self.assertNotIn('body', call.kwargs['params']['$select'].split(','))
         self.assertFalse(call.kwargs['allow_redirects'])
 
+    def test_direction_uses_exact_mailbox_recipients_in_the_existing_list_read(self):
+        for recipient_field in ('toRecipients', 'ccRecipients'):
+            with self.subTest(recipient_field=recipient_field):
+                self.network.reset_mock()
+                self.network.return_value = graph_response({'value': [{
+                    **MESSAGE, 'isRead': True, 'subject': 'FW: Synthetic enquiry',
+                    recipient_field: [{'emailAddress': {'address': ' SALES@EXAMPLE.TEST '}}],
+                }]})
+                result = self.service.list_messages(user_id=17)
+                self.assertEqual(result['results'][0]['direction'], 'incoming')
+                self.assertEqual(self.network.call_count, 1)
+                fields = self.network.call_args.kwargs['params']['$select'].split(',')
+                self.assertIn('toRecipients', fields)
+                self.assertIn('ccRecipients', fields)
+                self.assertNotIn('bccRecipients', fields)
+                for key in ('toRecipients', 'ccRecipients', 'bccRecipients', 'to_recipients', 'cc_recipients'):
+                    self.assertNotIn(key, result['results'][0])
+
+    def test_direction_recognizes_own_from_sender_delegation_and_self_addressed_mail(self):
+        own = {'emailAddress': {'address': ' Sales@Example.Test '}}
+        other = {'emailAddress': {'address': 'delegate@example.test'}}
+        for origin in (
+            {'from': own, 'sender': own},
+            {'from': own, 'sender': other},
+            {'from': other, 'sender': own},
+            {'from': None, 'sender': own},
+        ):
+            with self.subTest(origin=origin):
+                self.network.return_value = graph_response({'value': [{
+                    **MESSAGE, **origin, 'toRecipients': [own], 'isRead': False,
+                }]})
+                self.assertEqual(self.service.list_messages(user_id=17)['results'][0]['direction'], 'outgoing')
+
+    def test_draft_precedes_origin_and_recipient_classification(self):
+        for origin in (None, {'emailAddress': {'address': 'sales@example.test'}}, MESSAGE['from']):
+            with self.subTest(origin=origin):
+                self.network.return_value = graph_response({'value': [{
+                    **MESSAGE, 'from': origin, 'isDraft': True,
+                    'toRecipients': [{'emailAddress': {'address': 'sales@example.test'}}],
+                }]})
+                row = self.service.list_messages(user_id=17)['results'][0]
+                self.assertEqual(row['direction'], 'draft')
+                self.assertTrue(row['is_draft'])
+
+    def test_unproven_direction_stays_unknown_without_guessing_domains_or_hidden_recipients(self):
+        own = {'emailAddress': {'address': 'sales@example.test'}}
+        variants = [
+            {},
+            {'toRecipients': [{'emailAddress': {'address': 'sales-alias@example.test'}}]},
+            {'bccRecipients': [own]},
+            {'toRecipients': {'emailAddress': {'address': 'sales@example.test'}}},
+            {'toRecipients': [None, 'sales@example.test', {'emailAddress': 7}]},
+            {'from': None, 'sender': None, 'toRecipients': [own]},
+            {'from': {'emailAddress': {'address': 7}}, 'toRecipients': [own]},
+            {'from': {'emailAddress': {'address': 'not-an-address'}}, 'toRecipients': [own]},
+            {'from': {'emailAddress': {'address': ' '}}},
+            {'isDraft': 'true'},
+        ]
+        for index, fields in enumerate(variants):
+            with self.subTest(index=index):
+                self.network.return_value = graph_response({'value': [{**MESSAGE, **fields}]})
+                self.assertEqual(self.service.list_messages(user_id=17)['results'][0]['direction'], 'unknown')
+
+    def test_old_cursor_without_recipient_metadata_remains_usable(self):
+        self.network.return_value = graph_response({'value': [MESSAGE]})
+        page = self.service.list_messages(user_id=17, cursor=self.cursor())
+        self.assertEqual(page['results'][0]['direction'], 'unknown')
+        self.assertEqual(self.network.call_count, 1)
+        self.assertEqual(self.network.call_args.args, ('GET', self.next_link))
+        self.assertIsNone(self.network.call_args.kwargs['params'])
+
+    def test_presentation_direction_does_not_change_source_review_digest(self):
+        self.network.return_value = graph_response({
+            **MESSAGE, 'body': {'contentType': 'text', 'content': 'Synthetic unchanged source'},
+        })
+        first = self.service.get_message(MESSAGE['id'])
+        with patch.object(SalesMicrosoftGraphService, '_message_direction', return_value='incoming'):
+            second = self.service.get_message(MESSAGE['id'])
+        self.assertNotEqual(first['direction'], second['direction'])
+        self.assertEqual(first['analysis_source_hash'], second['analysis_source_hash'])
+        self.assertEqual(
+            {key: value for key, value in first['extracted_information'].items() if key != 'analysis'},
+            {key: value for key, value in second['extracted_information'].items() if key != 'analysis'},
+        )
+        self.assertNotEqual(first['extracted_information']['analysis']['sources'][0]['direction'],
+                            second['extracted_information']['analysis']['sources'][0]['direction'])
+
+    def test_list_thread_roles_use_draft_and_prefix_without_extra_graph_requests(self):
+        messages = [{**MESSAGE, 'id': str(index), 'subject': subject, 'isDraft': draft}
+                    for index, (subject, draft) in enumerate([
+                        ('Re: RFQ bulletin', False), (' FW: Subject', False), ('New subject', False), ('Re: Draft', True),
+                    ])]
+        self.network.return_value = graph_response({'value': messages})
+        result = self.service.list_messages(user_id=17)
+        self.assertEqual([row['thread_role'] for row in result['results']], ['reply', 'forward', 'unknown', 'draft'])
+        self.assertEqual(self.network.call_count, 1)
+        self.assertNotIn('internetMessageHeaders', self.network.call_args.kwargs['params']['$select'])
+        self.assertTrue(all(row['thread_role_reason'] for row in result['results']))
+
     def test_cursor_keeps_entire_next_link_including_non_page_size_skip(self):
         self.network.side_effect = [
             graph_response({'value': [], '@odata.nextLink': self.next_link}),
@@ -440,6 +539,36 @@ class SalesMailboxBrowsingAPITests(TestCase):
         self.assertEqual(before, SalesMailboxConnection.objects.values().get(pk=self.connection.pk))
         self.assertEqual(SalesEmailIntake.objects.count(), 0)
         self.assertTrue(all(call.args[0] == 'GET' for call in self.network.call_args_list))
+
+    def test_guarded_list_and_detail_directions_agree_without_writes_or_extra_reads(self):
+        before = SalesMailboxConnection.objects.values().get(pk=self.connection.pk)
+        own = {'emailAddress': {'name': 'Synthetic Sales', 'address': 'sales@example.test'}}
+        for expected, metadata in (
+            ('incoming', {'toRecipients': [own]}),
+            ('outgoing', {'from': own, 'toRecipients': [own]}),
+            ('draft', {'from': own, 'isDraft': True}),
+            ('unknown', {}),
+        ):
+            with self.subTest(expected=expected):
+                payload = {**MESSAGE, **metadata, 'body': {'contentType': 'text', 'content': 'Synthetic body'}}
+                self.network.reset_mock()
+                self.network.side_effect = [graph_response({'value': [payload]}), graph_response(payload)]
+                listed = self.client.get(self.list_url)
+                detail = self.client.get(self.detail_url, {'message_id': MESSAGE['id']})
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(detail.status_code, 200)
+                self.assertEqual(listed.data['results'][0]['direction'], expected)
+                self.assertEqual(detail.data['direction'], expected)
+                self.assert_private(listed)
+                self.assert_private(detail)
+                self.assertEqual(self.network.call_count, 2)
+                self.assertTrue(all(call.args[0] == 'GET' for call in self.network.call_args_list))
+                self.assertNotIn('to_recipients', listed.data['results'][0])
+                self.assertEqual(detail.data['to_recipients'],
+                                 [{'name': 'Synthetic Sales', 'email': 'sales@example.test'}]
+                                 if metadata.get('toRecipients') else [])
+        self.assertEqual(before, SalesMailboxConnection.objects.values().get(pk=self.connection.pk))
+        self.assertEqual(SalesEmailIntake.objects.count(), 0)
 
     def test_module_grant_does_not_allow_another_owners_mail(self):
         self.client.force_authenticate(self.other)

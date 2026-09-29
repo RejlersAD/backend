@@ -2,12 +2,14 @@
 
 import re
 import secrets
+from collections.abc import Mapping
 from html import unescape
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.cache import patch_vary_headers
 from django.utils.html import strip_tags
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, serializers, status, viewsets
@@ -26,7 +28,8 @@ from apps.rbac.permissions import HasModuleAccess
 from apps.rbac.action_policy import module_action_allowed
 
 from .email_permissions import (
-    require_email_opportunity_access, visible_email_clients, visible_email_opportunities,
+    require_email_opportunity_access, visible_email_clients, visible_email_intakes,
+    visible_email_opportunities,
 )
 
 from .models import Client, Contact, OpportunityAuditEvent, SalesEmailIntake
@@ -63,6 +66,11 @@ class SalesEmailWebhookSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'source_message_id': {'validators': []},
         }
+
+    def to_internal_value(self, data):
+        if isinstance(data, Mapping) and set(data) - set(self.fields):
+            raise serializers.ValidationError({'detail': 'Only legacy email source fields may be submitted.'})
+        return super().to_internal_value(data)
 
     def validate_source_message_id(self, value):
         value = value.strip()
@@ -110,6 +118,7 @@ def sales_email_intake(request):
     source_message_id = validated.pop('source_message_id')
     with transaction.atomic():
         intake, created = SalesEmailIntake.objects.get_or_create(
+            mailbox_connection=None,
             source_message_id=source_message_id,
             defaults=validated,
         )
@@ -141,6 +150,18 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
     ]
     ordering_fields = ['received_at', 'created_at', 'status', 'importance']
     ordering = ['-received_at']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(
+            pk__in=visible_email_intakes(self.request.user).values('pk'),
+        )
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response['Cache-Control'] = 'private, no-store, max-age=0'
+        response['Pragma'] = 'no-cache'
+        patch_vary_headers(response, ('Authorization', 'Cookie'))
+        return response
 
     def _save_resolution(self, intake, *, status_value, note='', duplicate_of=None):
         intake.status = status_value
@@ -184,8 +205,13 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             })
         duplicate_of = None
         duplicate_id = request.data.get('duplicate_of')
+        candidates = self.get_queryset().filter(mailbox_connection_id=intake.mailbox_connection_id)
         if duplicate_id:
-            duplicate_of = SalesEmailIntake.objects.filter(pk=duplicate_id).first()
+            try:
+                duplicate_id = serializers.UUIDField().run_validation(duplicate_id)
+            except serializers.ValidationError:
+                raise serializers.ValidationError({'duplicate_of': 'The original intake could not be found.'}) from None
+            duplicate_of = candidates.filter(pk=duplicate_id).first()
             if not duplicate_of:
                 raise serializers.ValidationError({
                     'duplicate_of': 'The original intake could not be found.',
@@ -195,7 +221,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'duplicate_of': 'An intake cannot duplicate itself.',
                 })
         else:
-            candidates = SalesEmailIntake.objects.exclude(pk=intake.pk)
+            candidates = candidates.exclude(pk=intake.pk)
             same_sender_and_subject = Q(
                 sender_email__iexact=intake.sender_email,
                 subject__iexact=intake.subject,
