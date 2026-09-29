@@ -500,7 +500,20 @@ def _parse_normalized_composition(ws, allowed_streams=None, allowed_components=N
     return out
 
 
-def _parse_master_case_workbook(wb, source_filename: str, template_profile_payload: Dict[str, Any]):
+def _with_dynamic_streams(template_streams, source_stream_ids):
+    """Append dynamic template entries for source streams missing from the
+    template so extraction covers every source stream regardless of template
+    scope (format-agnostic: works for master, phase, and summary layouts)."""
+    existing = {_normalise_text(stream.get('stream_id')) for stream in template_streams or []}
+    dynamic = [
+        {'stream_id': _normalise_text(stream_id), 'description': '', 'dynamic': True}
+        for stream_id in source_stream_ids
+        if _normalise_text(stream_id) and _normalise_text(stream_id) not in existing
+    ]
+    return list(template_streams or []) + dynamic
+
+
+def _parse_master_case_workbook(wb, source_filename: str, template_profile_payload: Dict[str, Any], extract_all_streams: bool = False):
     layout = detect_template_layout(wb, 'master')
     ws = wb[layout['sheet_name']]
     title = _normalise_text(ws.cell(1, 1).value)
@@ -517,6 +530,8 @@ def _parse_master_case_workbook(wb, source_filename: str, template_profile_paylo
                      if ws.cell(layout['stream_header_row'], column).value not in (None, '')]
     if len(header_values) != len(source_columns):
         raise ValueError('Source workbook contains duplicate stream IDs.')
+    if extract_all_streams:
+        template_streams = _with_dynamic_streams(template_streams, list(source_columns))
     source_sections = template_sections(ws, layout)
     source_properties = {}
     for section in source_sections:
@@ -1138,8 +1153,12 @@ def analyze_hmb_master_template(workbook_path: str) -> Dict[str, Any]:
     return result
 
 
-def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', template_profile_payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """Parse one HMB case workbook into normalized long-format records."""
+def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', template_profile_payload: Dict[str, Any] | None = None, extract_all_streams: bool = False) -> Dict[str, Any]:
+    """Parse one HMB case workbook into normalized long-format records.
+
+    When extract_all_streams is True, every stream found in the source file is
+    extracted (the template stream list only drives output layout; source
+    streams missing from the template are included dynamically)."""
     # Random cell access dominates this parser; normal mode is significantly
     # faster than read_only mode for this access pattern.
     with open(workbook_path, 'rb') as workbook_file:
@@ -1151,7 +1170,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
     is_phase_workbook = any(name in wb.sheetnames for name in ('Overall', 'Vapour Phase', 'Liquid Phase', 'Aqueous Phase'))
     if not normalized_summary and ('Master' in wb.sheetnames or not is_phase_workbook) and (template_profile_payload or {}).get('stream_columns'):
         try:
-            return _parse_master_case_workbook(wb, source_filename, template_profile_payload)
+            return _parse_master_case_workbook(wb, source_filename, template_profile_payload, extract_all_streams=extract_all_streams)
         finally:
             wb.close()
     sheet_map = {
@@ -1298,6 +1317,9 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
             'records': records,
             'exceptions': exceptions,
         }
+
+    if extract_all_streams:
+        template_streams = _with_dynamic_streams(template_streams, source_stream_ids)
 
     stream_map, unmatched, duplicates = _resolve_stream_mapping(template_streams, source_stream_ids)
     template_by_id = {

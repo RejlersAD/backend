@@ -215,8 +215,6 @@ def _build_hmb_stream_comparison(project, template_profile, stream_id: str) -> d
         (stream for stream in stream_columns if str(stream.get('stream_id', '')) == stream_id),
         None,
     )
-    if stream_meta is None:
-        raise ValueError('Stream ID is not present in the selected Master template.')
 
     records = list(
         HMBCaseRecord.objects.filter(
@@ -229,6 +227,17 @@ def _build_hmb_stream_comparison(project, template_profile, stream_id: str) -> d
             'source_filename', 'source_stream_id', 'source_metadata',
         )
     )
+    if stream_meta is None:
+        # Dynamic stream: extracted via extract-all mode but not defined in the
+        # master template. Build minimal metadata from imported records.
+        if not records:
+            raise ValueError('Stream ID is not present in the selected Master template.')
+        stream_meta = {
+            'stream_id': stream_id,
+            'description': '',
+            'pfd_no': '',
+            'dynamic': True,
+        }
     available_cases = sorted({canonical_hmb_case_name(name) for name in HMBCaseRecord.objects.filter(
         project=project, template_profile=template_profile,
     ).values_list('case_name', flat=True).distinct()})
@@ -282,6 +291,7 @@ def _build_hmb_stream_comparison(project, template_profile, stream_id: str) -> d
         'project_id': str(project.project_id),
         'template_profile_id': str(template_profile.id),
         'stream': stream_meta,
+        'stream_dynamic': bool(stream_meta.get('dynamic')),
         'fixed_case_slots': configured_cases,
         'case_names': case_names,
         'rows': rows,
@@ -661,6 +671,87 @@ def list_hmb_master_templates_view(request):
     })
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def sync_hmb_template_streams_view(request):
+    """Rebuild a master template profile's stream_columns from the stream IDs
+    actually present in imported case records — makes the template dynamic so
+    it follows the source data (e.g. 1, 2, 3...) instead of the fixed IDs
+    baked into the uploaded Master.xlsx (e.g. 1001, 1008...).
+
+    Existing template stream metadata (description, pfd_no) is preserved for
+    IDs that still exist; new streams get empty metadata and dynamic=True.
+    """
+    project_id = request.data.get('project_id')
+    template_profile_id = request.data.get('template_profile_id')
+    if not project_id or not template_profile_id:
+        return Response(
+            {'error': 'project_id and template_profile_id are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    project, project_err = _get_accessible_project(request.user, project_id)
+    if project_err:
+        return project_err
+    try:
+        profile = HMBMasterTemplateProfile.objects.get(id=template_profile_id, is_active=True)
+    except (HMBMasterTemplateProfile.DoesNotExist, ValueError):
+        return Response({'error': 'Template profile not found'}, status=status.HTTP_404_NOT_FOUND)
+    if profile.project_id and profile.project_id != project.project_id:
+        return Response({'error': 'Template profile does not belong to this project'}, status=status.HTTP_400_BAD_REQUEST)
+    if not profile.project_id and not _is_admin(request.user) and profile.created_by_id != request.user.id:
+        return Response({'error': 'Access denied for template profile.'}, status=status.HTTP_403_FORBIDDEN)
+
+    source_ids = list(
+        HMBCaseRecord.objects.filter(project=project, template_profile=profile)
+        .values_list('stream_id', flat=True).distinct()
+    )
+    if not source_ids:
+        return Response(
+            {'error': 'No imported case records found for this template. Import case files first.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def _natural_key(value):
+        return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', str(value))]
+
+    source_ids = sorted({str(sid).strip() for sid in source_ids if str(sid).strip()}, key=_natural_key)
+
+    payload = profile.analysis_payload or {}
+    existing = {
+        str(stream.get('stream_id', '')).strip(): stream
+        for stream in payload.get('stream_columns', []) or []
+        if str(stream.get('stream_id', '')).strip()
+    }
+    stream_columns = []
+    for index, stream_id in enumerate(source_ids):
+        previous = existing.get(stream_id, {})
+        stream_columns.append({
+            **previous,
+            'column_index': index + 4,
+            'column_letter': get_column_letter(index + 4),
+            'stream_id': stream_id,
+            'description': previous.get('description', ''),
+            'dynamic': stream_id not in existing,
+        })
+
+    payload['stream_columns'] = stream_columns
+    summary = payload.get('summary') or {}
+    summary['stream_count'] = len(stream_columns)
+    payload['summary'] = summary
+    profile.analysis_payload = payload
+    profile.stream_count = len(stream_columns)
+    profile.save(update_fields=['analysis_payload', 'stream_count', 'updated_at'])
+
+    return Response({
+        'success': True,
+        'template_profile_id': str(profile.id),
+        'stream_count': len(stream_columns),
+        'retained_template_streams': len([s for s in stream_columns if not s.get('dynamic')]),
+        'added_dynamic_streams': len([s for s in stream_columns if s.get('dynamic')]),
+        'stream_columns': stream_columns,
+    })
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def retrieve_hmb_master_template_view(request, profile_id):
@@ -730,6 +821,7 @@ def preview_hmb_case_files_view(request):
     failures = []
     storage_failed = False
     template_payload = template_profile.analysis_payload or {}
+    extract_all_streams = str(request.data.get('extract_all_streams', '')).strip().lower() in ('1', 'true', 'yes', 'on')
     for file_obj in files:
         filename = file_obj.name or 'HMB input'
         extension = os.path.splitext(filename.lower())[1]
@@ -752,7 +844,7 @@ def preview_hmb_case_files_view(request):
                 extracted = HMBVisionExtractor().extract_from_pdf(temp_path)
                 parsed = _normalise_pdf_hmb(extracted.get('streams', []), filename, template_payload)
             else:
-                parsed = parse_hmb_case_workbook(temp_path, filename, template_payload)
+                parsed = parse_hmb_case_workbook(temp_path, filename, template_payload, extract_all_streams=extract_all_streams)
             if not parsed.get('records'):
                 raise ValueError('No mapped values found. Verify the selected master and source workbook.')
             storage_result = store_hmb_source(
@@ -1078,6 +1170,7 @@ def import_hmb_case_files_view(request):
                 temp_path,
                 source_filename=file_obj.name,
                 template_profile_payload=(template_profile.analysis_payload or {}) if template_profile else None,
+                extract_all_streams=str(request.data.get('extract_all_streams', '')).strip().lower() in ('1', 'true', 'yes', 'on'),
             )
             case_name = parsed.get('case_name', '')
             if case_name in imported_case_names:
@@ -1245,6 +1338,7 @@ def hmb_project_consolidated_summary_view(request, project_id):
         'case_count': len(case_names),
         'stream_count': len(stream_ids),
         'cases': case_names,
+        'stream_ids': stream_ids,
         'sections': section_counts,
     })
 

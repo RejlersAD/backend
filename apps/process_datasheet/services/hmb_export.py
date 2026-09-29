@@ -111,6 +111,8 @@ def build_final_workbook(content, comparisons):
                     if isinstance(cell.value, str):
                         cell.data_type = 's'
                 else:
+                    cell.value = '\u2013'
+                    cell.data_type = 's'
                     cell.comment = Comment('No validated source value. Blank is not zero.', 'RADAI')
                     validation.append([stream_id, case, identity[0], property_row['property'], property_row['unit'], 'missing'])
                 source = mapped.get('sources', {}).get(case, {})

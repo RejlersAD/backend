@@ -9,7 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .hmb_extractor_view import _get_accessible_project, _is_admin, _build_hmb_stream_comparison
-from .models import HMBMasterTemplateProfile, HMBSourceUpload
+from .models import HMBCaseRecord, HMBMasterTemplateProfile, HMBSourceUpload
 from .services.hmb_export import inspect_output_template, build_final_workbook
 from .services.hmb_storage import store_hmb_source, read_hmb_source, delete_hmb_source, HMBStorageError
 
@@ -86,10 +86,18 @@ def hmb_final_export_view(request, project_id):
         return Response({'error': 'Access denied for this master.'}, status=403)
     requested = request.data.get('stream_ids')
     available = [str(stream['stream_id']) for stream in profile.analysis_payload.get('stream_columns', [])]
+    # Include dynamically extracted streams (imported records whose stream_id is
+    # not part of the master template) so extract-all imports are exportable.
+    dynamic_ids = (
+        HMBCaseRecord.objects.filter(project=project, template_profile=profile)
+        .exclude(stream_id__in=available)
+        .values_list('stream_id', flat=True).distinct()
+    )
+    available = available + [str(sid) for sid in dynamic_ids]
     if requested == 'all':
         requested = available
-    if not isinstance(requested, list) or not requested or len(requested) > 200 or any(str(item) not in available for item in requested):
-        return Response({'error': 'Select 1 to 200 streams from the active master.'}, status=400)
+    if not isinstance(requested, list) or not requested or len(requested) > 1000 or any(str(item) not in available for item in requested):
+        return Response({'error': 'Select 1 to 1000 streams from the active master or extracted streams.'}, status=400)
     try:
         comparisons = [_build_hmb_stream_comparison(project, profile, stream) for stream in dict.fromkeys(map(str, requested))]
         content = build_final_workbook(read_hmb_source(source), comparisons)
