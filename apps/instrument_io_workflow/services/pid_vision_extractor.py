@@ -146,6 +146,63 @@ LINE_TAG_PATTERN = re.compile(
     r'^\d{1,3}(?:/\d)?"?-[A-Z0-9][A-Z0-9-]{3,38}$'
 )
 
+# A second, real, confirmed line-tag shape — distinct from the size-
+# service-serial one above: just <unit/area number>-<sequential line
+# number>, e.g. "1520-383", "1520-215". Seen live in Vision responses
+# rejected by LINE_TAG_PATTERN because Vision reads them prefixed by a
+# drawing number and/or a short service code, space-separated ahead of
+# the actual tag — confirmed real examples from a live extraction log:
+# "865030 1520-383", "864975 HF 1520-215", "864977 LF 1520-213",
+# "864978 HF 1520-215", "865018 FCWR 1520-207". _extract_line_tag_token
+# below strips that noise; this pattern is what the surviving token gets
+# checked against when LINE_TAG_PATTERN's own size-prefix shape doesn't
+# apply. Deliberately narrower than LINE_TAG_PATTERN (real line numbers
+# in this shape are short) so it doesn't loosen tolerance for genuinely
+# malformed values elsewhere.
+UNIT_LINE_NUMBER_PATTERN = re.compile(r'^\d{3,5}-\d{2,5}[A-Z]?$')
+
+
+def _extract_line_tag_token(raw_value: str) -> str:
+    """A line-kind item's raw tag text (or an instrument's 'line_tag'
+    sub-field) can come back with a drawing number and/or a short service
+    code Vision read alongside the line's own callout, space-separated
+    ahead of it — see UNIT_LINE_NUMBER_PATTERN's own comment for real
+    confirmed examples. Finds and returns just the token that's actually
+    shaped like a line tag (checked against both known real shapes),
+    discarding the rest, instead of the whole noisy value being rejected
+    outright. Returns the value unchanged (whitespace-trimmed, upper-
+    cased) if it already matches either shape as a whole, or if no token
+    inside it matches either shape — in the latter case the caller's own
+    validation still rejects it exactly as before; this function never
+    invents a tag that isn't actually present in the text.
+    """
+    cleaned = (raw_value or '').strip().upper()
+    if not cleaned:
+        return cleaned
+    if LINE_TAG_PATTERN.match(cleaned) or UNIT_LINE_NUMBER_PATTERN.match(cleaned):
+        return cleaned
+    for token in cleaned.split():
+        if LINE_TAG_PATTERN.match(token) or UNIT_LINE_NUMBER_PATTERN.match(token):
+            return token
+    return cleaned
+
+
+def _clean_instrument_line_tag(raw_value: str) -> str:
+    """Clean an instrument row's 'line_tag' sub-field the same way as a
+    standalone kind='line' item (see _extract_line_tag_token), but this
+    field has no separate sanity-pattern check anywhere else — so, unlike
+    a standalone line item (which _parse_tags simply drops if it still
+    doesn't match after cleaning), do that check here explicitly rather
+    than storing an unvalidated value on the row.
+    """
+    cleaned = _extract_line_tag_token(raw_value)
+    if not cleaned:
+        return ''
+    if LINE_TAG_PATTERN.match(cleaned) or UNIT_LINE_NUMBER_PATTERN.match(cleaned):
+        return cleaned
+    return ''
+
+
 # Tagged kinds (instrument/equipment/line) are validated against their own
 # sanity pattern as before. 'symbol' has no text shape to validate at all
 # — an untagged valve/piping symbol legitimately has tag == "" — so it's
@@ -166,6 +223,23 @@ VISION_SYSTEM_PROMPT = (
 
 VISION_USER_PROMPT = """Identify EVERY unique instrument tag, equipment tag, line number, AND visual symbol on this P&ID image.
 
+TWO-PART TASK FOR EVERY INSTRUMENT — read this before anything else below.
+Finding an instrument's tag is only HALF the job. For every single
+instrument you report (kind "instrument" — see section 1), you must ALSO
+physically trace the pipe it sits on or connects to via its instrument
+lead line, and read THAT pipe's own line-number callout into "line_tag"
+on the SAME item. Do not treat this as optional metadata to fill in only
+if convenient — treat every instrument balloon as a two-step lookup:
+(1) read the tag, (2) follow the line to it, read the line tag. Only
+skip step 2, leaving "line_tag" as "", when the instrument genuinely has
+no physical pipe connection at all (e.g. a panel/DCS-mounted function
+instrument with no lead line drawn to any pipe) — never skip it just
+because the line's callout is small, faint, or requires looking a little
+further along the pipe than the balloon itself. Full instructions for
+both steps are in section 1 below; the JSON shape is in the RETURN
+FORMAT section; and the SELF-CONSISTENCY CHECK near the end of this
+prompt has you re-verify this specific requirement before you finish.
+
 Four kinds of item appear on a P&ID — classify each one by its symbol or
 context, not just its text shape:
 
@@ -185,6 +259,23 @@ context, not just its text shape:
    ALSO set "symbol_type" to the instrument's full descriptive type (e.g.
    "PRESSURE TRANSMITTER", "FLOW ELEMENT", "LEVEL GAUGE", "TEMPERATURE
    ELEMENT") — leave it "" if you can't tell what kind of instrument it is.
+   CONNECTED LINE (REQUIRED — see TWO-PART TASK at the very top of this
+   prompt) — for a field-mounted instrument (plain circle balloon, or a
+   valve-type instrument per the VALVE-TYPE paragraph just below),
+   physically trace the pipe/line it sits directly on or connects to via
+   its instrument lead line — a short line running from the balloon to
+   the pipe — and read THAT pipe's own callout (see LINE TAGS, section 3
+   below, for its shape — e.g. 6"-FL-AC6N-8112). This is a real, separate
+   look at the drawing, not something to infer from the instrument's own
+   tag or position alone. Set "line_tag" to that connected line's full
+   tag on the SAME instrument item — do NOT report it a second time as a
+   separate kind "line" item as well (that would be reporting the same
+   physical line twice). Leave "line_tag" as "" ONLY when the instrument
+   genuinely has no lead line drawn to any pipe at all (e.g. a panel-
+   mounted/DCS-function instrument) or the connected line's callout is
+   truly illegible — do not guess, do not reuse a nearby unrelated line's
+   tag, but also do not skip this step just because it takes a second
+   look along the pipe.
    VALVE-TYPE INSTRUMENTS (FUNC = PSV, PV, FCV, LCV, PCV, SDV, XV, MOV and
    similar) are usually NOT drawn inside a round balloon at all — the tag
    text sits directly beside/above/below the actual valve BODY symbol
@@ -341,6 +432,15 @@ not ALSO appear as the "tag" of its own instrument/equipment item
 elsewhere in your answer, add one now — don't let a tag exist only as
 someone else's location reference.
 
+LINE_TAG CHECK — before finishing, go back through every item you
+reported with kind "instrument" and confirm "line_tag" is actually
+filled in, not left "" by default. For each one still blank, look again
+at the drawing specifically for its connected pipe (per CONNECTED LINE
+in section 1) before accepting that it truly has none — an empty
+"line_tag" should be the result of a genuine second look finding no
+connected line, never of only reading the tag and moving on to the next
+balloon without tracing its line at all.
+
 ACCURACY — read every character exactly as printed. Do NOT guess,
 abbreviate, truncate, or autocomplete from a similar-looking tag
 elsewhere on the drawing — a tag that's genuinely hard to read is still
@@ -388,7 +488,8 @@ object:
    "symbol_type": "<full descriptive type, e.g. PRESSURE TRANSMITTER, GATE VALVE — empty if unknown>",
    "service": "<the FULL service/description text printed near the tag, not shortened — or empty string>",
    "location": "<short, consistent approximate position on the drawing — only meaningful for kind \"symbol\", else empty>",
-   "unit_prefix": "<unit number per UNIT NUMBER PREFIX above, or \"\" — only meaningful for kind \"instrument\"/\"equipment\"/\"line\", else empty>"}
+   "unit_prefix": "<unit number per UNIT NUMBER PREFIX above, or \"\" — only meaningful for kind \"instrument\"/\"equipment\"/\"line\", else empty>",
+   "line_tag": "<the connected pipe line's own full tag per CONNECTED LINE above — only meaningful for kind \"instrument\", else empty>"}
 
 Be exhaustive. Miss nothing — a small tag in a corner is exactly as
 important to report as a large one in the middle of the page. Find EVERY
@@ -1044,6 +1145,14 @@ def _parse_tags(raw: str) -> list[dict]:
         stripped_unit_prefix = ''
         if kind == 'instrument':
             tag, stripped_unit_prefix = _strip_reported_unit_prefix_for_validation(tag, item.get('unit_prefix'))
+        elif kind == 'line':
+            # See UNIT_LINE_NUMBER_PATTERN's own comment — a real line
+            # callout Vision reads alongside a drawing number/service
+            # code comes back as e.g. "865030 1520-383", which the sanity
+            # pattern below correctly rejects as a WHOLE string (it isn't
+            # a line tag); this recovers just the actual tag token from
+            # inside it instead of losing the item entirely.
+            tag = _extract_line_tag_token(tag)
         # Validate the sanity pattern against the BARE tag (as printed
         # inside the balloon, prefix stripped per above) before any unit
         # prefix is (re-)applied below — widening INSTRUMENT_TAG_PATTERN
@@ -1052,7 +1161,7 @@ def _parse_tags(raw: str) -> list[dict]:
         # prefix is validated separately (UNIT_PREFIX_PATTERN in
         # _apply_unit_prefix) and (re-)prepended only after this shape
         # check passes.
-        if not tag or not pattern.match(tag):
+        if not tag or not (pattern.match(tag) or (kind == 'line' and UNIT_LINE_NUMBER_PATTERN.match(tag))):
             rejected_bad_shape += 1
             logger.info(
                 '[IOWF] _parse_tags: rejected tag %r (kind=%r) — does not match the %s '
@@ -1085,6 +1194,18 @@ def _parse_tags(raw: str) -> list[dict]:
             'service': (item.get('service') or '').strip(),
             'location': '',
             'unit_prefix': unit_prefix,
+            # BUG FIX: this dict — not the raw parsed JSON item — is what
+            # _row_from_tag_info actually receives (see
+            # `_row_from_tag_info(info, ...) for info in _parse_tags(raw)`
+            # at this module's per-page entry point), so 'line_tag' being
+            # absent here meant Vision's answer was silently discarded
+            # regardless of whether it ever returned one — the true root
+            # cause of a real, confirmed 0-of-289 result across two rounds
+            # of prompt strengthening that had nothing to do with the
+            # prompt at all. Only meaningful for kind='instrument' (see
+            # _row_from_tag_info's own docstring) but harmless to carry
+            # through for the others too.
+            'line_tag': item.get('line_tag', ''),
         })
 
     # Dedup pass: a genuine model-compliance failure seen live — despite
@@ -1211,11 +1332,21 @@ def _row_from_tag_info(tag_info: dict, page_index: int) -> dict:
     against line_numbering) — see
     models.IO_LEGEND_SUPPLEMENTARY_FORMAT_SECTIONS. Untagged symbols
     populate neither — nothing validates a free-text symbol_type, the row
-    exists purely to surface what Vision found. Each row only ever has ONE
-    of tag_number/equipment_tag/line_tag populated — a P&ID drawing
-    doesn't reliably pair a given instrument with "its" equipment/line the
-    way a table row would, so each kind is kept independent rather than
-    merged into one.
+    exists purely to surface what Vision found.
+
+    One deliberate exception to "each row only has ONE of tag_number/
+    equipment_tag/line_tag populated": an 'instrument' row ALSO carries
+    'line_tag' when Vision could identify the specific pipe/line that
+    instrument connects to (see the prompt's CONNECTED LINE instructions)
+    — an instrument reliably sits on or beside its own connected line the
+    way it doesn't reliably sit beside "its" equipment, so pairing tag +
+    connected line on one row is trustworthy here specifically. This does
+    NOT also produce a separate kind='line' row for that same line — the
+    prompt explicitly tells Vision not to double-report it. legend_
+    comparison.check_field_against_legend still validates this row's
+    'line_tag' against the line_numbering legend exactly as it would for
+    a standalone line row; it reads whichever field it's asked to check,
+    unaffected by what else is populated on the same row.
     """
     kind = tag_info['kind']
     tag = tag_info['tag']
@@ -1240,6 +1371,15 @@ def _row_from_tag_info(tag_info: dict, page_index: int) -> dict:
             # function code avoids fabricating a value that looks correct
             # but isn't backed by anything on the drawing.
             'signal_type': '',
+            # See this function's own docstring for why an instrument row
+            # (uniquely among the four kinds) also carries line_tag. Same
+            # noisy-value cleaning as a standalone kind='line' item in
+            # _parse_tags (drawing number / service code prefix — see
+            # UNIT_LINE_NUMBER_PATTERN's own comment); this field otherwise
+            # has NO validation of its own, so a value that still doesn't
+            # match either real line-tag shape after cleaning is dropped
+            # rather than stored as unvalidated noise on the row.
+            'line_tag': _clean_instrument_line_tag(tag_info.get('line_tag', '')),
         })
     elif kind == 'equipment':
         record.update({
@@ -1293,6 +1433,26 @@ def _dedupe_rows(rows: list[dict]) -> list[dict]:
         seen.add(key)
         out.append(r)
     return out
+
+
+def _drop_empty_rows(rows: list[dict]) -> list[dict]:
+    """Drop a row that identifies NOTHING at all — tag_number,
+    equipment_tag, line_tag, service_description, AND symbol_type all
+    blank — the shape a truncated-JSON salvage (see _recover_json_array)
+    or an odd Vision response can occasionally leave behind. Checks all
+    FIVE fields with OR, keeping a row if ANY one has real data — NOT a
+    narrower check (e.g. just tag_number/line_tag/service_description):
+    a real 'equipment' row always has tag_number/line_tag blank by design
+    (see _row_from_tag_info), and a real untagged 'symbol' row very often
+    has no service_description at all (confirmed on real data: 454 of 654
+    symbol rows on one real document) but does have symbol_type — a
+    narrower check would have deleted hundreds of genuinely correct rows.
+    """
+    return [
+        r for r in rows
+        if (r.get('tag_number') or r.get('equipment_tag') or r.get('line_tag')
+            or r.get('service_description') or r.get('symbol_type'))
+    ]
 
 
 # tag_number/equipment_tag/line_tag are populated on mutually-exclusive
@@ -1468,8 +1628,38 @@ def _extract_tags_from_image(
     resized = _downscale(img, max_dim)
     image_b64 = _image_to_b64_png(resized)
     raw, tokens_used = _call_vision_with_retries(provider, api_key, image_b64)
+    if page_index == 0:
+        _log_raw_vision_response_for_diagnostics(raw)
     rows = [_row_from_tag_info(info, page_index) for info in _parse_tags(raw)]
     return rows, tokens_used
+
+
+def _log_raw_vision_response_for_diagnostics(raw: str) -> None:
+    """TEMPORARY diagnostic — added to track down a real, repeated result
+    (0 of 289 instrument rows getting line_tag on a genuine document,
+    across two rounds of prompt strengthening) that prose-only debugging
+    couldn't explain: is the model omitting "line_tag" from its JSON
+    entirely, returning it consistently empty, or is something on the
+    parsing side losing it after a correct response? Logs the FIRST
+    page's raw, unparsed response text (every call for that page, since
+    Quick Scan alone makes VISION_PASSES of them) so that's directly
+    visible instead of inferred. Remove once the line_tag investigation
+    concludes — this is not meant to run in every request indefinitely.
+    Capped at 12000 chars; a dense/Thorough-Scan response can run far
+    longer than that, but this is about spot-checking the SHAPE of a
+    real response, not archiving every one in full.
+    """
+    total = raw.count('"line_tag"')
+    non_empty = len(re.findall(r'"line_tag"\s*:\s*"[^"]+"', raw))
+    logger.info(
+        '[IOWF] DIAGNOSTIC line_tag check (page 1 raw response): '
+        '"line_tag" key present %d time(s), non-empty %d time(s)',
+        total, non_empty,
+    )
+    logger.info(
+        '[IOWF] DIAGNOSTIC raw Vision response (page 1, first 12000 chars of %d total):\n%s',
+        len(raw), raw[:12000],
+    )
 
 
 def extract_pid_tags_from_page(
@@ -1678,6 +1868,7 @@ def extract_pid_tags_via_vision(
     _backfill_missing_unit_prefix_across_rows(deduped)
     _warn_about_remaining_unprefixed_tags(deduped)
     _warn_about_tags_mentioned_only_in_location(deduped)
+    deduped = _drop_empty_rows(deduped)
 
     warnings: list[str] = []
     if failed_pages:

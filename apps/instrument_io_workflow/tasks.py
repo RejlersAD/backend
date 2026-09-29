@@ -148,10 +148,30 @@ def dispatch_io_document_processing(
     vision_provider: str | None = None,
     vision_api_key: str | None = None,
     thorough: bool = False,
+    check_cache: bool = False,
+    compare_best: bool = False,
 ) -> None:
-    """Single entry point views.py's create()/re_extract() use to kick off
-    extraction — hides the EAGER-mode-dev vs real-broker split so neither
-    caller needs to know which one is active.
+    """Single entry point views.py's create()/re_extract()/
+    force_fresh_extract() use to kick off extraction — hides the
+    EAGER-mode-dev vs real-broker split so no caller needs to know which
+    one is active.
+
+    check_cache/compare_best: threaded straight through to
+    process_io_document — see its own docstring. Real Vision extraction
+    isn't fully deterministic run-to-run on the same file/scan-mode
+    (confirmed live), so there are now three distinct actions:
+      - create() (Upload & Extract): check_cache=True, compare_best=False
+        — a fresh upload may reuse a prior identical-file+scan-mode run.
+      - re_extract() (Re-extract): check_cache=True, compare_best=False
+        — deliberately the FAST, CONSISTENT action now: prefers the cache
+        over running Vision again, same reasoning as create().
+      - force_fresh_extract() (Force Fresh Analysis): check_cache=False,
+        compare_best=True — always runs genuinely fresh, then keeps
+        whichever of this run or the existing cache actually has more
+        rows, updating the cache only when the fresh run is at least as
+        good.
+    Both default to False so any other/future caller doesn't accidentally
+    opt into either behaviour without explicitly choosing to.
 
     With a real broker (Redis) configured, process_io_document.delay(...)
     already returns almost instantly — the actual work runs on a separate
@@ -184,7 +204,9 @@ def dispatch_io_document_processing(
     from django.conf import settings
 
     if not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
-        process_io_document.delay(document_id, vision_provider, vision_api_key, thorough)
+        process_io_document.delay(
+            document_id, vision_provider, vision_api_key, thorough, check_cache, compare_best,
+        )
         return
 
     import threading
@@ -192,7 +214,9 @@ def dispatch_io_document_processing(
 
     def _run():
         try:
-            process_io_document.delay(document_id, vision_provider, vision_api_key, thorough)
+            process_io_document.delay(
+                document_id, vision_provider, vision_api_key, thorough, check_cache, compare_best,
+            )
         except Exception:
             logger.exception(
                 '[IOWF] Background EAGER-mode dispatch failed for document %s', document_id,
@@ -249,7 +273,7 @@ def _looks_like_pid_drawing(pages: list) -> bool:
 def process_io_document(
     self, document_id: str,
     vision_provider: str | None = None, vision_api_key: str | None = None,
-    thorough: bool = False,
+    thorough: bool = False, check_cache: bool = False, compare_best: bool = False,
 ) -> None:
     """Coordinator: classify pages, fan out per-page/group subtasks via a
     Celery chord, dispatch finalize_io_document as its callback. Runs
@@ -266,6 +290,26 @@ def process_io_document(
     ignored entirely for a regular I/O List table document, same as
     views.py's synchronous path already does. Default None so every
     existing caller/queued task signature keeps working unchanged.
+
+    check_cache: only meaningful once this document turns out to be a
+    P&ID drawing — if True, look up services.results_cache.
+    load_vision_results_cache(pdf_sha256, scan_mode, extraction_mode)
+    BEFORE dispatching any Vision/OCR work (extraction_mode — 'ocr' or
+    'vision_<provider>' — computed from whether a key was actually
+    supplied for THIS request, so a keyed request can never read back a
+    weaker no-key run's cache, or vice versa); a hit skips the whole
+    chord and finalizes
+    straight from the cached rows (see the pid_drawing branch below).
+    create() passes True; re_extract() always passes False (see
+    results_cache.py's own top docstring, section 2, for why this exists
+    and the incident history behind not letting this get too broad).
+    Ignored entirely for a plain I/O List table document — never cached.
+
+    compare_best: threaded straight through to finalize_io_document — see
+    its own docstring. force_fresh_extract() passes True alongside
+    check_cache=False (always run genuinely fresh, then keep whichever
+    of this run or the existing cache is better); create()/re_extract()
+    never pass True.
 
     Captures `started` (wall-clock time right now) and threads it through
     the chord to finalize_io_document, rather than having finalize derive
@@ -302,6 +346,55 @@ def process_io_document(
 
     if _looks_like_pid_drawing(pages):
         page_count = len(pages)
+        scan_mode = 'thorough' if thorough else 'quick'
+
+        # BUG FIX: extraction_mode ('ocr' vs 'vision_<provider>') must be
+        # part of the cache lookup, not just scan_mode — otherwise a fresh
+        # upload WITH a newly-supplied, valid API key could still return a
+        # WEAKER prior run's local-OCR result for this same file, since
+        # nothing previously distinguished an OCR-produced cache entry
+        # from a Vision-produced one. See results_cache.py's
+        # vision_extraction_mode() docstring for the full incident.
+        from .services.results_cache import vision_extraction_mode
+        key_supplied = bool(vision_provider and vision_api_key)
+        extraction_mode = vision_extraction_mode(vision_provider, key_supplied)
+
+        # BUG FIX: local-OCR results (no API key) are low-quality and often
+        # empty — not worth caching or reading back at all. 'ocr' never
+        # participates in this cache in either direction: every no-key
+        # upload runs OCR fresh, every time, and its result is never
+        # written either (see the unconditional save call in
+        # finalize_io_document below, gated the same way).
+        if check_cache and extraction_mode != 'ocr':
+            from .services.results_cache import load_vision_results_cache
+            cached = load_vision_results_cache(document.pdf_sha256, scan_mode, extraction_mode)
+            if cached is not None:
+                logger.info(
+                    '[IOWF] Vision cache HIT for document %s (hash=%s scan_mode=%s extraction_mode=%s, '
+                    '%d cached rows) — skipping Vision/OCR entirely for this fresh upload',
+                    document_id, (document.pdf_sha256 or '')[:12], scan_mode, extraction_mode, len(cached['io_rows']),
+                )
+                IOListDocument.objects.filter(id=document_id).update(
+                    pages_total=page_count, pages_processed=page_count, current_phase='finalizing',
+                    vision_calls_total=0, vision_calls_done=0, tokens_used_total=0,
+                    provisional_rows_count=len(cached['io_rows']), provisional_comments_count=0,
+                )
+                # Reuses finalize_io_document's own combine/dedupe/persist
+                # pipeline unchanged rather than duplicating it — a single
+                # synthetic "unit" carrying the cached rows looks exactly
+                # like what the real chord's subtasks would have returned.
+                finalize_io_document.delay(
+                    [{'io_rows': cached['io_rows'], 'comments': []}], document_id, started,
+                    document_type='pid_drawing', thorough=thorough,
+                    vision_key_supplied=key_supplied, vision_provider=vision_provider,
+                )
+                return
+            logger.info(
+                '[IOWF] Vision cache MISS for document %s (hash=%s scan_mode=%s extraction_mode=%s) '
+                '— running fresh extraction',
+                document_id, (document.pdf_sha256 or '')[:12], scan_mode, extraction_mode,
+            )
+
         subtasks = [
             process_pid_vision_page.s(document_id, idx, vision_provider, vision_api_key, thorough)
             for idx in range(page_count)
@@ -326,7 +419,8 @@ def process_io_document(
         )
         chord(subtasks)(finalize_io_document.s(
             document_id, started, document_type='pid_drawing', thorough=thorough,
-            vision_key_supplied=bool(vision_provider and vision_api_key),
+            vision_key_supplied=key_supplied, vision_provider=vision_provider,
+            compare_best=compare_best,
         ))
         logger.info(
             '[IOWF] Detected P&ID drawing document %s (%d pages) — dispatched %d parallel Vision/OCR unit(s)',
@@ -470,7 +564,14 @@ def process_pid_vision_page(
     from .models import IOListDocument
     from .services.io_table_extractor import extract_pid_drawing_row_for_page_via_local_ocr
 
-    result: dict[str, Any] = {'io_rows': []}
+    # auth_failed distinguishes "key invalid/expired" from any other
+    # reason a page fell back to local OCR (rate limit, transient network
+    # error, model-not-available...) — see finalize_io_document, which
+    # aggregates this across every page to pick the right user-facing
+    # message. Real gap this closes: previously an invalid key produced
+    # the SAME generic "add an API key" warning as no key at all, even
+    # though the user HAD supplied one — just not a working one.
+    result: dict[str, Any] = {'io_rows': [], 'auth_failed': False}
     try:
         document = IOListDocument.objects.get(id=document_id)
         with document.pdf_file.open('rb') as f:
@@ -501,6 +602,8 @@ def process_pid_vision_page(
                 )
             except Exception as exc:  # noqa: BLE001
                 status = getattr(exc, 'status_code', None) or getattr(exc, 'http_status', None)
+                if status in (401, 403):
+                    result['auth_failed'] = True
                 logger.error(
                     '[IOWF] process_pid_vision_page: Vision call FAILED for document %s page %d: '
                     '%s: %s (status=%s) — falling back to local OCR for this page',
@@ -533,7 +636,8 @@ def process_pid_vision_page(
 def finalize_io_document(
     self, unit_results: list, document_id: str, started: float,
     document_type: str = 'io_list', thorough: bool = False,
-    vision_key_supplied: bool = False,
+    vision_key_supplied: bool = False, compare_best: bool = False,
+    vision_provider: str | None = None,
 ) -> None:
     """Celery chord callback — combines every subtask's output, links
     comments<->rows, runs the legend check, persists. Mirrors
@@ -551,11 +655,26 @@ def finalize_io_document(
     other page's output the way the synchronous whole-document loop in
     pid_vision_extractor.extract_pid_tags_via_vision does as it goes —
     that dedup pass runs here instead, once, over the combined set from
-    every page."""
+    every page.
+
+    compare_best: only meaningful for a fresh pid_drawing run (i.e. from
+    "Force Fresh Analysis" — views.py's force_fresh_extract(), which is
+    the only caller that ever passes True). Real Vision extraction isn't
+    fully deterministic run-to-run on the same file (confirmed live: the
+    same drawing, same Thorough Scan config, gave 1010 tags one run and
+    902 another) — this compares this run's just-finished row count
+    against whatever's ALREADY cached for this exact (file_hash,
+    scan_mode) and keeps whichever is better, so the cache — and the
+    document the user is looking at — only ever gets BETTER over
+    repeated fresh runs, never regresses to a worse one. "Re-extract"
+    (check_cache=True, no compare_best) deliberately does NOT do this —
+    it's meant to be the FAST, consistent, cache-preferring action;
+    comparing/possibly-discarding a fresh run is only for the action
+    that explicitly asks to run fresh."""
     from .models import IOListDocument
     from .services.page_classifier import classify_pages
     from .services.orchestrator import combine_and_finalize, persist_extraction, sha256_of
-    from .services.results_cache import save_results_cache
+    from .services.results_cache import save_results_cache, save_vision_results_cache
 
     try:
         document = IOListDocument.objects.get(id=document_id)
@@ -575,9 +694,12 @@ def finalize_io_document(
 
         comments: list = []
         io_rows: list = []
+        any_auth_failed = False
         for unit in (unit_results or []):
             comments.extend(unit.get('comments') or [])
             io_rows.extend(unit.get('io_rows') or [])
+            if unit.get('auth_failed'):
+                any_auth_failed = True
         # Deterministic order regardless of which parallel subtask finished
         # first.
         io_rows.sort(key=lambda r: (r.get('page_number') or 0))
@@ -587,6 +709,7 @@ def finalize_io_document(
             from .services.pid_vision_extractor import (
                 _dedupe_rows, _backfill_missing_unit_prefix_across_rows,
                 _warn_about_remaining_unprefixed_tags, _warn_about_tags_mentioned_only_in_location,
+                _drop_empty_rows,
             )
             io_rows = _dedupe_rows(io_rows)
             # Each process_pid_vision_page subtask already ran the
@@ -600,6 +723,12 @@ def finalize_io_document(
             _backfill_missing_unit_prefix_across_rows(io_rows)
             _warn_about_remaining_unprefixed_tags(io_rows)
             _warn_about_tags_mentioned_only_in_location(io_rows)
+            # See _drop_empty_rows's own docstring — this fan-out path
+            # (large documents, one Celery subtask per page) has its own
+            # combine step separate from pid_vision_extractor's single-
+            # process entry point, so the filter has to be applied here
+            # too, not just there.
+            io_rows = _drop_empty_rows(io_rows)
             # BUG FIX: this used to only check whether any FOUND row's
             # remarks mentioned "local OCR" — a real, confirmed symptom
             # from a live upload: a P&ID drawing uploaded with no API key
@@ -618,11 +747,73 @@ def finalize_io_document(
             # failed.
             if not vision_key_supplied:
                 warnings = [
-                    'No API key was provided — this P&ID drawing was extracted using basic OCR only. '
-                    'Add a Claude or OpenAI API key and re-extract for much better accuracy.'
+                    'Add Claude/OpenAI API key for P&ID Vision extraction. Without key, '
+                    'basic OCR only (lower accuracy).'
+                ]
+            elif any_auth_failed:
+                # Distinct from the "no key" message above and the
+                # generic local-OCR one below — a key WAS supplied here,
+                # it just didn't work (expired, revoked, typo'd, wrong
+                # provider). Telling the user "add a key" when they
+                # already added one is actively misleading; this is the
+                # real gap that produced.
+                warnings = [
+                    'API key invalid or expired. Please check your key and try again.'
                 ]
             elif any('local OCR' in (r.get('remarks') or '') for r in io_rows):
                 warnings = ['Add an API key for better accuracy — some pages used local OCR']
+
+            # See finalize_io_document's own docstring (compare_best
+            # param) for why this exists. Compares THIS run's fresh
+            # io_rows against whatever's already cached for this exact
+            # (file_hash, scan_mode) — never against a different scan
+            # mode or a different file — and keeps whichever is better.
+            # A missing cache entry (first-ever run for this file+mode)
+            # just falls through with the fresh result and no message,
+            # same as if compare_best were False.
+            scan_mode_for_compare = 'thorough' if thorough else 'quick'
+            # Same extraction_mode dimension as process_io_document's
+            # check_cache lookup — compare_best must only ever compare a
+            # fresh Vision run against a PREVIOUS Vision run's cache (or a
+            # fresh OCR run against a previous OCR run's), never across
+            # the two, for the same reason described in
+            # results_cache.vision_extraction_mode()'s docstring.
+            from .services.results_cache import vision_extraction_mode
+            extraction_mode_for_compare = vision_extraction_mode(vision_provider, vision_key_supplied)
+            # 'ocr' is never cached (see the BUG FIX comment in
+            # process_io_document) — nothing to compare a fresh no-key run
+            # against, and Force Fresh Analysis on OCR wouldn't mean much
+            # anyway (there's no Vision non-determinism to guard against).
+            if compare_best and extraction_mode_for_compare != 'ocr':
+                from .services.results_cache import load_vision_results_cache
+                existing_cached = load_vision_results_cache(digest, scan_mode_for_compare, extraction_mode_for_compare)
+                if existing_cached is not None:
+                    cached_rows = existing_cached['io_rows']
+                    fresh_count, cached_count = len(io_rows), len(cached_rows)
+                    if fresh_count < cached_count:
+                        logger.info(
+                            '[IOWF] compare_best: fresh run (%d rows) worse than cached '
+                            '(%d rows) for document %s — keeping cached result',
+                            fresh_count, cached_count, document_id,
+                        )
+                        io_rows = cached_rows
+                        warnings = [
+                            f'Cached result is better ({cached_count} rows vs {fresh_count} rows). '
+                            f'Keeping cached result!'
+                        ] + warnings
+                    elif fresh_count > cached_count:
+                        logger.info(
+                            '[IOWF] compare_best: fresh run (%d rows) better than cached '
+                            '(%d rows) for document %s — updating cache',
+                            fresh_count, cached_count, document_id,
+                        )
+                        warnings = [
+                            f'Better result found! Updated from {cached_count} to {fresh_count} rows'
+                        ] + warnings
+                    # fresh_count == cached_count: keep the fresh rows and
+                    # let the unconditional save_vision_results_cache call
+                    # below refresh the cache's timestamp — no message,
+                    # same row count either way.
 
         result = combine_and_finalize(
             digest, pages, comments, io_rows,
@@ -658,6 +849,23 @@ def finalize_io_document(
         # path so a large document (over PAGE_FANOUT_THRESHOLD pages)
         # gets the same fast-viewing cache as a small one.
         save_results_cache(document, digest, 'thorough' if thorough else 'quick')
+        # Separate, hash+scan_mode-keyed cache (see results_cache.py's own
+        # top docstring, section 2) — lets a FUTURE fresh upload of this
+        # exact file skip Vision entirely, regardless of which project or
+        # document record it lands under. Written unconditionally after
+        # every successful pid_drawing completion, whether this run
+        # actually called Vision or itself came from a cache hit
+        # (re-saving identical data is harmless) — never for a plain
+        # io_list table document (nothing to cache; no Vision call ever
+        # happens there), and never for a no-key local-OCR run either —
+        # OCR quality is unreliable enough (often 0 rows) that caching it
+        # would just mean the NEXT no-key upload of this file silently
+        # reuses that same low-quality result instead of trying OCR fresh.
+        if document_type == 'pid_drawing' and extraction_mode_for_compare != 'ocr':
+            save_vision_results_cache(
+                digest, 'thorough' if thorough else 'quick', io_rows, warnings,
+                extraction_mode=extraction_mode_for_compare,
+            )
         logger.info(
             '[IOWF] finalize_io_document complete for document %s (%s): '
             'comments=%d io_rows=%d',

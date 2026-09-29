@@ -117,6 +117,7 @@ COMMENT_HEADER_ALIASES = {
 IO_LIST_CANONICAL_COLUMNS = [
     'tag_number', 'loop_number', 'pid_no', 'instrument_type',
     'service_description', 'hmi_description', 'from_location', 'to_location',
+    'device_location',
     'status', 'io_type', 'system', 'hmi_tag', 'signal_type',
     'is_nis', 'voltage_level', 'wire_type', 'wet_dry', 'no_nc',
     'mos', 'oos', 'sys_range_min', 'sys_range_max', 'unit',
@@ -124,7 +125,7 @@ IO_LIST_CANONICAL_COLUMNS = [
     'state_text_0', 'state_text_1', 'alarm_priority', 'voting',
     'marsh_cab_no', 'io_group_no', 'sys_cab_no', 'jb_number',
     'intercon_dwg', 'loop_dwg', 'pri_cable_no', 'cable_size',
-    'pr_tr_core', 'remarks', 'revision',
+    'pr_tr_core', 'set_point', 'remarks', 'revision',
     # P&ID drawing (Vision) extraction only — see services/pid_vision_extractor.py.
     # A table-sourced (io_list) document never populates these; a
     # pid_drawing document only ever populates ONE of tag_number/
@@ -136,14 +137,38 @@ IO_LIST_CANONICAL_COLUMNS = [
 # Header alias map — every variation the extractor will encounter.
 # Keys = canonical name, values = list of textual variants (lower-cased compare).
 IO_HEADER_ALIASES = {
-    'tag_number':         ['tag number', 'tag no', 'tag', 'instrument tag'],
-    'loop_number':        ['loop number', 'loop no', 'loop'],
+    # NOT a bare 'tag' alias — that matches ANY header containing the word
+    # as a substring (bug hit live: row4's own 'HMI Tag' column got
+    # misread as tag_number instead of hmi_tag when _build_header_map ran
+    # against that row, clobbering the real tag once the row3-shape
+    # rebuild in io_table_extractor.py copied third_map's fields across —
+    # same root cause as the earlier 'type'/instrument_type fix below).
+    'tag_number':         ['tag number', 'tag no', 'instrument tag'],
+    # NOT a bare 'loop' alias — matches 'Loop Dwg. No.' too (a distinct
+    # canonical, loop_dwg), same substring-collision pattern as tag/type
+    # above; the exact-word aliases below already match a standalone
+    # 'Loop Number' header without it.
+    'loop_number':        ['loop number', 'loop no'],
     'pid_no':             ['p&id no', 'p&id number', 'pid no', 'p&id'],
-    'instrument_type':    ['instrument type', 'inst type', 'type'],
-    'service_description':['service description', 'service', 'description'],
+    # NOT a bare 'type' alias — that matches ANY header containing the word
+    # as a substring (bug hit live: 'Signal Type' got misread as instrument_
+    # type when this alias list was checked against a second/alternate
+    # header row that has no 'Instrument Type' column of its own at all).
+    'instrument_type':    ['instrument type', 'inst type'],
+    # NOT a bare 'description' alias — matches 'HMI Description' too (a
+    # distinct canonical, hmi_description; same substring-collision
+    # pattern as tag/type/loop above). 'service' alone is kept — no other
+    # real header seen so far contains it as an unrelated substring.
+    'service_description':['service description', 'service'],
     'hmi_description':    ['hmi description', 'hmi desc'],
     'from_location':      ['from'],
     'to_location':        ['to'],
+    # Real document 107's own row2 header — sits at the SAME column index
+    # row1 uses for 'P&ID No' (stacked group header vs sub-header, not a
+    # gap), so this was previously undetectable no matter what alias list
+    # existed: nothing built a map from row2's OWN header text at all.
+    # Fixed alongside — see secondary_map in io_table_extractor.py.
+    'device_location':    ['device location'],
     'status':             ['status'],
     'io_type':            ['i/o type', 'io type', 'i o type'],
     'system':             ['system', 'sys', 'dcs/esd'],
@@ -159,6 +184,19 @@ IO_HEADER_ALIASES = {
     'sys_range_min':      ['sys range min', 'range min', 'min'],
     'sys_range_max':      ['sys range max', 'range max', 'max'],
     'unit':               ['unit', 'engineering unit', 'eng unit'],
+    # Placed BEFORE alarm_h/alarm_l below on purpose: _build_header_map
+    # claims each column for whichever canonical it processes first, and a
+    # header like "SET POINT (H)" contains a bare 'h' that would otherwise
+    # be claimed by alarm_h's short alias first — see the header-detection
+    # bug this fixed (Set Point values landing in the Alarm H column).
+    # Deliberately does NOT include 'setting'/'set value' — tried those,
+    # but a real document's "Alarm / Trip Settings" GROUP header (a
+    # 4-column H/HH/L/LL alarm block, confirmed via its own sub-header
+    # row) contains 'setting' as a substring, so it got wrongly claimed as
+    # Set Point instead of being left for the (currently unmapped, since
+    # it lives on a second header row) Alarm H/HH/L/LL columns. Only the
+    # unambiguous literal wordings stay.
+    'set_point':          ['set point', 'setpoint', 'set pt', 'sp', 'set point value'],
     'alarm_h':            ['h', 'alarm h', 'high'],
     'alarm_hh':           ['hh', 'alarm hh', 'high high'],
     'alarm_l':            ['l', 'alarm l', 'low'],

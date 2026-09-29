@@ -35,7 +35,7 @@ _CENTER      = Alignment(horizontal='center', vertical='center', wrap_text=True)
 _COMMON_COLUMNS = ['tag_number', 'instrument_type', 'service_description']
 _TABLE_ONLY_COLUMNS = [
     'loop_number', 'pid_no', 'hmi_description', 'io_type', 'system',
-    'signal_type', 'unit', 'alarm_priority',
+    'signal_type', 'unit', 'alarm_priority', 'set_point',
 ]
 _PID_DRAWING_ONLY_COLUMNS = [
     'kind', 'equipment_tag', 'line_tag', 'symbol_type', 'location',
@@ -64,23 +64,14 @@ def export_document_to_xlsx(document, columns: str = 'all') -> bytes:
     _relevant_columns_for)."""
     wb = Workbook()
 
-    # Sheet 1 — comments
-    ws_c = wb.active
-    ws_c.title = 'Comments Resolution Sheet'
-    headers_c = COMMENT_SHEET_COLUMNS + ['status_meaning', 'page_number',
-                                          'linked_tags']
-    _write_header(ws_c, headers_c)
-    for r_idx, c in enumerate(document.extracted_comments.all(), start=2):
-        row = [
-            c.s_no, c.company_comment, c.contractor_reply, c.company_decision,
-            c.status_code, c.status_meaning, c.page_number,
-            ', '.join(c.linked_tags or []),
-        ]
-        for c_idx, val in enumerate(row, start=1):
-            ws_c.cell(row=r_idx, column=c_idx, value=val)
-
-    # Sheet 2 — IO rows
-    ws_r = wb.create_sheet('IO List')
+    # Sheet 1 — IO rows. Created first (and left as wb.active, openpyxl's
+    # default) so this is the sheet Excel actually shows on open — a real
+    # complaint from a real user: the IO List is what someone downloading
+    # this file wants to see immediately, not the Comments Resolution
+    # Sheet, which used to be created first purely because this function
+    # happened to build it before the row data.
+    ws_r = wb.active
+    ws_r.title = 'IO List'
     body_columns = (
         _relevant_columns_for(document.document_type)
         if columns == 'relevant' else list(IO_LIST_CANONICAL_COLUMNS)
@@ -95,6 +86,20 @@ def export_document_to_xlsx(document, columns: str = 'all') -> bytes:
         for c_idx, col in enumerate(headers_r[2:], start=3):
             ws_r.cell(row=r_idx, column=c_idx, value=d.get(col, ''))
 
+    # Sheet 2 — comments
+    ws_c = wb.create_sheet('Comments Resolution Sheet')
+    headers_c = COMMENT_SHEET_COLUMNS + ['status_meaning', 'page_number',
+                                          'linked_tags']
+    _write_header(ws_c, headers_c)
+    for r_idx, c in enumerate(document.extracted_comments.all(), start=2):
+        row = [
+            c.s_no, c.company_comment, c.contractor_reply, c.company_decision,
+            c.status_code, c.status_meaning, c.page_number,
+            ', '.join(c.linked_tags or []),
+        ]
+        for c_idx, val in enumerate(row, start=1):
+            ws_c.cell(row=r_idx, column=c_idx, value=val)
+
     # Sheet 3 — legend findings (whatever was recorded at extraction time)
     ws_l = wb.create_sheet('Legend Check')
     headers_l = ['section', 'source', 'field', 'value', 'severity', 'issue', 'expected']
@@ -103,6 +108,11 @@ def export_document_to_xlsx(document, columns: str = 'all') -> bytes:
         row = [finding.get(k, '') for k in headers_l]
         for c_idx, val in enumerate(row, start=1):
             ws_l.cell(row=r_idx, column=c_idx, value=val)
+
+    # Explicit, not just relying on ws_r being created first — a future
+    # edit that reorders these sheets shouldn't be able to silently
+    # regress which one Excel opens to.
+    wb.active = wb.sheetnames.index('IO List')
 
     buf = BytesIO()
     wb.save(buf)

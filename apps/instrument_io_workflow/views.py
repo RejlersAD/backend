@@ -282,28 +282,39 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         thorough        = str(request.data.get('thorough', '')).lower() in ('1', 'true', 'yes')
         logger.info(
             "[IOWF] create(): thorough=%r vision_provider=%r key supplied=%s "
-            "— Upload & Extract always runs fresh (no cache consulted)",
+            "— may reuse a cached Vision result for this exact file+scan-mode (see check_cache below); "
+            "re-extract never does",
             thorough, vision_provider, bool(vision_api_key),
         )
 
-        # NO hash-cache lookup here, deliberately — "Upload & Extract" must
-        # ALWAYS run a genuinely fresh extraction, every time, no
-        # exceptions. A hash-based cache here caused confirmed bugs: a
-        # new/fresh document silently returning ANOTHER document's
-        # already-completed result whenever the same file bytes had been
-        # seen before (even with a newly-supplied Vision key, or a
-        # different Quick/Thorough Scan mode than the cached run used) —
-        # neither `project`, `vision_api_key`, nor `thorough` were ever
-        # part of the cache key, so any one of them changing between two
-        # uploads of the same file was silently ignored.
+        # check_cache=True below: for a P&ID drawing, process_io_document
+        # will look up services.results_cache.load_vision_results_cache()
+        # keyed on (this file's SHA-256, quick/thorough scan mode) BEFORE
+        # dispatching any Vision/OCR work — a hit skips Vision entirely.
+        # Deliberately NOT keyed by project or document id, so the same
+        # PDF bytes uploaded to a different project reuses the prior run.
         #
-        # Neither this action nor re_extract() (below) ever caches —
-        # services/orchestrator.py's extract_document() no longer has any
-        # cache of its own either (the old per-worker _MEMO dict was
-        # removed outright, not just bypassed). Caching only ever makes
-        # sense for VIEWING an already-completed document, which is a
-        # separate, plain DB read (this ViewSet's retrieve()/list(), via
-        # the serializers) that never calls extract_document() at all.
+        # An EARLIER hash-only pre-extraction cache here was removed after
+        # a confirmed bug: a brand-new document silently returned ANOTHER
+        # document's already-completed result whenever the same file bytes
+        # had been seen before, even with a newly-supplied Vision key or a
+        # DIFFERENT Quick/Thorough Scan mode than the cached run used —
+        # because neither scan mode nor anything else distinguishing the
+        # two runs was ever part of that cache's key. This one fixes that
+        # specific gap (scan_mode IS part of the key now) — see
+        # results_cache.py's own top docstring (section 2) for the full
+        # history and design reasoning before changing this again.
+        #
+        # re_extract() (below) ALSO passes check_cache=True now — Vision
+        # extraction genuinely isn't deterministic run-to-run on the same
+        # file (confirmed live: same drawing, same scan mode, 1010 tags
+        # one run vs 902 another), so "Re-extract" is deliberately the
+        # FAST, CONSISTENT action: it prefers whatever's already cached
+        # over paying for another Vision run. force_fresh_extract()
+        # (further below) is the one that always runs genuinely fresh,
+        # with compare_best=True to keep whichever result is actually
+        # better rather than risking a worse one silently replacing a
+        # better one.
         document = IOListDocument.objects.create(
             project_name=request.data.get('project_name', '') or '',
             document_number=request.data.get('document_number', '') or '',
@@ -352,6 +363,7 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         from .tasks import dispatch_io_document_processing
         dispatch_io_document_processing(
             str(document.id), vision_provider, vision_api_key, thorough,
+            check_cache=True,
         )
         document.refresh_from_db()
         ser = self.get_serializer(document)
@@ -364,11 +376,17 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
     # ---- re-run extraction on an existing PDF ------------------------
     @action(detail=True, methods=['post'], url_path='re-extract')
     def re_extract(self, request, pk=None):
-        """Always runs a genuinely fresh extraction — no cache lookup of
-        any kind, same as create() above — and, like create(), now
-        ALWAYS dispatches async (Celery chord) regardless of page count,
-        so a re-extract gets the exact same real per-page progress and
-        guaranteed auto-open-on-completion as a fresh upload, not a
+        """check_cache=True below — prefers a cached Vision result for
+        this exact file+scan-mode over running Vision again, same as
+        create() (see its own comment for the full reasoning: real Vision
+        extraction isn't deterministic run-to-run, so this is deliberately
+        the FAST, CONSISTENT action). Use force_fresh_extract() instead
+        when you specifically want to pay for a new Vision run — that one
+        also keeps whichever result turns out better rather than letting
+        a worse fresh run silently replace a better cached one. Like
+        create(), ALWAYS dispatches async (Celery chord) regardless of
+        page count, so this gets the exact same real per-page progress
+        and guaranteed auto-open-on-completion as a fresh upload, not a
         blocking wait with no feedback."""
         document = self.get_object()
         try:
@@ -393,6 +411,53 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         from .tasks import dispatch_io_document_processing
         dispatch_io_document_processing(
             str(document.id), vision_provider, vision_api_key, thorough,
+            check_cache=True,
+        )
+        document.refresh_from_db()
+        ser = self.get_serializer(document)
+        already_done = document.status in ('completed', 'failed')
+        return Response(
+            {'cached': False, 'document': ser.data},
+            status=status.HTTP_201_CREATED if already_done else status.HTTP_202_ACCEPTED,
+        )
+
+    # ---- always run genuinely fresh Vision, keep whichever result wins ----
+    @action(detail=True, methods=['post'], url_path='force-fresh-extract')
+    def force_fresh_extract(self, request, pk=None):
+        """The one action that ALWAYS pays for a new Vision run —
+        check_cache=False — but never lets a worse run silently replace a
+        better one: compare_best=True means finalize_io_document compares
+        this run's row count against whatever's already cached for this
+        exact (file_hash, scan_mode) and keeps whichever is actually
+        better (see its own docstring for the real, confirmed non-
+        determinism this addresses — the same file, same scan mode, gave
+        1010 tags one run and 902 another). The document ends up showing
+        whichever result won; extraction_stats['warnings'] carries a
+        message saying which happened ("Better result found!..." or
+        "Cached result is better..."). Same async/EAGER-mode dispatch
+        pattern as create()/re_extract() above."""
+        document = self.get_object()
+        try:
+            with document.pdf_file.open('rb'):
+                pass  # just confirms the file is actually readable
+        except Exception as exc:
+            return Response(
+                {'error': 'Could not read PDF', 'detail': str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        vision_provider = request.data.get('vision_provider') or None
+        vision_api_key  = request.data.get('vision_api_key') or None
+        thorough        = str(request.data.get('thorough', '')).lower() in ('1', 'true', 'yes')
+
+        document.status = 'extracting'
+        document.extraction_started_at = timezone.now()
+        document.save(update_fields=['status', 'extraction_started_at', 'updated_at'])
+
+        from .tasks import dispatch_io_document_processing
+        dispatch_io_document_processing(
+            str(document.id), vision_provider, vision_api_key, thorough,
+            check_cache=False, compare_best=True,
         )
         document.refresh_from_db()
         ser = self.get_serializer(document)
