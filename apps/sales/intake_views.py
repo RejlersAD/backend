@@ -31,6 +31,8 @@ from .email_permissions import (
     require_email_opportunity_access, visible_email_clients, visible_email_intakes,
     visible_email_opportunities,
 )
+from .email_classification_review import classification_review_evidence, require_classification_review
+from .mailbox_opportunities import EmailReviewConflict
 
 from .models import Client, Contact, OpportunityAuditEvent, SalesEmailIntake
 from .serializers import (
@@ -246,6 +248,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
     def convert_to_opportunity(self, request, pk=None):
         require_email_opportunity_access(request.user)
         permitted_intake = self.get_object()
+        classification_code = require_classification_review(request.data)
         with transaction.atomic():
             # Preserve the scoped queryset, but lock only the intake row. The
             # list/detail joins include nullable relations that PostgreSQL
@@ -254,6 +257,17 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             if intake.opportunity_id:
                 if not visible_email_opportunities(request.user).filter(pk=intake.opportunity_id).exists():
                     raise PermissionDenied('The linked opportunity is not available to you.')
+                previous = OpportunityAuditEvent.objects.filter(
+                    opportunity_id=intake.opportunity_id,
+                    event_type='opportunity_created_from_email',
+                    data__source_email_intake_id=str(intake.pk),
+                ).first()
+                previous_review = previous.data.get('reviewed_classification') if previous else None
+                if previous_review and previous_review.get('code') != classification_code:
+                    raise EmailReviewConflict(
+                        'An opportunity already exists for this email with a different reviewed classification.',
+                        code='email_already_converted',
+                    )
                 return Response({
                     'intake': self.get_serializer(intake).data,
                     'opportunity': DealDetailSerializer(intake.opportunity).data,
@@ -352,6 +366,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'internet_message_id': intake.internet_message_id,
                     'sender_email': intake.sender_email,
                     'received_at': intake.received_at.isoformat(),
+                    'reviewed_classification': classification_review_evidence(classification_code, request.user),
                 },
             )
 
