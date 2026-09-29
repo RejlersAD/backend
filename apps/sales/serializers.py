@@ -34,6 +34,7 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
         source='duplicate_of.subject', read_only=True,
     )
     extracted_information = serializers.SerializerMethodField()
+    source_token = serializers.SerializerMethodField()
     can_create_opportunity = serializers.SerializerMethodField()
     can_create_client = serializers.SerializerMethodField()
 
@@ -46,7 +47,7 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             'opportunity_name', 'reviewed_by', 'reviewed_by_name',
             'reviewed_at', 'resolution_note', 'duplicate_of',
             'duplicate_of_subject', 'created_at', 'updated_at',
-            'extracted_information', 'can_create_opportunity', 'can_create_client',
+            'extracted_information', 'source_token', 'can_create_opportunity', 'can_create_client',
             'mailbox_connection', 'source_mailbox_address', 'source_tenant_id',
             'conversation_id', 'captured_by',
         ]
@@ -77,8 +78,32 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
         return data
 
     def get_extracted_information(self, obj):
-        information = analyze_saved_email(obj, request=self.context.get('request'), context=self.context)
+        information = self._email_information(obj)
         return enrich_customer_match(information, request=self.context.get('request'))
+
+    def _email_information(self, obj):
+        analyses = self.context.setdefault('_saved_email_analyses', {})
+        key = str(obj.pk)
+        if key not in analyses:
+            view = self.context.get('view')
+            self.context['email_ai_allow_provider'] = getattr(view, 'action', None) == 'retrieve'
+            self.context['email_ai_skip'] = getattr(view, 'action', None) == 'list'
+            analyses[key] = analyze_saved_email(obj, request=self.context.get('request'), context=self.context)
+        return analyses[key]
+
+    def get_source_token(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated or not user.is_active:
+            return None
+        if getattr(self.context.get('view'), 'action', None) == 'list':
+            return None
+        information = self._email_information(obj)
+        source_hash = self.context.get('_saved_email_source_hashes', {}).get(str(obj.pk))
+        if not source_hash:
+            return None
+        from .email_opportunity_evidence import saved_email_review_token
+        return saved_email_review_token(obj, user, source_hash, information)
 
     def get_can_create_opportunity(self, obj):
         return bool(obj.status in {'received', 'under_review'} and self._creation_capabilities()[0])

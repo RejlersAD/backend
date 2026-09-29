@@ -112,6 +112,10 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
     distinct from the public submission date derived from the source timestamp.
     Legacy extraction keys remain available to existing imported-intake clients.
     """
+    # Imported at call time because the semantic helper shares these date
+    # primitives. Filter before resolving conflicts so a separate agreement
+    # deadline cannot erase a genuine proposal deadline in the same source.
+    from .email_agreement_actions import is_agreement_deadline_evidence
     subject = str(subject or "")
     raw_content = f"{subject}\n\n{body_text or ''}"
     content = raw_content[:MAX_CONTENT].replace("\r\n", "\n").replace("\r", "\n")
@@ -227,7 +231,9 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
             rf"\b(?:{label}){bridge}{weekday}(?P<date>{DATE_TOKEN})(?!\d)", content, re.I,
         ) if len(match.group(0)) <= 500 and match.group(0).count('\n') <= 4
             and not re.search(r'\n[ \t]*\n', match.group(0))
-            and _date_context_allowed(content, match.start(), match.end())]
+            and _date_context_allowed(content, match.start(), match.end())
+            and (key != 'due_date' or not is_agreement_deadline_evidence(
+                match.group(0), content, source_span=(match.start(), match.end())))]
         normalized = [(_date_value(match.group("date")), match) for match in matches]
         distinct = {value for value, _ in normalized}
         if matches:

@@ -8,6 +8,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 from .email_extraction import DATE_TOKEN, MAX_CONTENT, UNCERTAIN_STATEMENT, _date_value, _extract_email_fields, email_text_units
 from .email_classification import COMPILED_RULES, classify_email_segment
 from .email_intelligence import add_email_intelligence
+from .email_agreement_actions import add_agreement_actions
 
 
 MAX_MESSAGES = 100
@@ -40,7 +41,7 @@ ATTACHMENT_TEXT = re.compile(
 ACTION = re.compile(
     r'^(?:(?:please|kindly)\s+|(?:we\s+(?:ask|request|invite)\s+you\s+to\s+)|'
     r'(?:you\s+are\s+(?:requested|required|invited)\s+to\s+))?'
-    r'(?:submit|provide|confirm|acknowledge|review|return|complete|respond|clarify|send|register|download)\b', re.I,
+    r'(?:submit|provide|confirm|acknowledge|review|return|complete|respond|clarify|send|register|download|initial|sign|stamp|share|ensure)\b', re.I,
 )
 
 
@@ -718,4 +719,5 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
     result = add_email_intelligence(result, analysis, segments, original_request=original_request,
                                     selected=selected_segment if selected_available else None,
                                     mailbox_address=mailbox_address)
+    result = add_agreement_actions(result, analysis, segments)
     return {'extracted_information': result, 'analysis': analysis}

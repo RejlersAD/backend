@@ -4,6 +4,7 @@ from apps.rbac.action_policy import module_action_allowed
 
 from .email_analysis import MAX_MESSAGES, MAX_TEXT, analyze_email_conversation
 from .email_permissions import visible_email_intakes
+from .email_opportunity_evidence import source_digest
 
 
 HISTORY_TEXT_LIMIT = MAX_TEXT // 2
@@ -101,4 +102,16 @@ def analyze_saved_email(obj, *, request=None, context=None):
     result = analyze_email_conversation(
         messages, selected_message_id='selected-message', coverage=coverage, mailbox_address=own,
     )
+    context.setdefault('_saved_email_source_hashes', {})[str(obj.pk)] = source_digest({
+        'mailbox': own, 'tenant': obj.source_tenant_id,
+        'connection': str(obj.mailbox_connection_id or ''),
+        'messages': messages, 'coverage': coverage,
+    })
+    if authorized and not context.get('email_ai_skip'):
+        from .email_ai_analysis import enhance_email_analysis
+        result = enhance_email_analysis(
+            result, messages,
+            scope_key=f'saved:{user.pk}:{obj.mailbox_connection_id}:{obj.source_tenant_id}:{own}:{obj.pk}',
+            allow_provider=bool(context.get('email_ai_allow_provider')),
+        )
     return {**result['extracted_information'], 'analysis': result['analysis']}

@@ -1340,6 +1340,20 @@ WRENCH_S3_MIRROR_MODE = config('WRENCH_S3_MIRROR_MODE', default='flat')
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o')
 
+# Optional server Anthropic configuration; email review selects a provider
+# explicitly and never borrows credentials/model names from another provider.
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+ANTHROPIC_MODEL = config('ANTHROPIC_MODEL', default='')
+
+# Sales email AI is an explicit server-side integration. Email content is sent
+# only after current mailbox/intake authorization; no project BYOK key is used.
+SALES_EMAIL_AI_ENABLED = config('SALES_EMAIL_AI_ENABLED', default=False, cast=bool)
+SALES_EMAIL_AI_PROVIDER = config('SALES_EMAIL_AI_PROVIDER', default='openai')
+SALES_EMAIL_AI_API_KEY = config('SALES_EMAIL_AI_API_KEY', default='')
+SALES_EMAIL_AI_MODEL = config('SALES_EMAIL_AI_MODEL', default='')
+SALES_EMAIL_AI_TIMEOUT_SECONDS = config('SALES_EMAIL_AI_TIMEOUT_SECONDS', default=12, cast=float)
+SALES_EMAIL_AI_MAX_OUTPUT_TOKENS = config('SALES_EMAIL_AI_MAX_OUTPUT_TOKENS', default=3500, cast=int)
+
 # ==============================================================================
 # PROCUREMENT DOCUMENT EXTRACTION CONFIGURATION (SOFT-CODED)
 # ==============================================================================

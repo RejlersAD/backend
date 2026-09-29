@@ -15,6 +15,13 @@ from .email_permissions import (
     require_email_opportunity_access, visible_email_clients, visible_email_opportunities,
 )
 from .email_classification_review import classification_review_evidence, require_classification_review
+from .email_client_resolution import (
+    email_customer_intent, require_reviewed_customer_name, resolve_email_customer,
+)
+from .email_customer_matching import normalize_customer_name
+from .email_opportunity_evidence import (
+    prevent_duplicate_tender, reviewed_analysis_snapshot, tender_identity,
+)
 from .microsoft_graph import SalesMicrosoftGraphService
 from .models import OpportunityAuditEvent
 from .serializers import DealCreateSerializer
@@ -80,11 +87,12 @@ def email_review_token(connection, user, message):
     return signing.dumps({
         'scope': _digest(_connection_scope(connection)), 'actor': str(user.pk),
         'message': message['id'], 'source': _source_digest(message),
+        'analysis': reviewed_analysis_snapshot(message.get('extracted_information')),
     }, salt=REVIEW_SALT, compress=True)
 
 
 def _read_review_token(token, connection, user, message_id):
-    if not isinstance(token, str) or not token or len(token) > 8000:
+    if not isinstance(token, str) or not token or len(token) > 48_000:
         raise serializers.ValidationError({'source_token': 'Reload the email before creating an opportunity.'})
     try:
         review = signing.loads(token, salt=REVIEW_SALT, max_age=REVIEW_MAX_AGE)
@@ -104,32 +112,40 @@ def _read_review_token(token, connection, user, message_id):
 
 def _reviewed_serializer(data, user):
     if not isinstance(data, dict) or set(data) - {
-        *REVIEW_FIELDS, 'message_id', 'source_token', 'classification_code', 'classification_confirmed',
+        *REVIEW_FIELDS, 'new_client', 'message_id', 'source_token', 'classification_code', 'classification_confirmed',
     }:
         raise serializers.ValidationError({'detail': 'Only reviewed opportunity fields may be submitted.'})
     classification_code = require_classification_review(data)
-    required = ('deal_name', 'client', 'estimated_value', 'currency', 'expected_close_date')
+    required = ('deal_name', 'estimated_value', 'currency', 'expected_close_date')
     errors = {key: ['This field is required.'] for key in required if data.get(key) in (None, '')}
     if errors:
         raise serializers.ValidationError(errors)
-    try:
-        client_id = serializers.UUIDField().run_validation(data['client'])
-    except serializers.ValidationError:
-        raise serializers.ValidationError({'client': 'Select an accessible client.'}) from None
-    client = visible_email_clients(user).filter(pk=client_id).first()
-    if client is None:
-        raise serializers.ValidationError({'client': 'Select an accessible client.'})
+    intent = email_customer_intent(data)
+    client = None
+    if 'client' in intent:
+        client = visible_email_clients(user).filter(pk=intent['client']).first()
+        if client is None:
+            raise serializers.ValidationError({'client': 'Select an accessible client.'})
     payload = {key: data[key] for key in REVIEW_FIELDS if key in data}
+    payload.pop('client', None)
+    if client is not None:
+        payload['client'] = str(client.pk)
     payload.update({
-        'client': str(client.pk), 'client_reference': data.get('client_reference') or '',
+        'client_reference': data.get('client_reference') or '',
         'scope_type': data.get('scope_type') or 'other',
         'description': data.get('description') or '',
         'submission_due_date': data.get('submission_due_date') or None,
     })
     serializer = DealCreateSerializer(data=payload)
+    if client is None:
+        # Validate all commercial inputs before source reads or business writes.
+        # The atomic resolver supplies the canonical FK immediately before save.
+        serializer.fields['client'].required = False
     serializer.is_valid(raise_exception=True)
     normalized = dict(serializer.validated_data)
-    normalized['client'] = str(client.pk)
+    normalized['client'] = str(client.pk) if client is not None else {
+        'reviewed_name': normalize_customer_name(intent['new_client']['company_name']),
+    }
     legacy_payload_hash = _digest(normalized)
     normalized['classification_code'] = classification_code
     normalized['classification_confirmed'] = True
@@ -142,6 +158,11 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
     serializer, payload_hash, legacy_payload_hash, classification_code = _reviewed_serializer(data, user)
     message_id = data.get('message_id')
     review = _read_review_token(data.get('source_token'), connection, user, message_id)
+    analysis_snapshot = reviewed_analysis_snapshot(review.get('analysis'))
+    intent = email_customer_intent(data)
+    require_reviewed_customer_name(intent, analysis_snapshot)
+    if analysis_snapshot.get('ai_review', {}).get('status') == 'validated' and not data.get('scope_type'):
+        raise serializers.ValidationError({'scope_type': 'Review the scope type before saving.'})
     # The provider source is fetched with our own mailbox and identity. Client
     # supplied body, subject, mailbox and source evidence are never accepted.
     message = SalesMicrosoftGraphService(connection).get_message(message_id)
@@ -153,11 +174,6 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
         require_email_opportunity_access(user)
         if _connection_scope(locked) != _connection_scope(connection):
             raise EmailReviewConflict('The mailbox connection changed. Reload the email before continuing.')
-        client = visible_email_clients(user).select_for_update().filter(
-            pk=serializer.validated_data['client'].pk,
-        ).first()
-        if client is None:
-            raise serializers.ValidationError({'client': 'Select an accessible client.'})
         previous = OpportunityAuditEvent.objects.filter(
             event_type='opportunity_created_from_email',
             data__mailbox_source_hash=source_hash,
@@ -166,6 +182,8 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
             opportunity = visible_email_opportunities(user).filter(pk=previous.opportunity_id).first()
             if opportunity is None:
                 raise PermissionDenied('This email already has an opportunity you cannot access.')
+            if not visible_email_clients(user).filter(pk=opportunity.client_id).exists():
+                raise serializers.ValidationError({'client': 'Select an accessible client.'})
             legacy_same_payload = (
                 previous.data.get('reviewed_payload_hash_version', 1) == 1
                 and 'reviewed_classification' not in previous.data
@@ -186,6 +204,11 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
                     'The email or conversation evidence differs from the recorded opportunity.', code='email_already_converted',
                 )
             return opportunity, False
+        client, customer_resolution = resolve_email_customer(user, intent)
+        prevent_duplicate_tender(
+            client=client, reviewed_reference=serializer.validated_data.get('client_reference'),
+            snapshot=analysis_snapshot,
+        )
         source = {
             'source_mailbox_connection_id': str(connection.pk),
             'source_mailbox_address': connection.mailbox_address,
@@ -193,6 +216,9 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
             'sender_email': message.get('sender_email') or '',
             'received_at': message.get('received_at'),
         }
+        identity = tender_identity(analysis_snapshot)
+        if identity:
+            source['email_tender_identity'] = identity
         opportunity = serializer.save(
             owner=user, client=client, opportunity_source='client_email',
             next_action='Qualify email-originated opportunity',
@@ -206,6 +232,8 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
                 'reviewed_payload_hash': payload_hash, 'source_content_hash': review['source'],
                 'source_hash_version': 2, 'reviewed_payload_hash_version': 2,
                 'reviewed_classification': classification_review_evidence(classification_code, user),
+                'reviewed_email_analysis': analysis_snapshot,
+                'reviewed_customer_resolution': customer_resolution,
             },
         )
         return opportunity, True

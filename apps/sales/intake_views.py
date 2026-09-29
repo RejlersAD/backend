@@ -25,20 +25,58 @@ from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 
 from apps.rbac.permissions import HasModuleAccess
-from apps.rbac.action_policy import module_action_allowed
 
 from .email_permissions import (
     require_email_opportunity_access, visible_email_clients, visible_email_intakes,
     visible_email_opportunities,
 )
 from .email_classification_review import classification_review_evidence, require_classification_review
-from .mailbox_opportunities import EmailReviewConflict
+from .email_client_resolution import (
+    email_customer_intent, require_reviewed_customer_name, resolve_email_customer,
+)
+from .mailbox_opportunities import EmailReviewConflict, REVIEW_FIELDS, _reviewed_serializer
+from .email_opportunity_evidence import (
+    prevent_duplicate_tender, read_saved_email_review, source_digest, tender_identity,
+)
+from .saved_email_analysis import analyze_saved_email
 
-from .models import Client, Contact, OpportunityAuditEvent, SalesEmailIntake
+from .models import OpportunityAuditEvent, SalesEmailIntake
 from .serializers import (
-    ClientCreateSerializer, DealCreateSerializer, DealDetailSerializer,
+    DealDetailSerializer,
     SalesEmailIntakeSerializer as SalesEmailIntakeDetailSerializer,
 )
+
+
+def _saved_review_payload(data, intake, user, snapshot):
+    """Normalize reviewed values and retain the logical customer intent on retry."""
+    legacy = 'source_token' not in data
+    intent = email_customer_intent(data, legacy=legacy)
+    if not legacy:
+        require_reviewed_customer_name(intent, snapshot)
+        if snapshot.get('ai_review', {}).get('status') == 'validated' and not data.get('scope_type'):
+            raise serializers.ValidationError({'scope_type': 'Review the scope type before saving.'})
+    payload = {key: data[key] for key in REVIEW_FIELDS if key in data}
+    payload.update({
+        'classification_code': data.get('classification_code'),
+        'classification_confirmed': data.get('classification_confirmed'),
+    })
+    if 'new_client' in intent:
+        payload['new_client'] = {'company_name': intent['new_client']['company_name']}
+    if legacy:
+        for key, fallback in (
+            ('deal_name', intake.subject[:300]), ('currency', 'AED'),
+            ('scope_type', 'other'), ('description', intake.body_preview),
+        ):
+            payload[key] = payload.get(key) or fallback
+    serializer, normalized_hash, _, _ = _reviewed_serializer(payload, user)
+    location = serializers.CharField(max_length=255, allow_blank=True).run_validation(data.get('location') or '')
+    note = str(data.get('resolution_note') or '').strip()
+    serializer.validated_data['location'] = location
+    fingerprint = source_digest({
+        'reviewed_fields': normalized_hash, 'location': location, 'resolution_note': note,
+        'new_client_details': {key: value for key, value in intent.get('new_client', {}).items() if key != 'company_name'},
+    })
+    return serializer, intent, fingerprint
 
 
 class SalesEmailIntakeThrottle(SimpleRateThrottle):
@@ -254,9 +292,19 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             # list/detail joins include nullable relations that PostgreSQL
             # cannot lock through an outer join.
             intake = self.get_queryset().select_related(None).select_for_update().get(pk=permitted_intake.pk)
+            analysis_snapshot = {}
+            if 'source_token' in request.data:
+                source_context = {'email_ai_skip': True}
+                analyze_saved_email(intake, request=request, context=source_context)
+                analysis_snapshot = read_saved_email_review(
+                    request.data['source_token'], intake, request.user,
+                    source_context['_saved_email_source_hashes'][str(intake.pk)],
+                )
             if intake.opportunity_id:
                 if not visible_email_opportunities(request.user).filter(pk=intake.opportunity_id).exists():
                     raise PermissionDenied('The linked opportunity is not available to you.')
+                if not visible_email_clients(request.user).filter(pk=intake.opportunity.client_id).exists():
+                    raise serializers.ValidationError({'client': 'Select an accessible client.'})
                 previous = OpportunityAuditEvent.objects.filter(
                     opportunity_id=intake.opportunity_id,
                     event_type='opportunity_created_from_email',
@@ -268,6 +316,13 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                         'An opportunity already exists for this email with a different reviewed classification.',
                         code='email_already_converted',
                     )
+                if previous and previous.data.get('reviewed_payload_hash'):
+                    _, _, fingerprint = _saved_review_payload(request.data, intake, request.user, analysis_snapshot)
+                    if previous.data['reviewed_payload_hash'] != fingerprint:
+                        raise EmailReviewConflict(
+                            'An opportunity already exists for this email with different reviewed fields.',
+                            code='email_already_converted',
+                        )
                 return Response({
                     'intake': self.get_serializer(intake).data,
                     'opportunity': DealDetailSerializer(intake.opportunity).data,
@@ -278,69 +333,19 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'status': 'Rejected or duplicate intake cannot be converted.',
                 })
 
-            client = None
-            client_id = request.data.get('client')
-            if client_id:
-                try:
-                    client_id = serializers.UUIDField().run_validation(client_id)
-                except serializers.ValidationError:
-                    raise serializers.ValidationError({'client': 'Select an accessible client.'}) from None
-                client = visible_email_clients(request.user).filter(pk=client_id).first()
-                if not client:
-                    raise serializers.ValidationError({
-                        'client': 'The selected client could not be found.',
-                    })
-            else:
-                if not module_action_allowed(request.user, 'sales_clients', 'create'):
-                    raise PermissionDenied('You do not have access to create clients.')
-                new_client = request.data.get('new_client') or {}
-                company_name = str(new_client.get('company_name', '')).strip()
-                if not company_name:
-                    raise serializers.ValidationError({
-                        'client': 'Select a client or provide a new client name.',
-                    })
-                client = visible_email_clients(request.user).filter(
-                    company_name__iexact=company_name,
-                ).first()
-                if not client:
-                    client_serializer = ClientCreateSerializer(data={
-                        'company_name': company_name,
-                        'legal_name': company_name,
-                        'industry_type': new_client.get('industry_type') or 'other',
-                        'email': new_client.get('email') or '',
-                        'phone': new_client.get('phone') or '',
-                        'website': new_client.get('website') or '',
-                        'country': new_client.get('country') or '',
-                        'status': 'prospect',
-                        'notes': f'Created from Sales email intake {intake.id}.',
-                    })
-                    client_serializer.is_valid(raise_exception=True)
-                    client = client_serializer.save(account_manager=request.user)
-
-                    contact_email = str(new_client.get('contact_email') or '').strip()
-                    if contact_email:
-                        name_parts = str(new_client.get('contact_name') or '').strip().split()
-                        Contact.objects.create(
-                            client=client,
-                            first_name=name_parts[0] if name_parts else 'Email',
-                            last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else 'Contact',
-                            email=contact_email,
-                            phone=new_client.get('phone') or '',
-                            role_type='procurement',
-                            is_primary=True,
-                        )
-
+            legacy_customer = 'source_token' not in request.data
+            opportunity_serializer, customer_intent, fingerprint = _saved_review_payload(
+                request.data, intake, request.user, analysis_snapshot,
+            )
+            client, customer_resolution = resolve_email_customer(
+                request.user, customer_intent, legacy=legacy_customer,
+            )
+            prevent_duplicate_tender(
+                client=client, reviewed_reference=request.data.get('client_reference'),
+                snapshot=analysis_snapshot,
+            )
             payload = {
-                'deal_name': request.data.get('deal_name') or intake.subject[:300],
-                'client': str(client.id),
-                'estimated_value': request.data.get('estimated_value'),
-                'currency': request.data.get('currency') or 'AED',
-                'expected_close_date': request.data.get('expected_close_date'),
-                'submission_due_date': request.data.get('submission_due_date'),
-                'scope_type': request.data.get('scope_type') or 'other',
-                'location': request.data.get('location') or '',
-                'description': request.data.get('description') or intake.body_preview,
-                'client_reference': request.data.get('client_reference') or '',
+                'client': client,
                 'opportunity_source': 'client_email',
                 'next_action': 'Qualify email-originated opportunity',
                 'next_action_date': timezone.now().date(),
@@ -352,9 +357,10 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'received_at': intake.received_at.isoformat(),
                 },
             }
-            opportunity_serializer = DealCreateSerializer(data=payload)
-            opportunity_serializer.is_valid(raise_exception=True)
-            opportunity = opportunity_serializer.save(owner=request.user)
+            identity = tender_identity(analysis_snapshot)
+            if identity:
+                payload['custom_fields']['email_tender_identity'] = identity
+            opportunity = opportunity_serializer.save(owner=request.user, **payload)
             OpportunityAuditEvent.objects.create(
                 opportunity=opportunity,
                 actor=request.user,
@@ -367,6 +373,10 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'sender_email': intake.sender_email,
                     'received_at': intake.received_at.isoformat(),
                     'reviewed_classification': classification_review_evidence(classification_code, request.user),
+                    'reviewed_email_analysis': analysis_snapshot,
+                    'reviewed_customer_resolution': customer_resolution,
+                    'reviewed_payload_hash': fingerprint,
+                    'reviewed_payload_hash_version': 3,
                 },
             )
 

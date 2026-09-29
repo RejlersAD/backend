@@ -1,5 +1,14 @@
 # Sales email customer matching for review (Task 4)
 
+29 September follow-up: the user authorized automatic form prefilling and
+missing-client creation on final opportunity save. The read-only matching
+projection below remains unchanged; its earlier manual-only selection policy
+is superseded by the reviewed autofill flow in
+[AI review and client resolution](SALES_EMAIL_AI_REVIEW.md#form-autofill-and-missing-clients).
+Both live and saved detail expose the guarded new-client capability. Save
+revalidates the source name, current permissions and canonical directory before
+atomically resolving/creating the client, opportunity and audit.
+
 Saved intake and live mailbox detail responses now add
 `extracted_information.customer_match` using the current request actor. The
 source's existing mailbox/intake guards run first. The pure email analysis and
