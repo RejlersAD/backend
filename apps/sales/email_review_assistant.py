@@ -18,6 +18,17 @@ from .email_ai_provider import analyze_email_sources, email_ai_cache_identity, e
 
 ACTIONS = ('question', 'extract_requirements', 'check_deadline', 'draft_reply')
 VALIDATION_REVISION = 2
+# Public diagnostics are fixed categories, never provider text or source data.
+# Keep the existing status/code/detail envelope compatible with older clients.
+FAILURE_REASONS = frozenset({
+    'disabled', 'configuration_missing', 'configuration_invalid', 'unsupported_provider',
+    'provider_timeout', 'provider_authentication', 'provider_permission', 'provider_rate_limit',
+    'provider_request', 'provider_dependency_missing', 'provider_unavailable',
+    'provider_refused', 'provider_incomplete', 'invalid_response', 'input_too_large',
+    'output_too_large', 'invalid_input', 'invalid_schema', 'invalid_instructions',
+    'source_unavailable', 'request_in_progress', 'cache_unavailable', 'invalid_evidence',
+    'internal_unavailable', 'mailbox_unavailable',
+})
 QUESTIONS = {
     'extract_requirements': 'What requirements and requested actions are stated in this email?',
     'check_deadline': 'What deadlines are stated, what are they for, and what qualifications apply?',
@@ -57,9 +68,10 @@ commercial facts. A supported flag means relevant text exists, not verified trut
 
 
 class EmailAssistantError(APIException):
-    def __init__(self, detail, *, status=503, code='email_assistant_unavailable'):
+    def __init__(self, detail, *, status=503, code='email_assistant_unavailable', reason='internal_unavailable'):
         self.status_code = status
-        super().__init__({'detail': detail, 'code': code})
+        safe_reason = reason if isinstance(reason, str) and reason in FAILURE_REASONS else 'internal_unavailable'
+        super().__init__({'detail': detail, 'code': code, 'reason': safe_reason})
 
 
 def require_assistant_read(user):
@@ -89,7 +101,10 @@ def assistant_request(data, *, live=False, query_params=None):
 def require_assistant_configuration():
     configuration = email_ai_configuration()
     if not configuration.get('ready'):
-        raise EmailAssistantError('Email AI review is unavailable. Check the server configuration or try again later.')
+        raise EmailAssistantError(
+            'Email AI review is unavailable. Check the server configuration or try again later.',
+            reason=configuration.get('error_code'),
+        )
     return configuration
 
 
@@ -162,7 +177,7 @@ def review_email_assistant(payload, request, *, scope_key):
     configuration = require_assistant_configuration()
     if (not isinstance(payload, dict) or not payload.get('sources') or not scope_key
             or payload.get('selected_source_id') not in {row['id'] for row in payload['sources']}):
-        raise EmailAssistantError('No eligible email text is available for this review.')
+        raise EmailAssistantError('No eligible email text is available for this review.', reason='source_unavailable')
     key = 'sales-email-assistant:' + _digest({
         'version': 1, 'validation': VALIDATION_REVISION, 'scope': scope_key, 'configuration': email_ai_cache_identity(),
         'sources': payload, 'request': request, 'contract': [SCHEMA, INSTRUCTIONS],
@@ -173,21 +188,25 @@ def review_email_assistant(payload, request, *, scope_key):
         if isinstance(cached, dict):
             return copy.deepcopy(cached)
         if not cache.add(lock_key, lease, timeout=45):
-            raise EmailAssistantError('This email question is already being reviewed. Try again shortly.')
+            raise EmailAssistantError('This email question is already being reviewed. Try again shortly.',
+                                      reason='request_in_progress')
     except EmailAssistantError:
         raise
     except Exception:
-        raise EmailAssistantError('Email AI review is temporarily unavailable. Try again later.') from None
+        raise EmailAssistantError('Email AI review is temporarily unavailable. Try again later.',
+                                  reason='cache_unavailable') from None
     try:
         result = analyze_email_sources({**payload, 'request': request}, SCHEMA, instructions=INSTRUCTIONS)
         if result.get('status') != 'completed':
             if result.get('error_code') == 'provider_timeout':
-                raise EmailAssistantError('Email AI review timed out. Try again.', status=504, code='email_assistant_timeout')
-            raise EmailAssistantError('Email AI review is unavailable. Try again later.')
+                raise EmailAssistantError('Email AI review timed out. Try again.', status=504,
+                                          code='email_assistant_timeout', reason='provider_timeout')
+            raise EmailAssistantError('Email AI review is unavailable. Try again later.',
+                                      reason=result.get('error_code'))
         citations = _checked_citations(result.get('proposal'), payload)
         if citations is None:
             raise EmailAssistantError('The AI response could not be verified against this email. Try again.',
-                                     status=502, code='email_assistant_invalid_response')
+                                     status=502, code='email_assistant_invalid_response', reason='invalid_evidence')
         output = {
             'version': 1, 'kind': 'reply_draft' if request['action'] == 'draft_reply' else 'answer',
             'answer': _answer(request['action'], citations), 'citations': citations,
@@ -195,7 +214,11 @@ def review_email_assistant(payload, request, *, scope_key):
             'coverage': payload.get('coverage', {}), 'partial': bool(payload.get('partial')),
             'needs_review': True,
         }
-        cache.set(key, output, timeout=300)
+        try:
+            cache.set(key, output, timeout=300)
+        except Exception:
+            raise EmailAssistantError('Email AI review is temporarily unavailable. Try again later.',
+                                      reason='cache_unavailable') from None
         return output
     except EmailAssistantError:
         raise

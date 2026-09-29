@@ -136,9 +136,13 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
         try:
             SalesMicrosoftGraphService(connection).get_message(request.data['message_id'], review_context=context)
         except SalesMailboxReadError as exc:
-            return Response({'detail': str(exc)}, status=exc.status_code)
+            error = {'detail': str(exc)}
+            if 500 <= exc.status_code < 600:
+                error['reason'] = 'mailbox_unavailable'
+            return Response(error, status=exc.status_code)
         except Exception:
-            return Response({'detail': 'The email could not be loaded from Microsoft.'}, status=502)
+            return Response({'detail': 'The email could not be loaded from Microsoft.',
+                             'reason': 'mailbox_unavailable'}, status=502)
         return Response(review_email_assistant(
             context.get('assistant_sources'), query,
             scope_key=f'live:{request.user.pk}:{connection.pk}:{connection.tenant_id}:{connection.mailbox_address}:{request.data["message_id"]}',
