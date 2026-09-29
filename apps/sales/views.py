@@ -105,12 +105,17 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
         try:
             result = SalesMicrosoftGraphService(connection).get_message(
                 request.query_params.get('message_id'),
+                allow_ai=True,
+                ai_scope_key=f'live:{request.user.pk}:{connection.pk}:{connection.tenant_id}:{connection.mailbox_address}',
             )
         except SalesMailboxReadError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         except Exception:
             return Response({'detail': 'The email could not be loaded from Microsoft.'}, status=502)
         result['can_create_opportunity'] = can_create_email_opportunity(request.user)
+        result['can_create_client'] = bool(
+            result['can_create_opportunity'] and module_action_allowed(request.user, 'sales_clients', 'create')
+        )
         result['source_token'] = email_review_token(connection, request.user, result)
         from .email_customer_matching import enrich_customer_match
         result['extracted_information'] = enrich_customer_match(

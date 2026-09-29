@@ -400,3 +400,11 @@ apps/finance/data/invoice_performance_summary.json
 !docs/SALES_EMAIL_INTELLIGENCE.md
 !docs/examples/sales_email_intelligence_reference.py
 /.codex_tmp/
+
+# Maintained AI email review contracts and isolated regression coverage.
+!apps/sales/tests/test_email_agreement_actions.py
+!apps/sales/tests/test_email_ai_*.py
+!apps/sales/tests/test_email_tender_concurrency.py
+!apps/sales/tests/test_email_client_resolution.py
+!apps/sales/tests/test_email_client_concurrency.py
+!docs/SALES_EMAIL_AI_REVIEW.md
