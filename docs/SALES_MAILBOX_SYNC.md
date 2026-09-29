@@ -7,11 +7,35 @@ customer, lead or opportunity is automatically created.
 
 ## Enable, pause and visibility
 
-`POST /api/v1/sales/mailbox-connections/{id}/configure-sync/` accepts only:
+`POST /api/v1/sales/mailbox-connections/{id}/configure-sync/` accepts Boolean
+`enabled` and optional `expected_identity`. Existing callers can still send:
 
 ```json
 {"enabled": true}
 ```
+
+The shared-mailbox setup form sends its reviewed saved identity as well:
+
+```json
+{
+  "enabled": true,
+  "expected_identity": {
+    "mailbox_address": "sales@example.test",
+    "tenant_id": "reviewed-tenant-id",
+    "client_id": "reviewed-client-id"
+  }
+}
+```
+
+When present, `expected_identity` must contain exactly these three nonblank
+strings within the existing model field lengths. Null, missing/extra fields and
+other values return 400. The command checks current authority/scope and compares
+all three exact values against the locked database connection before any state,
+enable flag, authorizing actor or lease write. A mismatch returns 409; reload and
+review/test the current connection before another explicit action. This prevents
+an open setup form from enabling a different mailbox/application after another
+administrator corrects the same unused record. This additive guard changes no
+schema and preserves existing Boolean-only callers.
 
 Use `false` to pause. The actor needs current `sales_email_intake` read, create
 and update actions plus the established connection owner/administrator scope.

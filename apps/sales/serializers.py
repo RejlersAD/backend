@@ -593,6 +593,7 @@ class SalesMailboxConnectionSerializer(serializers.ModelSerializer):
     token_encryption_configured = serializers.SerializerMethodField()
     delegated_connected = serializers.SerializerMethodField()
     sync = serializers.SerializerMethodField()
+    last_error = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesMailboxConnection
@@ -605,24 +606,55 @@ class SalesMailboxConnectionSerializer(serializers.ModelSerializer):
             'created_by', 'updated_by', 'created_at', 'updated_at',
         ]
 
+    def to_internal_value(self, data):
+        if self.instance is None and isinstance(data, dict) and data.get('auth_mode') == 'application':
+            allowed = {'name', 'auth_mode', 'tenant_id', 'client_id', 'mailbox_address', 'enabled'}
+            unexpected = set(data) - allowed
+            if unexpected:
+                raise serializers.ValidationError({
+                    field: 'This field cannot be supplied when adding a shared mailbox.'
+                    for field in sorted(unexpected)
+                })
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if self.instance is None and attrs.get('auth_mode') == 'application':
+            if attrs.get('enabled', False):
+                raise serializers.ValidationError({'enabled': 'Save the connection first, then use configure-sync to enable automatic syncing.'})
+            attrs['enabled'] = False
         protected = ('mailbox_address', 'tenant_id', 'client_id', 'auth_mode')
         changed = [field for field in protected if self.instance is not None
                    and field in attrs and attrs[field] != getattr(self.instance, field)]
         has_sync = self.instance is not None and hasattr(self.instance, 'sync_state')
+        identity_locked = self.instance is not None and (has_sync or self.instance.email_intakes.exists())
         if has_sync and 'enabled' in attrs and attrs['enabled'] != self.instance.enabled:
             raise serializers.ValidationError({'enabled': 'Use configure-sync to change automatic syncing.'})
-        if changed and (self.instance.email_intakes.exists() or has_sync):
+        if changed and identity_locked:
             raise serializers.ValidationError({
                 field: 'This mailbox connection has saved emails or sync history. Create a separate connection for a different identity.'
                 for field in changed
             })
+        auth_mode = attrs.get('auth_mode', self.instance.auth_mode if self.instance else None)
+        if auth_mode == 'application' and 'mailbox_address' in attrs:
+            # Normalize correctable setup records, never retained source identity.
+            address = attrs['mailbox_address'] if identity_locked else attrs['mailbox_address'].strip().lower()
+            duplicates = SalesMailboxConnection.objects.filter(mailbox_address__iexact=address)
+            if self.instance is not None:
+                duplicates = duplicates.exclude(pk=self.instance.pk)
+            if duplicates.exists():
+                raise serializers.ValidationError({'mailbox_address': 'This mailbox connection already exists.'})
+            attrs['mailbox_address'] = address
         return attrs
 
     def get_sync(self, obj):
         from .mailbox_sync import sync_projection
         return sync_projection(obj)
+
+    def get_last_error(self, obj):
+        # Historical provider diagnostics remain server-side as well; reopening
+        # setup must not expose them through the ordinary list/detail response.
+        return 'Microsoft could not verify this mailbox. Check its configuration and server access.' if obj.last_error else ''
 
     def get_secret_configured(self, obj):
         import os
