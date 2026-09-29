@@ -856,6 +856,25 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             return UserProfileListSerializer
         return UserProfileSerializer
 
+    def create(self, request, *args, **kwargs):
+        """Create a user, surfacing unexpected failures as JSON.
+
+        Without this, an unhandled exception (e.g. a DB/employer-sync or
+        email error) propagates past DRF and Django returns an opaque HTML
+        500 page, which gives the admin no actionable detail. Catch it here
+        and return the real message so the UI can display it.
+        """
+        from rest_framework import status as drf_status
+        from rest_framework.response import Response
+        try:
+            return super().create(request, *args, **kwargs)
+        except Exception as exc:
+            logger.exception('[UserProfile] User creation failed')
+            return Response(
+                {'error': f'User creation failed: {exc.__class__.__name__}: {exc}'},
+                status=drf_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
     @transaction.atomic
     def perform_create(self, serializer):
         from apps.rbac.rbac_config import DEFAULT_ROLE_CONFIG
