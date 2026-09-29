@@ -69,7 +69,7 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
-        if self.action in {'messages', 'message', 'convert_to_opportunity', 'capture_message', 'configure_sync', 'list', 'retrieve', 'create', 'update', 'partial_update', 'test_connection'}:
+        if self.action in {'messages', 'message', 'review_assistant', 'convert_to_opportunity', 'capture_message', 'configure_sync', 'list', 'retrieve', 'create', 'update', 'partial_update', 'test_connection'}:
             response['Cache-Control'] = 'private, no-store, max-age=0'
             response['Pragma'] = 'no-cache'
             patch_vary_headers(response, ('Authorization', 'Cookie'))
@@ -122,6 +122,27 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             result.get('extracted_information'), request=request,
         )
         return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='review-assistant')
+    def review_assistant(self, request, pk=None):
+        from .email_review_assistant import (
+            assistant_request, require_assistant_configuration, require_assistant_read, review_email_assistant,
+        )
+        require_assistant_read(request.user)
+        connection = self.get_object()
+        query = assistant_request(request.data, live=True, query_params=request.query_params)
+        require_assistant_configuration()
+        context = {}
+        try:
+            SalesMicrosoftGraphService(connection).get_message(request.data['message_id'], review_context=context)
+        except SalesMailboxReadError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except Exception:
+            return Response({'detail': 'The email could not be loaded from Microsoft.'}, status=502)
+        return Response(review_email_assistant(
+            context.get('assistant_sources'), query,
+            scope_key=f'live:{request.user.pk}:{connection.pk}:{connection.tenant_id}:{connection.mailbox_address}:{request.data["message_id"]}',
+        ))
 
     @action(detail=True, methods=['post'], url_path='convert-to-opportunity')
     def convert_to_opportunity(self, request, pk=None):

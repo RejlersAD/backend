@@ -666,7 +666,7 @@ class SalesMicrosoftGraphService:
         result.pop('_sender_address', None)
         return result
 
-    def get_message(self, message_id, *, allow_ai=False, ai_scope_key=''):
+    def get_message(self, message_id, *, allow_ai=False, ai_scope_key='', review_context=None):
         url = self._mailbox_messages_url()
         if (
             not isinstance(message_id, str) or len(message_id) > 2048
@@ -688,6 +688,9 @@ class SalesMicrosoftGraphService:
             messages, selected_message_id=message_id, coverage=coverage,
             mailbox_address=self.connection.mailbox_address,
         )
+        if review_context is not None:
+            from .email_review_assistant import assistant_sources
+            review_context['assistant_sources'] = assistant_sources(reviewed, messages)
         if ai_scope_key:
             from .email_ai_analysis import enhance_email_analysis
             reviewed = enhance_email_analysis(

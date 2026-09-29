@@ -102,6 +102,9 @@ def analyze_saved_email(obj, *, request=None, context=None):
     result = analyze_email_conversation(
         messages, selected_message_id='selected-message', coverage=coverage, mailbox_address=own,
     )
+    if context.get('include_assistant_sources'):
+        from .email_review_assistant import assistant_sources
+        context['assistant_sources'] = assistant_sources(result, messages)
     context.setdefault('_saved_email_source_hashes', {})[str(obj.pk)] = source_digest({
         'mailbox': own, 'tenant': obj.source_tenant_id,
         'connection': str(obj.mailbox_connection_id or ''),

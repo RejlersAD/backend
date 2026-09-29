@@ -1,9 +1,79 @@
 # AI email review and reviewed opportunity creation
 
 The existing Email Intake detail and Create opportunity paths can use bounded,
-source-validated AI proposals. The feature adds no UI controls or automatic
-business decisions. The rule engine remains available when AI is disabled,
+source-validated AI proposals. The original detection integration added no UI
+controls or automatic business decisions. The approved workspace follow-up below
+adds Ask RADAI and Analyze unread controls. The rule engine remains available when AI is disabled,
 unconfigured, unavailable or produces invalid output.
+
+## Read-only Ask RADAI email review, 29 September 2026
+
+The user explicitly approved functional email questions and unread analysis in
+the refreshed Email Intake workspace. Email questions use the existing provider
+configuration, source permissions and guarded routes:
+
+- `POST /api/v1/sales/mailbox-connections/{id}/review-assistant/` accepts
+  `{message_id, action, question?}` and reloads that message/conversation through
+  the server's scoped Graph GET path.
+- `POST /api/v1/sales/email-intakes/{id}/review-assistant/` accepts
+  `{action, question?}` and uses only the currently accessible saved source and
+  same-mailbox conversation history.
+- `action` is `question` (default), `extract_requirements`, `check_deadline` or
+  `draft_reply`. A question is required for `question`, maximum 2000 characters.
+  Chips may omit it. Additional fields, arbitrary context/history and query
+  parameters are rejected. Both POSTs require intake **read**, not create,
+  permission, plus existing mailbox/intake owner/administrator source scope.
+
+Success returns `{version:1, kind:'answer'|'reply_draft', answer, citations,
+provider, model, coverage, partial, needs_review:true}`. Citations contain
+`{source_id, excerpt}`. The provider selects relevant exact source passages;
+the server validates them and restores their owning and immediately adjacent
+paragraphs to retain request labels, negation, corrections and qualifications.
+Ambiguous occurrences or oversized evidence
+are rejected. At most eight citations, 1800 characters each and 6000 combined,
+are accepted. Factual answer content consists of these verified excerpts, not
+unrestricted generated claims. No relevant evidence produces an honest
+not-established answer. Citation relevance and source truth still require review.
+
+Reply drafts contain a neutral greeting, the source request and explicit editable
+placeholders for the user's response, dates and commitments. `kind` remains
+`reply_draft` when no evidence is available. They are text proposals only: neither
+endpoint sends mail, saves a mailbox draft, marks messages read, changes review
+or classification state, nor creates a client/opportunity/audit record. Agreement
+return and proposal submission facts retain their source labels; no answer
+changes the proposal form or canonical business status. Attachments/portal links
+are not followed and no tools are available to the model.
+
+Disabled/missing configuration and provider failures return a real `503` with
+`code:email_assistant_unavailable`; timeout returns `504 email_assistant_timeout`;
+invalid source citations return `502 email_assistant_invalid_response`. Existing
+input/source errors remain 400/403/404. Error details contain no provider payload
+or credential. Responses use private/no-store HTTP headers. Five-minute result
+caching is keyed by actor, source content/identity, question/action, provider
+configuration and contract, with a bounded concurrent-call lease. Every request
+rechecks source access before cache reuse; lists/conversion do not invoke this
+assistant. This adds no model migration, dependency or provider activation.
+
+Verification: 146 focused/retained cases passed in 38.204 seconds in a fresh
+network-disabled Python 3.11 container. The 25 new assistant cases exercise
+read-only grants, denied/foreign/anonymous sources, saved-history scope, malformed
+requests, disabled/error/timeout behavior, invented citations, restored negation,
+adjacent corrections/owning request labels and oversized-context refusal,
+prompt injection boundaries, scoped caching and unchanged business rows. Retained
+provider, browsing, saved-analysis, classification and conversion cases also pass.
+These regression tests mock provider and Graph calls. They make no live mailbox
+read or production deployment claim. Evidence: `artifacts/email-review-assistant-final.log`.
+
+Separate real-provider smoke check, 29 September 2026: one synthetic OQ tender
+question using `check_deadline` completed through the existing locally configured
+Anthropic adapter and the current assistant citation validator. Supported date
+(2 October 2026), time (01:59), timezone (Gulf Standard Time), exact source
+matching and mandatory review checks all passed. This used fresh in-process
+LocMem cache and minimal Django settings, with no application database setup,
+mailbox access, business writes or credential changes. It verifies this bounded
+synthetic case, not production configuration or general model accuracy. Only
+provider/status and Boolean checks were recorded in
+`artifacts/email-review-assistant-anthropic-smoke.log`.
 
 ## Release preparation, 29 September 2026
 

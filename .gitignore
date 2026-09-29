@@ -403,6 +403,7 @@ apps/finance/data/invoice_performance_summary.json
 
 # Maintained AI email review contracts and isolated regression coverage.
 !apps/sales/tests/test_email_agreement_actions.py
+!apps/sales/tests/test_email_review_assistant.py
 !apps/sales/tests/test_email_ai_*.py
 !apps/sales/tests/test_email_tender_concurrency.py
 !apps/sales/tests/test_email_client_resolution.py

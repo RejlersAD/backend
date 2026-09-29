@@ -227,6 +227,12 @@ def operation_action(request, view):
     if explicit:
         return explicit
     operation = getattr(view, 'action', '') or view.__class__.__name__
+    if operation == 'review_assistant' and (view.__class__.__module__, view.__class__.__name__) in {
+        ('apps.sales.views', 'SalesMailboxConnectionViewSet'),
+        ('apps.sales.intake_views', 'SalesEmailIntakeViewSet'),
+    }:
+        # Source-authorized AI reading does not create mail or business records.
+        return 'read'
     if view.__class__.__module__ == 'apps.procurement.views':
         # Receiving projections and historical evidence capture have explicit
         # grants; reconciliation records a pending receipt, never an approval.

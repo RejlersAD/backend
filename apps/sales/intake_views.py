@@ -215,6 +215,22 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
         ])
         return Response(self.get_serializer(intake).data)
 
+    @action(detail=True, methods=['post'], url_path='review-assistant')
+    def review_assistant(self, request, pk=None):
+        from .email_review_assistant import (
+            assistant_request, require_assistant_configuration, require_assistant_read, review_email_assistant,
+        )
+        require_assistant_read(request.user)
+        intake = self.get_object()
+        query = assistant_request(request.data, query_params=request.query_params)
+        require_assistant_configuration()
+        context = {'email_ai_skip': True, 'include_assistant_sources': True}
+        analyze_saved_email(intake, request=request, context=context)
+        return Response(review_email_assistant(
+            context['assistant_sources'], query,
+            scope_key=f'saved:{request.user.pk}:{intake.pk}:{intake.mailbox_connection_id}:{intake.source_tenant_id}',
+        ))
+
     @action(detail=True, methods=['post'], url_path='start-review')
     def start_review(self, request, pk=None):
         intake = self.get_object()
