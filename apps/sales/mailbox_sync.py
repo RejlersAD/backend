@@ -98,10 +98,19 @@ def _authorized(connection_id, token):
         yield connection, state, user
 
 
-def configure_mailbox_sync(*, connection, user, enabled):
+def configure_mailbox_sync(*, connection, user, enabled, expected_identity=None):
     """Explicitly authorize or pause automation; every toggle fences old jobs."""
     if not isinstance(enabled, bool):
         raise ValidationError({'enabled': 'Provide true or false.'})
+    if expected_identity is not None:
+        fields = {'mailbox_address', 'tenant_id', 'client_id'}
+        if (
+            not isinstance(expected_identity, dict) or set(expected_identity) != fields
+            or any(not isinstance(expected_identity[field], str) or not expected_identity[field].strip()
+                   or len(expected_identity[field]) > SalesMailboxConnection._meta.get_field(field).max_length
+                   for field in fields)
+        ):
+            raise ValidationError({'expected_identity': 'Provide the reviewed mailbox address, tenant ID and client ID.'})
     with transaction.atomic():
         current = SalesMailboxConnection.objects.select_for_update().get(pk=connection.pk)
         actor = get_user_model().objects.get(pk=user.pk)
@@ -110,6 +119,10 @@ def configure_mailbox_sync(*, connection, user, enabled):
             raise PermissionDenied('You do not have access to configure mailbox sync.')
         if not visible_mailbox_connections(actor).filter(pk=current.pk).exists():
             raise Http404()
+        if expected_identity is not None and any(
+            getattr(current, field) != value for field, value in expected_identity.items()
+        ):
+            raise EmailCaptureConflict('The mailbox configuration changed. Reload and review it before changing sync.')
         if enabled and current.auth_mode != 'application':
             raise ValidationError({'enabled': 'Automatic sync requires an application mailbox.'})
         if enabled and (not current.tenant_id.strip() or not current.client_id.strip()):

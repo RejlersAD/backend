@@ -53,6 +53,76 @@ class MailboxSyncAPITests(TestCase):
         self.assertIn('no-store', response['Cache-Control'])
         self.network.assert_not_called()
 
+    def reviewed_identity(self):
+        return {field: getattr(self.connection, field) for field in ('mailbox_address', 'tenant_id', 'client_id')}
+
+    def test_reviewed_identity_can_enable_the_matching_saved_connection(self):
+        response = self.client.post(self.url, {
+            'enabled': True, 'expected_identity': self.reviewed_identity(),
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['enabled'])
+        self.assertEqual(SalesMailboxSyncState.objects.get().authorized_by, self.owner)
+        self.network.assert_not_called()
+
+    def test_malformed_reviewed_identity_creates_no_sync_state(self):
+        identity = self.reviewed_identity()
+        for expected in (None, [], {}, {'mailbox_address': identity['mailbox_address']},
+                         {**identity, 'tenant_id': ''}, {**identity, 'client_id': 123},
+                         {**identity, 'client_id': 'x' * 101}, {**identity, 'authorized_by': str(self.other.pk)}):
+            with self.subTest(expected=expected):
+                response = self.client.post(self.url, {'enabled': True, 'expected_identity': expected}, format='json')
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertFalse(SalesMailboxSyncState.objects.exists())
+                self.connection.refresh_from_db()
+                self.assertFalse(self.connection.enabled)
+
+    def test_concurrent_setup_identity_change_conflicts_before_enabling(self):
+        original = self.reviewed_identity()
+        for field, changed in (('mailbox_address', 'changed@example.test'), ('tenant_id', 'changed-tenant'), ('client_id', 'changed-client')):
+            with self.subTest(field=field):
+                SalesMailboxConnection.objects.filter(pk=self.connection.pk).update(**{field: changed})
+                response = self.client.post(self.url, {
+                    'enabled': True, 'expected_identity': original,
+                }, format='json')
+                self.assertEqual(response.status_code, 409, response.data)
+                self.assertFalse(SalesMailboxSyncState.objects.exists())
+                self.connection.refresh_from_db()
+                self.assertFalse(self.connection.enabled)
+                self.assertEqual(getattr(self.connection, field), changed)
+                self.assertNotIn(changed, str(response.data))
+                SalesMailboxConnection.objects.filter(pk=self.connection.pk).update(**{field: original[field]})
+
+    def test_reviewed_identity_conflict_preserves_existing_sync_authority_and_lease(self):
+        self.assertEqual(self.configure().status_code, 200)
+        state = SalesMailboxSyncState.objects.get(connection=self.connection)
+        state.lease_token = uuid4()
+        state.lease_expires_at = timezone.now()
+        state.save()
+        before = SalesMailboxSyncState.objects.values().get(pk=state.pk)
+        response = self.client.post(self.url, {
+            'enabled': False, 'expected_identity': {**self.reviewed_identity(), 'client_id': 'outdated-client'},
+        }, format='json')
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(SalesMailboxSyncState.objects.values().get(pk=state.pk), before)
+        self.connection.refresh_from_db()
+        self.assertTrue(self.connection.enabled)
+
+    def test_identity_guard_uses_locked_database_record_instead_of_supplied_instance(self):
+        from apps.sales.mailbox_capture import EmailCaptureConflict
+        from apps.sales.mailbox_sync import configure_mailbox_sync
+        reviewed = self.reviewed_identity()
+        SalesMailboxConnection.objects.filter(pk=self.connection.pk).update(client_id='concurrently-changed-client')
+        self.assertEqual(self.connection.client_id, reviewed['client_id'])
+        with self.assertRaises(EmailCaptureConflict):
+            configure_mailbox_sync(
+                connection=self.connection, user=self.owner, enabled=True, expected_identity=reviewed,
+            )
+        self.assertFalse(SalesMailboxSyncState.objects.exists())
+        self.connection.refresh_from_db()
+        self.assertFalse(self.connection.enabled)
+        self.assertEqual(self.connection.client_id, 'concurrently-changed-client')
+
     def test_pause_fences_a_running_worker_and_resume_preserves_checkpoints(self):
         self.assertEqual(self.configure().status_code, 200)
         state = SalesMailboxSyncState.objects.get(connection=self.connection)
@@ -125,6 +195,12 @@ class MailboxSyncAPITests(TestCase):
 
     def test_identity_and_legacy_enable_patch_cannot_bypass_sync_commands(self):
         self.assertEqual(self.configure().status_code, 200)
+        for data in ({'tenant_id': 'other'}, {'mailbox_address': 'other@example.test'}, {'enabled': False}):
+            self.assertEqual(self.client.patch(self.base, data, format='json').status_code, 403)
+        # Application setup edits now require administration; even an authorized
+        # administrator cannot bypass the retained sync identity/command guards.
+        self.owner.is_superuser = True
+        self.owner.save(update_fields=['is_superuser'])
         for data in ({'tenant_id': 'other'}, {'mailbox_address': 'other@example.test'}, {'enabled': False}):
             self.assertEqual(self.client.patch(self.base, data, format='json').status_code, 400)
         self.assertEqual(self.client.delete(self.base).status_code, 409)

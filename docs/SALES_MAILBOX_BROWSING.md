@@ -10,6 +10,71 @@ status, mark messages read, download attachments, or send mail. Imported enquiry
 review remains available. Explicit reviewed opportunity creation and its authority
 checks are described below. No migration is needed.
 
+## Administrator shared-mailbox setup - 29 September 2026
+
+`POST /api/v1/sales/mailbox-connections/` can register an application mailbox
+using only `name` (optional), `auth_mode: "application"`, `tenant_id`, `client_id`,
+`mailbox_address` and optional `enabled: false`. It requires the existing
+administrator check plus current `sales_email_intake` read/create permissions.
+An explicit application request from a non-administrator now returns 403 without
+creating a delegated record. Existing delegated creation/OAuth remains unchanged.
+
+Registration stores the current authenticated actor as creator/updater, a
+lowercase trimmed address, disabled intake and untested health. It makes no
+provider call and creates no sync state or email source. Caller-supplied ownership,
+health, approval, secret or other unsupported fields are rejected. Enabling at
+registration is rejected: use the separate guarded configure-sync command.
+Secrets remain in the server environment; this API cannot install credentials or
+configure workers. No mailbox, tenant, client or authorizing actor is inferred.
+
+A repeated or case-varied address returns a mailbox-address validation error
+without replacing the existing record. Validation checks historical mixed-case
+addresses; normalized new registrations also use the existing database unique
+constraint to prevent concurrent identical inserts. A uniqueness race returns a
+safe validation error. This adds no case-insensitive database constraint or
+historical-address rewrite; delegated connection-writing flows remain separate.
+
+Application-connection corrections through PATCH require current administration
+and intake read/update permissions; create permission is not required for an
+edit. Non-administrators cannot edit or convert an application connection, and
+cannot promote a delegated connection. Ordinary delegated edits remain available.
+Unprotected address corrections use the same normalization and case-insensitive
+duplicate check, excluding the edited record. Captured/synced identities retain
+their exact stored values and existing change prohibitions. The locked validation
+result is retained before saving. Update responses are private/no-store as well.
+
+`POST .../{id}/test-connection/` explicitly tests Graph access under existing read
+permission and mailbox scope. Failures return static public text, without raw
+provider diagnostics; list/detail also project any retained `last_error` as safe
+public text without rewriting historical server diagnostics. Creation and test
+responses are private/no-store. A saved
+connection or successful test does not activate sync; the existing
+[sync prerequisites and configure-sync contract](SALES_MAILBOX_SYNC.md) apply.
+Setup sends its saved mailbox address, tenant ID and client ID in the optional
+`expected_identity` guard when configuring sync. A stale identity returns 409
+before any state/authority/lease change; the caller must reload and review it.
+
+Verification was repeated from a clean isolated checkout based on `origin/main`,
+with only this feature's files. Fresh Python 3.11 Docker containers mounted that
+source read-only, disabled networking and used synthetic in-memory SQLite through
+`config.settings_release_test`. The full Sales suite ran 444 cases successfully
+(9 PostgreSQL-only cases skipped). After the final reviewed-identity guard, all
+101 affected setup, sync API/domain, capture and Graph/OAuth cases passed.
+They cover role/action denial, revocation during validation, pending ownership,
+delegated compatibility, creation/edit retries and mixed-case duplicates,
+simulated uniqueness failure, input validation, provider-error privacy and stale
+identity rejection without changing prior authority or leases. Provider/task
+effects were isolated. These runs do not certify PostgreSQL concurrency.
+
+The actual full application registry also passed a migration-state comparison
+against private in-memory SQLite: `No changes detected`. No migration was applied.
+Logs: `artifacts/sales-mailbox-setup-isolated-regressions.log`,
+`artifacts/sales-mailbox-setup-isolated-final.log` and
+`artifacts/sales-mailbox-setup-isolated-migration-state.log`. The narrower
+`settings_sales_test` harness had an existing unresolved
+`payroll_engine.PayrollAdjustment` relation; the complete release harness was used.
+No live mailbox, production environment or deployment was changed.
+
 ## API
 
 Both endpoints require authentication, effective `sales_email_intake.read`, and
