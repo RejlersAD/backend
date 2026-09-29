@@ -1,5 +1,75 @@
 # Sales email classification proposals (Task 3)
 
+## Explicit conversion confirmation - 29 September 2026
+
+The Email Intake redesign requires an explicit human classification before an
+opportunity can be created. Both existing commands now require
+`classification_code` and the JSON boolean `classification_confirmed: true`:
+
+- `POST /api/v1/sales/mailbox-connections/{id}/convert-to-opportunity/`
+- `POST /api/v1/sales/email-intakes/{id}/convert-to-opportunity/`
+
+The code must be one of the 19 existing classification codes listed below.
+The UI also offers manual `promotional_event` and `system_notification` choices;
+these do not describe opportunities and the server rejects their conversion.
+They do not add automatic classifier rules. Existing categories remain subject
+to human review and existing opportunity permissions, without a new business
+eligibility policy or an automatic qualification transition.
+
+Absent, false or nonboolean confirmation returns HTTP 400 with a
+`classification_confirmed` field error. An absent/invalid/non-opportunity code
+returns HTTP 400 with a `classification_code` field error. Existing denial,
+source-change, expiry and provider errors retain their meanings.
+
+Confirming in the UI is a review for the current source/session. It does not
+create a server record or claim a saved classification. The confirmation and
+opportunity commit together: the existing `opportunity_created_from_email`
+audit event records `reviewed_classification` with `version: 1`, code, canonical
+label, `confirmed_by` (server actor ID) and `confirmed_at` (server timestamp).
+Source analysis remains a proposal and GET requests remain read-only.
+
+Live conversion includes the code and true confirmation in a version-2 reviewed
+payload hash. Identical retries retain the original audit and return the existing
+accessible opportunity; changed classification conflicts with HTTP 409. Historic
+version-1 audit hashes may return an existing opportunity after matching the old
+opportunity fields and all current source/scope/access checks. This never
+backfills historical confirmation or creates another record. Imported retries
+likewise reject changing a classification already recorded in the audit; legacy
+records without that evidence retain their existing idempotent return behavior.
+
+No schema migration, source mutation, new confirmation endpoint or mailbox write
+is introduced. Deploy the coordinated UI and backend: older conversion clients
+without these new fields receive a validation error and must be updated. The
+persisted additions are ordinary JSON audit data; rollback does not erase them.
+
+Verified locally on Python 3.11: 41 isolated SQLite API/regression cases passed,
+including strict confirmation, invalid/non-opportunity codes, source and access
+guards, audit rollback and historical/changed retries. Four disposable
+PostgreSQL cases also passed: imported conversion and three observed competing
+submissions (identical, changed fields, changed classification). The latter
+observed distinct connections waiting on the existing row lock; exactly one
+opportunity and its original review audit survived. The temporary test database
+and named tmpfs PostgreSQL container were removed. These are functional and
+locking checks, not an application migration or deployment. Evidence:
+`artifacts/email-enterprise-classification-tests.log` and
+`artifacts/email-enterprise-classification-postgresql-tests.log`.
+
+Release preparation on 29 September 2026 reapplied only this feature to fetched
+`main` at `c3ab24723443b70a2de82d282d6ad99315ce84e7`, preserving the later
+shared-mailbox setup release. Against that isolated source, 65 Python 3.11
+API/migration regressions and four PostgreSQL concurrency cases passed. The
+migration cases apply/reverse the existing Sales 0008, 0009 and 0010 operations
+using private historical SQLite fixtures. PostgreSQL tests use a disposable
+tmpfs database and observed real row-lock contention; the database and container
+were removed. These checks do not apply migrations to the application database.
+Release logs are in workspace `artifacts/release-email-premium-20260929/`.
+The full base-settings registry check loaded 58 apps and 533 migration files,
+reported no migration conflicts and no model drift. It replaced database/cache/
+email transports with private in-memory services before Django initialization.
+This supersedes an initial raw-base-settings attempt that retained PostgreSQL
+connection options under SQLite and was stopped after that configuration error.
+No application migration state or deployed database was queried.
+
 Existing saved-intake and live-mailbox analysis now derives
 `extracted_information.classification` from the selected message's current
 unquoted text. No new endpoint, database column, background classification job
