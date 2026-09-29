@@ -54,6 +54,35 @@ configuration and contract, with a bounded concurrent-call lease. Every request
 rechecks source access before cache reuse; lists/conversion do not invoke this
 assistant. This adds no model migration, dependency or provider activation.
 
+Diagnostic follow-up, 29 September 2026: assistant errors additionally return
+an allowlisted `reason`, while retaining the existing HTTP status, `code` and
+`detail`. Older clients can ignore it. Configuration reasons are `disabled`,
+`configuration_missing`, `configuration_invalid` and `unsupported_provider`.
+Provider reasons are `provider_timeout`, `provider_authentication`,
+`provider_permission`, `provider_rate_limit`, `provider_request`,
+`provider_dependency_missing`, `provider_unavailable`, `provider_refused`,
+`provider_incomplete`, `invalid_response`, `input_too_large`, `output_too_large`,
+`invalid_input`, `invalid_schema` and `invalid_instructions`. These are fixed
+transport categories; `provider_request` does not establish a billing problem.
+Assistant reasons are `source_unavailable`, `request_in_progress`,
+`cache_unavailable`, `invalid_evidence` and `internal_unavailable`. A live source
+reload returning 5xx also includes `mailbox_unavailable`; source denials retain
+their existing envelopes. Unknown or nonstring reasons become
+`internal_unavailable`, never arbitrary provider/error text. No key, question,
+source text, response body, model output or raw exception is added to an error.
+The correction does not change provider configuration, requests, retries or
+citation validation, and does not establish that a production outage is fixed.
+
+Diagnostic verification: 124 assistant, provider, mailbox browsing and reviewed
+opportunity-conversion cases passed in 20.292 seconds in a fresh, network-disabled
+Python 3.11 container. Tests use isolated SQLite/LocMem services, synthetic
+credentials and mocked Graph/provider transport. Coverage includes live/saved
+error envelopes, every provider category, malformed/untrusted reasons, cache
+failure/recovery, unavailable sources, denied access, unchanged business rows
+and retained success/citation behavior. Scoped fatal Python lint and whitespace
+checks passed. No live database, mailbox or provider was accessed. Evidence:
+`artifacts/email-assistant-diagnostics-backend.log`.
+
 Verification: 146 focused/retained cases passed in 38.204 seconds in a fresh
 network-disabled Python 3.11 container. The 25 new assistant cases exercise
 read-only grants, denied/foreign/anonymous sources, saved-history scope, malformed
