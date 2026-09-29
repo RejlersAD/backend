@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 from apps.rbac.models import Permission, UserPermissionOverride, UserProfile
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.intake_views import SalesEmailIntakeViewSet
-from apps.sales.mailbox_opportunities import REVIEW_MAX_AGE, REVIEW_SALT
+from apps.sales.mailbox_opportunities import REVIEW_MAX_AGE, REVIEW_SALT, _reviewed_serializer, _source_digest
 from apps.sales.microsoft_graph import SalesMicrosoftGraphService
 from apps.sales.models import Client, Deal, OpportunityAuditEvent, SalesEmailIntake, SalesMailboxConnection
 from apps.sales.views import SalesMailboxConnectionViewSet
@@ -78,6 +78,7 @@ class MailboxOpportunityAPITests(TestCase):
             'estimated_value': '250000.15', 'currency': 'AED',
             'expected_close_date': '2026-12-31', 'submission_due_date': '2026-11-21',
             'scope_type': 'feasibility', 'description': 'The scope reviewed by the user.',
+            'classification_code': 'rfq', 'classification_confirmed': True,
         }
 
     def review(self):
@@ -106,9 +107,108 @@ class MailboxOpportunityAPITests(TestCase):
     def test_detail_has_evidence_and_capability_without_writes(self):
         detail = self.review()
         self.assertTrue(detail.data['can_create_opportunity'])
-        self.assertEqual(detail.data['extracted_information']['customer_name'], 'Reviewed Company')
+        self.assertEqual(detail.data['extracted_information']['organization_name'], 'Reviewed Company')
         self.assertTrue(detail.data['source_token'])
         self.assert_no_conversion()
+
+    def test_classification_requires_explicit_boolean_confirmation_before_source_fetch(self):
+        payload = self.payload()
+        for value in (None, False, 0, 1, 'true', [], {}):
+            with self.subTest(value=value):
+                self.network.reset_mock()
+                candidate = {**payload, 'classification_confirmed': value}
+                if value is None:
+                    candidate.pop('classification_confirmed')
+                response = self.post(candidate)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('classification_confirmed', response.data)
+                self.network.assert_not_called()
+        self.assert_no_conversion()
+
+    def test_invalid_and_manual_non_opportunity_classifications_cannot_convert(self):
+        payload = self.payload()
+        for code in ('', None, [], 'invented_type', 'promotional_event', 'system_notification'):
+            with self.subTest(code=code):
+                self.network.reset_mock()
+                response = self.post({**payload, 'classification_code': code})
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('classification_code', response.data)
+                self.network.assert_not_called()
+        self.assert_no_conversion()
+
+    def test_classification_is_audited_and_changed_classification_retry_conflicts(self):
+        payload = self.payload()
+        self.assertEqual(self.post(payload).status_code, 201)
+        event = OpportunityAuditEvent.objects.get()
+        recorded = deepcopy(event.data)
+        self.assertEqual(recorded['reviewed_classification']['code'], 'rfq')
+        self.assertEqual(recorded['reviewed_classification']['label'], 'RFQ')
+        self.assertEqual(recorded['reviewed_classification']['confirmed_by'], str(self.user.pk))
+        self.assertTrue(recorded['reviewed_classification']['confirmed_at'])
+        self.assertEqual(self.post(payload).status_code, 200)
+        self.assertEqual(self.post({**payload, 'classification_code': 'rfp'}).status_code, 409)
+        event.refresh_from_db()
+        self.assertEqual(event.data, recorded)
+        self.assertEqual(Deal.objects.count(), 1)
+
+    def test_historical_payload_retry_retains_legacy_evidence_without_backfilling_confirmation(self):
+        payload = self.payload()
+        self.assertEqual(self.post(payload).status_code, 201)
+        event = OpportunityAuditEvent.objects.get()
+        event.data['reviewed_payload_hash'] = _reviewed_serializer(payload, self.user)[2]
+        event.data.pop('reviewed_payload_hash_version')
+        event.data.pop('reviewed_classification')
+        event.save(update_fields=['data'])
+        recorded = deepcopy(event.data)
+        self.assertEqual(self.post(payload).status_code, 200)
+        self.assertEqual(self.post({**payload, 'estimated_value': '250001.15'}).status_code, 409)
+        event.refresh_from_db()
+        self.assertEqual(event.data, recorded)
+        self.assertEqual(Deal.objects.count(), 1)
+
+    def test_existing_general_communication_category_remains_human_reviewable(self):
+        response = self.post({**self.payload(), 'classification_code': 'general_communication'})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(OpportunityAuditEvent.objects.get().data['reviewed_classification']['code'], 'general_communication')
+
+    def test_changed_conversation_requires_review_before_any_opportunity_write(self):
+        self.message['conversationId'] = 'opportunity-thread'
+        original = {
+            **deepcopy(self.message), 'id': 'original-thread-message=',
+            'body': {'contentType': 'text', 'content': 'Customer: Reviewed Company\nDue date: 21 November 2026'},
+            'sentDateTime': '2026-09-20T08:00:00Z',
+        }
+        def respond(_method, _url, **kwargs):
+            if '$filter' in (kwargs.get('params') or {}):
+                return graph_response({'value': [self.message, original]})
+            return graph_response(self.message)
+        self.network.side_effect = respond
+        payload = self.payload()
+        original['body']['content'] += '\nThe proposal deadline is extended to 30 November 2026.'
+        conflict = self.post(payload)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data['code'], 'email_review_changed')
+        self.assert_no_conversion()
+        refreshed = self.post(self.payload())
+        self.assertEqual(refreshed.status_code, 201)
+        self.assertEqual(OpportunityAuditEvent.objects.get().data['source_hash_version'], 2)
+
+    def test_unchanged_legacy_audit_can_return_existing_with_fresh_conversation_review(self):
+        payload = self.payload()
+        self.assertEqual(self.post(payload).status_code, 201)
+        event = OpportunityAuditEvent.objects.get()
+        current = SalesMicrosoftGraphService(self.connection).get_message(MESSAGE['id'])
+        event.data.pop('source_hash_version')
+        event.data['source_content_hash'] = _source_digest(current, version=1)
+        event.save(update_fields=['data'])
+        response = self.post(self.payload())
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['created'])
+        self.assertEqual(Deal.objects.count(), 1)
+        self.message['body']['content'] += '<p>Source content changed.</p>'
+        self.network.return_value = graph_response(self.message)
+        self.assertEqual(self.post(self.payload()).status_code, 409)
+        self.assertEqual(Deal.objects.count(), 1)
 
     def test_explicit_creation_identical_retry_and_canonical_values(self):
         before = SalesMailboxConnection.objects.values().get(pk=self.connection.pk)
@@ -325,3 +425,49 @@ class MailboxOpportunityAPITests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(Deal.objects.count(), 0)
         self.assertFalse(Client.objects.filter(company_name='Explicit new client').exists())
+
+    def test_imported_classification_gate_prevents_client_or_opportunity_creation(self):
+        intake = self.make_intake()
+        url = f'/api/v1/sales/email-intakes/{intake.pk}/convert-to-opportunity/'
+        fields = {key: value for key, value in self.fields.items() if key not in {'message_id', 'client'}}
+        fields['new_client'] = {'company_name': 'Unconfirmed new client'}
+        for change in (
+            {'classification_confirmed': False}, {'classification_confirmed': 'true'},
+            {'classification_code': ''}, {'classification_code': 'promotional_event'},
+            {'classification_code': 'system_notification'},
+        ):
+            with self.subTest(change=change):
+                response = self.client.post(url, {**fields, **change}, format='json')
+                self.assertEqual(response.status_code, 400)
+        intake.refresh_from_db()
+        self.assertEqual(intake.status, 'received')
+        self.assertIsNone(intake.opportunity_id)
+        self.assertFalse(Deal.objects.exists())
+        self.assertFalse(OpportunityAuditEvent.objects.exists())
+        self.assertFalse(Client.objects.filter(company_name='Unconfirmed new client').exists())
+        self.network.assert_not_called()
+
+    def test_imported_confirmation_audit_retry_conflict_and_atomic_failure(self):
+        intake = self.make_intake()
+        url = f'/api/v1/sales/email-intakes/{intake.pk}/convert-to-opportunity/'
+        fields = {key: value for key, value in self.fields.items() if key != 'message_id'}
+        with patch('apps.sales.intake_views.OpportunityAuditEvent.objects.create', side_effect=RuntimeError('audit failed')):
+            with self.assertRaises(RuntimeError):
+                self.client.post(url, fields, format='json')
+        intake.refresh_from_db()
+        self.assertEqual(intake.status, 'received')
+        self.assertIsNone(intake.opportunity_id)
+        self.assertFalse(Deal.objects.exists())
+        self.assertFalse(OpportunityAuditEvent.objects.exists())
+        self.assertEqual(self.client.post(url, fields, format='json').status_code, 201)
+        event = OpportunityAuditEvent.objects.get()
+        recorded = deepcopy(event.data)
+        self.assertEqual(recorded['reviewed_classification']['code'], 'rfq')
+        self.assertEqual(recorded['reviewed_classification']['confirmed_by'], str(self.user.pk))
+        self.assertTrue(recorded['reviewed_classification']['confirmed_at'])
+        self.assertEqual(self.client.post(url, fields, format='json').status_code, 200)
+        changed = self.client.post(url, {**fields, 'classification_code': 'rfp'}, format='json')
+        self.assertEqual(changed.status_code, 409)
+        event.refresh_from_db()
+        self.assertEqual(event.data, recorded)
+        self.assertEqual(Deal.objects.count(), 1)

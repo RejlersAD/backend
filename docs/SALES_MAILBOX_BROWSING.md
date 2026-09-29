@@ -1,10 +1,79 @@
 # Read-only Sales shared mailbox browsing
 
+Subsequent Task 1 adds an explicit [durable capture command](SALES_EMAIL_CAPTURE.md)
+with migration 0008 and mailbox-scoped saved evidence. The GET browsing behavior
+described below remains unchanged; selecting or refreshing mail does not save it.
+
 The Email Intake page can browse live emails separately from imported enquiries.
 Browsing does not create `SalesEmailIntake` rows, enable intake, update health
 status, mark messages read, download attachments, or send mail. Imported enquiry
 review remains available. Explicit reviewed opportunity creation and its authority
 checks are described below. No migration is needed.
+
+## Administrator shared-mailbox setup - 29 September 2026
+
+`POST /api/v1/sales/mailbox-connections/` can register an application mailbox
+using only `name` (optional), `auth_mode: "application"`, `tenant_id`, `client_id`,
+`mailbox_address` and optional `enabled: false`. It requires the existing
+administrator check plus current `sales_email_intake` read/create permissions.
+An explicit application request from a non-administrator now returns 403 without
+creating a delegated record. Existing delegated creation/OAuth remains unchanged.
+
+Registration stores the current authenticated actor as creator/updater, a
+lowercase trimmed address, disabled intake and untested health. It makes no
+provider call and creates no sync state or email source. Caller-supplied ownership,
+health, approval, secret or other unsupported fields are rejected. Enabling at
+registration is rejected: use the separate guarded configure-sync command.
+Secrets remain in the server environment; this API cannot install credentials or
+configure workers. No mailbox, tenant, client or authorizing actor is inferred.
+
+A repeated or case-varied address returns a mailbox-address validation error
+without replacing the existing record. Validation checks historical mixed-case
+addresses; normalized new registrations also use the existing database unique
+constraint to prevent concurrent identical inserts. A uniqueness race returns a
+safe validation error. This adds no case-insensitive database constraint or
+historical-address rewrite; delegated connection-writing flows remain separate.
+
+Application-connection corrections through PATCH require current administration
+and intake read/update permissions; create permission is not required for an
+edit. Non-administrators cannot edit or convert an application connection, and
+cannot promote a delegated connection. Ordinary delegated edits remain available.
+Unprotected address corrections use the same normalization and case-insensitive
+duplicate check, excluding the edited record. Captured/synced identities retain
+their exact stored values and existing change prohibitions. The locked validation
+result is retained before saving. Update responses are private/no-store as well.
+
+`POST .../{id}/test-connection/` explicitly tests Graph access under existing read
+permission and mailbox scope. Failures return static public text, without raw
+provider diagnostics; list/detail also project any retained `last_error` as safe
+public text without rewriting historical server diagnostics. Creation and test
+responses are private/no-store. A saved
+connection or successful test does not activate sync; the existing
+[sync prerequisites and configure-sync contract](SALES_MAILBOX_SYNC.md) apply.
+Setup sends its saved mailbox address, tenant ID and client ID in the optional
+`expected_identity` guard when configuring sync. A stale identity returns 409
+before any state/authority/lease change; the caller must reload and review it.
+
+Verification was repeated from a clean isolated checkout based on `origin/main`,
+with only this feature's files. Fresh Python 3.11 Docker containers mounted that
+source read-only, disabled networking and used synthetic in-memory SQLite through
+`config.settings_release_test`. The full Sales suite ran 444 cases successfully
+(9 PostgreSQL-only cases skipped). After the final reviewed-identity guard, all
+101 affected setup, sync API/domain, capture and Graph/OAuth cases passed.
+They cover role/action denial, revocation during validation, pending ownership,
+delegated compatibility, creation/edit retries and mixed-case duplicates,
+simulated uniqueness failure, input validation, provider-error privacy and stale
+identity rejection without changing prior authority or leases. Provider/task
+effects were isolated. These runs do not certify PostgreSQL concurrency.
+
+The actual full application registry also passed a migration-state comparison
+against private in-memory SQLite: `No changes detected`. No migration was applied.
+Logs: `artifacts/sales-mailbox-setup-isolated-regressions.log`,
+`artifacts/sales-mailbox-setup-isolated-final.log` and
+`artifacts/sales-mailbox-setup-isolated-migration-state.log`. The narrower
+`settings_sales_test` harness had an existing unresolved
+`payroll_engine.PayrollAdjustment` relation; the complete release harness was used.
+No live mailbox, production environment or deployment was changed.
 
 ## API
 
@@ -22,7 +91,7 @@ while `enabled` is false, because that setting describes intake automation.
   one message. Pass the opaque message ID as an encoded query parameter.
 
 List rows contain `id`, `subject`, `sender_name`, `sender_email`, `received_at`,
-`sent_at`, `body_preview`, `has_attachments`, `is_read`, `is_draft`, and `importance`.
+`sent_at`, `body_preview`, `has_attachments`, `is_read`, `is_draft`, `direction`, and `importance`.
 Detail adds `body_text`, `body_content`, `to_recipients`, and `cc_recipients`.
 Recipient entries contain `name` and `email`. There is no invented total count
 or intake status.
@@ -34,6 +103,38 @@ paragraphs, lists and tables, then projects only inert semantic nodes. Original
 HTML, styles and remote assets are never returned. Clients render text as escaped
 text and map only approved node types/props to React elements; they must not inject
 HTML or load embedded remote content.
+
+## Message direction
+
+List and detail rows include `direction`: `incoming`, `outgoing`, `draft`, or
+`unknown`. An explicit Graph draft flag takes precedence. Otherwise, an exact
+trimmed, case-insensitive match between the configured mailbox and either From
+or Sender means outgoing, including self-addressed mail and delegated sending.
+A known other origin with the mailbox in To or Cc means incoming. Missing or
+malformed metadata, unresolved aliases and hidden recipients remain unknown;
+company domains, subject prefixes and read flags do not establish direction.
+
+To/Cc metadata is selected within the existing list request, with no additional
+Graph calls. The list exposes the derived direction rather than recipient lists;
+detail retains its existing To/Cc fields. Bcc is neither requested nor projected.
+Older continuation pages without recipient metadata can return unknown until the
+list is refreshed. Direction is presentation metadata and is excluded from the
+conversation/source-review digest. This change introduces no mailbox writes,
+persistence or permission changes.
+
+Verified on 28 September 2026: 126 isolated tests passed across mailbox browsing,
+conversation retrieval, reviewed opportunities, Graph, intake, extraction and
+analysis. Seven added cases cover direction edges, unchanged request counts,
+guarded list/detail consistency, read-only effects and source-digest stability.
+Log: `artifacts/sales-email-row-status-tests.log`. Scoped Python compilation and
+`git diff --check` also passed. This check did not access a live mailbox or rerun
+PostgreSQL concurrency tests; transaction behavior is unchanged.
+
+The local backend was restarted with this correction. A guarded, read-only live
+list returned 50 messages with 46 incoming, two outgoing and two unknown, HTTP
+200 and private/no-store headers. Connection state and opportunity/audit/intake
+counts were unchanged; the log contains counts/status only. Evidence:
+`artifacts/sales-email-row-status-live.log`. No schema change is required.
 
 ## Readable email content
 
@@ -105,6 +206,66 @@ Live detail also returns `extracted_information`, `can_create_opportunity` and
 `source_token`. Imported enquiries use the same deterministic local extractor.
 Detection proposes evidence-backed fields for review; it does not create a client,
 opportunity or intake record. Missing/ambiguous values remain unresolved.
+
+### Conversation analysis
+
+Detail now reads other available messages with the selected provider message's
+`conversationId`, within the configured mailbox. This identity is server-derived;
+the browser cannot select a different conversation or mailbox. Every page and
+continuation must preserve that conversation filter and the existing Graph host
+and mailbox path. Returned message identities, body shapes and conversation IDs
+are validated before use. Replies and quoted/forwarded segments are ordered from
+available timestamps, with conservative ordering when quote dates are absent.
+Drafts are excluded from customer instructions and deadline evidence.
+
+Transport is bounded to four 25-message pages, 100 distinct messages, two million
+processed body characters and a cooperative 20-second additional-read budget.
+The timeout is not a hard end-to-end response deadline or response-byte limit.
+Malformed/unavailable conversation results retain the selected email preview and
+report partial coverage. Limits never imply that the entire mailbox was analyzed.
+
+`extracted_information.analysis` is an additive version-1 object:
+
+- `message_kind` and `summary` describe the selected message's purpose in context.
+- `key_points` contain `label`, `value` and local `source_ids`.
+- `requested_actions` contain source-backed `text` and `source_ids`;
+  `suggested_actions` additionally contain `reason` and remain review proposals.
+- `sources` contain local `id`, `label`, `subject`, sender metadata, `sent_at`,
+  `origin` (`message` or `quoted`) and literal source `excerpt`.
+- `coverage` contains `status` (`complete`, `partial`, `selected_only` or
+  `saved_content`), `messages_reviewed`, `segments_reviewed` and
+  `original_identified`. Complete means the available bounded conversation was
+  read; it does not certify that an original invitation exists there.
+- `limitations` explain absent originals, partial history, date ambiguity and
+  unread attachment/portal contents. These sources are not downloaded or followed.
+
+Legacy evidence remains, with `field_sources` mapping fields to source IDs. The
+[final v2 contract](SALES_EMAIL_INTELLIGENCE.md) keeps five visible labels and
+shows an explicit organization as Customer Name when available, otherwise a
+qualified low-confidence readable label derived from an evidenced external
+customer domain. `customer_domain` stays separate; portal/public/internal delivery
+domains cannot supply the fallback, and derived labels never canonical-match or
+create clients. Request codes include EOI/EIO/RFT/RFQ/RFP/ITT and remain anchored
+to the original solicitation. Later incidental words cannot override them; only
+assertive positive reclassification creates a review conflict. A tender bulletin
+is a separate message purpose. Explicit deadline amendments can supersede older
+due dates; uncertain dates stay unresolved. Submission Date means original incoming
+sent date, never reception time or the proposal deadline. Body-stated submission
+dates remain separate. Imported enquiries use bounded authorized saved history
+and quoted chains, explicitly reporting `saved_content` or partial coverage.
+
+The analysis runs locally with deterministic parsing and no external AI provider.
+It supports recognized source patterns, not arbitrary language understanding.
+Source content remains untrusted evidence and cannot create records or authority.
+
+`analysis_source_hash` binds order-independent conversation evidence and coverage
+to the existing review token. Conversion re-reads this evidence; a changed sibling
+message or coverage requires reload/review (409). Read/unread flags are excluded.
+New source audit records carry `source_hash_version: 2`. An unchanged historical
+unversioned audit can still return the existing opportunity on an identical retry,
+but only after fresh current review, permission checks and equality of the old
+selected-message hash and reviewed payload. No historical record is overwritten;
+old in-flight review tokens require reloading. No data migration is needed.
 
 An explicit `POST /api/v1/sales/mailbox-connections/{id}/convert-to-opportunity/`
 accepts `message_id`, `source_token`, `deal_name`, `client`, `client_reference`,
@@ -198,3 +359,43 @@ connection and server-side `RADAI_SALES_GRAPH_CLIENT_SECRET`, with Microsoft acc
 scoped to the intended mailbox. Local secrets/configuration are not part of this
 release. The existing Railway pre-deploy migration command remains in place; this
 feature introduces no migration and does not enable automatic intake or mail sending.
+
+## Conversation-analysis local verification, 28 September 2026
+
+The final focused functional run passed **119 tests** in 7.843 seconds under
+`config.settings_release_test`: `test_mailbox_conversation`, `test_email_analysis`,
+`test_mailbox_opportunities`, `test_mailbox_browsing`, `test_email_extraction`,
+`testgraph` and `testintake`. These include 45 extraction/analysis cases across
+varied organizations, original/quoted/replied invitations, bulletin obligations,
+draft exclusion, explicit/ambiguous revisions, source conflicts and generic
+request kinds. Transport and guarded API tests cover bounded/partial history,
+scope violations, source changes and historical retry compatibility. Evidence:
+`artifacts/sales-conversation-functional-final.log`. SQLite model-sync tests are
+functional verification, not migration or row-lock certification.
+
+Read-only checks against the existing local application connection returned 200
+with private/no-store headers for three live messages. The reported bulletin
+resolved customer, underlying request type and its stated obligation; submission
+and due dates stayed blank because available text supplied neither. Its available
+conversation contained one message and did not establish the original invitation.
+A separate reply reviewed four messages/seven source segments and identified an
+original request. A third incoming message was also analyzed. Only non-sensitive
+counts/status/field-presence results were logged. Opportunity, audit and intake
+counts and the connection record were unchanged; no mailbox write was requested.
+Evidence: `artifacts/sales-conversation-live-check.log`.
+
+All three PostgreSQL concurrency cases passed (12.889 seconds): two observed
+real lock waits between separate connections and the imported conversion/retry
+case. They used `config.settings_procurement_postgresql_test`, host Python 3.13,
+and a new labelled PostgreSQL 15.18 tmpfs container on `127.0.0.1:15443`; the test
+database and validated disposable container were removed. This model-sync test
+harness did not use the application database or certify migration history.
+Evidence: `artifacts/sales-conversation-postgresql-tests.log` and adjacent timing
+and cleanup JSON.
+
+Separately, the actual local Python 3.11 runtime/full app registry reported 559
+applied migrations (all seven Sales migrations), no pending steps, no graph
+conflicts and consistent history. Its dry-run model drift check returned
+`No changes detected`. Logs: `artifacts/sales-conversation-migration-check.log`
+and `artifacts/sales-conversation-model-drift.log`. No new schema or production
+migration was performed. Local scripts and verification outputs are ignored.

@@ -2,12 +2,14 @@
 
 import re
 import secrets
+from collections.abc import Mapping
 from html import unescape
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.cache import patch_vary_headers
 from django.utils.html import strip_tags
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, serializers, status, viewsets
@@ -26,8 +28,11 @@ from apps.rbac.permissions import HasModuleAccess
 from apps.rbac.action_policy import module_action_allowed
 
 from .email_permissions import (
-    require_email_opportunity_access, visible_email_clients, visible_email_opportunities,
+    require_email_opportunity_access, visible_email_clients, visible_email_intakes,
+    visible_email_opportunities,
 )
+from .email_classification_review import classification_review_evidence, require_classification_review
+from .mailbox_opportunities import EmailReviewConflict
 
 from .models import Client, Contact, OpportunityAuditEvent, SalesEmailIntake
 from .serializers import (
@@ -63,6 +68,11 @@ class SalesEmailWebhookSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'source_message_id': {'validators': []},
         }
+
+    def to_internal_value(self, data):
+        if isinstance(data, Mapping) and set(data) - set(self.fields):
+            raise serializers.ValidationError({'detail': 'Only legacy email source fields may be submitted.'})
+        return super().to_internal_value(data)
 
     def validate_source_message_id(self, value):
         value = value.strip()
@@ -110,6 +120,7 @@ def sales_email_intake(request):
     source_message_id = validated.pop('source_message_id')
     with transaction.atomic():
         intake, created = SalesEmailIntake.objects.get_or_create(
+            mailbox_connection=None,
             source_message_id=source_message_id,
             defaults=validated,
         )
@@ -141,6 +152,18 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
     ]
     ordering_fields = ['received_at', 'created_at', 'status', 'importance']
     ordering = ['-received_at']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(
+            pk__in=visible_email_intakes(self.request.user).values('pk'),
+        )
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response['Cache-Control'] = 'private, no-store, max-age=0'
+        response['Pragma'] = 'no-cache'
+        patch_vary_headers(response, ('Authorization', 'Cookie'))
+        return response
 
     def _save_resolution(self, intake, *, status_value, note='', duplicate_of=None):
         intake.status = status_value
@@ -184,8 +207,13 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             })
         duplicate_of = None
         duplicate_id = request.data.get('duplicate_of')
+        candidates = self.get_queryset().filter(mailbox_connection_id=intake.mailbox_connection_id)
         if duplicate_id:
-            duplicate_of = SalesEmailIntake.objects.filter(pk=duplicate_id).first()
+            try:
+                duplicate_id = serializers.UUIDField().run_validation(duplicate_id)
+            except serializers.ValidationError:
+                raise serializers.ValidationError({'duplicate_of': 'The original intake could not be found.'}) from None
+            duplicate_of = candidates.filter(pk=duplicate_id).first()
             if not duplicate_of:
                 raise serializers.ValidationError({
                     'duplicate_of': 'The original intake could not be found.',
@@ -195,7 +223,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'duplicate_of': 'An intake cannot duplicate itself.',
                 })
         else:
-            candidates = SalesEmailIntake.objects.exclude(pk=intake.pk)
+            candidates = candidates.exclude(pk=intake.pk)
             same_sender_and_subject = Q(
                 sender_email__iexact=intake.sender_email,
                 subject__iexact=intake.subject,
@@ -220,6 +248,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
     def convert_to_opportunity(self, request, pk=None):
         require_email_opportunity_access(request.user)
         permitted_intake = self.get_object()
+        classification_code = require_classification_review(request.data)
         with transaction.atomic():
             # Preserve the scoped queryset, but lock only the intake row. The
             # list/detail joins include nullable relations that PostgreSQL
@@ -228,6 +257,17 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             if intake.opportunity_id:
                 if not visible_email_opportunities(request.user).filter(pk=intake.opportunity_id).exists():
                     raise PermissionDenied('The linked opportunity is not available to you.')
+                previous = OpportunityAuditEvent.objects.filter(
+                    opportunity_id=intake.opportunity_id,
+                    event_type='opportunity_created_from_email',
+                    data__source_email_intake_id=str(intake.pk),
+                ).first()
+                previous_review = previous.data.get('reviewed_classification') if previous else None
+                if previous_review and previous_review.get('code') != classification_code:
+                    raise EmailReviewConflict(
+                        'An opportunity already exists for this email with a different reviewed classification.',
+                        code='email_already_converted',
+                    )
                 return Response({
                     'intake': self.get_serializer(intake).data,
                     'opportunity': DealDetailSerializer(intake.opportunity).data,
@@ -326,6 +366,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'internet_message_id': intake.internet_message_id,
                     'sender_email': intake.sender_email,
                     'received_at': intake.received_at.isoformat(),
+                    'reviewed_classification': classification_review_evidence(classification_code, request.user),
                 },
             )
 

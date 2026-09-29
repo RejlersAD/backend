@@ -7,10 +7,12 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess, IsAdmin
+from django.db import IntegrityError, transaction
+from django.db.models.deletion import ProtectedError
 from django.db.models import Q, Count, Sum, Avg, F
 from django.utils import timezone
 from django.utils.cache import patch_vary_headers
@@ -35,13 +37,18 @@ from .serializers import (
     QuoteListSerializer, QuoteDetailSerializer, SalesActivityListSerializer,
     SalesActivityDetailSerializer, SalesForecastSerializer, SalesDashboardSerializer,
     AIInsightSerializer, FrameworkAgreementSerializer, ProjectHandoverSerializer,
-    SalesMailboxConnectionSerializer,
+    SalesMailboxConnectionSerializer, SalesEmailIntakeSerializer,
 )
 from .ai_service import SalesAIService
 from .microsoft_graph import SalesMailboxReadError, SalesMicrosoftGraphService
-from .email_permissions import can_create_email_opportunity, require_email_opportunity_access
+from .email_permissions import (
+    can_create_email_opportunity, require_email_opportunity_access,
+    visible_mailbox_connections,
+)
+from .mailbox_capture import capture_mailbox_message, EmailCaptureConflict
 from .mailbox_opportunities import convert_mailbox_message, email_review_token
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+from apps.rbac.action_policy import module_action_allowed
 from .workflow import (
     _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
     decide_handover, submit_award, submit_handover_for_acceptance,
@@ -62,7 +69,7 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
-        if self.action in {'messages', 'message', 'convert_to_opportunity'}:
+        if self.action in {'messages', 'message', 'convert_to_opportunity', 'capture_message', 'configure_sync', 'list', 'retrieve', 'create', 'update', 'partial_update', 'test_connection'}:
             response['Cache-Control'] = 'private, no-store, max-age=0'
             response['Pragma'] = 'no-cache'
             patch_vary_headers(response, ('Authorization', 'Cookie'))
@@ -105,6 +112,10 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'The email could not be loaded from Microsoft.'}, status=502)
         result['can_create_opportunity'] = can_create_email_opportunity(request.user)
         result['source_token'] = email_review_token(connection, request.user, result)
+        from .email_customer_matching import enrich_customer_match
+        result['extracted_information'] = enrich_customer_match(
+            result.get('extracted_information'), request=request,
+        )
         return Response(result)
 
     @action(detail=True, methods=['post'], url_path='convert-to-opportunity')
@@ -129,42 +140,127 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             'created': created,
         }, status=201 if created else 200)
 
+    @action(detail=True, methods=['post'], url_path='capture-message')
+    def capture_message(self, request, pk=None):
+        connection = self.get_object()
+        if request.query_params:
+            return Response({'detail': 'The email capture request is invalid.'}, status=400)
+        try:
+            intake, created = capture_mailbox_message(
+                connection=connection, user=request.user, data=request.data,
+            )
+        except SalesMailboxReadError as exc:
+            return Response({'detail': str(exc)}, status=exc.status_code)
+        except (APIException, Http404):
+            raise
+        except Exception:
+            # Never log or reflect Graph bodies, mailbox credentials or IDs.
+            return Response({'detail': 'The email could not be saved. Try again later.'}, status=503)
+        return Response({
+            'intake': SalesEmailIntakeSerializer(intake, context={'request': request}).data,
+            'created': created,
+        }, status=201 if created else 200)
+
     def get_permissions(self):
         if self.action == 'oauth_callback':
             return [AllowAny()]
         return super().get_permissions()
 
+    @action(detail=True, methods=['post'], url_path='configure-sync')
+    def configure_sync(self, request, pk=None):
+        from .mailbox_sync import configure_mailbox_sync, sync_projection
+        connection = self.get_object()
+        if (
+            request.query_params or not isinstance(request.data, dict)
+            or set(request.data) not in ({'enabled'}, {'enabled', 'expected_identity'})
+            or type(request.data.get('enabled')) is not bool
+            or ('expected_identity' in request.data and not isinstance(request.data['expected_identity'], dict))
+        ):
+            return Response({'detail': 'Provide enabled as true or false and, optionally, the reviewed expected_identity.'}, status=400)
+        configure_mailbox_sync(
+            connection=connection, user=request.user, enabled=request.data['enabled'],
+            expected_identity=request.data.get('expected_identity'),
+        )
+        connection.refresh_from_db()
+        return Response({'enabled': connection.enabled, 'sync': sync_projection(connection)})
+
     def _is_admin(self):
         return IsAdmin().has_permission(self.request, self)
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = visible_mailbox_connections(self.request.user)
         if self.request.query_params.get('mine', '').lower() in {'1', 'true', 'yes'}:
             return queryset.filter(created_by=self.request.user)
-        if self._is_admin():
-            return queryset
-        return queryset.filter(created_by=self.request.user)
+        return queryset
+
+    def _require_application_mailbox_write(self, action):
+        if not self._is_admin():
+            raise PermissionDenied('Only administrators can configure shared mailbox connections.')
+        if not all(module_action_allowed(self.request.user, 'sales_email_intake', required)
+                   for required in ('read', action)):
+            raise PermissionDenied(f'You need read and {action} access to configure a shared mailbox.')
+
+    def create(self, request, *args, **kwargs):
+        if isinstance(request.data, dict) and request.data.get('auth_mode') == 'application':
+            self._require_application_mailbox_write('create')
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        current = self.get_object()
+        if current.auth_mode == 'application' or (
+            isinstance(request.data, dict) and request.data.get('auth_mode') == 'application'
+        ):
+            self._require_application_mailbox_write('update')
+        return super().update(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         auth_mode = serializer.validated_data.get('auth_mode', 'delegated')
-        if not self._is_admin():
-            auth_mode = 'delegated'
-        serializer.save(
-            auth_mode=auth_mode,
-            created_by=self.request.user,
-            updated_by=self.request.user,
-        )
+        if auth_mode == 'application':
+            self._require_application_mailbox_write('create')
+        try:
+            with transaction.atomic():
+                serializer.save(
+                    auth_mode=auth_mode,
+                    created_by=self.request.user,
+                    updated_by=self.request.user,
+                )
+        except IntegrityError:
+            # Concurrent application registrations use one normalized address;
+            # recover the existing uniqueness failure without a second record.
+            if auth_mode == 'application' and SalesMailboxConnection.objects.filter(
+                mailbox_address__iexact=serializer.validated_data['mailbox_address'],
+            ).exists():
+                raise ValidationError({'mailbox_address': 'This mailbox connection already exists.'}) from None
+            raise
 
     def perform_update(self, serializer):
-        auth_mode = serializer.validated_data.get('auth_mode', self.get_object().auth_mode)
-        if not self._is_admin():
-            auth_mode = 'delegated'
-        serializer.save(auth_mode=auth_mode, updated_by=self.request.user)
+        with transaction.atomic():
+            # Serialize reconfiguration against capture, then repeat validation
+            # on the locked instance: capture may have won since is_valid().
+            current = self.get_queryset().select_for_update().get(pk=serializer.instance.pk)
+            serializer.instance = current
+            auth_mode = serializer.validated_data.get('auth_mode', current.auth_mode)
+            if current.auth_mode == 'application' or auth_mode == 'application':
+                self._require_application_mailbox_write('update')
+            serializer.validated_data.update(serializer.validate({**serializer.validated_data, 'auth_mode': auth_mode}))
+            serializer.save(auth_mode=auth_mode, updated_by=self.request.user)
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            current = self.get_queryset().select_for_update().get(pk=instance.pk)
+            try:
+                current.delete()
+            except ProtectedError:
+                raise EmailCaptureConflict('This connection has saved emails or sync history and cannot be deleted.') from None
 
     def _authorization_response(self, request, connection):
-        if connection.auth_mode != 'delegated':
-            connection.auth_mode = 'delegated'
-            connection.save(update_fields=['auth_mode', 'updated_at'])
+        with transaction.atomic():
+            connection = self.get_queryset().select_for_update().get(pk=connection.pk)
+            if connection.email_intakes.exists() or hasattr(connection, 'sync_state'):
+                raise EmailCaptureConflict('This connection has saved emails and cannot be changed to delegated Outlook access.')
+            if connection.auth_mode != 'delegated':
+                connection.auth_mode = 'delegated'
+                connection.save(update_fields=['auth_mode', 'updated_at'])
         nonce = secrets.token_urlsafe(32)
         state_payload = {
             'connection_id': str(connection.id),
@@ -232,6 +328,8 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
                     updated_by=request.user,
                 )
 
+        if connection.email_intakes.exists() or hasattr(connection, 'sync_state'):
+            raise EmailCaptureConflict('This connection has saved emails and cannot be changed to delegated Outlook access.')
         changed_fields = []
         for field, value in (
             ('tenant_id', tenant_id),
@@ -249,6 +347,10 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
     def test_connection(self, request, pk=None):
         result = SalesMicrosoftGraphService(self.get_object()).health_check()
         response_status = status.HTTP_200_OK if result['connected'] else status.HTTP_400_BAD_REQUEST
+        if not result['connected']:
+            # Provider diagnostics can contain tenant/account identifiers. The
+            # setup form already has safe configuration-presence metadata.
+            result = {'connected': False, 'error': 'Microsoft could not verify this mailbox. Check its configuration and server access.'}
         return Response(result, status=response_status)
 
     @action(detail=True, methods=['post'], url_path='connect-outlook')
@@ -285,13 +387,18 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             cache.delete(f'sales-graph-oauth:{nonce}')
             if expected != payload:
                 raise signing.BadSignature('OAuth state has expired or was already used.')
-            connection = SalesMailboxConnection.objects.get(
-                id=payload['connection_id'],
-                created_by_id=payload['user_id'],
-            )
-            result = SalesMicrosoftGraphService(
-                connection
-            ).complete_delegated_authorization(code)
+            # OAuth is a GET callback, outside the normal write-route atomic
+            # guard. Serialize its final identity save with capture as well.
+            with transaction.atomic():
+                connection = SalesMailboxConnection.objects.select_for_update().get(
+                    id=payload['connection_id'],
+                    created_by_id=payload['user_id'],
+                )
+                if connection.email_intakes.exists() or hasattr(connection, 'sync_state'):
+                    return finish('error', 'This connection has saved emails and cannot be reconfigured.')
+                result = SalesMicrosoftGraphService(
+                    connection
+                ).complete_delegated_authorization(code)
             if not result['connected']:
                 return finish('error', result.get('error', 'Mailbox verification failed.'))
         except Exception as exc:

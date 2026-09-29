@@ -3,11 +3,15 @@ Sales Serializers
 DRF serializers for Sales Management API
 """
 
-from .email_extraction import extract_email_information
-from .email_permissions import can_create_email_opportunity
+from .saved_email_analysis import analyze_saved_email
+from .email_customer_matching import enrich_customer_match
+from .email_permissions import (
+    can_create_email_opportunity, visible_email_intakes, visible_email_opportunities,
+)
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from apps.rbac.action_policy import module_action_allowed
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
     ProjectHandover, Quote, SalesActivity, SalesEmailIntake, SalesForecast,
@@ -31,33 +35,77 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
     )
     extracted_information = serializers.SerializerMethodField()
     can_create_opportunity = serializers.SerializerMethodField()
+    can_create_client = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesEmailIntake
         fields = [
             'id', 'source_message_id', 'internet_message_id', 'subject',
-            'sender_name', 'sender_email', 'received_at', 'body_preview',
+            'sender_name', 'sender_email', 'received_at', 'sent_at', 'body_preview',
             'has_attachments', 'importance', 'status', 'opportunity',
             'opportunity_name', 'reviewed_by', 'reviewed_by_name',
             'reviewed_at', 'resolution_note', 'duplicate_of',
             'duplicate_of_subject', 'created_at', 'updated_at',
-            'extracted_information', 'can_create_opportunity',
+            'extracted_information', 'can_create_opportunity', 'can_create_client',
+            'mailbox_connection', 'source_mailbox_address', 'source_tenant_id',
+            'conversation_id', 'captured_by',
         ]
         read_only_fields = fields
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = request.user if request else None
+        visibility = getattr(self, '_related_visibility', None)
+        if visibility is None:
+            visibility = self._related_visibility = {}
+        if instance.duplicate_of_id:
+            key = ('intake', instance.duplicate_of_id)
+            if key not in visibility:
+                visibility[key] = bool(user and visible_email_intakes(user).filter(pk=instance.duplicate_of_id).exists())
+            if not visibility[key]:
+                data['duplicate_of'], data['duplicate_of_subject'] = None, ''
+        if instance.opportunity_id:
+            key = ('opportunity', instance.opportunity_id)
+            if key not in visibility:
+                visibility[key] = bool(
+                    user and module_action_allowed(user, 'sales_opportunities', 'read')
+                    and visible_email_opportunities(user).filter(pk=instance.opportunity_id).exists()
+                )
+            if not visibility[key]:
+                data['opportunity'], data['opportunity_name'] = None, ''
+        return data
+
     def get_extracted_information(self, obj):
-        return extract_email_information(
-            subject=obj.subject,
-            body_text=obj.body_preview,
-            sender_email=obj.sender_email,
-        )
+        information = analyze_saved_email(obj, request=self.context.get('request'), context=self.context)
+        return enrich_customer_match(information, request=self.context.get('request'))
 
     def get_can_create_opportunity(self, obj):
+        return bool(obj.status in {'received', 'under_review'} and self._creation_capabilities()[0])
+
+    def get_can_create_client(self, obj):
+        return bool(obj.status in {'received', 'under_review'} and self._creation_capabilities()[1])
+
+    def _creation_capabilities(self):
+        """Same-actor display grants are shared only within this response.
+
+        Record status remains checked per row; conversion commands always
+        recheck live authority. Never attach this memo to a user/global cache.
+        """
         request = self.context.get('request')
-        return bool(
-            request and obj.status in {'received', 'under_review'}
-            and can_create_email_opportunity(request.user)
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated or not user.is_active:
+            return False, False
+        key = (id(request), user.pk)
+        cached = getattr(self, '_email_creation_capabilities', None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        opportunity = can_create_email_opportunity(user)
+        capabilities = (
+            opportunity, opportunity and module_action_allowed(user, 'sales_clients', 'create'),
         )
+        self._email_creation_capabilities = (key, capabilities)
+        return capabilities
 
 
 # ==============================================================================
@@ -544,6 +592,8 @@ class SalesMailboxConnectionSerializer(serializers.ModelSerializer):
     secret_configured = serializers.SerializerMethodField()
     token_encryption_configured = serializers.SerializerMethodField()
     delegated_connected = serializers.SerializerMethodField()
+    sync = serializers.SerializerMethodField()
+    last_error = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesMailboxConnection
@@ -555,6 +605,56 @@ class SalesMailboxConnectionSerializer(serializers.ModelSerializer):
             'connected_at',
             'created_by', 'updated_by', 'created_at', 'updated_at',
         ]
+
+    def to_internal_value(self, data):
+        if self.instance is None and isinstance(data, dict) and data.get('auth_mode') == 'application':
+            allowed = {'name', 'auth_mode', 'tenant_id', 'client_id', 'mailbox_address', 'enabled'}
+            unexpected = set(data) - allowed
+            if unexpected:
+                raise serializers.ValidationError({
+                    field: 'This field cannot be supplied when adding a shared mailbox.'
+                    for field in sorted(unexpected)
+                })
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if self.instance is None and attrs.get('auth_mode') == 'application':
+            if attrs.get('enabled', False):
+                raise serializers.ValidationError({'enabled': 'Save the connection first, then use configure-sync to enable automatic syncing.'})
+            attrs['enabled'] = False
+        protected = ('mailbox_address', 'tenant_id', 'client_id', 'auth_mode')
+        changed = [field for field in protected if self.instance is not None
+                   and field in attrs and attrs[field] != getattr(self.instance, field)]
+        has_sync = self.instance is not None and hasattr(self.instance, 'sync_state')
+        identity_locked = self.instance is not None and (has_sync or self.instance.email_intakes.exists())
+        if has_sync and 'enabled' in attrs and attrs['enabled'] != self.instance.enabled:
+            raise serializers.ValidationError({'enabled': 'Use configure-sync to change automatic syncing.'})
+        if changed and identity_locked:
+            raise serializers.ValidationError({
+                field: 'This mailbox connection has saved emails or sync history. Create a separate connection for a different identity.'
+                for field in changed
+            })
+        auth_mode = attrs.get('auth_mode', self.instance.auth_mode if self.instance else None)
+        if auth_mode == 'application' and 'mailbox_address' in attrs:
+            # Normalize correctable setup records, never retained source identity.
+            address = attrs['mailbox_address'] if identity_locked else attrs['mailbox_address'].strip().lower()
+            duplicates = SalesMailboxConnection.objects.filter(mailbox_address__iexact=address)
+            if self.instance is not None:
+                duplicates = duplicates.exclude(pk=self.instance.pk)
+            if duplicates.exists():
+                raise serializers.ValidationError({'mailbox_address': 'This mailbox connection already exists.'})
+            attrs['mailbox_address'] = address
+        return attrs
+
+    def get_sync(self, obj):
+        from .mailbox_sync import sync_projection
+        return sync_projection(obj)
+
+    def get_last_error(self, obj):
+        # Historical provider diagnostics remain server-side as well; reopening
+        # setup must not expose them through the ordinary list/detail response.
+        return 'Microsoft could not verify this mailbox. Check its configuration and server access.' if obj.last_error else ''
 
     def get_secret_configured(self, obj):
         import os

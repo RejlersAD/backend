@@ -159,6 +159,7 @@ class SalesEmailIntakeReviewTests(TestCase):
         )
         payload = {
             'client': str(self.account.id),
+            'classification_code': 'rfq', 'classification_confirmed': True,
             'deal_name': 'Grid stability engineering study',
             'estimated_value': '250000.00',
             'currency': 'AED',
@@ -235,6 +236,7 @@ class SalesEmailIntakeReviewTests(TestCase):
                     'contact_name': extracted['contact_name'],
                     'contact_email': extracted['contact_email'],
                 },
+                'classification_code': 'rfq', 'classification_confirmed': True,
                 'deal_name': self.intake.subject,
                 'estimated_value': extracted['estimated_value'],
                 'currency': extracted['currency'],

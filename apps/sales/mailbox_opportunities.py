@@ -14,6 +14,7 @@ from rest_framework.exceptions import APIException, PermissionDenied
 from .email_permissions import (
     require_email_opportunity_access, visible_email_clients, visible_email_opportunities,
 )
+from .email_classification_review import classification_review_evidence, require_classification_review
 from .microsoft_graph import SalesMicrosoftGraphService
 from .models import OpportunityAuditEvent
 from .serializers import DealCreateSerializer
@@ -28,6 +29,7 @@ REVIEW_FIELDS = (
 SOURCE_FIELDS = (
     'id', 'subject', 'sender_name', 'sender_email', 'received_at', 'sent_at',
     'body_text', 'body_content', 'to_recipients', 'cc_recipients', 'has_attachments',
+    'analysis_source_hash',
 )
 
 
@@ -58,8 +60,11 @@ def _connection_scope(connection):
     }
 
 
-def _source_digest(message):
-    return _digest({field: message.get(field) for field in SOURCE_FIELDS})
+def _source_digest(message, *, version=2):
+    fields = SOURCE_FIELDS if version == 2 else tuple(
+        field for field in SOURCE_FIELDS if field != 'analysis_source_hash'
+    )
+    return _digest({field: message.get(field) for field in fields})
 
 
 def _source_identity(connection, message_id):
@@ -98,8 +103,11 @@ def _read_review_token(token, connection, user, message_id):
 
 
 def _reviewed_serializer(data, user):
-    if not isinstance(data, dict) or set(data) - {*REVIEW_FIELDS, 'message_id', 'source_token'}:
+    if not isinstance(data, dict) or set(data) - {
+        *REVIEW_FIELDS, 'message_id', 'source_token', 'classification_code', 'classification_confirmed',
+    }:
         raise serializers.ValidationError({'detail': 'Only reviewed opportunity fields may be submitted.'})
+    classification_code = require_classification_review(data)
     required = ('deal_name', 'client', 'estimated_value', 'currency', 'expected_close_date')
     errors = {key: ['This field is required.'] for key in required if data.get(key) in (None, '')}
     if errors:
@@ -122,13 +130,16 @@ def _reviewed_serializer(data, user):
     serializer.is_valid(raise_exception=True)
     normalized = dict(serializer.validated_data)
     normalized['client'] = str(client.pk)
-    return serializer, _digest(normalized)
+    legacy_payload_hash = _digest(normalized)
+    normalized['classification_code'] = classification_code
+    normalized['classification_confirmed'] = True
+    return serializer, _digest(normalized), legacy_payload_hash, classification_code
 
 
 def convert_mailbox_message(*, connection, connection_queryset, user, data):
     """Deduplicate within this configured connection using a locked audit lookup."""
     require_email_opportunity_access(user)
-    serializer, payload_hash = _reviewed_serializer(data, user)
+    serializer, payload_hash, legacy_payload_hash, classification_code = _reviewed_serializer(data, user)
     message_id = data.get('message_id')
     review = _read_review_token(data.get('source_token'), connection, user, message_id)
     # The provider source is fetched with our own mailbox and identity. Client
@@ -155,14 +166,24 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
             opportunity = visible_email_opportunities(user).filter(pk=previous.opportunity_id).first()
             if opportunity is None:
                 raise PermissionDenied('This email already has an opportunity you cannot access.')
-            if previous.data.get('reviewed_payload_hash') != payload_hash:
+            legacy_same_payload = (
+                previous.data.get('reviewed_payload_hash_version', 1) == 1
+                and 'reviewed_classification' not in previous.data
+                and previous.data.get('reviewed_payload_hash') == legacy_payload_hash
+            )
+            if previous.data.get('reviewed_payload_hash') != payload_hash and not legacy_same_payload:
                 raise EmailReviewConflict(
                     'An opportunity already exists for this email with different reviewed fields.',
                     code='email_already_converted',
                 )
-            if previous.data.get('source_content_hash') != review['source']:
+            previous_source = previous.data.get('source_content_hash')
+            legacy_same_selected = (
+                previous.data.get('source_hash_version', 1) == 1
+                and previous_source == _source_digest(message, version=1)
+            )
+            if previous_source != review['source'] and not legacy_same_selected:
                 raise EmailReviewConflict(
-                    'This email changed after its opportunity was created.', code='email_already_converted',
+                    'The email or conversation evidence differs from the recorded opportunity.', code='email_already_converted',
                 )
             return opportunity, False
         source = {
@@ -183,6 +204,8 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
             data={
                 **source, 'mailbox_source_hash': source_hash,
                 'reviewed_payload_hash': payload_hash, 'source_content_hash': review['source'],
+                'source_hash_version': 2, 'reviewed_payload_hash_version': 2,
+                'reviewed_classification': classification_review_evidence(classification_code, user),
             },
         )
         return opportunity, True

@@ -59,10 +59,11 @@ class EmailOpportunityConcurrencyTests(TransactionTestCase):
             'expected_close_date': '2026-11-30', 'submission_due_date': '2026-10-23',
             'scope_type': 'feed', 'client_reference': 'RFT-2026-001',
             'description': 'Reviewed synthetic scope',
+            'classification_code': 'rft', 'classification_confirmed': True,
         }
         self.endpoint = f'/api/v1/sales/mailbox-connections/{self.mailbox.pk}/convert-to-opportunity/'
 
-    def race(self, *, change_payload=False):
+    def race(self, *, change_payload=False, change_classification=False):
         winner_locked, release_winner, contender_connected = Event(), Event(), Event()
         pids = {}
         original_create = OpportunityAuditEvent.objects.create
@@ -93,6 +94,8 @@ class EmailOpportunityConcurrencyTests(TransactionTestCase):
         contender_payload = deepcopy(self.payload)
         if change_payload:
             contender_payload['estimated_value'] = '260000.50'
+        if change_classification:
+            contender_payload['classification_code'] = 'rfq'
         with (
             patch('apps.sales.mailbox_opportunities.SalesMicrosoftGraphService.get_message', return_value=self.message),
             patch.object(OpportunityAuditEvent.objects, 'create', side_effect=create_and_pause),
@@ -139,6 +142,15 @@ class EmailOpportunityConcurrencyTests(TransactionTestCase):
         self.assertEqual(contender[0], 409, contender)
         self.assertEqual(Deal.objects.count(), 1)
         self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='opportunity_created_from_email').count(), 1)
+
+    def test_simultaneous_changed_classification_conflicts_and_preserves_winner_review(self):
+        winner, contender = self.race(change_classification=True)
+        self.assertEqual(winner[0], 201, winner)
+        self.assertEqual(contender[0], 409, contender)
+        self.assertEqual(Deal.objects.count(), 1)
+        event = OpportunityAuditEvent.objects.get(event_type='opportunity_created_from_email')
+        self.assertEqual(event.data['reviewed_classification']['code'], 'rft')
+        self.assertEqual(event.data['reviewed_classification']['confirmed_by'], str(self.actor.pk))
 
     def test_imported_conversion_locks_the_scoped_intake_without_nullable_joins(self):
         intake = SalesEmailIntake.objects.create(
