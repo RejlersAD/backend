@@ -680,7 +680,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['stage', 'priority', 'client', 'owner']
     search_fields = ['deal_code', 'deal_name', 'client__company_name']
-    ordering_fields = ['created_at', 'expected_close_date', 'estimated_value', 'weighted_value']
+    ordering_fields = ['deal_code', 'id', 'created_at', 'expected_close_date', 'estimated_value', 'weighted_value']
     ordering = ['-created_at']
     
     def get_serializer_class(self):
@@ -756,6 +756,18 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 for value, label in Deal._meta.get_field('opportunity_type').choices
             ],
         })
+
+    @action(detail=False, methods=['post'], url_path='export')
+    def export(self, request):
+        from .opportunity_export import opportunity_export_ids, opportunity_export_response
+
+        if not all(module_action_allowed(request.user, 'sales_opportunities', verb)
+                   for verb in ('read', 'export')):
+            raise PermissionDenied('You do not have access to export opportunities.')
+        if request.query_params:
+            raise ValidationError({'ids': 'Send the selected opportunity IDs in the request body.'})
+        identifiers = opportunity_export_ids(request.data)
+        return opportunity_export_response(self.get_queryset(), identifiers)
 
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):

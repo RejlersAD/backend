@@ -322,7 +322,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'next_action_date', 'bid_decision', 'award_status', 'award_value',
             'converted_project', 'stage_entered_at',
             'framework', 'framework_number', 'client_contact', 'disciplines',
-            'estimated_hours', 'delivery_office', 'opportunity_source',
+            'estimated_hours', 'delivery_office', 'opportunity_source', 'service_categories',
             'next_action', 'risk_level',
             'opportunity_type', 'open_date', 'created_by', 'created_by_name',
         ]

@@ -425,3 +425,4 @@ apps/finance/data/invoice_performance_summary.json
 !apps/sales/tests/test_vf_*.py
 !apps/sales/migrations/0011_*.py
 !docs/SALES_VF_REGISTRATION.md
+!docs/SALES_OPPORTUNITY_REGISTER_EXPORT.md

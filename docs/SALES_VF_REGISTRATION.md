@@ -102,4 +102,28 @@ are inserted for verification.
   No local opportunity was created for verification. Evidence:
   `artifacts/vf-local-migration.log`, `artifacts/vf-local-verification.log`.
 
-Implemented locally; no production deployment, push or main merge by this task.
+The initial implementation was activated locally. Release preparation is now
+authorized separately; no production deployment or main merge has been performed.
+
+## Release verification - 30 September 2026
+
+The release integration run passed 107 tests covering VF registration, secure
+export, nullable consumers and live/saved email conversion
+(`artifacts/vf-release-integration.log`). Fatal Python lint and whitespace checks
+passed. Both fetched development and main were already ancestors; alignment did
+not change application code.
+
+A fresh disposable PostgreSQL 16 database passed the Sales migration chain through
+0011, schema drift check, pre-use reversal, historical opportunity upgrade and
+issued-number rollback refusal (`artifacts/vf-release-postgres-migrations.log`).
+This certifies the scoped Sales migration chain, not every unrelated application.
+The final disposable PostgreSQL concurrency/API run passed 13 tests, including
+the observed allocation/retry lock races and rollback behavior
+(`artifacts/vf-release-postgres-concurrency.log`).
+
+Guarded read-only inspection of `postgres_local/radai_dev` confirmed 564 applied
+migrations, consistent history, zero pending migrations across all applications,
+Sales 0011 applied and no Sales model drift
+(`artifacts/vf-release-local-migrations.log`). The application database was not
+used for synthetic registration tests. Production migration remains unverified;
+deploy the backend and apply Sales 0011 before the corresponding frontend.
