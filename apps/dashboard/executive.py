@@ -237,19 +237,52 @@ def _pipeline_stages(active):
     grouped = {}
     values = active.values('stage', 'currency').annotate(
         count=Count('pk'), amount=Sum('estimated_value'), weighted_amount=Sum('weighted_value'),
+        amount_count=Count('estimated_value'), weighted_count=Count('weighted_value'),
     ).order_by('stage', 'currency')
     for row in values:
         stage = grouped.setdefault(row['stage'], {'count': 0, 'currencies': {}})
         stage['count'] += row['count']
         currency = (row['currency'] or '').strip().upper() or 'UNSPECIFIED'
-        money = stage['currencies'].setdefault(currency, {'amount': Decimal('0'), 'weighted_amount': Decimal('0')})
-        money['amount'] += row['amount']
-        money['weighted_amount'] += row['weighted_amount']
+        money = stage['currencies'].setdefault(currency, {
+            'amount': Decimal('0'), 'weighted_amount': Decimal('0'),
+        })
+        for field, count_field in [('amount', 'amount_count'), ('weighted_amount', 'weighted_count')]:
+            if currency == 'UNSPECIFIED' or row[count_field] < row['count']:
+                money[field] = None
+            elif money[field] is not None:
+                money[field] += row[field]
     return [{
         'stage': code, 'label': DEAL_STAGES[code]['name'], 'count': grouped[code]['count'],
-        'by_currency': [{'currency': currency, **{key: str(value.quantize(Decimal('0.01'))) for key, value in amounts.items()}}
+        'by_currency': [{'currency': currency, **{key: str(value.quantize(Decimal('0.01'))) if value is not None else None
+                                                for key, value in amounts.items()}}
                         for currency, amounts in sorted(grouped[code]['currencies'].items())],
     } for code in ['lead', 'qualified', 'proposal', 'negotiation', 'award_pending'] if code in grouped]
+
+
+def _sales_pipeline_metric(active):
+    """Withhold incomplete currency totals while retaining the opportunity count."""
+    groups = {}
+    for row in active.values('currency').annotate(
+        count=Count('pk'), known_count=Count('weighted_value'), amount=Sum('weighted_value'),
+    ).order_by('currency'):
+        code = (row['currency'] or '').strip().upper() or 'UNSPECIFIED'
+        group = groups.setdefault(code, {'amount': Decimal('0'), 'missing_value_count': 0})
+        group['missing_value_count'] += row['count'] - row['known_count']
+        if row['amount'] is not None:
+            group['amount'] += row['amount']
+    incomplete = sorted(code for code, row in groups.items()
+                        if code == 'UNSPECIFIED' or row['missing_value_count'])
+    rows = [{'currency': code, 'amount': str(row['amount'].quantize(Decimal('0.01')))}
+            for code, row in sorted(groups.items()) if code not in incomplete]
+    result = _money_metric('weighted_pipeline', 'Weighted pipeline', rows,
+                           'CRM opportunity register',
+                           'Stored opportunity value weighted by stage probability; currencies remain separate.')
+    result.update({'incomplete_currencies': incomplete,
+                   'missing_value_count': sum(row['missing_value_count'] for row in groups.values())})
+    if incomplete:
+        reason = 'Affected currency totals are withheld because opportunity amounts or currency are missing.'
+        result.update({'status': 'partial', 'description': reason, 'definition': reason, 'reason': reason})
+    return result
 
 
 def _build_sales(user, context):
@@ -277,8 +310,7 @@ def _build_sales(user, context):
     result = department('sales', metrics=[
         metric('active_opportunities', 'Active opportunities', active.count(), source='CRM opportunity register',
                description='Opportunities in lead, qualification, proposal, negotiation or award approval.'),
-        _money_metric('weighted_pipeline', 'Weighted pipeline', _money_rows(active, 'weighted_value'),
-                      'CRM opportunity register', 'Stored opportunity value weighted by stage probability; currencies remain separate.'),
+        _sales_pipeline_metric(active),
         metric('proposals_due', 'Proposals due or overdue', due.count(), source='CRM submission deadlines',
                description='Active opportunity submission dates overdue or due within seven days.'),
     ], actions=actions, limitations=[

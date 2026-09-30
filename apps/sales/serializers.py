@@ -21,6 +21,25 @@ from .models import (
 User = get_user_model()
 
 
+def _complete_value_sum(queryset, field):
+    """An incomplete commercial total is unknown, not a partial total or zero."""
+    from django.db.models import Count, Sum
+    totals = queryset.aggregate(records=Count('pk'), known=Count(field), total=Sum(field))
+    if totals['known'] != totals['records']:
+        return None
+    return totals['total'] if totals['records'] else 0
+
+
+def _user_display_name(user):
+    if user is None:
+        return ''
+    return user.get_full_name() or user.username or user.email
+
+
+def _opportunity_creator_name(opportunity):
+    return _user_display_name(opportunity.created_by)
+
+
 class SalesEmailIntakeSerializer(serializers.ModelSerializer):
     """Employee-facing intake record with immutable email provenance."""
 
@@ -192,9 +211,9 @@ class ClientListSerializer(serializers.ModelSerializer):
         return obj.deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
     
     def get_total_deal_value(self, obj):
-        from django.db.models import Sum
-        total = obj.deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).aggregate(Sum('estimated_value'))
-        return total['estimated_value__sum'] or 0
+        return _complete_value_sum(
+            obj.deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']), 'estimated_value',
+        )
 
 
 class ClientDetailSerializer(serializers.ModelSerializer):
@@ -214,15 +233,17 @@ class ClientDetailSerializer(serializers.ModelSerializer):
         return SalesActivityListSerializer(activities, many=True).data
     
     def get_deals_summary(self, obj):
-        from django.db.models import Sum, Count
         deals = obj.deals.all()
         return {
             'total_count': deals.count(),
             'active_count': deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count(),
             'won_count': deals.filter(stage__in=['awarded', 'converted']).count(),
             'lost_count': deals.filter(stage='lost').count(),
-            'total_value': deals.aggregate(Sum('estimated_value'))['estimated_value__sum'] or 0,
-            'pipeline_value': deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0,
+            'total_value': _complete_value_sum(deals, 'estimated_value'),
+            'pipeline_value': _complete_value_sum(
+                deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']),
+                'weighted_value',
+            ),
         }
 
 
@@ -284,7 +305,8 @@ class FrameworkAgreementSerializer(serializers.ModelSerializer):
 class DealListSerializer(serializers.ModelSerializer):
     """Lightweight deal list serializer"""
     client_name = serializers.CharField(source='client.company_name', read_only=True)
-    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    owner_name = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
     stage_display = serializers.SerializerMethodField()
     days_in_stage = serializers.SerializerMethodField()
     framework_number = serializers.CharField(source='framework.framework_number', read_only=True)
@@ -302,12 +324,19 @@ class DealListSerializer(serializers.ModelSerializer):
             'framework', 'framework_number', 'client_contact', 'disciplines',
             'estimated_hours', 'delivery_office', 'opportunity_source',
             'next_action', 'risk_level',
+            'opportunity_type', 'open_date', 'created_by', 'created_by_name',
         ]
-        read_only_fields = ['id', 'weighted_value', 'created_at']
+        read_only_fields = ['id', 'deal_code', 'weighted_value', 'created_at', 'created_by']
     
     def get_stage_display(self, obj):
         from .models import DEAL_STAGES
         return DEAL_STAGES.get(obj.stage, {}).get('name', obj.stage)
+
+    def get_created_by_name(self, obj):
+        return _opportunity_creator_name(obj)
+
+    def get_owner_name(self, obj):
+        return _user_display_name(obj.owner)
     
     def get_days_in_stage(self, obj):
         from django.utils import timezone
@@ -338,8 +367,11 @@ class OpportunityAuditEventSerializer(serializers.ModelSerializer):
 
 class DealDetailSerializer(serializers.ModelSerializer):
     """Detailed deal serializer"""
+    client_name = serializers.CharField(source='client.company_name', read_only=True)
     client_details = ClientListSerializer(source='client', read_only=True)
+    owner_name = serializers.SerializerMethodField()
     owner_details = UserBasicSerializer(source='owner', read_only=True)
+    created_by_name = serializers.SerializerMethodField()
     team_members_details = UserBasicSerializer(source='team_members', many=True, read_only=True)
     quotes = serializers.SerializerMethodField()
     activities = serializers.SerializerMethodField()
@@ -349,11 +381,17 @@ class DealDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = '__all__'
-        read_only_fields = ['id', 'weighted_value', 'ai_win_probability', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'deal_code', 'created_by', 'weighted_value', 'ai_win_probability', 'created_at', 'updated_at']
     
     def get_quotes(self, obj):
         quotes = obj.quotes.all()[:5]
         return QuoteListSerializer(quotes, many=True).data
+
+    def get_created_by_name(self, obj):
+        return _opportunity_creator_name(obj)
+
+    def get_owner_name(self, obj):
+        return _user_display_name(obj.owner)
     
     def get_activities(self, obj):
         activities = obj.activities.all()[:10]
@@ -371,9 +409,7 @@ class DealDetailSerializer(serializers.ModelSerializer):
         }
         if not any(item['event_type'] in creation_events for item in history):
             source = obj.custom_fields or {}
-            owner_name = ''
-            if obj.owner:
-                owner_name = obj.owner.get_full_name() or obj.owner.username
+            creator_name = self.get_created_by_name(obj)
             history.append({
                 'id': f'created-{obj.id}',
                 'event_type': (
@@ -392,8 +428,8 @@ class DealDetailSerializer(serializers.ModelSerializer):
                     )
                     if source.get(key)
                 },
-                'actor': obj.owner_id,
-                'actor_name': owner_name,
+                'actor': obj.created_by_id,
+                'actor_name': creator_name,
                 'occurred_at': obj.created_at,
             })
         return sorted(
@@ -423,14 +459,38 @@ class DealCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         exclude = ['weighted_value', 'ai_win_probability', 'ai_recommended_actions', 'created_at', 'updated_at']
-        extra_kwargs = {'deal_code': {'required': False}}
         read_only_fields = [
+            'deal_code', 'created_by',
             'stage', 'stage_entered_at', 'bid_decision', 'bid_decision_reason',
             'bid_decided_by', 'bid_decided_at', 'award_status', 'award_submitted_by',
             'award_submitted_at', 'award_approved_by', 'award_approved_at',
             'award_rejection_reason', 'converted_project', 'converted_by',
             'converted_at', 'actual_close_date',
         ]
+
+    def _actor(self):
+        return self.context.get('actor') or getattr(self.context.get('request'), 'user', None)
+
+    def validate_owner(self, value):
+        from .opportunity_registration import visible_opportunity_owners
+        if value is None:
+            if self.instance is not None:
+                raise serializers.ValidationError('Choose an active owner within your Sales access.')
+            return value
+        if not visible_opportunity_owners(self._actor()).filter(pk=value.pk).exists():
+            raise serializers.ValidationError('Choose an active owner within your Sales access.')
+        return value
+
+    def validate_client(self, value):
+        from .email_permissions import visible_email_clients
+        actor = self._actor()
+        if (
+            not actor or not actor.is_authenticated or not actor.is_active
+            or not module_action_allowed(actor, 'sales_clients', 'read')
+            or not visible_email_clients(actor).filter(pk=value.pk).exists()
+        ):
+            raise serializers.ValidationError('Choose a client within your Sales access.')
+        return value
 
     def validate_nominated_project_manager(self, value):
         if self.instance and getattr(value, 'pk', None) != self.instance.nominated_project_manager_id:
@@ -451,21 +511,8 @@ class DealCreateSerializer(serializers.ModelSerializer):
         return attrs
     
     def create(self, validated_data):
-        # Auto-generate deal code if not provided
-        if not validated_data.get('deal_code'):
-            from django.utils.crypto import get_random_string
-            client_prefix = validated_data['client'].client_code[:3]
-            validated_data['deal_code'] = f"DEAL-{client_prefix}-{get_random_string(6, '0123456789')}"
-        
-        # Extract team_members if provided
-        team_members = validated_data.pop('team_members', [])
-        
-        deal = super().create(validated_data)
-        
-        if team_members:
-            deal.team_members.set(team_members)
-        
-        return deal
+        from .opportunity_registration import create_registered_opportunity
+        return create_registered_opportunity(actor=self._actor(), validated_data=validated_data)
 
 
 # ==============================================================================

@@ -149,7 +149,7 @@ class EmailClientResolutionTests(TestCase):
 
     def test_live_changed_source_and_invalid_commercial_fields_create_no_client(self):
         payload = self.named_payload()
-        for change in ({'estimated_value': ''}, {'expected_close_date': '2026-02-30'}):
+        for change in ({'estimated_value': 'invalid'}, {'expected_close_date': '2026-02-30'}):
             response = self.post({**payload, **change})
             self.assertEqual(response.status_code, 400, response.data)
         self.message['body']['content'] += '\nChanged source'
@@ -184,7 +184,7 @@ class EmailClientResolutionTests(TestCase):
 
     def test_saved_signed_fields_are_required_and_blank_description_is_preserved(self):
         intake, url, payload = self.saved_payload()
-        for change in ({'currency': ''}, {'deal_name': ''}):
+        for change in ({'deal_name': ''},):
             response = self.client.post(url, {**payload, **change}, format='json')
             self.assertEqual(response.status_code, 400, response.data)
             self.assert_no_new_records()
@@ -199,6 +199,24 @@ class EmailClientResolutionTests(TestCase):
         response = self.client.post(url, payload, format='json')
         self.assertEqual(response.status_code, 400, response.data)
         self.assertNotIn('client_details', str(response.data))
+        self.assertEqual(Deal.objects.count(), 1)
+
+    def test_saved_initial_registration_keeps_unknown_commercial_fields_blank(self):
+        intake, url, payload = self.saved_payload()
+        for field in ('estimated_value', 'expected_close_date', 'currency', 'scope_type'):
+            payload.pop(field, None)
+        payload['opportunity_type'] = 'tender'
+        response = self.client.post(url, payload, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        deal = Deal.objects.get()
+        self.assertEqual(deal.deal_code, 'Q-102101')
+        self.assertEqual(deal.created_by, self.user)
+        self.assertIsNotNone(deal.open_date)
+        self.assertIsNone(deal.estimated_value)
+        self.assertIsNone(deal.expected_close_date)
+        self.assertEqual(deal.currency, '')
+        self.assertEqual(deal.scope_type, '')
+        self.assertEqual(self.client.post(url, payload, format='json').status_code, 200)
         self.assertEqual(Deal.objects.count(), 1)
 
     def test_saved_name_mismatch_stale_source_and_invalid_deal_leave_no_client(self):
@@ -274,11 +292,6 @@ class EmailClientResolutionTests(TestCase):
                 'description': info['scope_summary'], 'classification_code': 'tender_opportunity',
                 'classification_confirmed': True,
             }
-            for field in ('currency', 'scope_type'):
-                missing = {**payload, field: ''}
-                rejected = self.post(missing)
-                self.assertEqual(rejected.status_code, 400, rejected.data)
-                self.assert_no_new_records(clients=0)
             first = self.post(payload)
             self.assertEqual(first.status_code, 201, first.data)
             self.assertEqual(self.post(payload).status_code, 200)

@@ -8,6 +8,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from django.utils import timezone
 from django.db.models import Avg, Sum, Count, Q, F
+from rest_framework.exceptions import ValidationError
 import random
 import logging
 
@@ -82,6 +83,24 @@ class SalesAIService:
         
         # Get current pipeline
         pipeline_deals = Deal.objects.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending'])
+
+        # A newly registered opportunity can legitimately have no commercial
+        # estimate yet. Do not turn that missing evidence into a saved zero or
+        # quietly generate a forecast from only the priced part of the pipeline.
+        missing_inputs = [field for field in ('estimated_value', 'weighted_value')
+                          if pipeline_deals.filter(**{f'{field}__isnull': True}).exists()]
+        if pipeline_deals.filter(currency='').exists():
+            missing_inputs.append('currency')
+        if missing_inputs:
+            incomplete = pipeline_deals.filter(
+                Q(estimated_value__isnull=True) | Q(weighted_value__isnull=True) | Q(currency='')
+            ).count()
+            raise ValidationError({
+                'code': 'forecast_inputs_incomplete',
+                'detail': 'Complete opportunity amounts and currencies before generating a forecast.',
+                'missing_inputs': missing_inputs,
+                'incomplete_opportunity_count': incomplete,
+            })
         
         total_pipeline_value = pipeline_deals.aggregate(
             total=Sum('weighted_value')
@@ -112,11 +131,11 @@ class SalesAIService:
         forecast_by_service = cls._calculate_service_breakdown(pipeline_deals)
         
         # Top contributing deals
-        top_deals = list(pipeline_deals.order_by('-weighted_value')[:5].values(
+        top_deals = list(pipeline_deals.order_by(F('weighted_value').desc(nulls_last=True))[:5].values(
             'deal_code', 'deal_name', 'weighted_value', 'probability'
         ))
         for deal in top_deals:
-            deal['weighted_value'] = float(deal['weighted_value'] or 0)
+            deal['weighted_value'] = float(deal['weighted_value']) if deal['weighted_value'] is not None else None
         
         forecast_data = {
             'forecast_period': period,
@@ -152,7 +171,10 @@ class SalesAIService:
         breakdown = {}
         for deal in deals_queryset:
             for service in deal.service_categories:
-                breakdown[service] = breakdown.get(service, 0) + float(deal.weighted_value)
+                if deal.weighted_value is None or not deal.currency:
+                    breakdown[service] = None
+                elif service not in breakdown or breakdown[service] is not None:
+                    breakdown[service] = breakdown.get(service, 0) + float(deal.weighted_value)
         return breakdown
     
     @classmethod
@@ -208,8 +230,10 @@ class SalesAIService:
         scores['industry_fit'] = 100 if industry in target_industries else 60
         
         # Budget Match Score
-        deal_value = deal_data.get('estimated_value', 0)
-        if deal_value > 1000000:
+        deal_value = deal_data.get('estimated_value')
+        if deal_value is None:
+            scores['budget_match'] = None
+        elif deal_value > 1000000:
             scores['budget_match'] = 100
         elif deal_value > 500000:
             scores['budget_match'] = 80
@@ -229,7 +253,7 @@ class SalesAIService:
             else:
                 scores['urgency'] = 50
         else:
-            scores['urgency'] = 30
+            scores['urgency'] = None
         
         # Decision Authority (based on contact role)
         contact_role = deal_data.get('primary_contact_role', '')
@@ -240,6 +264,19 @@ class SalesAIService:
         else:
             scores['decision_authority'] = 50
         
+        missing_fields = [name for name, factor in (
+            ('estimated_value', 'budget_match'), ('expected_close_date', 'urgency')
+        ) if scores[factor] is None]
+        if missing_fields:
+            return {
+                'total_score': None,
+                'grade': 'Not scored',
+                'status': 'incomplete',
+                'missing_fields': missing_fields,
+                'score_breakdown': scores,
+                'recommendations': ['Record the estimated value and expected award date before scoring this opportunity.'],
+            }
+
         # Calculate weighted total
         total_score = sum(
             scores[factor] * cls.LEAD_SCORE_WEIGHTS[factor]
@@ -572,8 +609,8 @@ class SalesAIService:
             })
         
         # Close date approaching
-        days_to_close = (deal.expected_close_date - timezone.now().date()).days
-        if 0 < days_to_close < 7:
+        days_to_close = (deal.expected_close_date - timezone.now().date()).days if deal.expected_close_date else None
+        if days_to_close is not None and 0 < days_to_close < 7:
             actions.insert(0, {
                 'action': 'Accelerate Close',
                 'priority': 'critical',
@@ -696,17 +733,22 @@ Best regards,
         
         # Insight 2: Revenue Potential
         from .models import Deal
-        pipeline_value = Deal.objects.filter(
+        pipeline = Deal.objects.filter(
             client=client,
             stage__in=['qualified', 'proposal', 'negotiation']
-        ).aggregate(Sum('weighted_value'))['weighted_value__sum'] or Decimal('0')
+        )
+        missing_count = pipeline.filter(Q(weighted_value__isnull=True) | Q(currency='')).count()
+        pipeline_value = (pipeline.aggregate(Sum('weighted_value'))['weighted_value__sum'] or Decimal('0')) if not missing_count else None
         
         revenue_insight = {
             'type': 'revenue_potential',
             'title': 'Revenue Opportunity',
-            'value': float(pipeline_value),
-            'description': f"${pipeline_value:,.2f} in active pipeline",
-            'recommendation': "Focus on accelerating deals in negotiation stage" if pipeline_value > 100000 else "Identify new opportunities"
+            'value': float(pipeline_value) if pipeline_value is not None else None,
+            'description': f"${pipeline_value:,.2f} in active pipeline" if pipeline_value is not None else 'Pipeline amount is incomplete.',
+            'recommendation': ("Focus on accelerating deals in negotiation stage" if pipeline_value > 100000 else "Identify new opportunities")
+                              if pipeline_value is not None else 'Record missing opportunity amounts and currencies.',
+            'status': 'incomplete' if missing_count else 'available',
+            'incomplete_opportunity_count': missing_count,
         }
         insights.append(revenue_insight)
         

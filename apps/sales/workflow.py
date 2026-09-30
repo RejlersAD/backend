@@ -56,6 +56,7 @@ def submit_qualification(opportunity, actor):
         (opportunity.submission_due_date, 'submission_due_date'),
         (opportunity.expected_close_date, 'expected_close_date'),
         (opportunity.estimated_value, 'estimated_value'),
+        (opportunity.currency, 'currency'),
         (opportunity.owner_id, 'owner'),
     ]:
         _require(value, field, missing)
@@ -87,6 +88,8 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
         raise ValidationError({'decision': 'Use bid, conditional_bid, or no_bid.'})
     if decision in {'conditional_bid', 'no_bid'} and not reason:
         raise ValidationError({'reason': 'A justification is required for this decision.'})
+    if opportunity.estimated_value is None or not opportunity.currency:
+        raise ValidationError({'detail': 'Complete the estimated value and currency before a bid decision.'})
     approval_value = Decimal(str(getattr(settings, 'SALES_MANAGEMENT_APPROVAL_VALUE', 5000000)))
     requires_management = opportunity.risk_level in {'high', 'critical'} or opportunity.estimated_value >= approval_value
     if requires_management and actor.id == opportunity.owner_id:
