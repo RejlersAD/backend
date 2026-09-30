@@ -3,7 +3,7 @@ Sales Management Views
 DRF ViewSets with AI-powered actions
 """
 
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -12,6 +12,7 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess, IsAdmin
 from django.db import IntegrityError, transaction
+from django.contrib.auth import get_user_model
 from django.db.models.deletion import ProtectedError
 from django.db.models import Q, Count, Sum, Avg, F
 from django.utils import timezone
@@ -29,7 +30,7 @@ import secrets
 
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, ProjectHandover, Quote,
-    SalesActivity, SalesForecast, SalesMailboxConnection,
+    SalesActivity, SalesForecast, SalesMailboxConnection, OpportunityAuditEvent,
 )
 from .serializers import (
     ClientListSerializer, ClientDetailSerializer, ClientCreateSerializer,
@@ -57,6 +58,13 @@ from .workflow import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _opportunity_total(queryset, field):
+    """Do not turn an incomplete opportunity pipeline into a zero-valued one."""
+    if queryset.filter(Q(**{f'{field}__isnull': True}) | Q(currency='')).exists():
+        return None
+    return float(queryset.aggregate(total=Sum(field))['total'] or 0)
 
 
 class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
@@ -666,13 +674,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     visibility_module_code = 'sales'
     visibility_owner_field = 'owner'
     
-    queryset = Deal.objects.select_related('client', 'owner').prefetch_related('team_members')
+    queryset = Deal.objects.select_related('client', 'owner', 'created_by').prefetch_related('team_members')
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['stage', 'priority', 'client', 'owner']
     search_fields = ['deal_code', 'deal_name', 'client__company_name']
-    ordering_fields = ['created_at', 'expected_close_date', 'estimated_value', 'weighted_value']
+    ordering_fields = ['deal_code', 'id', 'created_at', 'expected_close_date', 'estimated_value', 'weighted_value']
     ordering = ['-created_at']
     
     def get_serializer_class(self):
@@ -682,17 +690,84 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             return DealCreateSerializer
         return DealListSerializer
     
-    def perform_create(self, serializer):
-        """Set owner to current user if not specified"""
-        if not serializer.validated_data.get('owner'):
-            opportunity = serializer.save(owner=self.request.user)
-        else:
-            opportunity = serializer.save()
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        from .manual_registration import RegistrationConflict, registration_fingerprint
+
+        data = request.data.copy()
+        request_id = None
+        if 'registration_request_id' in data:
+            request_id = str(serializers.UUIDField().run_validation(data.pop('registration_request_id')))
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        fingerprint = registration_fingerprint(serializer.validated_data)
+        if request_id:
+            # Serialize retries by this actor without reserving a VF number or
+            # depending on an in-memory cache. The audit commits with the Deal.
+            get_user_model().objects.select_for_update(no_key=True).get(pk=request.user.pk)
+            previous = OpportunityAuditEvent.objects.filter(
+                actor=request.user, event_type='opportunity_created',
+                data__registration_request_id=request_id,
+            ).first()
+            if previous:
+                opportunity = self.get_queryset().filter(pk=previous.opportunity_id).first()
+                if opportunity is None:
+                    raise PermissionDenied('The saved opportunity is not available to you.')
+                if previous.data.get('registration_fingerprint') != fingerprint:
+                    raise RegistrationConflict()
+                return Response(DealDetailSerializer(opportunity, context=self.get_serializer_context()).data)
+        opportunity = serializer.save()
         _audit(
-            opportunity, self.request.user, 'opportunity_created',
+            opportunity, request.user, 'opportunity_created',
             to_stage=opportunity.stage,
-            data={'opportunity_source': opportunity.opportunity_source},
+            data={
+                'opportunity_source': opportunity.opportunity_source,
+                **({'registration_request_id': request_id, 'registration_fingerprint': fingerprint} if request_id else {}),
+            },
         )
+        return Response(
+            DealDetailSerializer(opportunity, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        instance._prefetched_objects_cache = {}
+        return Response(DealDetailSerializer(instance, context=self.get_serializer_context()).data)
+
+    @action(detail=False, methods=['get'], url_path='registration-options')
+    def registration_options(self, request):
+        from .opportunity_registration import visible_opportunity_owners
+
+        if not all(module_action_allowed(request.user, 'sales_opportunities', verb) for verb in ('read', 'create')):
+            raise PermissionDenied('You do not have access to register opportunities.')
+        return Response({
+            'default_owner': request.user.pk,
+            'owners': [
+                {'id': owner.pk, 'name': owner.get_full_name() or owner.username}
+                for owner in visible_opportunity_owners(request.user).order_by('first_name', 'last_name', 'pk')
+            ],
+            'opportunity_types': [
+                {'value': value, 'label': label}
+                for value, label in Deal._meta.get_field('opportunity_type').choices
+            ],
+        })
+
+    @action(detail=False, methods=['post'], url_path='export')
+    def export(self, request):
+        from .opportunity_export import opportunity_export_ids, opportunity_export_response
+
+        if not all(module_action_allowed(request.user, 'sales_opportunities', verb)
+                   for verb in ('read', 'export')):
+            raise PermissionDenied('You do not have access to export opportunities.')
+        if request.query_params:
+            raise ValidationError({'ids': 'Send the selected opportunity IDs in the request body.'})
+        identifiers = opportunity_export_ids(request.data)
+        return opportunity_export_response(self.get_queryset(), identifiers)
 
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):
@@ -806,7 +881,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         deal_data = {
             'client_employee_count': deal.client.employee_count,
             'industry_type': deal.client.industry_type,
-            'estimated_value': float(deal.estimated_value),
+            'estimated_value': float(deal.estimated_value) if deal.estimated_value is not None else None,
             'expected_close_date': deal.expected_close_date,
             'primary_contact_role': deal.client.contacts.filter(is_primary=True).first().role_type if deal.client.contacts.filter(is_primary=True).exists() else 'other'
         }
@@ -844,8 +919,9 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         
         summary = {
             'total_deals': pipeline.count(),
-            'total_value': float(pipeline.aggregate(Sum('estimated_value'))['estimated_value__sum'] or 0),
-            'weighted_value': float(pipeline.aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0),
+            'total_value': _opportunity_total(pipeline, 'estimated_value'),
+            'weighted_value': _opportunity_total(pipeline, 'weighted_value'),
+            'incomplete_opportunity_count': pipeline.filter(Q(estimated_value__isnull=True) | Q(currency='')).count(),
             'by_stage': {},
             'by_priority': {}
         }
@@ -858,8 +934,8 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 summary['by_stage'][stage_key] = {
                     'name': stage_info['name'],
                     'count': stage_deals.count(),
-                    'value': float(stage_deals.aggregate(Sum('estimated_value'))['estimated_value__sum'] or 0),
-                    'weighted_value': float(stage_deals.aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0)
+                    'value': _opportunity_total(stage_deals, 'estimated_value'),
+                    'weighted_value': _opportunity_total(stage_deals, 'weighted_value'),
                 }
         
         # Group by priority
@@ -867,7 +943,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             priority_deals = pipeline.filter(priority=priority)
             summary['by_priority'][priority] = {
                 'count': priority_deals.count(),
-                'value': float(priority_deals.aggregate(Sum('estimated_value'))['estimated_value__sum'] or 0)
+                'value': _opportunity_total(priority_deals, 'estimated_value'),
             }
         
         return Response({
@@ -1293,6 +1369,8 @@ class SalesForecastViewSet(viewsets.ModelViewSet):
                 'insights': forecast_data.get('insights', [])
             })
         
+        except ValidationError:
+            raise
         except Exception as e:
             logger.error(f"Forecast generation error: {str(e)}")
             return Response({
@@ -1364,9 +1442,9 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         active_deals = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
         
         # Pipeline value
-        pipeline_value = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).aggregate(
-            Sum('weighted_value')
-        )['weighted_value__sum'] or Decimal('0')
+        pipeline_value = _opportunity_total(deals.filter(
+            stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending'],
+        ), 'weighted_value')
         
         # Won deals this month
         won_mtd = deals.filter(
@@ -1376,6 +1454,8 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         
         # Average deal size
         avg_deal_size = deals.aggregate(Avg('estimated_value'))['estimated_value__avg'] or Decimal('0')
+        if deals.filter(Q(estimated_value__isnull=True) | Q(currency='')).exists():
+            avg_deal_size = None
         
         # Win rate
         closed_deals = deals.filter(stage__in=['awarded', 'converted', 'lost'])
@@ -1400,7 +1480,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         top_clients = clients.order_by('-lifetime_value')[:5]
         
         # Top deals
-        top_deals = deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).order_by('-weighted_value')[:5]
+        top_deals = deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).order_by(F('weighted_value').desc(nulls_last=True))[:5]
         
         # Recent activities
         recent_activities = SalesActivity.objects.order_by('-activity_date')[:10]
@@ -1417,19 +1497,20 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         revenue_by_industry = {}
         for client in clients:
             industry = client.get_industry_type_display()
-            client_pipeline = deals.filter(
+            client_pipeline = _opportunity_total(deals.filter(
                 client=client
-            ).exclude(stage__in=['lost', 'no_bid', 'cancelled']).aggregate(
-                Sum('weighted_value')
-            )['weighted_value__sum'] or Decimal('0')
-            revenue_by_industry[industry] = revenue_by_industry.get(industry, 0) + float(client_pipeline)
+            ).exclude(stage__in=['lost', 'no_bid', 'cancelled']), 'weighted_value')
+            prior = revenue_by_industry.get(industry, 0)
+            revenue_by_industry[industry] = None if prior is None or client_pipeline is None else prior + client_pipeline
         
         # Forecast next month
         try:
             next_month_forecast = SalesAIService.generate_sales_forecast('next_month', 6)
             forecast_next_month = next_month_forecast['predicted_revenue']
-        except:
-            forecast_next_month = float(pipeline_value) * 0.7  # Fallback estimate
+        except ValidationError:
+            forecast_next_month = None
+        except Exception:
+            forecast_next_month = pipeline_value * 0.7 if pipeline_value is not None else None
         
         # Serialize data
         from .serializers import ClientListSerializer, DealListSerializer, SalesActivityListSerializer
@@ -1439,9 +1520,9 @@ class SalesDashboardViewSet(viewsets.ViewSet):
             'active_clients': active_clients,
             'total_deals': total_deals,
             'active_deals': active_deals,
-            'pipeline_value': float(pipeline_value),
+            'pipeline_value': pipeline_value,
             'won_value_mtd': float(won_mtd),
-            'avg_deal_size': float(avg_deal_size),
+            'avg_deal_size': float(avg_deal_size) if avg_deal_size is not None else None,
             'win_rate': round(win_rate, 1),
             'avg_sales_cycle_days': avg_sales_cycle_days,
             'top_clients': ClientListSerializer(top_clients, many=True).data,

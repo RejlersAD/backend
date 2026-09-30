@@ -420,3 +420,9 @@ apps/finance/data/invoice_performance_summary.json
 !apps/planning_intelligence/tests/tests_central_ai_transports.py
 !docs/ADMIN_AI_API_KEYS.md
 !docs/AI_PROVIDER_CONSUMER_COVERAGE.md
+
+# VF registration contracts, migrations and synthetic regression coverage.
+!apps/sales/tests/test_vf_*.py
+!apps/sales/migrations/0011_*.py
+!docs/SALES_VF_REGISTRATION.md
+!docs/SALES_OPPORTUNITY_REGISTER_EXPORT.md

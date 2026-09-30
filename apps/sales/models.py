@@ -42,7 +42,7 @@ CLIENT_TIERS = {
 
 # Deal Stages (Sales Pipeline)
 DEAL_STAGES = {
-    'lead': {'name': 'Lead', 'probability': 10, 'color': 'gray', 'order': 1},
+    'lead': {'name': 'Open', 'probability': 10, 'color': 'gray', 'order': 1},
     'qualified': {'name': 'Qualified Lead', 'probability': 25, 'color': 'blue', 'order': 2},
     'proposal': {'name': 'Proposal & Estimate', 'probability': 50, 'color': 'purple', 'order': 3},
     'negotiation': {'name': 'Negotiation', 'probability': 75, 'color': 'yellow', 'order': 4},
@@ -66,6 +66,14 @@ AWARD_STATUS_CHOICES = [
     ('pending', 'Pending Approval'),
     ('approved', 'Approved'),
     ('rejected', 'Rejected'),
+]
+
+OPPORTUNITY_TYPE_CHOICES = [
+    ('tender', 'Tender'),
+    ('rfq', 'RFQ'),
+    ('eoi', 'EOI'),
+    ('direct_enquiry', 'Direct enquiry'),
+    ('other', 'Other'),
 ]
 
 # Service Categories
@@ -322,6 +330,20 @@ class FrameworkAgreement(TimeStampedModel):
 # SALES PIPELINE MODELS
 # ==============================================================================
 
+class OpportunityNumberSequence(models.Model):
+    """One transactional counter; committed VF numbers are never recycled."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    next_number = models.PositiveBigIntegerField(default=102101)
+
+    class Meta:
+        db_table = 'sales_opportunity_number_sequence'
+        constraints = [
+            models.CheckConstraint(check=models.Q(id=1), name='sales_vf_singleton'),
+            models.CheckConstraint(check=models.Q(next_number__gte=102101), name='sales_vf_minimum'),
+        ]
+
+
 class Deal(TimeStampedModel):
     """
     Sales opportunities and deals
@@ -340,6 +362,7 @@ class Deal(TimeStampedModel):
     # Deal Information
     deal_code = models.CharField(max_length=50, unique=True, db_index=True)
     deal_name = models.CharField(max_length=300)
+    opportunity_type = models.CharField(max_length=20, choices=OPPORTUNITY_TYPE_CHOICES, blank=True)
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='deals')
     client_contact = models.ForeignKey(
         Contact, on_delete=models.SET_NULL, null=True, blank=True,
@@ -357,13 +380,14 @@ class Deal(TimeStampedModel):
     priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default='medium')
     
     # Financial
-    estimated_value = models.DecimalField(max_digits=15, decimal_places=2)
-    weighted_value = models.DecimalField(max_digits=15, decimal_places=2, default=0)  # value * probability
+    estimated_value = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    weighted_value = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)  # value * probability
     actual_value = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
-    currency = models.CharField(max_length=10, default='USD')
+    currency = models.CharField(max_length=10, blank=True, default='')
     
     # Timeline
-    expected_close_date = models.DateField()
+    open_date = models.DateField(null=True, blank=True)
+    expected_close_date = models.DateField(null=True, blank=True)
     actual_close_date = models.DateField(null=True, blank=True)
     next_action_date = models.DateField(null=True, blank=True)
     next_action = models.CharField(max_length=300, blank=True)
@@ -371,7 +395,11 @@ class Deal(TimeStampedModel):
     expected_start_date = models.DateField(null=True, blank=True)
     
     # Ownership
-    owner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='deals_owned')
+    owner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='deals_owned')
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sales_opportunities_created', editable=False,
+    )
     team_members = models.ManyToManyField(User, related_name='deals_team', blank=True)
     
     # Service Details
@@ -463,7 +491,10 @@ class Deal(TimeStampedModel):
             self.probability = DEAL_STAGES[self.stage]['probability']
 
         # Auto-calculate weighted value from the effective stage probability.
-        self.weighted_value = (self.estimated_value * self.probability) / 100
+        self.weighted_value = (
+            (self.estimated_value * self.probability) / 100
+            if self.estimated_value is not None else None
+        )
         
         # Set actual close date when closed
         if self.stage in ['awarded', 'converted', 'lost', 'no_bid', 'cancelled'] and not self.actual_close_date:

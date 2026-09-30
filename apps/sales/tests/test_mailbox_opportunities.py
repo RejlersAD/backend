@@ -111,6 +111,50 @@ class MailboxOpportunityAPITests(TestCase):
         self.assertTrue(detail.data['source_token'])
         self.assert_no_conversion()
 
+    def test_vf_registration_without_commercial_facts_uses_received_open_date(self):
+        self.message['receivedDateTime'] = '2026-09-29T22:30:00Z'
+        self.network.return_value = graph_response(self.message)
+        payload = self.payload()
+        for field in ('estimated_value', 'currency', 'expected_close_date', 'scope_type'):
+            payload.pop(field)
+        payload['opportunity_type'] = 'rfq'
+        response = self.post(payload)
+        self.assertEqual(response.status_code, 201, response.data)
+        deal = Deal.objects.get()
+        self.assertEqual(deal.deal_code, 'Q-102101')
+        self.assertEqual(str(deal.open_date), '2026-09-30')
+        self.assertEqual(deal.created_by, self.user)
+        self.assertIsNone(deal.estimated_value)
+        self.assertIsNone(deal.expected_close_date)
+        self.assertEqual(deal.currency, '')
+        self.assertEqual(deal.scope_type, '')
+        self.assertEqual(self.post(payload).status_code, 200)
+        self.assertEqual(Deal.objects.count(), 1)
+
+    def test_vf_email_reviewed_owner_and_open_date_are_retained_on_retry(self):
+        payload = {**self.payload(), 'owner': self.other.pk, 'open_date': '2026-09-20', 'opportunity_type': 'tender'}
+        first = self.post(payload)
+        self.assertEqual(first.status_code, 201, first.data)
+        deal = Deal.objects.get()
+        self.assertEqual(deal.owner, self.other)
+        self.assertEqual(deal.created_by, self.user)
+        self.assertEqual(str(deal.open_date), '2026-09-20')
+        self.assertEqual(self.post(payload).status_code, 200)
+        self.assertEqual(self.post({**payload, 'open_date': '2026-09-21'}).status_code, 409)
+
+    def test_pre_vf_retry_with_omitted_scope_preserves_historical_record(self):
+        payload = self.payload()
+        payload.pop('scope_type')
+        self.assertEqual(self.post(payload).status_code, 201)
+        event = OpportunityAuditEvent.objects.get()
+        event.data['reviewed_payload_hash_version'] = 2
+        event.data['reviewed_payload_hash'] = _reviewed_serializer(payload, self.user, legacy_scope=True)[1]
+        event.save(update_fields=['data'])
+        Deal.objects.update(scope_type='other')
+        self.assertEqual(self.post(payload).status_code, 200)
+        self.assertEqual(Deal.objects.get().scope_type, 'other')
+        self.assertEqual(self.post({**payload, 'deal_name': 'Changed title'}).status_code, 409)
+
     def test_classification_requires_explicit_boolean_confirmation_before_source_fetch(self):
         payload = self.payload()
         for value in (None, False, 0, 1, 'true', [], {}):
@@ -302,9 +346,9 @@ class MailboxOpportunityAPITests(TestCase):
                 self.network.assert_not_called()
         self.assert_no_conversion()
 
-    def test_missing_amount_date_and_invalid_date_are_not_fabricated(self):
+    def test_invalid_amount_and_date_are_rejected_without_conversion(self):
         payload = self.payload()
-        for changed in [{'estimated_value': ''}, {'expected_close_date': ''}, {'expected_close_date': '2026-02-30'}, {'currency': ''}]:
+        for changed in [{'estimated_value': 'invalid'}, {'expected_close_date': ''}, {'expected_close_date': '2026-02-30'}]:
             self.assertEqual(self.post({**payload, **changed}).status_code, 400)
         self.assert_no_conversion()
 

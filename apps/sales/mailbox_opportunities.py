@@ -2,12 +2,14 @@
 
 import hashlib
 import json
+from zoneinfo import ZoneInfo
 
 from django.core import signing
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 from rest_framework.exceptions import APIException, PermissionDenied
 
@@ -32,6 +34,7 @@ REVIEW_MAX_AGE = 1800
 REVIEW_FIELDS = (
     'deal_name', 'client', 'client_reference', 'estimated_value', 'currency',
     'expected_close_date', 'submission_due_date', 'scope_type', 'description',
+    'opportunity_type', 'open_date', 'owner',
 )
 SOURCE_FIELDS = (
     'id', 'subject', 'sender_name', 'sender_email', 'received_at', 'sent_at',
@@ -110,13 +113,13 @@ def _read_review_token(token, connection, user, message_id):
     return review
 
 
-def _reviewed_serializer(data, user):
+def _reviewed_serializer(data, user, *, legacy_scope=False):
     if not isinstance(data, dict) or set(data) - {
         *REVIEW_FIELDS, 'new_client', 'message_id', 'source_token', 'classification_code', 'classification_confirmed',
     }:
         raise serializers.ValidationError({'detail': 'Only reviewed opportunity fields may be submitted.'})
     classification_code = require_classification_review(data)
-    required = ('deal_name', 'estimated_value', 'currency', 'expected_close_date')
+    required = ('deal_name',)
     errors = {key: ['This field is required.'] for key in required if data.get(key) in (None, '')}
     if errors:
         raise serializers.ValidationError(errors)
@@ -132,24 +135,45 @@ def _reviewed_serializer(data, user):
         payload['client'] = str(client.pk)
     payload.update({
         'client_reference': data.get('client_reference') or '',
-        'scope_type': data.get('scope_type') or 'other',
+        'scope_type': data.get('scope_type') or '',
         'description': data.get('description') or '',
         'submission_due_date': data.get('submission_due_date') or None,
     })
-    serializer = DealCreateSerializer(data=payload)
+    serializer = DealCreateSerializer(data=payload, context={'actor': user})
     if client is None:
         # Validate all commercial inputs before source reads or business writes.
         # The atomic resolver supplies the canonical FK immediately before save.
         serializer.fields['client'].required = False
     serializer.is_valid(raise_exception=True)
     normalized = dict(serializer.validated_data)
+    if normalized.get('owner') is not None:
+        normalized['owner'] = str(normalized['owner'].pk)
     normalized['client'] = str(client.pk) if client is not None else {
         'reviewed_name': normalize_customer_name(intent['new_client']['company_name']),
     }
-    legacy_payload_hash = _digest(normalized)
+    historical = dict(normalized)
+    if not data.get('scope_type'):
+        historical['scope_type'] = 'other'
+    legacy_payload_hash = _digest(historical)
+    if legacy_scope:
+        normalized = historical
     normalized['classification_code'] = classification_code
     normalized['classification_confirmed'] = True
     return serializer, _digest(normalized), legacy_payload_hash, classification_code
+
+
+def email_open_date(received_at):
+    """Use the authoritative received timestamp's Gulf calendar date."""
+    if isinstance(received_at, str):
+        try:
+            received_at = parse_datetime(received_at)
+        except (ValueError, TypeError):
+            return None
+    if received_at is None:
+        return None
+    if timezone.is_aware(received_at):
+        return received_at.astimezone(ZoneInfo('Asia/Dubai')).date()
+    return received_at.date()
 
 
 def convert_mailbox_message(*, connection, connection_queryset, user, data):
@@ -161,8 +185,6 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
     analysis_snapshot = reviewed_analysis_snapshot(review.get('analysis'))
     intent = email_customer_intent(data)
     require_reviewed_customer_name(intent, analysis_snapshot)
-    if analysis_snapshot.get('ai_review', {}).get('status') == 'validated' and not data.get('scope_type'):
-        raise serializers.ValidationError({'scope_type': 'Review the scope type before saving.'})
     # The provider source is fetched with our own mailbox and identity. Client
     # supplied body, subject, mailbox and source evidence are never accepted.
     message = SalesMicrosoftGraphService(connection).get_message(message_id)
@@ -189,7 +211,12 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
                 and 'reviewed_classification' not in previous.data
                 and previous.data.get('reviewed_payload_hash') == legacy_payload_hash
             )
-            if previous.data.get('reviewed_payload_hash') != payload_hash and not legacy_same_payload:
+            legacy_same_scope = (
+                previous.data.get('reviewed_payload_hash_version', 1) == 2
+                and not data.get('scope_type')
+                and previous.data.get('reviewed_payload_hash') == _reviewed_serializer(data, user, legacy_scope=True)[1]
+            )
+            if previous.data.get('reviewed_payload_hash') != payload_hash and not legacy_same_payload and not legacy_same_scope:
                 raise EmailReviewConflict(
                     'An opportunity already exists for this email with different reviewed fields.',
                     code='email_already_converted',
@@ -220,7 +247,9 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
         if identity:
             source['email_tender_identity'] = identity
         opportunity = serializer.save(
-            owner=user, client=client, opportunity_source='client_email',
+            owner=serializer.validated_data.get('owner') or user,
+            open_date=serializer.validated_data.get('open_date') or email_open_date(message.get('received_at')),
+            client=client, opportunity_source='client_email',
             next_action='Qualify email-originated opportunity',
             next_action_date=timezone.now().date(), custom_fields=source,
         )
@@ -230,7 +259,7 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
             data={
                 **source, 'mailbox_source_hash': source_hash,
                 'reviewed_payload_hash': payload_hash, 'source_content_hash': review['source'],
-                'source_hash_version': 2, 'reviewed_payload_hash_version': 2,
+                'source_hash_version': 2, 'reviewed_payload_hash_version': 3,
                 'reviewed_classification': classification_review_evidence(classification_code, user),
                 'reviewed_email_analysis': analysis_snapshot,
                 'reviewed_customer_resolution': customer_resolution,

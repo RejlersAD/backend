@@ -34,7 +34,7 @@ from .email_classification_review import classification_review_evidence, require
 from .email_client_resolution import (
     email_customer_intent, require_reviewed_customer_name, resolve_email_customer,
 )
-from .mailbox_opportunities import EmailReviewConflict, REVIEW_FIELDS, _reviewed_serializer
+from .mailbox_opportunities import EmailReviewConflict, REVIEW_FIELDS, _reviewed_serializer, email_open_date
 from .email_opportunity_evidence import (
     prevent_duplicate_tender, read_saved_email_review, source_digest, tender_identity,
 )
@@ -53,8 +53,6 @@ def _saved_review_payload(data, intake, user, snapshot):
     intent = email_customer_intent(data, legacy=legacy)
     if not legacy:
         require_reviewed_customer_name(intent, snapshot)
-        if snapshot.get('ai_review', {}).get('status') == 'validated' and not data.get('scope_type'):
-            raise serializers.ValidationError({'scope_type': 'Review the scope type before saving.'})
     payload = {key: data[key] for key in REVIEW_FIELDS if key in data}
     payload.update({
         'classification_code': data.get('classification_code'),
@@ -64,7 +62,7 @@ def _saved_review_payload(data, intake, user, snapshot):
         payload['new_client'] = {'company_name': intent['new_client']['company_name']}
     if legacy:
         for key, fallback in (
-            ('deal_name', intake.subject[:300]), ('currency', 'AED'),
+            ('deal_name', intake.subject[:300]),
             ('scope_type', 'other'), ('description', intake.body_preview),
         ):
             payload[key] = payload.get(key) or fallback
@@ -376,7 +374,11 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             identity = tender_identity(analysis_snapshot)
             if identity:
                 payload['custom_fields']['email_tender_identity'] = identity
-            opportunity = opportunity_serializer.save(owner=request.user, **payload)
+            opportunity = opportunity_serializer.save(
+                owner=opportunity_serializer.validated_data.get('owner') or request.user,
+                open_date=opportunity_serializer.validated_data.get('open_date') or email_open_date(intake.received_at),
+                **payload,
+            )
             OpportunityAuditEvent.objects.create(
                 opportunity=opportunity,
                 actor=request.user,
