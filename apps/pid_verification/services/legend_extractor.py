@@ -19,6 +19,7 @@ Six standard legend categories are extracted and stored per sheet:
 All configuration (thresholds, prompts, section headings) is soft-coded via
 module-level constants so the render logic never needs touching.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import base64
 import io
 import json
@@ -506,12 +507,11 @@ def _safe_legend_json(raw: str) -> Optional[dict]:
 def _extract_batch_gemini_legend(images: list[str]) -> Optional[dict]:
     """Send a batch of base64-encoded pages to Gemini and return parsed dict."""
     try:
-        import google.generativeai as genai
-        api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
+        from google import genai
+        api_key = provider_api_key('gemini', fallback=(lambda: (os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY'))))
         if not api_key:
             return None
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: api_key)
 
         import PIL.Image
         parts = [_AI_USER_PROMPT]
@@ -519,9 +519,9 @@ def _extract_batch_gemini_legend(images: list[str]) -> Optional[dict]:
             img_bytes = base64.b64decode(b64)
             parts.append(PIL.Image.open(io.BytesIO(img_bytes)))
 
-        response = model.generate_content(
-            parts,
-            generation_config={'max_output_tokens': AI_MAX_TOKENS, 'temperature': 0},
+        response = client.models.generate_content(
+            model=GEMINI_MODEL, contents=parts,
+            config={'max_output_tokens': AI_MAX_TOKENS, 'temperature': 0},
         )
         raw = getattr(response, 'text', '') or ''
         logger.info('[LegendExtractor][Gemini] batch reply %d chars', len(raw))
@@ -543,12 +543,12 @@ def _extract_batch_openai_legend(images: list[str], prompt: str = None) -> Optio
     try:
         from django.conf import settings as _settings
         import openai
-        api_key = getattr(_settings, 'OPENAI_API_KEY', None) or os.environ.get('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (getattr(_settings, 'OPENAI_API_KEY', None) or os.environ.get('OPENAI_API_KEY'))))
         if not api_key:
             logger.warning('[LegendExtractor] OPENAI_API_KEY not set')
             return None
 
-        client = openai.OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
         content = [{'type': 'text', 'text': prompt}]
         for b64 in images:
             content.append({

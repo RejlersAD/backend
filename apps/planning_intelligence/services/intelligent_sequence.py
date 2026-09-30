@@ -92,8 +92,10 @@ SYSTEM = (
 @sensitive_variables()
 def _provider(project, actor, payload):
     from . import project_ai
+    from .central_ai import central_status
     from .project_setup_ai import _personal_settings
-    personal_connection = _personal_settings(actor) is not None
+    managed = central_status(project_ai.project_provider(project))['managed']
+    personal_connection = not managed and _personal_settings(actor) is not None
     if not personal_connection and project_ai.get_project_ai_config(project):
         result = project_ai.call_project_ai(project, system_prompt=SYSTEM,
             user_prompt=json.dumps({'schema': _schema(), **payload}), max_tokens=14000,
@@ -106,7 +108,7 @@ def _provider(project, actor, payload):
         except (ValueError, TypeError, KeyError):
             _error('AI returned an incomplete sequence. Retry; your saved plan is unchanged.',
                    'intelligent_sequence_ai_unavailable', 503)
-    if not personal_connection and (project.ai_settings or {}).get('enabled'):
+    if not personal_connection and (managed or (project.ai_settings or {}).get('enabled')):
         _error('The project AI connection is unavailable. Update its AI settings and retry.',
                'intelligent_sequence_ai_unavailable', 503)
     from .project_setup_ai import generation_credentials, openai_client, provider_error_message

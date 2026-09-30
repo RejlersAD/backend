@@ -19,6 +19,7 @@ cross-check panel can consume both with the same code path::
     }
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_api_key
 
 import json
 import logging
@@ -227,6 +228,7 @@ def extract_equipment_tags_via_vision(
     api_key: str,
 ) -> dict:
     """Multi-tile Vision extraction of equipment tags from a P&ID PDF."""
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
     if not api_key or not api_key.strip():

@@ -28,6 +28,9 @@ def provider_answer(payload, schema, *, instructions):
 @override_settings(**AI_SETTINGS)
 class EmailAssistantEvidenceTests(SimpleTestCase):
     def setUp(self):
+        unmanaged = patch('apps.core.ai_credentials._provider_record', return_value=None)
+        unmanaged.start()
+        self.addCleanup(unmanaged.stop)
         cache.clear()
         self.addCleanup(cache.clear)
         self.payload = {

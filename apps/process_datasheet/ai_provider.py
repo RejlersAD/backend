@@ -11,6 +11,7 @@ Supported provider IDs:
 
 Per-task overrides in TASK_PROVIDERS take precedence over AI_STRATEGY.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import os
 
@@ -62,10 +63,10 @@ def build_gemini_client():
     """Return an initialised Gemini GenerativeModel client or None."""
     try:
         from google import genai  # google-genai SDK
-        api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+        api_key = provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY'))))
         if not api_key:
             return None
-        client = genai.Client(api_key=api_key)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         return client
     except Exception:
         return None
@@ -75,9 +76,9 @@ def build_openai_client():
     """Return an initialised OpenAI client or None."""
     try:
         from openai import OpenAI
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
         if not api_key:
             return None
-        return OpenAI(api_key=api_key)
+        return lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
     except Exception:
         return None

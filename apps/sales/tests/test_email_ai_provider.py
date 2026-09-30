@@ -45,6 +45,9 @@ def completion(content='{"customer":"River Utilities Ltd"}', **changes):
 )
 class EmailAIProviderTests(SimpleTestCase):
     def setUp(self):
+        unmanaged = patch('apps.core.ai_credentials._provider_record', return_value=None)
+        unmanaged.start()
+        self.addCleanup(unmanaged.stop)
         constructor = patch('openai.OpenAI')
         self.addCleanup(constructor.stop)
         self.constructor = constructor.start()
@@ -286,6 +289,9 @@ def anthropic_completion(content='{"customer":"River Utilities Ltd"}', *, stop_r
 )
 class AnthropicEmailAIProviderTests(SimpleTestCase):
     def setUp(self):
+        unmanaged = patch('apps.core.ai_credentials._provider_record', return_value=None)
+        unmanaged.start()
+        self.addCleanup(unmanaged.stop)
         constructor = patch('anthropic.Anthropic')
         self.addCleanup(constructor.stop)
         self.constructor = constructor.start()

@@ -14,6 +14,7 @@ This layer is CONDITIONALLY executed based on extraction mode:
 
 Cost: Paid API calls (user BYOK or platform key)
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import os
 import base64
@@ -218,14 +219,14 @@ class Layer3VisionAIExtractor:
             import openai
             
             # Use user key or platform key
-            api_key = self.user_api_key or os.getenv('OPENAI_API_KEY')
+            api_key = provider_api_key('openai', fallback=(lambda: (self.user_api_key or os.getenv('OPENAI_API_KEY'))))
             if not api_key:
                 return {
-                    'error': 'No API key provided (BYOK required or platform key missing)',
+                    'error': 'The selected AI provider is not configured. Contact an administrator.',
                     'cost_usd': 0.0,
                 }
             
-            client = openai.OpenAI(api_key=api_key)
+            client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
             
             # Call Vision API
             response = client.chat.completions.create(
@@ -296,14 +297,14 @@ class Layer3VisionAIExtractor:
             import anthropic
             
             # Use user key or platform key
-            api_key = self.user_api_key or os.getenv('ANTHROPIC_API_KEY')
+            api_key = provider_api_key('anthropic', fallback=(lambda: (self.user_api_key or os.getenv('ANTHROPIC_API_KEY'))))
             if not api_key:
                 return {
-                    'error': 'No API key provided (BYOK required or platform key missing)',
+                    'error': 'The selected AI provider is not configured. Contact an administrator.',
                     'cost_usd': 0.0,
                 }
             
-            client = anthropic.Anthropic(api_key=api_key)
+            client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key))
             
             # Call Vision API
             response = client.messages.create(

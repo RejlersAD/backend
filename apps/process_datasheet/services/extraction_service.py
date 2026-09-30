@@ -2,6 +2,7 @@
 PDF Extraction Service
 Multi-modal PDF extraction using GPT-4 Vision and traditional parsing
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import io
 import json
@@ -37,9 +38,9 @@ class ExtractionService:
         """Initialize extraction service"""
         self.openai_client = None
         if OpenAI:
-            api_key = os.getenv('OPENAI_API_KEY')
+            api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
             if api_key:
-                self.openai_client = OpenAI(api_key=api_key)
+                self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
     
     def extract_from_pdf(self, pdf_path: str, equipment_config: Dict) -> Dict[str, Any]:
         """

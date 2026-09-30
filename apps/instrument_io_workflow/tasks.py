@@ -64,6 +64,7 @@ does on the synchronous path. Not treated as new risk here — it's the
 same handling apps.pid_verification's fan-out has used all along.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_available
 
 import logging
 import time
@@ -356,7 +357,7 @@ def process_io_document(
         # from a Vision-produced one. See results_cache.py's
         # vision_extraction_mode() docstring for the full incident.
         from .services.results_cache import vision_extraction_mode
-        key_supplied = bool(vision_provider and vision_api_key)
+        key_supplied = bool(vision_provider and provider_available(vision_provider, vision_api_key))
         extraction_mode = vision_extraction_mode(vision_provider, key_supplied)
 
         # BUG FIX: local-OCR results (no API key) are low-quality and often
@@ -408,7 +409,7 @@ def process_io_document(
         # granularity than whole-page completion — see vision_calls_done's
         # own model-field comment for why that mattered.
         vision_calls_total = 0
-        if vision_provider and vision_api_key:
+        if vision_provider and provider_available(vision_provider, vision_api_key):
             from .services.pid_vision_extractor import VISION_PASSES, VISION_TILE_ROWS, VISION_TILE_COLS
             calls_per_page = (VISION_TILE_ROWS * VISION_TILE_COLS * VISION_PASSES) if thorough else VISION_PASSES
             vision_calls_total = calls_per_page * page_count
@@ -577,7 +578,7 @@ def process_pid_vision_page(
         with document.pdf_file.open('rb') as f:
             pdf_bytes = f.read()
 
-        if vision_provider and vision_api_key:
+        if vision_provider and provider_available(vision_provider, vision_api_key):
             try:
                 from .services.pid_vision_extractor import extract_pid_tags_from_page
 
@@ -747,7 +748,7 @@ def finalize_io_document(
             # failed.
             if not vision_key_supplied:
                 warnings = [
-                    'Add Claude/OpenAI API key for P&ID Vision extraction. Without key, '
+                    'Ask an administrator to configure the selected AI provider. Without AI, '
                     'basic OCR only (lower accuracy).'
                 ]
             elif any_auth_failed:
@@ -758,10 +759,10 @@ def finalize_io_document(
                 # already added one is actively misleading; this is the
                 # real gap that produced.
                 warnings = [
-                    'API key invalid or expired. Please check your key and try again.'
+                    'The configured AI credential was rejected. Ask an administrator to review it.'
                 ]
             elif any('local OCR' in (r.get('remarks') or '') for r in io_rows):
-                warnings = ['Add an API key for better accuracy — some pages used local OCR']
+                warnings = ['Some pages used local OCR. Ask an administrator to review the AI provider configuration.']
 
             # See finalize_io_document's own docstring (compare_best
             # param) for why this exists. Compares THIS run's fresh

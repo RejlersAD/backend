@@ -20,6 +20,7 @@ Two independent capabilities, combined by cross_reference():
      deep_claude/hybrid AI analysis modes) — skipped otherwise.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_api_key
 
 import logging
 import re
@@ -199,6 +200,7 @@ def run_page_vision_analysis(drawing_data: dict, api_key: str, page_image_b64: s
     inputs — this is a best-effort pipeline enhancement, not a required
     step (see LegendSymbolBridgeStage / AIAnalysisStage, both critical=False).
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     if not api_key or not page_image_b64:
         return None
     try:

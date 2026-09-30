@@ -5,6 +5,7 @@ This service analyzes P&ID diagrams to extract pressure instrument data using
 advanced AI (OpenAI Vision API) and populates Excel datasheets automatically.
 Implements soft coding techniques for easy configuration and extensibility.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -107,9 +108,9 @@ class PressureInstrumentAnalyzer:
         self.template_file = 'Pressure_Instrument.xlsx'
         
         # Initialize OpenAI client
-        api_key = os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
         if api_key:
-            self.openai_client = OpenAI(api_key=api_key, timeout=120.0)
+            self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=120.0)
             logger.info("[PressureInstrument] ✅ OpenAI client initialized successfully")
         else:
             self.openai_client = None
@@ -857,7 +858,7 @@ Return ONLY the JSON array - no explanations, no markdown blocks.
             )
             
             retry_response = response.choices[0].message.content
-            logger.info(f"[PressureInstrument] Simplified detection response: {retry_response}")
+            logger.info(f"[PressureInstrument] Simplified response length: {len(retry_response)} characters")
             
             instruments = self._parse_ai_response(retry_response)
             logger.info(f"[PressureInstrument] Simplified detection found {len(instruments)} instruments")
@@ -935,13 +936,13 @@ Return ONLY the JSON array - no explanations, no markdown blocks.
                     pass
                 
                 logger.warning("[PressureInstrument] No JSON array found in AI response")
-                logger.debug(f"[PressureInstrument] Cleaned response: {cleaned_response[:500]}")
+                logger.debug(f"[PressureInstrument] Cleaned response length: {len(cleaned_response)} characters")
                 return []
                 
         except json.JSONDecodeError as e:
             logger.error(f"[PressureInstrument] JSON parsing error: {str(e)}")
             logger.error(f"[PressureInstrument] Error at position {e.pos}")
-            logger.debug(f"[PressureInstrument] Raw response: {ai_response[:1000]}")
+            logger.debug(f"[PressureInstrument] Response length: {len(ai_response)} characters")
             return []
         except Exception as e:
             logger.error(f"[PressureInstrument] Unexpected parsing error: {str(e)}", exc_info=True)

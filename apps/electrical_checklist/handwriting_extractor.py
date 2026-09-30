@@ -15,6 +15,7 @@ replace the existing service — it is used by the new `extract_handwriting`
 endpoint action and can be enabled/disabled from the frontend via a soft-coded flag.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key, provider_managed
 
 import base64
 import io
@@ -86,8 +87,8 @@ class HandwritingExtractor:
         """
         Args:
             config: Optional overrides for HANDWRITING_CONFIG (applied last, wins over mode preset).
-            user_openai_api_key: BYOK — user-supplied OpenAI API key. When provided,
-                takes precedence over settings.OPENAI_API_KEY for this instance only.
+            user_openai_api_key: Legacy user-supplied OpenAI API key. Used only
+                when the provider is not centrally managed, before environment fallback.
                 The key is held in memory for the lifetime of the extractor and
                 MUST NOT be logged, persisted, or serialised.
             extraction_mode: Soft-coded mode name ("fast" | "balanced" | "deep" | "vision_only").
@@ -113,8 +114,7 @@ class HandwritingExtractor:
                 "Falling back to the platform key."
             )
             logger.warning(
-                "[Handwriting] User-supplied API key ignored (bad format, len=%d, prefix=%r)",
-                len(raw_key), raw_key[:3] if raw_key else "",
+                "[Handwriting] User-supplied API key ignored because its format is invalid.",
             )
         # Runtime flag: if a valid-looking user key still gets rejected by OpenAI
         # at request time (e.g. revoked / spent quota), we flip this and fall
@@ -156,9 +156,11 @@ class HandwritingExtractor:
     @property
     def key_source(self) -> str:
         """Returns which key source is active (safe to log — does NOT leak the key)."""
+        if provider_managed('openai'):
+            return "platform" if self._resolve_api_key() else "none"
         if self._user_api_key and not self._user_key_runtime_disabled:
             return "user_supplied"
-        if getattr(settings, "OPENAI_API_KEY", None):
+        if provider_api_key('openai', fallback=(lambda: (getattr(settings, "OPENAI_API_KEY", None)))):
             return "platform"
         return "none"
 
@@ -446,24 +448,19 @@ class HandwritingExtractor:
     # ── Vision path (OpenAI GPT-4o) ─────────────────────────────────────────
 
     def _vision_available(self) -> bool:
-        # BYOK key wins if still trusted; otherwise fall back to platform key.
-        if self._user_api_key and not self._user_key_runtime_disabled:
-            return True
-        return bool(getattr(settings, "OPENAI_API_KEY", None))
+        return bool(self._resolve_api_key())
 
     def _resolve_api_key(self) -> Optional[str]:
         """Return the API key to use RIGHT NOW, respecting runtime disable."""
-        if self._user_api_key and not self._user_key_runtime_disabled:
-            return self._user_api_key
-        return getattr(settings, "OPENAI_API_KEY", None)
+        return provider_api_key(
+            'openai',
+            fallback=lambda: self._user_api_key if not self._user_key_runtime_disabled else None,
+        )
 
     def _get_openai_client(self):
         if self._openai_client is None:
             from openai import OpenAI
-            self._openai_client = OpenAI(
-                api_key=self._resolve_api_key(),
-                timeout=self.config.get("vision_timeout_sec", 60),
-            )
+            self._openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (self._resolve_api_key()), timeout=self.config.get("vision_timeout_sec", 60))
         return self._openai_client
 
     def _reset_client_after_key_change(self) -> None:
@@ -645,7 +642,7 @@ RULES:
                             is_auth_error
                             and self._user_api_key
                             and not self._user_key_runtime_disabled
-                            and getattr(settings, "OPENAI_API_KEY", None)
+                            and provider_api_key('openai', fallback=(lambda: (getattr(settings, "OPENAI_API_KEY", None))))
                         ):
                             logger.warning(
                                 "[Handwriting] User BYOK key rejected by OpenAI — "

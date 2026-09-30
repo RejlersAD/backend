@@ -10,6 +10,7 @@ EXTRACTION METHOD SELECTION (soft-coded):
 - 'tesseract' = Free OCR + regex (default, cost-effective)
 - 'openai'    = GPT-4o structured extraction (higher accuracy, costs money)
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import io
 import json
@@ -219,11 +220,11 @@ def call_gpt4o_extraction(raw_text: str) -> dict:
     """
     from openai import OpenAI
 
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get("OPENAI_API_KEY", ""))))
     if not api_key:
         raise ValueError("OPENAI_API_KEY is not set")
 
-    client = OpenAI(api_key=api_key)
+    client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
 
     # Trim to max chars to stay within token limits
     trimmed_text = raw_text[:MAX_TEXT_CHARS]

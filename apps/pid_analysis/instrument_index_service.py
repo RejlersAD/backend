@@ -13,6 +13,7 @@ All pass results are merged and deduplicated by normalised tag number.
 SOFT-CODED: all instrument categories live in INSTRUMENT_CATEGORIES dict
 below — add/remove types without touching logic.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import io
 import os
@@ -3019,7 +3020,7 @@ class InstrumentIndexService:
     def _init_openai(self):
         try:
             import openai
-            api_key = os.environ.get("OPENAI_API_KEY")
+            api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get("OPENAI_API_KEY"))))
             if not api_key:
                 logger.warning("[InstrumentIndex] OPENAI_API_KEY not set")
                 return None
@@ -3028,11 +3029,7 @@ class InstrumentIndexService:
             # Values come from EXTRACTION_CONFIG (env-tunable).
             timeout_sec  = EXTRACTION_CONFIG.get("openai_request_timeout_sec", 180)
             max_retries  = EXTRACTION_CONFIG.get("openai_max_retries", 2)
-            client = openai.OpenAI(
-                api_key=api_key,
-                timeout=timeout_sec,
-                max_retries=max_retries,
-            )
+            client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=timeout_sec, max_retries=max_retries)
             logger.info(
                 f"[InstrumentIndex] ✅ OpenAI client initialised "
                 f"(timeout={timeout_sec}s, max_retries={max_retries})"
@@ -3045,11 +3042,11 @@ class InstrumentIndexService:
     def _init_gemini(self):
         try:
             from google import genai
-            api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            api_key = provider_api_key('gemini', fallback=(lambda: (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))))
             if not api_key:
                 logger.warning("[InstrumentIndex] GEMINI_API_KEY not set")
                 return None
-            client = genai.Client(api_key=api_key)
+            client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
             logger.info("[InstrumentIndex] ✅ Gemini client initialised")
             return client
         except ImportError:

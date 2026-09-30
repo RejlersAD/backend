@@ -6,6 +6,7 @@ using OpenAI Vision API with soft-coded field configuration.
 
 SMART EXTRACTION: Automatically extracts all MOV fields defined in mov_datasheet_config.py
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import logging
 import json
@@ -34,9 +35,9 @@ class MOVEquipmentExtractor:
 
     def __init__(self):
         """Initialize OpenAI client and configuration"""
-        api_key = os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
         if api_key:
-            self.openai_client = OpenAI(api_key=api_key, timeout=120.0)
+            self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=120.0)
             logger.info("[MOVExtractor] ✅ OpenAI client initialized successfully")
         else:
             self.openai_client = None
@@ -233,7 +234,7 @@ OUTPUT: Return ONLY a JSON array, nothing else."""
             logger.info(f"[MOVExtractor] 📊 Parsed {len(movs)} MOV equipment")
             
             if len(movs) == 0:
-                logger.warning(f"[MOVExtractor] ⚠️ ZERO MOVs extracted! Full AI response: {ai_response}")
+                logger.warning(f"[MOVExtractor] ⚠️ ZERO MOVs extracted; response length: {len(ai_response)} characters")
             
             return movs
             

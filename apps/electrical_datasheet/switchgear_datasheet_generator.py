@@ -2,6 +2,7 @@
 11KV Switchgear Datasheet Generator from SLD Documents
 Extracts equipment data and generates comprehensive datasheets
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 import logging
 import re
 import json
@@ -17,7 +18,7 @@ class SwitchgearDatasheetGenerator:
     """Generate 11KV switchgear datasheets from SLD documents"""
     
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
     
     def extract_text_from_pdf(self, pdf_file) -> str:
         """Extract text from any supported document type (multi-format)."""

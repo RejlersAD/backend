@@ -14,6 +14,7 @@ Mirrors the pattern used by `InstrumentIndexService` but specialised to
 piping-class structured extraction.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -95,11 +96,11 @@ class PaperSpecExtractionService:
             return self._gemini_client
         try:
             from google import genai  # type: ignore
-            api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            api_key = provider_api_key('gemini', fallback=(lambda: (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))))
             if not api_key:
                 logger.info("[SpecExtraction] GEMINI_API_KEY not set — Gemini disabled")
                 return None
-            self._gemini_client = genai.Client(api_key=api_key)
+            self._gemini_client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
             logger.info("[SpecExtraction] ✅ Gemini ready")
             return self._gemini_client
         except Exception as e:
@@ -118,11 +119,11 @@ class PaperSpecExtractionService:
                 api_key = self._user_api_key
                 logger.info("[SpecExtraction] Using user-provided OpenAI API key (BYOK)")
             else:
-                api_key = os.environ.get("OPENAI_API_KEY")
+                api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get("OPENAI_API_KEY"))))
                 if not api_key:
                     logger.info("[SpecExtraction] OPENAI_API_KEY not set — OpenAI disabled")
                     return None
-            self._openai_client = openai.OpenAI(api_key=api_key)
+            self._openai_client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
             logger.info("[SpecExtraction] ✅ OpenAI ready")
             return self._openai_client
         except Exception as e:
@@ -141,11 +142,11 @@ class PaperSpecExtractionService:
                 api_key = self._user_api_key
                 logger.info("[SpecExtraction] Using user-provided Claude API key (BYOK)")
             else:
-                api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
+                api_key = provider_api_key('anthropic', fallback=(lambda: (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY"))))
                 if not api_key:
                     logger.info("[SpecExtraction] ANTHROPIC_API_KEY not set — Claude disabled")
                     return None
-            self._claude_client = Anthropic(api_key=api_key)
+            self._claude_client = lazy_provider_client('anthropic', Anthropic, api_key=lambda: (api_key))
             logger.info("[SpecExtraction] ✅ Claude ready")
             return self._claude_client
         except Exception as e:
@@ -554,7 +555,7 @@ class PaperSpecExtractionService:
         # BYOK provider routing: when a user/project key is present, run the
         # explicitly selected provider first. For predictable billing/behavior,
         # default to a strict provider-only AI path plus OCR fallback.
-        byok_provider = self._user_provider if (self._user_api_key and self._user_provider in {"openai", "claude"}) else ""
+        byok_provider = self._user_provider if self._user_provider in {"openai", "claude"} else ""
         if byok_provider:
             byok_engine = f"{byok_provider}_vision"
             if byok_engine not in engines:
@@ -831,6 +832,6 @@ class PaperSpecExtractionService:
             "claude_prompt_tokens": self._claude_prompt_tokens,
             "claude_completion_tokens": self._claude_completion_tokens,
             "cost_usd": total_cost_usd,
-            "byok_provider": self._user_provider if self._user_api_key else None,
-            "byok_model": self._user_model if self._user_api_key else None,
+            "byok_provider": self._user_provider if self._user_provider in {"openai", "claude"} else None,
+            "byok_model": self._user_model if self._user_provider in {"openai", "claude"} else None,
         }

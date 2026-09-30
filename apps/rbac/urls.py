@@ -26,6 +26,7 @@ from .views_admin import (
 )
 from .database_maintenance_views import database_tables, database_table_action
 from apps.notifications.admin_history import NotificationHistoryViewSet
+from apps.core.ai_credential_views import ProviderStatusView
 
 router = DefaultRouter()
 # RBAC Core
@@ -59,6 +60,8 @@ router.register(r'social-links', SocialMediaLinkViewSet, basename='social-link')
 router.register(r'profile-documents', ProfileDocumentViewSet, basename='profile-document')
 
 urlpatterns = [
+    path('admin/ai-api-keys/', include('apps.core.ai_credential_urls')),
+    path('ai-provider-status/', ProviderStatusView.as_view(), name='ai-provider-status'),
     # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
     path('users/export/', UserExportView.as_view(), name='user-export-users'),
     path('', include(router.urls)),

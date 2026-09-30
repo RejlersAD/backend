@@ -11,6 +11,7 @@ Analysis Modes:
 
 Security: API keys are NEVER persisted — passed in-memory only from frontend sessionStorage.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import logging
 import json
 import re
@@ -49,6 +50,7 @@ def run_openai_analysis(
         ValueError: If API key is invalid
         RuntimeError: If OpenAI API call fails
     """
+    api_key = provider_api_key('openai', fallback=lambda: (api_key))
     if not api_key or not api_key.startswith('sk-'):
         raise ValueError("Invalid OpenAI API key format")
     
@@ -56,7 +58,7 @@ def run_openai_analysis(
         import openai
         
         # Initialize client with user's key
-        client = openai.OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
         
         # Build structured prompt
         prompt = _build_openai_prompt(drawing_data)
@@ -292,6 +294,7 @@ def run_claude_analysis(
         ValueError: If API key or page_image_b64 is missing
         RuntimeError: If the Claude API call fails after retries
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     if not api_key or not api_key.startswith('sk-ant-'):
         raise ValueError("Invalid Claude API key format")
     if not page_image_b64:
@@ -382,7 +385,7 @@ def _run_claude_analysis_one_pass(
 
     def _call(use_model: str):
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
         return client.messages.create(
             model=use_model,
             max_tokens=max_tokens,
@@ -898,6 +901,7 @@ def smart_compare_batch(pairs: List[Dict[str, Any]], api_key: str,
     comparison. Only a missing api_key raises (caller's responsibility to
     not call this without one).
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     if not api_key or not api_key.startswith('sk-ant-'):
         raise ValueError("Invalid Claude API key format")
     if not pairs:
@@ -951,7 +955,7 @@ def _smart_compare_one_batch(batch, api_key, resolved_model, fallback_model, tim
 
     def _call(use_model: str):
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=timeout_s)
         resp = client.messages.create(
             model=use_model,
             max_tokens=50000,

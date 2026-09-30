@@ -5,6 +5,7 @@ and generates comprehensive datasheets matching the standard ADNOC form.
 
 Columns: SI No. | DESCRIPTION | UNIT | SPECIFIED DESIGN DATA | VENDOR DATA | Rev
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 import logging
 import json
 from typing import Dict, List, Optional
@@ -19,7 +20,7 @@ class DGSetDatasheetGenerator:
     """Generate Emergency Diesel Generator (EDG) Set datasheets from sizing calculation documents."""
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Document Extraction (multi-format)

@@ -41,6 +41,7 @@ All work is cost-optimised:
 """
 
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_available
 
 import hashlib
 import logging
@@ -380,7 +381,7 @@ def extract_document(
         # A drawing has no structured table/comments content — start from
         # a clean slate rather than whatever the table extractor guessed.
         comments = []
-        if vision_provider and vision_api_key:
+        if vision_provider and provider_available(vision_provider, vision_api_key):
             try:
                 from .pid_vision_extractor import extract_pid_tags_via_vision
                 io_rows, vision_warnings = extract_pid_tags_via_vision(

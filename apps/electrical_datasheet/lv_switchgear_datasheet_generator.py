@@ -5,6 +5,7 @@ the ADNOC Technical Datasheet for LV Switchgear form.
 
 Columns: SR NO | DESCRIPTION | UNIT | REQUIRED DATA | VENDOR DATA | Rev
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 import logging
 import json
 from typing import Dict, List
@@ -19,7 +20,7 @@ class LVSwitchgearDatasheetGenerator:
     """Generate LV Switchgear datasheets from Technical Datasheet documents."""
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
 
     # ──────────────────────────────────────────────────────────────────────────
     # PDF Extraction

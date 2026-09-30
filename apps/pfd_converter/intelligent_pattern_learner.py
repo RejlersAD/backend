@@ -15,6 +15,7 @@ This system combines:
 - Template Application (exact replication)
 - Quality Control (validation against examples)
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import json
 import logging
@@ -48,7 +49,7 @@ class IntelligentPatternLearner:
     """
     
     def __init__(self):
-        self.client = OpenAI(api_key=config("OPENAI_API_KEY"))
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config("OPENAI_API_KEY")))
         self.learned_patterns: List[ExamplePattern] = []
         self.example_library: Dict[str, Dict] = {}
         

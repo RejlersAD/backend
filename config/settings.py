@@ -117,6 +117,9 @@ else:
     print("[WARNING] BYOK_ENCRYPTION_KEY not set — planning BYOK uses legacy SECRET_KEY compatibility mode.")
 
 PLANNING_INTEGRATION_ENCRYPTION_KEY = config('PLANNING_INTEGRATION_ENCRYPTION_KEY', default=None)
+# Central AI credentials use dedicated encryption material. An explicitly
+# configured BYOK key remains compatible; this registry never uses SECRET_KEY.
+AI_CREDENTIAL_ENCRYPTION_KEY = config('AI_CREDENTIAL_ENCRYPTION_KEY', default=None)
 
 # ================================================================
 # USER MANAGEMENT SECURITY SETTINGS

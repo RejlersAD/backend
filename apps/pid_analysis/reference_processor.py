@@ -3,6 +3,7 @@ Reference Document Intelligence Processor
 Extracts and structures data from reference documents for P&ID cross-verification
 SOFT-CODED: AI-powered extraction from equipment datasheets, legends, standards
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -17,9 +18,9 @@ class ReferenceDocumentProcessor:
     
     def __init__(self):
         """Initialize OpenAI client"""
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
         if api_key:
-            self.client = OpenAI(api_key=api_key, timeout=120.0)
+            self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=120.0)
         else:
             self.client = None
             print("[WARNING] OpenAI API key not found - reference processing will be limited")

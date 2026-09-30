@@ -9,6 +9,7 @@ LLM enrichment path is gated behind `OPENAI_API_KEY` and only used as a
 fallback when the local catalog has no entry for a given `kind`.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import os
 import logging
@@ -117,13 +118,13 @@ def _llm_enrich(issue: dict) -> Optional[dict]:
     endpoint never blocks a Django request past the client timeout.
     """
     global _llm_disabled_until
-    if not os.getenv('OPENAI_API_KEY'):
+    if not provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY')))):
         return None
     if time.time() < _llm_disabled_until:
         return None
     try:  # pragma: no cover -- network path
         from openai import OpenAI  # noqa: WPS433  (deferred import)
-        client = OpenAI(api_key=os.environ['OPENAI_API_KEY'], timeout=_LLM_TIMEOUT_SEC)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (os.environ['OPENAI_API_KEY']), timeout=_LLM_TIMEOUT_SEC)
         prompt = (
             "You are an instrumentation engineer. In 1-2 sentences, explain "
             "this finding from an IO-list QC tool, and propose a fix.\n\n"

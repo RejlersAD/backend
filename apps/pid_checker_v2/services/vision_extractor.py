@@ -9,6 +9,7 @@ render DPI, max image dimension, tokens, temperature, and the extraction
 prompt.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -230,6 +231,7 @@ def extract_line_tags_via_vision(
     symbol_shape_extractor.py). Callers must validate it against
     ALLOWED_CLAUDE_VISION_MODELS before passing it through.
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
     if not api_key or not api_key.strip():
@@ -363,6 +365,7 @@ def extract_raw_text_via_vision(pdf_bytes: bytes, page_index: int, api_key: str,
     a clear "AI Vision key required" error, not swallow it into an empty
     result (see extraction.py's VisionAPIKeyRequiredError).
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
     if not api_key or not api_key.strip():
@@ -429,7 +432,7 @@ def _call_raw_text_vision(provider: str, api_key: str, image_b64: str, model: st
     def _claude_call(k, b64, p, use_model=None):
         import anthropic
         from .token_accounting import read_claude_usage, read_claude_thinking_tokens
-        client = anthropic.Anthropic(api_key=k, timeout=VISION_REQUEST_TIMEOUT_S)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (k), timeout=VISION_REQUEST_TIMEOUT_S)
         resp = client.messages.create(
             model=use_model or model or VISION_MODELS['claude'],
             max_tokens=VISION_MAX_TOKENS,
@@ -506,7 +509,7 @@ def _call_raw_text_vision(provider: str, api_key: str, image_b64: str, model: st
     def _openai_call(k, b64, p):
         import openai
         from .token_accounting import read_openai_usage
-        client = openai.OpenAI(api_key=k, timeout=VISION_REQUEST_TIMEOUT_S)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (k), timeout=VISION_REQUEST_TIMEOUT_S)
         resp = client.chat.completions.create(
             model=VISION_MODELS['openai'],
             max_tokens=VISION_MAX_TOKENS,
@@ -869,6 +872,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
     Not tied to any extraction feature — just a connectivity/auth check
     against the same provider/model config the rest of BYOK Vision uses.
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if provider not in SUPPORTED_PROVIDERS:
         return False, f"Unsupported provider '{provider}'."
     if not api_key or not api_key.strip():
@@ -877,7 +881,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
     try:
         if provider == 'claude':
             import anthropic
-            client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+            client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
             client.messages.create(
                 model=VISION_MODELS['claude'],
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
@@ -885,7 +889,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
             )
         else:
             import openai
-            client = openai.OpenAI(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+            client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
             client.chat.completions.create(
                 model=VISION_MODELS['openai'],
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
@@ -902,7 +906,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
 def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT):
     import openai
     from .token_accounting import read_openai_usage
-    client = openai.OpenAI(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+    client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.chat.completions.create(
         model=VISION_MODELS['openai'],
         max_tokens=VISION_MAX_TOKENS,
@@ -932,7 +936,7 @@ def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
 def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT, model: str | None = None):
     import anthropic
     from .token_accounting import read_claude_usage, read_claude_thinking_tokens
-    client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+    client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.messages.create(
         model=model or VISION_MODELS['claude'],
         max_tokens=VISION_MAX_TOKENS,

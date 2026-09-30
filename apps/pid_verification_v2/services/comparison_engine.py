@@ -14,6 +14,7 @@ Returns structured comparison results with discrepancy categories:
 
 All comparison logic is soft-coded for easy tuning.
 """
+from apps.core.ai_consumer_clients import provider_api_key
 
 import logging
 import re
@@ -791,6 +792,7 @@ def compare_with_line_list(
     Returns:
         ComparisonResult with line list comparison findings
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     findings = []
     matched_count = 0
     mismatch_count = 0
@@ -957,6 +959,7 @@ def compare_with_equipment_list(
     Returns:
         ComparisonResult with equipment comparison findings
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     findings = []
     matched_count = 0
     mismatch_count = 0
@@ -1151,6 +1154,7 @@ def compare_with_instrument_index(
     Returns:
         ComparisonResult with instrument comparison findings
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     findings = []
     matched_count = 0
     mismatch_count = 0
@@ -1375,6 +1379,7 @@ def run_all_comparisons(
             'instrument': ComparisonResult
         }
     """
+    ai_api_key = provider_api_key('anthropic', fallback=lambda: (ai_api_key))
     results = {}
 
     # Extract P&ID elements

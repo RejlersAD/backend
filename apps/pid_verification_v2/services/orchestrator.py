@@ -15,6 +15,7 @@ Each processing stage is isolated, monitored, and can fail gracefully.
 Author: RADAI Team
 Last Updated: 2026-07-24
 """
+from apps.core.ai_consumer_clients import provider_available, provider_api_key
 
 import logging
 import re
@@ -461,8 +462,8 @@ class ExtractionStage(StageExecutor):
 
         # Hybrid extraction: Tesseract (if installed) + AI Vision (if a BYOK
         # key is present in this run's context) — see services/extraction.py.
-        extraction_api_key = context.user_context.get('claude_api_key') or context.user_context.get('openai_api_key')
-        extraction_provider = 'claude' if context.user_context.get('claude_api_key') else 'openai'
+        extraction_provider = 'claude' if provider_available('anthropic', context.user_context.get('claude_api_key')) else 'openai'
+        extraction_api_key = context.user_context.get('claude_api_key') if extraction_provider == 'claude' else context.user_context.get('openai_api_key')
 
         for seg in context.segments:
             extraction = extract_drawing(
@@ -833,8 +834,8 @@ class AIAnalysisStage(StageExecutor):
             run_page_vision_analysis, SYMBOL_BATCH_SIZE,
         )
 
-        openai_key = context.user_context.get('openai_api_key')
-        claude_key = context.user_context.get('claude_api_key')
+        openai_key = provider_api_key('openai', fallback=lambda: (context.user_context.get('openai_api_key')))
+        claude_key = provider_api_key('anthropic', fallback=lambda: (context.user_context.get('claude_api_key')))
         symbol_images = context.symbol_images or []
         needs_page_image = analysis_mode in ('deep_claude', 'hybrid') and claude_key
 

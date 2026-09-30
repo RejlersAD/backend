@@ -3,6 +3,7 @@ PFD Analysis Service — Advanced 4-Pass AI Engine
 Multi-stage GPT-4o Vision analysis with reference document text extraction,
 visual inventory scan, deep systematic checks, and gap analysis.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import re
 import base64
@@ -99,12 +100,12 @@ class PFDAnalysisService:
 
     def __init__(self):
         api_key = (
-            getattr(settings, "OPENAI_API_KEY", None)
-            or os.getenv("OPENAI_API_KEY")
+            provider_api_key('openai', fallback=(lambda: (getattr(settings, "OPENAI_API_KEY", None)
+            or os.getenv("OPENAI_API_KEY"))))
         )
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
-        self.client = OpenAI(api_key=api_key)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         print(f"[PFD_ANALYSIS] Initialized — model: {self.MODEL}, passes: 4")
 
     # -----------------------------------------------------------------------

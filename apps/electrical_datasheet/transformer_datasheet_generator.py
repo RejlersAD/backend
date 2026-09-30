@@ -12,6 +12,7 @@ Excel rendering only.
 Columns: Sl. No. | DESCRIPTION | UNIT | SPECIFIED DESIGN DATA | VENDOR DATA | Rev
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import json
 import logging
@@ -63,7 +64,7 @@ class TransformerDatasheetGenerator:
     """Generate Power/Distribution Transformer datasheets from sizing calculations."""
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
 
     # ──────────────────────────────────────────────────────────────────────
     # Document Extraction (multi-format — PDF / Excel / Word / image / …)

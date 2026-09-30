@@ -12,6 +12,7 @@ Endpoints (mounted at /api/v1/spec-customization/):
   GET    paper-spec/classes/<id>/           → class detail + components
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_api_key, provider_managed
 
 import hashlib
 import io
@@ -138,6 +139,9 @@ def _resolve_project_byok(project_id, user_provider: str, user_model: str, user_
     provider = (user_provider or '').strip().lower()
     model = (user_model or '').strip()
     api_key = (user_api_key or '').strip()
+
+    if provider in {'openai', 'claude'} and provider_managed(provider):
+        return provider, model, ''
 
     if api_key and provider in {'openai', 'claude'}:
         return provider, model, api_key
@@ -826,8 +830,8 @@ def extraction_config_diagnostics(request):
     from apps.spec_customization.services.advanced_validation import ADVANCED_VALIDATION_CONFIG
     
     # Check API key availability without exposing them
-    openai_key = os.getenv('OPENAI_API_KEY', '')
-    gemini_key = os.getenv('GOOGLE_API_KEY', '') or os.getenv('GEMINI_API_KEY', '')
+    openai_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY', ''))))
+    gemini_key = provider_api_key('gemini', fallback=(lambda: (os.getenv('GOOGLE_API_KEY', '') or os.getenv('GEMINI_API_KEY', ''))))
     
     config_data = {
         "environment": {
@@ -885,13 +889,9 @@ def extraction_config_diagnostics(request):
         "api_keys_status": {
             "openai": {
                 "configured": bool(openai_key),
-                "key_prefix": openai_key[:10] + "..." if openai_key else None,
-                "key_length": len(openai_key) if openai_key else 0,
             },
             "gemini": {
                 "configured": bool(gemini_key),
-                "key_prefix": gemini_key[:10] + "..." if gemini_key else None,
-                "key_length": len(gemini_key) if gemini_key else 0,
             },
             "warning": None if (openai_key and gemini_key) else (
                 "⚠️ Missing API keys - extraction may fail or use fallback only"

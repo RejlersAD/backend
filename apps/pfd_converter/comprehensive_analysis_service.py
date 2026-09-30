@@ -11,6 +11,7 @@ Configuration-driven approach:
 - Structured output format
 - Automatic integration with upload flow
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import openai
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
@@ -27,8 +28,7 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI
-OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OPENAI_API_KEY != '' else None
+openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
 
 
 # Soft-coded configuration for analysis patterns
@@ -326,7 +326,7 @@ Be EXTREMELY thorough. Extract EVERY visible detail, number, and specification."
             return json.loads(json_str)
         except Exception as e:
             logger.error(f"Failed to parse JSON response: {e}")
-            logger.error(f"Response content (first 500 chars): {content[:500]}")
+            logger.error(f"Response length: {len(content)} characters")
             return {}
     
     def _structure_analysis(self, all_pages: List[Dict], document_info: Dict = None) -> Dict:

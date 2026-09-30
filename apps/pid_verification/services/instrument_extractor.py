@@ -17,6 +17,7 @@ Pipeline:
 
 All thresholds, prompts, and schema keys are soft-coded via module-level constants.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import base64
 import io
 import json
@@ -393,11 +394,11 @@ def _extract_batch_gemini(images: list) -> Optional[dict]:
         from google import genai
         from google.genai import types
 
-        api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+        api_key = provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY'))))
         if not api_key:
             return None
 
-        client = genai.Client(api_key=api_key)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         parts  = [types.Part.from_text(text=_AI_USER_PROMPT)]
         for img_b64 in images:
             parts.append(types.Part.from_bytes(
@@ -432,18 +433,18 @@ def _extract_batch_openai(images: list) -> Optional[dict]:
     Returns parsed dict or None on failure.
     """
     try:
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
         if not api_key:
             try:
                 from django.conf import settings
-                api_key = settings.OPENAI_API_KEY
+                api_key = provider_api_key('openai', fallback=(lambda: (settings.OPENAI_API_KEY)))
             except Exception:
                 pass
         if not api_key:
             return None
 
         from openai import OpenAI
-        client  = OpenAI(api_key=api_key)
+        client  = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         content = [{'type': 'text', 'text': _AI_USER_PROMPT}]
         for b64 in images:
             content.append({

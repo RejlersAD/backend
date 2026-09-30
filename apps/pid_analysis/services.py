@@ -2,6 +2,7 @@
 P&ID Analysis Service - Multi-Pass Comprehensive Analysis
 Architecture: OCR + Vision + Cross-Validation + Chain-of-Thought + Reference Verification
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import base64
 import io
@@ -131,22 +132,18 @@ class PIDAnalysisService:
             print(f'[WARNING] Multi-model service failed, falling back to OpenAI only: {e}')
             # Fallback to OpenAI only
             api_key = (
-                os.getenv('OPENAI_API_KEY') or
-                getattr(settings, 'OPENAI_API_KEY', None)
+                provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or
+                getattr(settings, 'OPENAI_API_KEY', None))))
             )
             if not api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
-            self.client = OpenAI(api_key=api_key, timeout=180.0, max_retries=2)
+            self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=180.0, max_retries=2)
             self.ai_service = None
         
         # Keep legacy OpenAI client for backward compatibility
-        api_key = os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
         if api_key:
-            self.client = OpenAI(
-                api_key=api_key,
-                timeout=180.0,
-                max_retries=2
-            )
+            self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=180.0, max_retries=2)
         
         self.reference_processor = ReferenceDocumentProcessor()
         self.extracted_text = ""
@@ -387,14 +384,14 @@ class PIDAnalysisService:
         try:
             from google import genai
             api_key = (
-                os.getenv(getattr(self, 'gemini_api_key_env', 'GEMINI_API_KEY'))
+                provider_api_key('gemini', fallback=(lambda: (os.getenv(getattr(self, 'gemini_api_key_env', 'GEMINI_API_KEY'))
                 or os.getenv('GEMINI_API_KEY')
-                or getattr(settings, 'GEMINI_API_KEY', None)
+                or getattr(settings, 'GEMINI_API_KEY', None))))
             )
             if not api_key:
                 print('[WARNING] Gemini enabled but GEMINI_API_KEY env var not set — Gemini disabled')
                 return
-            self._gemini_client = observed_google(genai.Client(api_key=api_key))
+            self._gemini_client = observed_google(lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key)))
             print(f'[INFO] Google Gemini client initialized (primary={self._GEMINI_PRIMARY_MODEL})')
         except ImportError:
             print('[WARNING] google-genai not installed — Gemini disabled. '
@@ -2447,7 +2444,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                 return []
 
             response_text = response_text.strip()
-            print(f"[DEBUG RAW SECOND PASS] len={len(response_text)} | preview={response_text[:120]}")
+            print(f"[DEBUG RAW SECOND PASS] len={len(response_text)}")
             result = self._parse_analysis_response(response_text, 0)
 
             print(f"[INFO] Second pass found {len(result.get('issues', []))} additional issues")
@@ -2901,7 +2898,7 @@ Focus especially on:
                 return {"issues": [], "line_size_recommendations": []}
 
             response_text = (response.choices[0].message.content or "").strip()
-            print(f"[DEBUG PASS 7] len={len(response_text)} | preview={response_text[:120]}")
+            print(f"[DEBUG PASS 7] len={len(response_text)}")
 
             # Parse the JSON response
             result = self._parse_analysis_response(response_text, 0)

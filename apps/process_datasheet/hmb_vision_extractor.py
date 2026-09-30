@@ -1,4 +1,4 @@
-﻿"""
+"""
 HMB Table Extractor â€” Gemini Flash (primary) with OpenAI Vision fallback.
 Provider strategy is soft-coded in ai_provider.py.
 
@@ -146,7 +146,7 @@ class HMBVisionExtractor:
                 if not raw:
                     continue
 
-                logger.info(f"[HMBVisionExtractor] Page {page_num} ({provider}) preview: {raw[:200]}")
+                logger.info(f"[HMBVisionExtractor] Page {page_num} ({provider}) response length: {len(raw)} characters")
                 result = _parse_hmb_json(raw)
                 streams = result.get('streams', [])
                 logger.info(f"[HMBVisionExtractor] Page {page_num} ({provider}): {len(streams)} streams")

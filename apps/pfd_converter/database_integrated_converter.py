@@ -9,6 +9,7 @@ Integrates all extracted databases:
 
 Uses intelligent soft-coding techniques for superior P&ID generation.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import json
 import boto3
@@ -36,7 +37,7 @@ s3_client = boto3.client(
     region_name=AWS_REGION
 )
 
-openai_client = OpenAI(api_key=config('OPENAI_API_KEY', default=''))
+openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
 
 
 class DatabaseIntegratedConverter:

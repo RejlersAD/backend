@@ -18,6 +18,7 @@ AI step is silent — the caller falls back to the original parser, which still
 raises its clean "Unsupported file type" message if everything failed.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import io
 import json
@@ -308,12 +309,12 @@ def _parse_image(data: bytes, name: str) -> list[dict]:
     """
     _VISION_TIMEOUT = float(os.environ.get('INSTRUMENT_TOOLS_LLM_TIMEOUT_SEC', '6'))
     _VISION_MODEL   = os.environ.get('INSTRUMENT_TOOLS_LLM_MODEL', 'gpt-4o-mini')
-    if not os.getenv('OPENAI_API_KEY'):
+    if not provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY')))):
         return []
     try:                                                             # pragma: no cover -- network path
         import base64
         from openai import OpenAI                                    # noqa: WPS433
-        client = OpenAI(api_key=os.environ['OPENAI_API_KEY'], timeout=_VISION_TIMEOUT)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (os.environ['OPENAI_API_KEY']), timeout=_VISION_TIMEOUT)
         b64 = base64.b64encode(data).decode('ascii')
         ext = name.rsplit('.', 1)[-1].lower()
         prompt = (

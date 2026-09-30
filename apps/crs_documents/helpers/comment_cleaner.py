@@ -3,6 +3,7 @@ CRS Comment Cleaner - Intelligent Text Cleaning with OpenAI
 Uses GPT-3.5-turbo to intelligently clean and filter PDF comments
 Soft-coded approach - rules are configurable without code changes
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import os
 import re
@@ -199,24 +200,17 @@ class CommentCleaner:
         self._init_openai()
     
     def _init_openai(self):
-        """Initialize OpenAI client if API key is available"""
+        """Keep a lazy client so administrator changes reach this singleton."""
         if not OPENAI_AVAILABLE:
             logger.info("OpenAI library not available, using rule-based cleaning only")
             return
             
-        api_key = os.environ.get('OPENAI_API_KEY')
-        if api_key and self.config.config["openai"]["enabled"]:
-            try:
-                self.openai_client = OpenAI(api_key=api_key)
-                logger.info("✅ OpenAI client initialized successfully")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize OpenAI client: {e}")
-                self.openai_client = None
+        if self.config.config["openai"]["enabled"]:
+            self.openai_client = lazy_provider_client(
+                'openai', OpenAI, api_key=lambda: os.environ.get('OPENAI_API_KEY'),
+            )
         else:
-            if not api_key:
-                logger.info("OPENAI_API_KEY not set, using rule-based cleaning only")
-            else:
-                logger.info("OpenAI is disabled in config, using rule-based cleaning only")
+            logger.info("OpenAI is disabled in config, using rule-based cleaning only")
     
     def clean_comment(self, text: str) -> CleaningResult:
         """

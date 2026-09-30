@@ -3,6 +3,7 @@ P&ID OCR Extractor V2 - Multi-Engine + AI Intelligence
 Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
 Supports: Onshore, Offshore, ADNOC, Industrial/Project line-number formats
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import re
 import fitz  # PyMuPDF
@@ -467,9 +468,9 @@ class PIDLineExtractorV2:
         
         # Initialize OpenAI
         try:
-            openai_key = getattr(settings, 'OPENAI_API_KEY', None)
+            openai_key = provider_api_key('openai', fallback=(lambda: (getattr(settings, 'OPENAI_API_KEY', None))))
             if openai_key:
-                self.openai_client = OpenAI(api_key=openai_key)
+                self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (openai_key))
                 logger.info("✅ OpenAI initialized")
             else:
                 logger.warning("⚠️ OPENAI_API_KEY not configured")

@@ -9,6 +9,7 @@ Stages:
 4. Module Coverage: Map modules to specific P&ID drawings
 5. Connectivity Analysis: Analyze connections and relationships between modules
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 import logging
 import os
 from typing import Dict, List, Any, Optional
@@ -34,7 +35,7 @@ class FiveStageAnalyzer:
         """
         self.pfd_file_path = pfd_file_path
         self.document_info = document_info
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
         
         logger.info(f"[5-Stage Analyzer] Initialized for document: {document_info.get('document_number', 'Unknown')}")
     

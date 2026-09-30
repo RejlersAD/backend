@@ -4,6 +4,7 @@ Scheduled at 02:00 UAE time (Asia/Dubai) via Celery beat.
 Uses GPT-4o to generate 3 personalized insights per user.
 Failures are caught per-user so one bad user doesn't block others.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import logging
 import json
 from datetime import timedelta
@@ -101,7 +102,7 @@ def generate_user_insights_task(self):
 
     logger.info('[DashboardInsights] Starting nightly insight generation')
 
-    api_key = getattr(settings, 'OPENAI_API_KEY', None) or os.environ.get('OPENAI_API_KEY')
+    api_key = provider_api_key('openai', fallback=(lambda: (getattr(settings, 'OPENAI_API_KEY', None) or os.environ.get('OPENAI_API_KEY'))))
     model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o')
 
     if not api_key:
@@ -110,7 +111,7 @@ def generate_user_insights_task(self):
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
     except ImportError:
         logger.error('[DashboardInsights] openai package not installed — skipping')
         return

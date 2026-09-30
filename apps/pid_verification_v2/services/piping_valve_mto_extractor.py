@@ -32,6 +32,7 @@ Returned shape::
     }
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -570,7 +571,7 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
     VISION_BATCH_SIZE pages each, then call OpenAI in parallel.
     All rows are merged across batches, deduplicated and renumbered.
     """
-    api_key = os.getenv('OPENAI_API_KEY')
+    api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
     if not api_key:
         return {'rows': [], 'project_meta': {}, 'warnings': ['vision skipped — no OPENAI_API_KEY']}
 
@@ -592,7 +593,7 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
     for i in range(0, len(images), VISION_BATCH_SIZE):
         batches.append((i, images[i:i + VISION_BATCH_SIZE]))
 
-    client = OpenAI(api_key=api_key, timeout=VISION_TIMEOUT_SECS)
+    client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS)
     logger.info(
         '[ValveMTO] Vision → model=%s pages=%d batches=%d (size=%d, parallel=%d) dpi=%d',
         VISION_MODEL, len(images), len(batches), VISION_BATCH_SIZE,
@@ -778,7 +779,7 @@ def extract_valve_mto_streaming(
     )
     text_meta = _extract_meta_from_text(text)
 
-    api_key = os.getenv('OPENAI_API_KEY')
+    api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
     warnings: List[str] = []
 
     if not api_key:
@@ -845,7 +846,7 @@ def extract_valve_mto_streaming(
     if candidate_lines:
         logger.info('[ValveMTO] Harvested %d candidate line numbers from text layer', len(candidate_lines))
 
-    client = OpenAI(api_key=api_key, timeout=VISION_TIMEOUT_SECS)
+    client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS)
     logger.info(
         '[ValveMTO] Streaming vision → model=%s pages=%d batches=%d (size=%d, parallel=%d)',
         VISION_MODEL, len(images), total_batches, VISION_BATCH_SIZE,

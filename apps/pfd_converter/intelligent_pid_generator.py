@@ -12,6 +12,7 @@ Features:
 - Adaptive P&ID generation with DALL-E 3
 - No hardcoded rules - learns from examples
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import os
 import json
@@ -34,8 +35,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI
-OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
 
 
 class IntelligentPIDGenerator:

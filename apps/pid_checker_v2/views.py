@@ -6,6 +6,7 @@ GET  /extractions/<extraction_id>/      — single extraction with all tags
 DELETE /extractions/<extraction_id>/    — delete own extraction
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_available
 
 import hashlib
 import logging
@@ -297,8 +298,8 @@ class ExtractLineTagsView(APIView):
             if provider not in SUPPORTED_PROVIDERS:
                 return Response({'error': f"provider must be one of {SUPPORTED_PROVIDERS}"},
                                 status=status.HTTP_400_BAD_REQUEST)
-            if not api_key:
-                return Response({'error': 'api_key required for vision mode'},
+            if not provider_available(provider, api_key):
+                return Response({'error': 'An administrator must configure the selected AI provider before vision extraction.'},
                                 status=status.HTTP_400_BAD_REQUEST)
             model = (request.data.get('model') or '').strip() or None
             if model and provider == 'claude':
@@ -551,9 +552,9 @@ class ValidateLineTagsView(APIView):
         ai_provider = (request.data.get('vision_provider') or '').lower() or None
         ai_api_key = request.data.get('vision_api_key') or None
         if use_ai:
-            if ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key:
+            if ai_provider not in SUPPORTED_PROVIDERS or not provider_available(ai_provider, ai_api_key):
                 return Response(
-                    {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                    {'error': 'Select an available AI provider configured by an administrator.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -780,9 +781,9 @@ class CrossCheckView(APIView):
         use_ai = bool(request.data.get('use_ai'))
         ai_provider = (request.data.get('vision_provider') or '').lower() or None
         ai_api_key = request.data.get('vision_api_key') or None
-        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not provider_available(ai_provider, ai_api_key)):
             return Response(
-                {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                {'error': 'Select an available AI provider configured by an administrator.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1046,14 +1047,14 @@ class EquipmentCrossCheckView(APIView):
                 {'error': 'equipment_attributes must be an object mapping tag → {attribute_key: value}'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not provider_available(ai_provider, ai_api_key)):
             return Response(
-                {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                {'error': 'Select an available AI provider configured by an administrator.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if equipment_attributes and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+        if equipment_attributes and (ai_provider not in SUPPORTED_PROVIDERS or not provider_available(ai_provider, ai_api_key)):
             return Response(
-                {'error': 'equipment_attributes require vision_provider (openai|claude) and vision_api_key',
+                {'error': 'Equipment attributes require an available administrator-configured AI provider.',
                  'code': 'byok_required_for_attributes'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -1316,14 +1317,14 @@ class InstrumentCrossCheckView(APIView):
                 {'error': 'instrument_attributes must be an object mapping tag → {attribute_key: value}'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not provider_available(ai_provider, ai_api_key)):
             return Response(
-                {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                {'error': 'Select an available AI provider configured by an administrator.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if instrument_attributes and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+        if instrument_attributes and (ai_provider not in SUPPORTED_PROVIDERS or not provider_available(ai_provider, ai_api_key)):
             return Response(
-                {'error': 'instrument_attributes require vision_provider (openai|claude) and vision_api_key',
+                {'error': 'Instrument attributes require an available administrator-configured AI provider.',
                  'code': 'byok_required_for_attributes'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -1385,8 +1386,8 @@ class ExtractEquipmentTagsFromPidView(APIView):
         if provider not in SUPPORTED_PROVIDERS:
             return Response({'error': f'provider must be one of {SUPPORTED_PROVIDERS}'},
                             status=status.HTTP_400_BAD_REQUEST)
-        if not api_key:
-            return Response({'error': 'api_key required for vision extraction'},
+        if not provider_available(provider, api_key):
+            return Response({'error': 'An administrator must configure the selected AI provider for vision extraction.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
         from .services.equipment_vision_extractor import extract_equipment_tags_via_vision
@@ -1444,8 +1445,8 @@ class ExtractInstrumentTagsFromPidView(APIView):
         if provider not in SUPPORTED_PROVIDERS:
             return Response({'error': f'provider must be one of {SUPPORTED_PROVIDERS}'},
                             status=status.HTTP_400_BAD_REQUEST)
-        if not api_key:
-            return Response({'error': 'api_key required for vision extraction'},
+        if not provider_available(provider, api_key):
+            return Response({'error': 'An administrator must configure the selected AI provider for vision extraction.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
         from .services.instrument_vision_extractor import extract_instrument_tags_via_vision
@@ -1757,8 +1758,8 @@ class TestApiKeyView(APIView):
         if provider not in SUPPORTED_PROVIDERS:
             return Response({'valid': False, 'message': f"Unsupported provider '{provider}'."},
                             status=status.HTTP_400_BAD_REQUEST)
-        if not api_key:
-            return Response({'valid': False, 'message': 'API key is required.'},
+        if not provider_available(provider, api_key):
+            return Response({'valid': False, 'message': 'The selected AI provider is not configured. Contact an administrator.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
         from .services.vision_extractor import test_api_key
@@ -1821,8 +1822,8 @@ class IdentifySymbolsView(APIView):
         if provider not in SUPPORTED_PROVIDERS:
             return Response({'error': f'provider must be one of {SUPPORTED_PROVIDERS}'},
                             status=status.HTTP_400_BAD_REQUEST)
-        if not api_key:
-            return Response({'error': 'api_key required for vision extraction'},
+        if not provider_available(provider, api_key):
+            return Response({'error': 'An administrator must configure the selected AI provider for vision extraction.'},
                             status=status.HTTP_400_BAD_REQUEST)
         if model and provider == 'claude':
             from .services.vision_extractor import ALLOWED_CLAUDE_VISION_MODELS

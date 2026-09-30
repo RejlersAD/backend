@@ -4,6 +4,7 @@ Advanced AI-powered conversion using GPT-4o Vision and engineering intelligence
 Enhanced with RAG (Retrieval Augmented Generation) for improved pattern recognition
 Enhanced DALL-E 3 Integration for AI-Generated P&ID Drawings
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 from apps.rbac.ai_telemetry import observed_client
 import openai
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
@@ -26,12 +27,10 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client with API key
-OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
-openai.api_key = OPENAI_API_KEY
 
 # Initialize new OpenAI client for DALL-E 3
 try:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
     logger.info("✅ OpenAI client initialized for DALL-E 3 image generation")
 except Exception as e:
     openai_client = None
@@ -80,7 +79,8 @@ class DrawingConfig:
     @staticmethod
     def is_api_key_valid():
         """Check if OpenAI API key is configured"""
-        return bool(OPENAI_API_KEY and OPENAI_API_KEY != '' and not OPENAI_API_KEY.startswith('your-'))
+        key = provider_api_key('openai')
+        return bool(key and not key.startswith('your-'))
 
 
 class PFDToPIDConverter:
@@ -125,7 +125,7 @@ class PFDToPIDConverter:
                 logger.info("Using default extraction prompt")
             
             # Call OpenAI API
-            response = observed_client(openai).chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
@@ -179,7 +179,7 @@ class PFDToPIDConverter:
                 prompt = self._get_pid_generation_prompt(pfd_data)
                 logger.info("Using default P&ID generation prompt")
             
-            response = observed_client(openai).chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
@@ -364,7 +364,7 @@ class PFDToPIDConverter:
             logger.info(f"📝 DALL-E 2 Prompt length: {len(prompt)} characters")
             
             # Use old API for DALL-E 2 compatibility
-            response = openai.Image.create(
+            response = openai_client.images.generate(
                 model=DrawingConfig.DALLE2_MODEL,
                 prompt=prompt,
                 size=DrawingConfig.DALLE2_SIZE,
@@ -814,7 +814,7 @@ Return JSON with:
 - missing_elements: list
 """
             
-            response = observed_client(openai).chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {

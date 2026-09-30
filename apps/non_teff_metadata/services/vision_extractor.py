@@ -46,6 +46,7 @@ value, and it never raises into the caller.
 """
 
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import hashlib
@@ -399,14 +400,14 @@ def _file_sha256(path: str) -> str:
 
 def _gemini_api_key() -> Optional[str]:
     return (
-        os.getenv('GEMINI_API_KEY')
+        provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY')
         or os.getenv('GOOGLE_GENERATIVEAI_API_KEY')
-        or getattr(settings, 'GEMINI_API_KEY', None)
+        or getattr(settings, 'GEMINI_API_KEY', None))))
     )
 
 
 def _openai_api_key() -> Optional[str]:
-    return os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+    return provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
 
 
 def _crop_pil(img, frac: Optional[List[float]]):
@@ -603,7 +604,7 @@ def _call_gemini_vision(model: str, img_bytes: bytes, mime: str,
         logger.info('google-genai not installed — Gemini vision skipped')
         return {}
     try:
-        client = genai.Client(api_key=api_key)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         parts = [
             _build_user_prompt(missing_fields, file_name),
             _gtypes.Part.from_bytes(data=img_bytes, mime_type=mime),
@@ -636,11 +637,7 @@ def _call_openai_vision(model: str, img_bytes: bytes, mime: str,
     except ImportError:
         return {}
     try:
-        client = OpenAI(
-            api_key=api_key,
-            timeout=float(VISION_CONFIG['vision_timeout_s']),
-            max_retries=1,
-        )
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=float(VISION_CONFIG['vision_timeout_s']), max_retries=1)
         b64 = base64.b64encode(img_bytes).decode('ascii')
         resp = client.chat.completions.create(
             model=model,

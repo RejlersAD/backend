@@ -13,6 +13,7 @@ Approach:
 4. Use DALL-E 3 to create a professional P&ID drawing based on specifications
 5. Enhance the generated image with annotations and title block overlay
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import openai
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
@@ -34,8 +35,7 @@ from .reference_learning_system import ReferencePIDLearner
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client
-OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OPENAI_API_KEY != '' else None
+openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
 
 
 class AIPIDDrawingGenerator:
