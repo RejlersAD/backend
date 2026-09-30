@@ -11,6 +11,7 @@ Analysis Modes:
 
 Security: API keys are NEVER persisted — passed in-memory only from frontend sessionStorage.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import logging
 import json
 from typing import Dict, List, Any, Optional
@@ -50,6 +51,7 @@ def run_openai_analysis(
         ValueError: If API key is invalid
         RuntimeError: If OpenAI API call fails
     """
+    api_key = provider_api_key('openai', fallback=lambda: (api_key))
     if not api_key or not api_key.startswith('sk-'):
         raise ValueError("Invalid OpenAI API key format")
     
@@ -57,7 +59,7 @@ def run_openai_analysis(
         import openai
         
         # Initialize client with user's key
-        client = openai.OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
         
         # Build structured prompt
         prompt = _build_openai_prompt(drawing_data)
@@ -155,6 +157,7 @@ def run_claude_analysis(
         ValueError: If API key is invalid
         RuntimeError: If Claude API call fails
     """
+    api_key = provider_api_key('anthropic', fallback=lambda: (api_key))
     if not api_key or not api_key.startswith('sk-ant-'):
         raise ValueError("Invalid Claude API key format")
     
@@ -162,7 +165,7 @@ def run_claude_analysis(
         import anthropic
         
         # Initialize client with user's key
-        client = anthropic.Anthropic(api_key=api_key)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key))
         
         # Build structured prompt
         prompt = _build_claude_prompt(drawing_data)

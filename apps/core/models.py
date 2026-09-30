@@ -674,3 +674,6 @@ class DocumentAccessLog(models.Model):
 
     def __str__(self):
         return f'{self.access_type} on {self.document_id} by user {self.user_id}'
+
+
+from .ai_credential_models import AIProviderConfiguration, AIProviderCredential  # noqa: E402,F401

@@ -23,6 +23,7 @@ Design goals (matches the user's brief):
 """
 
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import hashlib
 import json
@@ -188,14 +189,14 @@ def _hash_context(item_id: str, ctx: Dict[str, Any]) -> str:
 
 def _gemini_api_key() -> Optional[str]:
     return (
-        os.getenv('GEMINI_API_KEY')
+        provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY')
         or os.getenv('GOOGLE_GENERATIVEAI_API_KEY')
-        or getattr(settings, 'GEMINI_API_KEY', None)
+        or getattr(settings, 'GEMINI_API_KEY', None))))
     )
 
 
 def _openai_api_key() -> Optional[str]:
-    return os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+    return provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +298,7 @@ def _call_gemini(model: str, user_prompt: str) -> Dict[str, Any]:
     except ImportError:
         return {}
     try:
-        client = genai.Client(api_key=api_key)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         cfg = _gtypes.GenerateContentConfig(
             system_instruction=RECO_CONFIG['system_prompt'],
             max_output_tokens=int(RECO_CONFIG['max_tokens']),
@@ -323,11 +324,7 @@ def _call_openai(model: str, user_prompt: str) -> Dict[str, Any]:
     except ImportError:
         return {}
     try:
-        client = OpenAI(
-            api_key=api_key,
-            timeout=float(RECO_CONFIG['timeout_s']),
-            max_retries=1,
-        )
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=float(RECO_CONFIG['timeout_s']), max_retries=1)
         resp = client.chat.completions.create(
             model=model,
             temperature=float(RECO_CONFIG['temperature']),

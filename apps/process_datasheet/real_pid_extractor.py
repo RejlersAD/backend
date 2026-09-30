@@ -3,6 +3,7 @@ Real P&ID Valve Extractor using HYBRID approach: OCR + OpenAI Vision
 STEP 1: Extract ALL text using Tesseract/EasyOCR/PaddleOCR
 STEP 2: Send OCR text + image to OpenAI Vision for intelligent structuring
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import logging
 import os
 import base64
@@ -32,9 +33,9 @@ class RealPIDExtractor:
         
         # Initialize OpenAI
         try:
-            api_key = os.getenv('OPENAI_API_KEY')
+            api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
             if api_key:
-                self.openai_client = OpenAI(api_key=api_key)
+                self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
                 logger.info("✅ OpenAI Vision initialized")
             else:
                 logger.warning("⚠️ No OPENAI_API_KEY found")
@@ -290,7 +291,7 @@ If no valves are visible on this page, return an empty array [].
                     )
 
                     content = response.choices[0].message.content.strip()
-                    logger.info(f"[RealPIDExtractor] Page {page_num + 1} raw response (first 400 chars): {content[:400]}")
+                    logger.info(f"[RealPIDExtractor] Page {page_num + 1} response length: {len(content)} characters")
                     content = re.sub(r'```json\s*', '', content)
                     content = re.sub(r'```\s*', '', content)
                     content = content.strip()
@@ -319,7 +320,7 @@ If no valves are visible on this page, return an empty array [].
                     logger.info(f"✅ [RealPIDExtractor] Page {page_num + 1}: {len(page_valves)} valves found, {new_count} new (total: {len(all_valves)})")
 
                 except json.JSONDecodeError as e:
-                    logger.error(f"[RealPIDExtractor] Failed to parse JSON for page {page_num + 1}: {e}. Raw content: {content[:300]}")
+                    logger.error(f"[RealPIDExtractor] Failed to parse JSON for page {page_num + 1}: {e}. Response length: {len(content)} characters")
                 except Exception as e:
                     logger.error(f"[RealPIDExtractor] Vision API failed for page {page_num + 1}: {e}")
 

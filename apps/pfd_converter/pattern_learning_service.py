@@ -2,6 +2,7 @@
 PFD to P&ID Pattern Learning Service
 Soft-coded service that learns conversion patterns from PFD-P&ID pairs using GPT-4 Vision
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import json
 import base64
@@ -141,8 +142,8 @@ class PFDtoPIDPatternLearner:
     
     def __init__(self, api_key=None):
         """Initialize with OpenAI API key"""
-        self.api_key = api_key or settings.OPENAI_API_KEY
-        self.client = OpenAI(api_key=self.api_key)
+        self.api_key = provider_api_key('openai', fallback=(lambda: (api_key or settings.OPENAI_API_KEY)))
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (self.api_key))
         self.config = PATTERN_LEARNING_CONFIG
     
     def convert_pdf_to_base64(self, pdf_path, page_num=0, dpi=200):

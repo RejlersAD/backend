@@ -31,6 +31,7 @@ Returned shape::
     }
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -199,7 +200,7 @@ def _extract_via_vision(
     if len(text_already) >= int(vis_cfg.get('skip_if_text_chars_gte', 800)):
         return {}, ['vision skipped — text extraction was sufficient']
 
-    api_key = os.getenv('OPENAI_API_KEY')
+    api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
     if not api_key:
         return {}, ['vision skipped — no OPENAI_API_KEY']
 
@@ -235,7 +236,7 @@ def _extract_via_vision(
         })
 
     try:
-        client = OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         resp = client.chat.completions.create(
             model=vis_cfg.get('model', 'gpt-4o'),
             temperature=float(vis_cfg.get('temperature', 0.0)),

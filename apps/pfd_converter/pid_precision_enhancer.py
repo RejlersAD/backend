@@ -21,6 +21,7 @@ Feature control (environment variables with soft-coded defaults):
   PID_MIN_SAFETY_DEVICES_PER_VESSEL  (default: 1)
   PID_APPLICABLE_STANDARDS           (default: ISA 5.1, ADNOC DEP, API 520, API 521)
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import json
 import logging
@@ -82,7 +83,7 @@ class PIDPrecisionEnhancer:
         """Lazy-init OpenAI client."""
         if self._client is None:
             from apps.rbac.ai_telemetry import observed_openai as OpenAI
-            self._client = OpenAI(api_key=config('OPENAI_API_KEY'))
+            self._client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY')))
         return self._client
 
     # ── Public API ────────────────────────────────────────────────────────────

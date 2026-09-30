@@ -409,3 +409,13 @@ apps/finance/data/invoice_performance_summary.json
 !apps/sales/tests/test_email_client_resolution.py
 !apps/sales/tests/test_email_client_concurrency.py
 !docs/SALES_EMAIL_AI_REVIEW.md
+
+# Reviewed AI registry source and synthetic regression coverage (no secrets).
+!apps/core/ai_credentials.py
+!apps/core/migrations/0013_ai_provider_credentials.py
+!apps/core/tests/test_ai_credentials.py
+!apps/core/tests/tests_ai_consumer_clients.py
+!apps/planning_intelligence/tests/tests_central_ai_credentials.py
+!apps/planning_intelligence/tests/tests_central_ai_transports.py
+!docs/ADMIN_AI_API_KEYS.md
+!docs/AI_PROVIDER_CONSUMER_COVERAGE.md

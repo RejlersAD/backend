@@ -27,6 +27,7 @@ catches what the first missed, combined and deduped rather than trusted
 alone.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -574,11 +575,10 @@ def _call_claude(api_key: str, image_b64: str) -> tuple[str, int]:
     own comment below for where that number comes from."""
     import anthropic
     logger.info(
-        '[IOWF] Calling Claude vision: model=%s image_b64_bytes=%d prompt_chars=%d key_prefix=%s...',
+        '[IOWF] Calling Claude vision: model=%s image_b64_bytes=%d prompt_chars=%d',
         VISION_MODELS['claude'], len(image_b64), len(VISION_USER_PROMPT),
-        (api_key or '')[:10],
     )
-    client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+    client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.messages.create(
         model=VISION_MODELS['claude'],
         max_tokens=VISION_MAX_TOKENS,
@@ -624,7 +624,7 @@ def _call_claude(api_key: str, image_b64: str) -> tuple[str, int]:
     # Log the FULL response, not a truncated preview — a truncated log was
     # useless for diagnosing exactly the failure mode below (empty text),
     # and even a full 32768-token response is only ~130KB of log text.
-    logger.info('[IOWF] Claude vision raw text (%d chars): %s', len(text), text)
+    logger.info('[IOWF] Claude vision response length: %d characters', len(text))
 
     if not text.strip():
         # A successful API call (no exception) that nonetheless produced
@@ -666,11 +666,10 @@ def _call_openai(api_key: str, image_b64: str) -> tuple[str, int]:
     own comment below for where that number comes from."""
     import openai
     logger.info(
-        '[IOWF] Calling OpenAI vision: model=%s image_b64_bytes=%d prompt_chars=%d key_prefix=%s...',
+        '[IOWF] Calling OpenAI vision: model=%s image_b64_bytes=%d prompt_chars=%d',
         VISION_MODELS['openai'], len(image_b64), len(VISION_USER_PROMPT),
-        (api_key or '')[:10],
     )
-    client = openai.OpenAI(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+    client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.chat.completions.create(
         model=VISION_MODELS['openai'],
         max_tokens=VISION_MAX_TOKENS,
@@ -1714,6 +1713,7 @@ def extract_pid_tags_from_page(
     progress-counter update must not be able to take down real
     extraction work.
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     def _tick(tokens_used=0):
         if on_call_complete is None:
             return
@@ -1835,6 +1835,7 @@ def extract_pid_tags_via_vision(
     collected and turned into an explicit warning string in the returned
     warnings list, so a bad key is never silent again.
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     doc = fitz.open(stream=pdf_bytes, filetype='pdf')
     page_count = doc.page_count
     doc.close()
@@ -1892,12 +1893,13 @@ def extract_pid_tags_via_vision(
 
 def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
     """One minimal text-only call to confirm a BYOK key actually works."""
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if not api_key or not api_key.strip():
         return False, 'API key is required.'
     try:
         if provider == 'claude':
             import anthropic
-            client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+            client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
             client.messages.create(
                 model=VISION_MODELS['claude'],
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
@@ -1913,7 +1915,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
             )
         elif provider == 'openai':
             import openai
-            client = openai.OpenAI(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+            client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
             client.chat.completions.create(
                 model=VISION_MODELS['openai'],
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,

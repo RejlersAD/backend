@@ -2,6 +2,7 @@
 Simplified RAG Service using OpenAI Embeddings
 Stores vectors in PostgreSQL for persistence
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import json
 from typing import List, Dict, Any, Optional
@@ -17,11 +18,11 @@ class RAGService:
     
     def __init__(self):
         """Initialize RAG service with OpenAI client"""
-        api_key = os.environ.get('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get('OPENAI_API_KEY'))))
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
-        self.client = OpenAI(api_key=api_key)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         self.embedding_model = os.environ.get('EMBEDDING_MODEL', 'text-embedding-3-small')
     
     def generate_embedding(self, text: str) -> List[float]:

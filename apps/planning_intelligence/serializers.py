@@ -197,17 +197,30 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
             return annotated
         return obj.files.filter(is_deleted=False).count()
 
+    def _effective_ai_settings(self, obj):
+        from .services.project_ai_settings import settings_payload
+        from .services.central_ai import central_status
+        from .services.project_ai import MODEL_CHOICES_BY_PROVIDER
+        cache = getattr(self, '_effective_ai_cache', None)
+        if cache is None:
+            cache = self._effective_ai_cache = {}
+            self._central_ai_metadata = {name: central_status(name) for name in MODEL_CHOICES_BY_PROVIDER}
+        identity = str(obj.pk)
+        if identity not in cache:
+            cache[identity] = settings_payload(obj, central_configurations=self._central_ai_metadata)
+        return cache[identity]
+
     def get_ai_enabled(self, obj):
-        return bool((obj.ai_settings or {}).get('enabled'))
+        return self._effective_ai_settings(obj)['enabled']
 
     def get_ai_provider(self, obj):
-        return (obj.ai_settings or {}).get('provider') or None
+        return self._effective_ai_settings(obj)['provider']
 
     def get_ai_model(self, obj):
-        return (obj.ai_settings or {}).get('model') or None
+        return self._effective_ai_settings(obj)['model']
 
     def get_ai_key_configured(self, obj):
-        return bool((obj.ai_settings or {}).get('api_key_encrypted'))
+        return self._effective_ai_settings(obj)['key_configured']
 
     def validate_enterprise_project(self, value):
         request = self.context.get('request')

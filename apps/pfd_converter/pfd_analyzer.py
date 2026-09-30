@@ -2,6 +2,7 @@
 PFD Analyzer Service - Phase 1 Analysis
 Intelligent analysis of PFD documents to extract modules, connectivity, and complexity
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 from apps.rbac.ai_telemetry import observed_client
 import logging
 import openai
@@ -16,7 +17,6 @@ class PFDAnalyzer:
     """Analyze PFD documents and extract detailed module information"""
     
     def __init__(self):
-        openai.api_key = settings.OPENAI_API_KEY
         self.model = "gpt-4o"
     
     def analyze_pfd_document(self, pfd_doc) -> Dict[str, Any]:
@@ -150,7 +150,7 @@ Return ONLY a valid JSON array of modules. Example format:
 ]"""
         
         try:
-            response = observed_client(openai).chat.completions.create(
+            response = observed_client(lazy_provider_client('openai', openai.OpenAI)).chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are an expert process engineer specializing in PFD analysis. Always return valid JSON arrays."},
@@ -214,7 +214,7 @@ Return ONLY valid JSON in this format:
 }}"""
         
         try:
-            response = observed_client(openai).chat.completions.create(
+            response = observed_client(lazy_provider_client('openai', openai.OpenAI)).chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are an expert in process flow analysis. Always return valid JSON."},

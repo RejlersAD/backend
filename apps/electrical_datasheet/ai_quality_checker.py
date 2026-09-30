@@ -11,6 +11,7 @@ Features:
 - Universal equipment type support
 - Rule-based fallback when AI is unavailable
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import json
 import re
@@ -41,13 +42,13 @@ class UnifiedAIQualityChecker:
     
     def __init__(self):
         """Initialize OpenAI client with fallback support"""
-        api_key = getattr(settings, 'OPENAI_API_KEY', None)
+        api_key = provider_api_key('openai', fallback=(lambda: (getattr(settings, 'OPENAI_API_KEY', None))))
         self.ai_available = False
         self.client = None
         
         if api_key and api_key != '':
             try:
-                self.client = OpenAI(api_key=api_key)
+                self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
                 self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4-turbo-preview')
                 self.ai_available = True
             except Exception as e:

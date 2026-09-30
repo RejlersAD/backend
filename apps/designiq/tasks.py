@@ -2,6 +2,7 @@
 DesignIQ Celery Tasks
 Background tasks for long-running operations like P&ID OCR processing
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 from apps.rbac.ai_telemetry import tracked_user_job
 from celery import shared_task
@@ -293,12 +294,12 @@ def call_openai_stress_criticality_batch(lines_data, section_7_text):
         from decouple import config
         from apps.rbac.ai_telemetry import observed_openai as OpenAI
 
-        api_key = config('OPENAI_API_KEY', default=None)
+        api_key = provider_api_key('openai', fallback=(lambda: (config('OPENAI_API_KEY', default=None))))
         if not api_key:
             logger.warning("⚠️ OPENAI_API_KEY not set – skipping doc-based stress criticality supplement")
             return {}
 
-        client = OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
 
         # Build the context for each line (compact)
         lines_context = []

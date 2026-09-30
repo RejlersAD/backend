@@ -25,6 +25,7 @@ Returns a structured ExtractionResult dict:
                        "vision_used": bool, "message": str | None},
 }
 """
+from apps.core.ai_consumer_clients import provider_api_key
 import logging
 import re
 from functools import lru_cache
@@ -98,6 +99,7 @@ def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | Non
         merged — see module docstring. When Tesseract is also unavailable
         AND no api_key is given, raises NoExtractionMethodAvailableError.
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     tesseract_ok = _tesseract_available()
 
     tesseract_text = ''

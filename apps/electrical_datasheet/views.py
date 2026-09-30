@@ -1,3 +1,4 @@
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -656,7 +657,7 @@ Overall Compliance Score: {compliance_score}%
         # Perform AI validation and data extraction using OpenAI
         try:
             # Check if OpenAI API key is properly configured
-            api_key = settings.OPENAI_API_KEY
+            api_key = provider_api_key('openai', fallback=(lambda: (settings.OPENAI_API_KEY)))
             is_valid_key = (
                 api_key and 
                 len(api_key) > 50 and 
@@ -675,7 +676,7 @@ Overall Compliance Score: {compliance_score}%
                 return Response(validation_data, status=status.HTTP_200_OK)
             
             from openai import OpenAI
-            client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
             
             validation_prompt = f"""
 You are an expert electrical engineer specializing in {equipment_type.name} validation and data extraction according to ADNOC standards.
@@ -2507,7 +2508,7 @@ Please provide your response as JSON with this exact structure:
             try: os.unlink(tmp_path)
             except Exception: pass
 
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY))
         prompt = (
             f"You are filling a single cell on an electrical datasheet.\n"
             f"Field: {row.get('description', '')}\n"

@@ -7,6 +7,7 @@ Task pipeline (all chained in a single async job):
   3. Generate Excel & PDF reports → upload to S3
   4. Update document status = completed (or failed)
 """
+from apps.core.ai_consumer_clients import provider_available, provider_api_key
 import logging
 import os
 import re
@@ -136,7 +137,7 @@ def process_pid_document(self, document_id: str, context: dict = None):
             # any library size automatically. Only bothers fetching when a
             # Claude key is actually present — Vision won't run without one.
             _symbol_images = []
-            if context.get('claude_api_key') and doc.project_id:
+            if provider_available('anthropic', context.get('claude_api_key')) and doc.project_id:
                 from apps.pid_verification_v2.services.legend_bridge import get_symbol_images_for_project
                 try:
                     _symbol_images = get_symbol_images_for_project(doc.project)
@@ -288,7 +289,7 @@ def process_pid_document(self, document_id: str, context: dict = None):
         # every page in the loop below instead of re-fetched per page.
         _legacy_symbol_images = []
         _legacy_pdf_bytes = None
-        if context.get('claude_api_key') and doc.project_id:
+        if provider_available('anthropic', context.get('claude_api_key')) and doc.project_id:
             from apps.pid_verification_v2.services.legend_bridge import get_symbol_images_for_project
             try:
                 _legacy_symbol_images = get_symbol_images_for_project(doc.project)
@@ -317,8 +318,8 @@ def process_pid_document(self, document_id: str, context: dict = None):
             drawing_obj.findings.all().delete()
 
             # ── 4. Extract elements (hybrid Tesseract + AI Vision) ─────────
-            _legacy_extraction_key = context.get('claude_api_key') or context.get('openai_api_key')
-            _legacy_extraction_provider = 'claude' if context.get('claude_api_key') else 'openai'
+            _legacy_extraction_provider = 'claude' if provider_available('anthropic', context.get('claude_api_key')) else 'openai'
+            _legacy_extraction_key = context.get('claude_api_key') if _legacy_extraction_provider == 'claude' else context.get('openai_api_key')
             extraction = extract_drawing(
                 file_path, page_index=seg.page_index, legend_data=project_legend,
                 api_key=_legacy_extraction_key, provider=_legacy_extraction_provider,
@@ -523,12 +524,12 @@ def process_pid_document(self, document_id: str, context: dict = None):
                         symbols = []
                         # Route to appropriate AI service
                         if analysis_mode == 'enhanced_openai':
-                            openai_key = context.get('openai_api_key')
+                            openai_key = provider_api_key('openai', fallback=lambda: (context.get('openai_api_key')))
                             if openai_key:
                                 raw_findings = run_openai_analysis(drawing_data, openai_key)['findings']
 
                         elif analysis_mode == 'deep_claude':
-                            claude_key = context.get('claude_api_key')
+                            claude_key = provider_api_key('anthropic', fallback=lambda: (context.get('claude_api_key')))
                             if claude_key and page_image_b64:
                                 result = run_page_vision_analysis(
                                     drawing_data, claude_key, page_image_b64,
@@ -539,8 +540,8 @@ def process_pid_document(self, document_id: str, context: dict = None):
                                     symbols = result['symbols']
 
                         elif analysis_mode == 'hybrid':
-                            openai_key = context.get('openai_api_key')
-                            claude_key = context.get('claude_api_key')
+                            openai_key = provider_api_key('openai', fallback=lambda: (context.get('openai_api_key')))
+                            claude_key = provider_api_key('anthropic', fallback=lambda: (context.get('claude_api_key')))
                             if openai_key and claude_key:
                                 result = run_hybrid_analysis(
                                     drawing_data, openai_key, claude_key,
@@ -1542,9 +1543,8 @@ def run_ai_checks_task(self, run_id: str, context: dict = None):
         
         project = check_run.project
         analysis_mode = context.get('analysis_mode', 'hybrid')
-        openai_key = context.get('openai_api_key')
-        claude_key = context.get('claude_api_key')
-        
+        openai_key = provider_api_key('openai', fallback=lambda: (context.get('openai_api_key')))
+        claude_key = provider_api_key('anthropic', fallback=lambda: (context.get('claude_api_key')))
         # Initialize extraction engine
         extractor = PIDExtractionEngine(
             openai_key=openai_key,

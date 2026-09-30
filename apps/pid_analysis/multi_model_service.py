@@ -2,6 +2,7 @@
 Multi-Model AI Service - Supports OpenAI and Google Gemini
 Provides unified interface for both models with automatic fallback
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 from typing import List, Dict, Any, Optional
 from django.conf import settings
@@ -11,14 +12,9 @@ try:
     from google.genai import types as genai_types
     GENAI_SDK = 'new'
 except ImportError:
-    try:
-        import google.generativeai as google_genai
-        genai_types = None
-        GENAI_SDK = 'legacy'
-    except ImportError:
-        google_genai = None
-        genai_types = None
-        GENAI_SDK = None
+    google_genai = None
+    genai_types = None
+    GENAI_SDK = None
 
 
 class MultiModelAIService:
@@ -34,28 +30,18 @@ class MultiModelAIService:
         
         # Initialize OpenAI
         self.openai_client = None
-        openai_key = os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+        openai_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
         if openai_key and self.provider in ['openai', 'both']:
-            self.openai_client = OpenAI(
-                api_key=openai_key,
-                timeout=180.0,
-                max_retries=2
-            )
+            self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (openai_key), timeout=180.0, max_retries=2)
             print("[AI SERVICE] ✅ OpenAI client initialized")
         
         # Initialize Gemini
         self.gemini_client = None
         self.gemini_api_key = None
-        gemini_key = os.getenv('GEMINI_API_KEY') or getattr(settings, 'GEMINI_API_KEY', None)
+        gemini_key = provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY') or getattr(settings, 'GEMINI_API_KEY', None))))
         if gemini_key and self.provider in ['gemini', 'both'] and google_genai:
             try:
-                if GENAI_SDK == 'new':
-                    # New google-genai SDK: use Client object
-                    self.gemini_client = observed_google(google_genai.Client(api_key=gemini_key))
-                else:
-                    # Legacy google-generativeai SDK
-                    google_genai.configure(api_key=gemini_key)
-                    self.gemini_client = observed_google(google_genai)
+                self.gemini_client = observed_google(lazy_provider_client('gemini', google_genai.Client, api_key=lambda: gemini_key))
                 self.gemini_api_key = gemini_key
                 print(f"[AI SERVICE] ✅ Gemini client initialized (SDK: {GENAI_SDK}, using stable 2.0-flash)")
             except Exception as e:
@@ -215,27 +201,14 @@ class MultiModelAIService:
                     if content:
                         prompt_parts.append(content)
             
-            if GENAI_SDK == 'new':
-                # New google-genai SDK
-                response = self.gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt_parts,
-                    config=google_genai.types.GenerateContentConfig(
-                        max_output_tokens=max_tokens,
-                        temperature=temperature,
-                    )
-                )
-                result = response.text or ""
-            else:
-                # Legacy google-generativeai SDK
-                model = self.gemini_client.GenerativeModel(model_name)
-                generation_config = {
-                    'max_output_tokens': max_tokens,
-                    'temperature': temperature,
-                }
-                response = model.generate_content(prompt_parts, generation_config=generation_config)
-                result = response.text or ""
-            
+            response = self.gemini_client.models.generate_content(
+                model=model_name, contents=prompt_parts,
+                config=google_genai.types.GenerateContentConfig(
+                    max_output_tokens=max_tokens, temperature=temperature,
+                ),
+            )
+            result = response.text or ""
+
             print(f"[GEMINI] Response length: {len(result)} chars")
             return result.strip()
             

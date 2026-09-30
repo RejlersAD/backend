@@ -14,10 +14,12 @@ from types import SimpleNamespace
 
 import requests
 from decouple import config
+from django.db import close_old_connections, connections
 from django.views.decorators.debug import sensitive_variables
 
 from ..config import CLAUDE_MODEL_CHOICES, DEFAULT_CLAUDE_MODEL
 from . import byok_crypto, claude_client
+from .central_ai import central_project_config
 
 
 logger = logging.getLogger(__name__)
@@ -129,8 +131,8 @@ class AnalysisRequests:
     """
 
     def __init__(self, project, user, concurrency):
-        # Freeze the selected credential settings and avoid deferred ORM reads
-        # or thread-local database connections in provider workers.
+        # Freeze project settings; provider workers resolve the current central
+        # credential per operation and close their own database connections.
         self.project = SimpleNamespace(pk=getattr(project, 'pk', None), id=getattr(project, 'id', None),
                                        ai_settings=deepcopy(_settings(project)))
         self.user = user
@@ -159,12 +161,18 @@ class AnalysisRequests:
         def call():
             error, usage = {}, []
             try:
+                close_old_connections()
                 result = call_project_ai(self.project, user=self.user, error_details=error,
                                          progress_callback=receive,
                                          usage_callback=lambda **values: usage.append(values), **request)
             except Exception:
                 result = None
                 error = {'provider': project_provider(self.project), 'code': 'invalid_response', 'http_status': None}
+            finally:
+                # Django request/Celery cleanup runs on the caller's thread.
+                # These short-lived executor threads must release their own
+                # registry connections, even when CONN_MAX_AGE is nonzero.
+                connections.close_all()
             return result, error, usage
 
         self.pending[self.executor.submit(call)] = key
@@ -203,6 +211,10 @@ def get_project_ai_config(project):
     """Return decrypted credentials for the selected provider only, or None."""
     provider = project_provider(project)
     settings = _settings(project)
+    if provider in MODEL_CHOICES_BY_PROVIDER:
+        managed, central = central_project_config(project, provider, DEFAULT_MODEL_BY_PROVIDER[provider])
+        if managed:
+            return central
     if settings.get('api_key_provider', provider) != provider:
         return None
     if provider == 'anthropic':

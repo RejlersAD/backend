@@ -15,6 +15,7 @@ Task pipeline:
   4. Generate Excel & PDF reports -> upload to S3 (finalize step).
   5. Update document status = completed (or failed).
 """
+from apps.core.ai_consumer_clients import provider_available, provider_api_key
 import logging
 import os
 import shutil
@@ -147,7 +148,7 @@ def process_pid_document(self, document_id: str, context: dict = None):
     # this scales to any library size automatically. Only bothers fetching
     # when a Claude key is actually present — Vision won't run without one.
     _symbol_images = []
-    if context.get('claude_api_key') and doc.project_id:
+    if provider_available('anthropic', context.get('claude_api_key')) and doc.project_id:
         _symbol_images = _load_symbol_images_v1(doc.project)
         logger.info(
             '[PIDVTask] Loaded %d reference symbol image(s) for document_id=%s',
@@ -439,8 +440,8 @@ def _process_one_page(doc, seg, file_path: str, pdf_bytes: bytes, project_legend
     # path) or process_pid_page's (fan-out path), both of which surface it
     # as a clear FAILED status + error_message instead of a silently
     # "completed" document with zero findings.
-    extraction_api_key = (context or {}).get('claude_api_key') or (context or {}).get('openai_api_key')
-    extraction_provider = 'claude' if (context or {}).get('claude_api_key') else 'openai'
+    extraction_provider = 'claude' if provider_available('anthropic', (context or {}).get('claude_api_key')) else 'openai'
+    extraction_api_key = (context or {}).get('claude_api_key') if extraction_provider == 'claude' else (context or {}).get('openai_api_key')
     extraction = extract_drawing(
         file_path, page_index=seg.page_index, legend_data=project_legend,
         api_key=extraction_api_key, provider=extraction_provider,
@@ -557,8 +558,8 @@ def _process_one_page(doc, seg, file_path: str, pdf_bytes: bytes, project_legend
                 'notes': extraction.get('notes', []),
             }
 
-            openai_key = context.get('openai_api_key')
-            claude_key = context.get('claude_api_key')
+            openai_key = provider_api_key('openai', fallback=lambda: (context.get('openai_api_key')))
+            claude_key = provider_api_key('anthropic', fallback=lambda: (context.get('claude_api_key')))
             raw_findings = []
 
             if analysis_mode == 'enhanced_openai' and openai_key:
@@ -1202,9 +1203,8 @@ def run_ai_checks_task(self, run_id: str, context: dict = None):
         
         project = check_run.project
         analysis_mode = context.get('analysis_mode', 'hybrid')
-        openai_key = context.get('openai_api_key')
-        claude_key = context.get('claude_api_key')
-        
+        openai_key = provider_api_key('openai', fallback=lambda: (context.get('openai_api_key')))
+        claude_key = provider_api_key('anthropic', fallback=lambda: (context.get('claude_api_key')))
         # Initialize extraction engine
         extractor = PIDExtractionEngine(
             openai_key=openai_key,

@@ -2,6 +2,7 @@
 AI-Powered P&ID Extraction Engine
 Handles vision API calls to OpenAI GPT-4o and Claude 3.5 Sonnet for P&ID element extraction.
 """
+from apps.core.ai_consumer_clients import provider_api_key
 import json
 import base64
 import re
@@ -31,11 +32,19 @@ class PIDExtractionEngine:
             claude_key: Claude API key (for deep/hybrid mode)
             mode: Analysis mode (standard, enhanced_openai, deep_claude, hybrid)
         """
-        self.openai_key = openai_key
-        self.claude_key = claude_key
+        self._legacy_openai_key = openai_key
+        self._legacy_claude_key = claude_key
         self.mode = mode
         self.config = VISION_API_CONFIG
         
+    @property
+    def openai_key(self):
+        return provider_api_key('openai', fallback=lambda: (self._legacy_openai_key))
+
+    @property
+    def claude_key(self):
+        return provider_api_key('anthropic', fallback=lambda: (self._legacy_claude_key))
+
     def _encode_image(self, image_path_or_bytes) -> str:
         """Encode image to base64 string."""
         if isinstance(image_path_or_bytes, (str, Path)):
@@ -94,7 +103,7 @@ class PIDExtractionEngine:
             'https://api.openai.com/v1/chat/completions',
             headers=headers,
             json=payload,
-            timeout=openai_config['timeout']
+            timeout=openai_config['timeout'], allow_redirects=False
         )
         
         response.raise_for_status()
@@ -151,7 +160,7 @@ class PIDExtractionEngine:
             'https://api.anthropic.com/v1/messages',
             headers=headers,
             json=payload,
-            timeout=claude_config['timeout']
+            timeout=claude_config['timeout'], allow_redirects=False
         )
         
         response.raise_for_status()

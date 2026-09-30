@@ -23,6 +23,7 @@ confidence scores in `[0,1]`. The mapper never raises; if everything fails
 it leaves the column unmapped (downstream rules will flag missing fields).
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import logging
 import os
@@ -148,7 +149,7 @@ def _llm_resolve(unmatched: dict[str, list[tuple[str, float]]],
     global _llm_disabled_until
     if not unmatched:
         return {}
-    api_key = os.environ.get('OPENAI_API_KEY')
+    api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get('OPENAI_API_KEY'))))
     if not api_key:
         return {}
     if time.time() < _llm_disabled_until:
@@ -159,7 +160,7 @@ def _llm_resolve(unmatched: dict[str, list[tuple[str, float]]],
     except Exception:                                                   # noqa: BLE001
         return {}
     try:
-        client = OpenAI(api_key=api_key, timeout=_LLM_TIMEOUT_SEC)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=_LLM_TIMEOUT_SEC)
         canonical_keys = list(schema.keys())
         prompt = (
             'Map each customer column name to the closest canonical key, or '

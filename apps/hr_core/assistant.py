@@ -1,4 +1,5 @@
 """Permission-aware, policy-grounded HR assistant."""
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import re
 
@@ -58,12 +59,12 @@ def answer_question(user, question):
         'section': section, 'source_url': policy.source_url,
     } for _, policy, section, _ in passages]
     context = '\n\n'.join(f'[{i}] {policy.title} v{policy.version}, section {section}: {text}' for i, (_, policy, section, text) in enumerate(passages, 1))
-    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+    api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get('OPENAI_API_KEY', '')))).strip()
     if api_key and getattr(settings, 'HR_ASSISTANT_LLM_ENABLED', False):
         try:
             from openai import OpenAI
             model = getattr(settings, 'HR_ASSISTANT_MODEL', 'gpt-4o-mini')
-            response = OpenAI(api_key=api_key).chat.completions.create(
+            response = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key)).chat.completions.create(
                 model=model, temperature=0,
                 messages=[
                     {'role': 'system', 'content': (

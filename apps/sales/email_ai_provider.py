@@ -96,10 +96,20 @@ def _configuration():
     model = _text_setting('SALES_EMAIL_AI_MODEL') or (_text_setting(prefix + '_MODEL') if prefix else '')
     api_key = _text_setting('SALES_EMAIL_AI_API_KEY') or (_text_setting(prefix + '_API_KEY') if prefix else '')
     code = ''
+    if prefix:
+        from apps.core.ai_credentials import AICredentialUnavailable, resolve_provider_credential
+        try:
+            api_key, central = resolve_provider_credential(provider, fallback=api_key)
+            if central['managed']:
+                enabled = central['enabled']
+                model = model or central.get('model', '')
+        except AICredentialUnavailable:
+            api_key = ''
+            code = 'configuration_invalid'
     timeout, tokens = 12.0, 3500
     if not prefix:
         code = 'unsupported_provider'
-    elif not model or not api_key:
+    elif not code and (not model or not api_key):
         code = 'configuration_missing'
     elif len(model) > 200 or any(char.isspace() for char in model):
         code = 'configuration_invalid'

@@ -112,7 +112,7 @@ class ProjectAISettingsTests(TestCase):
         rejected = gate(self.project)
         self.assertEqual(rejected.status_code, 400)
         self.assertEqual(rejected.data['code'], 'byok_required')
-        self.assertIn('choose a provider', rejected.data['error'])
+        self.assertIn('Ask an administrator', rejected.data['error'])
 
     def test_delete_and_disabled_connection_do_not_call_provider(self):
         self.save_gemini()

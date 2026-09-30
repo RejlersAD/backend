@@ -1,6 +1,7 @@
 """Conservative approval-date recognition from the actual date-cell image."""
 
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 from collections import defaultdict
@@ -114,13 +115,13 @@ def _local_date_candidates(crop):
 
 def _vision_date_candidates(crop):
     """Use the already configured provider only for this isolated date image."""
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get("OPENAI_API_KEY", "")))).strip()
     enabled = os.environ.get("PROCUREMENT_HANDWRITING_VISION_ENABLED", "true").lower() not in {"false", "0", "no"}
     if not enabled or not api_key or api_key.lower().startswith(("your-", "placeholder", "changeme")):
         return [], "not_configured"
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, timeout=20, max_retries=0)
+    client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=20, max_retries=0)
     candidates = []
     for name in ("original", "mask"):
         image = crop[name]

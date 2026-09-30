@@ -6,6 +6,7 @@ SYSTEM ROLE: Senior Process Design Engineer (15+ years EPC experience)
 STANDARDS: ISA-5.1, ISO 10628, ADNOC DEP, API
 OUTPUT: Draft P&ID PDF with assumption reports
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import openai
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
@@ -35,11 +36,11 @@ class EnhancedPFDToPIDConverter:
     
     def __init__(self):
         """Initialize OpenAI client and configuration"""
-        api_key = os.environ.get('OPENAI_API_KEY') or config('OPENAI_API_KEY', default='')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get('OPENAI_API_KEY') or config('OPENAI_API_KEY', default=''))))
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured")
         
-        self.client = OpenAI(api_key=api_key)
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         self.model = config('OPENAI_MODEL', default='gpt-4o')
         logger.info(f"[PFD→P&ID] Initialized with model: {self.model}")
     

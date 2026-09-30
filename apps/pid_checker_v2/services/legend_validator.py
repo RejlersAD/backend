@@ -12,6 +12,7 @@ short-circuited when there are no failing tags, keeping cost near-zero
 on clean drawings.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import json
 import logging
@@ -61,6 +62,7 @@ def validate_tags(
     ai_api_key: Optional[str] = None,
 ) -> dict:
     """Main entry — returns {summary, findings, ai_used}."""
+    ai_api_key = provider_api_key(ai_provider, fallback=lambda: (ai_api_key)) if ai_provider else ai_api_key
     if not isinstance(tags, list):
         raise ValueError('tags must be a list')
 
@@ -306,7 +308,7 @@ def _call_ai_text(provider: str, api_key: str, user_prompt: str) -> str:
     p = (provider or '').lower()
     if p == 'openai':
         import openai
-        client = openai.OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
         resp = client.chat.completions.create(
             model=VISION_MODELS['openai'],
             max_tokens=AI_MAX_TOKENS,
@@ -319,7 +321,7 @@ def _call_ai_text(provider: str, api_key: str, user_prompt: str) -> str:
         return resp.choices[0].message.content or ''
     if p == 'claude':
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key))
         resp = client.messages.create(
             model=VISION_MODELS['claude'],
             max_tokens=AI_MAX_TOKENS,

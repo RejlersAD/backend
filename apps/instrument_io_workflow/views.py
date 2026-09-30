@@ -33,6 +33,7 @@ POST   /api/v1/instrument-io-workflow/default-symbol-images/      ({section, sym
 """
 
 from __future__ import annotations
+from apps.core.ai_consumer_clients import provider_available
 
 import logging
 
@@ -684,9 +685,9 @@ def vision_test_key_view(request):
 
     provider = request.data.get('provider')
     api_key  = request.data.get('api_key')
-    if not provider or not api_key:
+    if not provider or not provider_available(provider, api_key):
         return Response(
-            {'valid': False, 'message': 'provider and api_key are required'},
+            {'valid': False, 'message': 'Select an available administrator-configured AI provider.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     valid, message = test_api_key(provider, api_key)

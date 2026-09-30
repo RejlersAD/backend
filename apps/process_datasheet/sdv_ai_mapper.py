@@ -2,6 +2,7 @@
 AI-Orchestrated SDV Datasheet Intelligence Layer
 Smart mapping between extracted P&ID and HMB data
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 import logging
 import sys
 from typing import Dict, List, Optional
@@ -32,10 +33,7 @@ class SDVDatasheetAIMapper:
     
     def __init__(self):
         """Initialize OpenAI client"""
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            timeout=60.0
-        )
+        self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (settings.OPENAI_API_KEY), timeout=60.0)
         log_and_print("[SDVDatasheetAIMapper] Initialized with OpenAI GPT-4")
     
     def map_pid_hmb_to_datasheet(

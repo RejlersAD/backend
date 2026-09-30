@@ -26,6 +26,7 @@ Usage (called from the view):
     from apps.pid_verification_v2.services.dcs_symbol_analyzer import run_dcs_analysis
     findings = run_dcs_analysis(drawing_obj, legend_file_path=None)
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
@@ -382,11 +383,11 @@ def _extract_legend_gemini(images: list[str]) -> Optional[dict]:
         from google import genai
         from google.genai import types
 
-        api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+        api_key = provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY'))))
         if not api_key:
             return None
 
-        client       = genai.Client(api_key=api_key)
+        client       = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         batch_results: list = []
 
         for i in range(0, len(images), GEMINI_EXTRACT_BATCH):
@@ -441,11 +442,11 @@ def _extract_legend_openai(images: list[str]) -> Optional[dict]:
     """
     try:
         from openai import OpenAI
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
         if not api_key:
             return None
 
-        client        = OpenAI(api_key=api_key)
+        client        = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         batch_results : list = []
 
         for i in range(0, len(images), OPENAI_EXTRACT_BATCH):
@@ -499,11 +500,11 @@ def _analyze_drawing_openai(images: list[str], legend_symbols: list, conventions
     """Use GPT-4o Vision to analyze the P&ID drawing against extracted legend."""
     try:
         from openai import OpenAI
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
         if not api_key:
             return None
 
-        client   = OpenAI(api_key=api_key)
+        client   = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         prompt   = _build_analyze_prompt(legend_symbols, conventions)
 
         content = [{"type": "text", "text": prompt}]
@@ -539,11 +540,11 @@ def _analyze_drawing_gemini(images: list[str], legend_symbols: list, conventions
         from google import genai
         from google.genai import types
 
-        api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+        api_key = provider_api_key('gemini', fallback=(lambda: (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY'))))
         if not api_key:
             return None
 
-        client = genai.Client(api_key=api_key)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         prompt = _build_analyze_prompt(legend_symbols, conventions)
 
         parts = [types.Part.from_text(text=prompt)]

@@ -14,6 +14,7 @@ Claude/OpenAI to correlate them (typo? partial match? OCR miss?) and
 suggest what to do.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import json
 import logging
@@ -175,6 +176,7 @@ def cross_check(
         each MATCH finding gains an ``attributes`` list and a per-tag
         ``severity`` (ok|minor|critical).
     """
+    ai_api_key = provider_api_key(ai_provider, fallback=lambda: (ai_api_key)) if ai_provider else ai_api_key
     pid_by_tag: dict[str, str] = {}
     for t in pid_equipment_tags:
         tag = _norm(t)
@@ -469,7 +471,7 @@ def _call_ai(provider: str, api_key: str, user_prompt: str):
     p = (provider or '').lower()
     if p == 'openai':
         import openai
-        client = openai.OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
         resp = client.chat.completions.create(
             model=VISION_MODELS['openai'],
             max_tokens=AI_MAX_TOKENS,
@@ -483,7 +485,7 @@ def _call_ai(provider: str, api_key: str, user_prompt: str):
         return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key))
         resp = client.messages.create(
             model=VISION_MODELS['claude'],
             max_tokens=AI_MAX_TOKENS,
@@ -755,7 +757,7 @@ def _call_ai_attr(provider: str, api_key: str, user_prompt: str):
     p = (provider or '').lower()
     if p == 'openai':
         import openai
-        client = openai.OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
         resp = client.chat.completions.create(
             model=VISION_MODELS['openai'],
             max_tokens=AI_ATTR_MAX_TOKENS,
@@ -769,7 +771,7 @@ def _call_ai_attr(provider: str, api_key: str, user_prompt: str):
         return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key))
         resp = client.messages.create(
             model=VISION_MODELS['claude'],
             max_tokens=AI_ATTR_MAX_TOKENS,

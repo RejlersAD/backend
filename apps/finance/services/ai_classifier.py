@@ -2,6 +2,7 @@
 AI Invoice Classifier Service
 Classifies invoices into Finance, IT, Project, or Admin categories using OpenAI
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 from openai import OpenAI
 from typing import Dict, Optional
 import json
@@ -16,11 +17,11 @@ class InvoiceClassifier:
     
     def __init__(self):
         """Initialize OpenAI client"""
-        self.api_key = getattr(settings, 'OPENAI_API_KEY', None)
+        self.api_key = provider_api_key('openai', fallback=(lambda: (getattr(settings, 'OPENAI_API_KEY', None))))
         self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
         
         if self.api_key:
-            self.client = OpenAI(api_key=self.api_key)
+            self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (self.api_key))
         else:
             logger.warning("OpenAI API key not configured - AI classification will use fallback rules")
             self.client = None

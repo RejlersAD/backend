@@ -12,6 +12,7 @@ import logging
 import re
 import time
 import httpx
+from contextlib import nullcontext
 from django.views.decorators.debug import sensitive_variables
 
 try:  # Anthropic 1.x uses httpx2; older supported SDKs use httpx.
@@ -20,6 +21,7 @@ except ImportError:
     httpx2 = None
 
 from . import byok_crypto
+from .central_ai import central_project_config
 from ..config import (
     CLAUDE_BYOK_ENABLED,
     CLAUDE_MODEL_VALUES,
@@ -60,7 +62,16 @@ def get_claude_config(project) -> dict | None:
     Return {'api_key': <decrypted>, 'model': <id>} for this project if BYOK
     is enabled/configured and usable, else None (deterministic-only).
     """
-    if not CLAUDE_BYOK_ENABLED or project is None:
+    if project is None:
+        return None
+
+    saved_provider = (getattr(project, 'ai_settings', None) or {}).get('provider')
+    if saved_provider not in (None, '', 'anthropic'):
+        return None
+    managed, central = central_project_config(project, 'anthropic', DEFAULT_CLAUDE_MODEL)
+    if managed:
+        return central
+    if not CLAUDE_BYOK_ENABLED:
         return None
 
     ai_settings = getattr(project, 'ai_settings', None) or {}
@@ -186,14 +197,20 @@ def call_claude(
 
     try:
         import anthropic
+        from apps.core.ai_consumer_clients import _private_provider_logs
 
-        with anthropic.Anthropic(
-            api_key=claude_config['api_key'],
-            timeout=CLAUDE_REQUEST_TIMEOUT_SECONDS,
+        managed = claude_config.get('managed') is True
+        client_options = {
+            'api_key': claude_config['api_key'], 'timeout': CLAUDE_REQUEST_TIMEOUT_SECONDS,
             # A timed-out generation may still be running at the provider.
             # Retrying belongs to the explicit analysis/checkpoint workflow.
-            max_retries=0,
-        ) as client:
+            'max_retries': 0,
+        }
+        if managed:
+            client_options.update(base_url='https://api.anthropic.com', auth_token='',
+                                  default_headers={'Authorization': anthropic.Omit(),
+                                                   'X-Api-Key': claude_config['api_key']})
+        with (_private_provider_logs() if managed else nullcontext()), anthropic.Anthropic(**client_options) as client:
             request = dict(model=model, max_tokens=max_tokens, system=system_prompt,
                            messages=[{'role': 'user', 'content': user_prompt}])
             if feature == 'document_intelligence':

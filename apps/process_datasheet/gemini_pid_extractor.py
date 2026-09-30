@@ -171,7 +171,7 @@ def _extract_page_with_gemini(client, img_bytes: bytes, page_num: int, ocr_text:
         ],
     )
     raw = response.text or ''
-    logger.info(f"[GeminiPIDExtractor] Page {page_num} response preview: {raw[:300]}")
+    logger.info(f"[GeminiPIDExtractor] Page {page_num} response length: {len(raw)} characters")
     return _parse_json_array(raw)
 
 
@@ -195,7 +195,7 @@ def _extract_page_with_openai(client, img_b64: str, page_num: int, ocr_text: str
         temperature=0.1,
     )
     raw = response.choices[0].message.content.strip()
-    logger.info(f"[OpenAIPIDExtractor] Page {page_num} response preview: {raw[:300]}")
+    logger.info(f"[OpenAIPIDExtractor] Page {page_num} response length: {len(raw)} characters")
     return _parse_json_array(raw)
 
 

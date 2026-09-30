@@ -215,7 +215,10 @@ class _ObservedClient:
 
 def observed_openai(*args, **kwargs):
     from openai import OpenAI
-    return _ObservedClient(OpenAI(*args, **kwargs), 'openai', workflow=_workflow.get())
+    from apps.core.ai_consumer_clients import lazy_provider_client
+    if args:
+        raise TypeError('OpenAI client options must be keyword arguments.')
+    return _ObservedClient(lazy_provider_client('openai', OpenAI, **kwargs), 'openai', workflow=_workflow.get())
 
 
 def observed_google(client):

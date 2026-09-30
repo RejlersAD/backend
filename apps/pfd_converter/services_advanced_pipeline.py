@@ -18,6 +18,7 @@ Uses:
 - Engineering knowledge base (ADNOC DEP, API, ISA standards)
 - Pattern recognition for equipment and instrument identification
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import openai
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
@@ -45,9 +46,8 @@ from .validation_engine import EngineeringValidationEngine
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client
-OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 try:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
 except Exception:
     openai_client = None
 
@@ -342,10 +342,10 @@ class AdvancedPFDToPIDPipeline:
             raise Exception("OpenAI Vision API returned empty response")
         
         logger.info(f"  → Parsing response (length: {len(content)} chars)...")
-        logger.info(f"  → Response preview: {content[:500]}...")
+        logger.info(f"  → Response length: {len(content)} characters")
         
         # Log full response for debugging
-        logger.debug(f"  → Full OpenAI response: {content}")
+        logger.debug(f"  → OpenAI response length: {len(content)} characters")
         
         # Check if OpenAI refused to process (not a PFD)
         # Very flexible validation - only reject if image is blank/corrupted
@@ -394,13 +394,13 @@ class AdvancedPFDToPIDPipeline:
                         logger.info("  ✅ JSON extracted via regex")
                     except json.JSONDecodeError as e:
                         logger.error(f"  ❌ JSON parsing failed: {str(e)}")
-                        logger.error(f"  Response content: {content[:500]}...")
+                        logger.error(f"  Response length: {len(content)} characters")
                         raise Exception(f"Failed to parse OpenAI response as JSON: {str(e)}")
         
         if vision_data is None:
             # Provide a fallback structure instead of failing completely
             logger.warning(f"  ⚠️ Could not parse structured JSON. Using fallback.")
-            logger.warning(f"  Response was: {content[:500]}...")
+            logger.warning(f"  Response length: {len(content)} characters")
             
             # Create minimal fallback structure to allow processing to continue
             vision_data = {
@@ -583,7 +583,7 @@ class AdvancedPFDToPIDPipeline:
         try:
             # Check if Claude AI validation is available
             use_claude = config('USE_CLAUDE_VALIDATION', default='true').lower() == 'true'
-            anthropic_key = config('ANTHROPIC_API_KEY', default='')
+            anthropic_key = provider_api_key('anthropic', fallback=(lambda: (config('ANTHROPIC_API_KEY', default=''))))
             
             if use_claude and anthropic_key:
                 logger.info("  🤖 Using Claude 3.5 Sonnet for AI-powered validation")

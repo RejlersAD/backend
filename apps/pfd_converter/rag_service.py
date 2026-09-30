@@ -12,6 +12,7 @@ Process:
 4. Use reference data as context for analyzing the uploaded PFD
 5. Provide more accurate analysis based on learned patterns
 """
+from apps.core.ai_consumer_clients import lazy_provider_client
 
 import logging
 from typing import Dict, List, Optional
@@ -23,8 +24,7 @@ import json
 
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
 
 
 class PFDRAGService:

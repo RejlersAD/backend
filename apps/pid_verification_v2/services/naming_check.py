@@ -15,6 +15,7 @@ AI vision check (Gemini primary → OpenAI fallback):
 Config: backend/domain_knowledge/pid_verification/naming_check_config.json
 All thresholds, prompts, model names and severity levels are soft-coded there.
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import base64
 import json
 import logging
@@ -318,14 +319,14 @@ def _call_gemini(
         from google.genai import types as _gtypes
 
         api_key = (
-            os.getenv("GEMINI_API_KEY")
-            or os.getenv("GOOGLE_GENERATIVEAI_API_KEY")
+            provider_api_key('gemini', fallback=(lambda: (os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_GENERATIVEAI_API_KEY"))))
         )
         if not api_key:
             logger.warning("[NamingCheck] GEMINI_API_KEY not set — Gemini skipped")
             return ""
 
-        client = genai.Client(api_key=api_key)
+        client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
         model  = config.get("ai_model", "gemini-2.0-flash")
 
         parts = [
@@ -363,12 +364,12 @@ def _call_openai(
     try:
         from openai import OpenAI
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = provider_api_key('openai', fallback=(lambda: (os.getenv("OPENAI_API_KEY"))))
         if not api_key:
             logger.warning("[NamingCheck] OPENAI_API_KEY not set — OpenAI skipped")
             return ""
 
-        client = OpenAI(api_key=api_key, timeout=float(config.get("timeout_seconds", 120)))
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=float(config.get("timeout_seconds", 120)))
         model  = config.get("ai_fallback_model", "gpt-4o")
 
         resp = client.chat.completions.create(
@@ -442,7 +443,7 @@ def run_ai_check(
         data        = json.loads(payload_str)
         ai_issues   = data.get("naming_issues", [])
     except Exception as parse_exc:
-        logger.warning("[NamingCheck] AI JSON parse failed (%s) — raw=%s...", parse_exc, raw[:200])
+        logger.warning("[NamingCheck] AI JSON parse failed (%s); response length=%d", type(parse_exc).__name__, len(raw))
         return []
 
     sev_map = config.get("severity_map", {})

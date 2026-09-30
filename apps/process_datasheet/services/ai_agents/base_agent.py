@@ -2,6 +2,7 @@
 Base Agent Class
 Soft-coded AI agent with configuration-driven behavior
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import json
 import logging
@@ -47,9 +48,9 @@ class BaseAgent(ABC):
         # Initialize OpenAI client
         self.client = None
         if OpenAI:
-            api_key = os.getenv('OPENAI_API_KEY')
+            api_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY'))))
             if api_key:
-                self.client = OpenAI(api_key=api_key)
+                self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
         
         # Agent state
         self.conversation_history = []
@@ -164,7 +165,7 @@ Return ONLY the JSON object, no additional text."""
                 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON response: {str(e)}")
-            logger.debug(f"Response text: {response_text}")
+            logger.debug(f"Response length: {len(response_text)} characters")
             raise ValueError(f"Invalid JSON response from LLM: {str(e)}")
     
     def _format_context(self, context: Dict) -> str:

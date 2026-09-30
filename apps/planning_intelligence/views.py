@@ -399,7 +399,9 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         """Hard gate: refuse to analyze / generate when this project has no
         usable project AI configuration. Returns a Response on failure,
         None on success."""
-        if not byok_crypto.is_encryption_configured():
+        from .services.central_ai import central_status
+        central = central_status(project_ai.project_provider(project))
+        if not central['managed'] and not byok_crypto.is_encryption_configured():
             return Response(
                 {'error': 'Planning AI encryption is not configured on the server.', 'code': 'byok_encryption_unavailable'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -408,10 +410,9 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'This project has no active AI configuration. '
-                        'Open the AI Settings panel, choose a provider, enable it, save a valid '
-                        'API key, and run Test Connection before analyzing '
-                        'or generating a schedule.'
+                        'This project has no active AI connection. Ask an administrator '
+                        'to configure the selected provider in AI API Key Management, '
+                        'then enable AI for this project.'
                     ),
                     'code': 'byok_required',
                 },

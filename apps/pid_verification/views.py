@@ -1,4 +1,4 @@
-﻿"""
+"""
 P&ID Verification — API Views
 ===============================
 Projects:
@@ -16,6 +16,7 @@ Documents:
   GET    /api/v1/pid-verification/list/                  → user document history
   DELETE /api/v1/pid-verification/delete/<document_id>/  → remove document
 """
+from apps.core.ai_consumer_clients import provider_available
 import logging
 import os
 import threading
@@ -212,9 +213,9 @@ def upload_pid(request):
                 {"error": "Invalid OpenAI API key format. Must start with 'sk-' and contain at least 20 characters."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-    elif needs_openai:
+    elif needs_openai and not provider_available('openai'):
         return Response(
-            {"error": f"OpenAI API key required for '{analysis_mode}' mode."},
+            {"error": f"An administrator must configure OpenAI for '{analysis_mode}' mode."},
             status=status.HTTP_400_BAD_REQUEST,
         )
     
@@ -225,9 +226,9 @@ def upload_pid(request):
                 {"error": "Invalid Claude API key format. Must start with 'sk-ant-' and contain at least 20 characters."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-    elif needs_claude:
+    elif needs_claude and not provider_available('anthropic'):
         return Response(
-            {"error": f"Claude API key required for '{analysis_mode}' mode."},
+            {"error": f"An administrator must configure Anthropic for '{analysis_mode}' mode."},
             status=status.HTTP_400_BAD_REQUEST,
         )
     
@@ -557,9 +558,9 @@ def reprocess_document(request, document_id):
                 {"error": "Invalid OpenAI API key format. Must start with 'sk-' and contain at least 20 characters."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-    elif needs_openai:
+    elif needs_openai and not provider_available('openai'):
         return Response(
-            {"error": f"OpenAI API key required for '{analysis_mode}' mode."},
+            {"error": f"An administrator must configure OpenAI for '{analysis_mode}' mode."},
             status=status.HTTP_400_BAD_REQUEST,
         )
     if claude_api_key:
@@ -568,9 +569,9 @@ def reprocess_document(request, document_id):
                 {"error": "Invalid Claude API key format. Must start with 'sk-ant-' and contain at least 20 characters."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-    elif needs_claude:
+    elif needs_claude and not provider_available('anthropic'):
         return Response(
-            {"error": f"Claude API key required for '{analysis_mode}' mode."},
+            {"error": f"An administrator must configure Anthropic for '{analysis_mode}' mode."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -1699,15 +1700,15 @@ def run_ai_checks(request, project_id):
     
     # Validate BYOK keys if required
     if analysis_mode in ['enhanced_openai', 'hybrid']:
-        if not openai_api_key:
+        if not provider_available('openai', openai_api_key):
             return Response({
-                'error': f'OpenAI API key required for {analysis_mode} mode'
+                'error': f'An administrator must configure OpenAI for {analysis_mode} mode'
             }, status=status.HTTP_400_BAD_REQUEST)
     
     if analysis_mode in ['deep_claude', 'hybrid']:
-        if not claude_api_key:
+        if not provider_available('anthropic', claude_api_key):
             return Response({
-                'error': f'Claude API key required for {analysis_mode} mode'
+                'error': f'An administrator must configure Anthropic for {analysis_mode} mode'
             }, status=status.HTTP_400_BAD_REQUEST)
     
     # Create check run record

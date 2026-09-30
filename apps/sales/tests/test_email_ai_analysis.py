@@ -57,6 +57,9 @@ def oq_proposal():
 
 class EmailAIAnalysisTests(SimpleTestCase):
     def setUp(self):
+        unmanaged = patch('apps.core.ai_credentials._provider_record', return_value=None)
+        unmanaged.start()
+        self.addCleanup(unmanaged.stop)
         cache.clear()
 
     def validate(self, proposal=None, messages=None):

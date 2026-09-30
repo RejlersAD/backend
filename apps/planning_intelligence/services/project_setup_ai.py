@@ -11,6 +11,8 @@ from rest_framework.exceptions import APIException, ValidationError
 
 from ..models import ProjectSetupAISettings
 from .byok_crypto import decrypt_api_key, encrypt_api_key, is_encryption_configured
+from .central_ai import central_status
+from apps.core.ai_credentials import AICredentialUnavailable, resolve_provider_credential
 
 logger = logging.getLogger(__name__)
 OFFICIAL_OPENAI_URL = 'https://api.openai.com/v1'
@@ -42,6 +44,9 @@ def _server_configuration_message():
 
 @sensitive_variables()
 def _configuration_message(personal):
+    central = central_status('openai')
+    if central['managed']:
+        return '' if central['ready'] else 'The administrator-managed OpenAI connection is unavailable. Ask an administrator to review AI API Key Management.'
     if personal is not None:
         if not is_encryption_configured():
             return 'Your saved API key is unavailable because secure storage is not configured. Ask an administrator to configure BYOK encryption.'
@@ -63,21 +68,32 @@ def ai_available(actor=None):
 def ai_settings_payload(actor):
     personal = _personal_settings(actor)
     message = _configuration_message(personal)
+    central = central_status('openai')
     return {
         'ai_available': not message,
         'ai_message': message,
         'ai_settings': {
             'provider': 'openai',
-            'model': personal.model if personal else default_model(),
-            'key_configured': personal is not None,
-            'last_tested_at': personal.last_tested_at.isoformat() if personal else None,
-            'storage_available': is_encryption_configured(),
+            'model': (central.get('model') or default_model()) if central['managed'] else personal.model if personal else default_model(),
+            'key_configured': central['ready'] if central['managed'] else personal is not None,
+            'credential_source': 'administrator' if central['managed'] else 'personal' if personal else 'environment',
+            'last_tested_at': personal.last_tested_at.isoformat() if personal and not central['managed'] else None,
+            'storage_available': central.get('encryption_ready', False) if central['managed'] else is_encryption_configured(),
         },
     }
 
 
 @sensitive_variables()
 def generation_credentials(actor):
+    try:
+        key, central = resolve_provider_credential('openai')
+    except AICredentialUnavailable:
+        raise SetupAIUnavailable('The administrator-managed AI connection is unavailable.') from None
+    if central['managed']:
+        if not key:
+            raise SetupAIUnavailable('The administrator-managed OpenAI connection is disabled or unavailable.')
+        # Pin the official API and suppress unrelated ambient project headers.
+        return key, central.get('model') or default_model(), True
     personal = _personal_settings(actor)
     message = _configuration_message(personal)
     if message:
@@ -123,6 +139,8 @@ def provider_error_message(error_code, *, personal=False, testing=False):
 
 @sensitive_variables()
 def test_and_save_settings(actor, data):
+    if central_status('openai')['managed']:
+        raise ValidationError({'api_key': 'This provider is managed in Admin → AI API Key Management.'})
     if not is_encryption_configured():
         raise SetupAIUnavailable('Secure API key storage is not configured. Ask an administrator to configure BYOK encryption before saving a key.')
     personal = _personal_settings(actor)

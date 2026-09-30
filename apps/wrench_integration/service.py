@@ -7,6 +7,7 @@ Implements the real SmartProject API authentication flow:
 
 API Reference: SmartProject API - Rejlers R0.pdf
 """
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import logging
 import time
 from urllib.parse import urlparse
@@ -2117,11 +2118,11 @@ def ai_rank_pid_documents(
         import os
         import json as _json
 
-        api_key = os.environ.get('OPENAI_API_KEY')
+        api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get('OPENAI_API_KEY'))))
         if not api_key:
             raise RuntimeError('OPENAI_API_KEY not set — skipping AI ranking')
 
-        client = OpenAI(api_key=api_key)
+        client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
 
         # Cap to 30 documents to keep prompt within token limits
         docs_for_ai = documents[:30]

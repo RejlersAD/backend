@@ -14,6 +14,7 @@ stays consistent with the rest of the BYOK Vision system. Text extraction
 (line tags, equipment tags, instrument tags) is untouched by this module.
 """
 from __future__ import annotations
+from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import json
 import logging
@@ -153,6 +154,7 @@ def identify_symbols_via_vision(
             'token_usage': <UsageMeter.summary()>,
         }
     """
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
     if not api_key or not api_key.strip():
@@ -304,7 +306,7 @@ def _call_claude_labeled(api_key: str, images: tuple, user_prompt: str, model: s
     import anthropic
     from .token_accounting import read_claude_usage
     pid_b64, legend_batch = images
-    client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+    client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     content = [
         {'type': 'text', 'text': 'P&ID drawing image:'},
         {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': pid_b64}},
@@ -334,7 +336,7 @@ def _call_openai_labeled(api_key: str, images: tuple, user_prompt: str):
     import openai
     from .token_accounting import read_openai_usage
     pid_b64, legend_batch = images
-    client = openai.OpenAI(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
+    client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     content = [
         {'type': 'text', 'text': user_prompt},
         {'type': 'text', 'text': 'P&ID drawing image:'},
