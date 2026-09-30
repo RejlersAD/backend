@@ -18,7 +18,7 @@ AI_SETTINGS = dict(SALES_EMAIL_AI_ENABLED=True, SALES_EMAIL_AI_PROVIDER='anthrop
 BODY = 'Please provide the engineering requirements.\n\nProposal deadline: 2 October 2026 at 01:59 Gulf Standard Time.'
 
 
-def provider_answer(payload, schema, *, instructions):
+def provider_answer(payload, schema, *, instructions, output_token_limit=None):
     source = payload['sources'][0]
     return {'status': 'completed', 'proposal': {'supported': True, 'citations': [
         {'source_id': source['id'], 'excerpt': source['body'].split('\n\n')[0]},
@@ -88,7 +88,9 @@ class EmailAssistantEvidenceTests(SimpleTestCase):
             {'source_id': 'm1-current', 'excerpt': 'Proposal deadline: 25 September 2026.'},
         ]}}
         response = self.call(action='check_deadline')
-        self.assertIn(body, response['answer'])
+        self.assertIn(body, response['citations'][0]['excerpt'])
+        self.assertIn('review', response['answer'].lower())
+        self.assertLess(len(response['answer']), 600)
         self.assertIn('cancelled', response['citations'][0]['excerpt'])
         self.assertIn('2 October 2026', response['citations'][0]['excerpt'])
 
@@ -100,7 +102,9 @@ class EmailAssistantEvidenceTests(SimpleTestCase):
             {'source_id': 'm1-current', 'excerpt': '25 September 2026 at 11:00 UAE time.'},
         ]}}
         response = self.call(action='check_deadline')
-        self.assertIn(body, response['answer'])
+        self.assertIn(body, response['citations'][0]['excerpt'])
+        self.assertIn('25 Sep 2026', response['answer'])
+        self.assertIn('agreement', response['answer'].lower())
         self.assertNotIn('Proposal deadline', response['answer'])
 
     def test_adjacent_approval_withdrawal_is_retained_with_earlier_claim(self):
@@ -111,8 +115,128 @@ class EmailAssistantEvidenceTests(SimpleTestCase):
             {'source_id': 'm1-current', 'excerpt': 'Client approval is confirmed.'},
         ]}}
         response = self.call()
-        self.assertIn(body, response['answer'])
+        self.assertIn('withdrawn', response['answer'])
+        self.assertIn('pending review', response['answer'])
+        self.assertIn(body, response['citations'][0]['excerpt'])
         self.assertIn('withdrawn', response['citations'][0]['excerpt'])
+
+    def test_interest_deadline_is_specific_without_repeating_overlapping_evidence(self):
+        paragraphs = [
+            'Example Energy Limited intends to issue an Invitation to Tender (ITT) for a design study.',
+            'If you are interested in participating, please confirm your interest and provide the following '
+            'by 1 PM, 02 October 2026.',
+            '1. Name and designation of your nominated focal point for this tender',
+            '2. Email address and direct / mobile telephone number',
+            '3. Registered company name and address',
+            'The ITT documents will be issued to the nominated focal point only. '
+            'Please note that this is not a commitment by the Company to award any contract.',
+            'We look forward to your response.',
+        ]
+        self.payload['sources'][0]['body'] = '\n\n'.join(paragraphs)
+        self.provider.side_effect = None
+        self.provider.return_value = {'status': 'completed', 'proposal': {'supported': True, 'citations': [
+            {'source_id': 'm1-current', 'excerpt': paragraphs[1]},
+            {'source_id': 'm1-current', 'excerpt': '\n\n'.join(paragraphs[1:3])},
+        ]}}
+        response = self.call(action='check_deadline')
+        answer = response['answer']
+        self.assertIn('2 Oct 2026', answer)
+        self.assertIn('1:00 PM', answer)
+        self.assertIn('interest', answer.lower())
+        self.assertIn('not stated', answer.lower())
+        self.assertNotIn('proposal deadline', answer.lower())
+        self.assertNotIn('Invitation to Tender', answer)
+        self.assertEqual(answer.count('2 Oct 2026'), 1)
+        self.assertLess(len(answer), 400)
+        self.assertTrue(response['citations'])
+        self.assertEqual(self.provider.call_args.kwargs['output_token_limit'], 1200)
+        self.assertEqual(response, self.call(action='check_deadline'))
+        self.provider.assert_called_once()
+
+    def test_typed_deadline_question_gets_the_same_direct_answer(self):
+        for question in ('What is the deadline?', 'deadline', 'Check deadlines', 'check the deadlines',
+                         'What is the submission deadline?', 'What is the deadline for this email?',
+                         '  CHECK   THE DEADLINES!  '):
+            with self.subTest(question=question):
+                response = self.call(question=question)
+                self.assertIn('2 Oct 2026', response['answer'])
+                self.assertIn('01:59', response['answer'])
+                self.assertIn('Gulf Standard Time', response['answer'])
+                self.assertNotIn('following deadline context', response['answer'])
+
+    def test_short_requirements_keep_full_evidence_out_of_the_answer(self):
+        body = 'Thank you for considering this project. Please provide a technical proposal. We look forward to hearing from you.'
+        self.payload['sources'][0]['body'] = body
+        self.provider.side_effect = None
+        self.provider.return_value = {'status': 'completed', 'proposal': {'supported': True, 'citations': [
+            {'source_id': 'm1-current', 'excerpt': 'Please provide a technical proposal.'},
+        ]}}
+        response = self.call(action='extract_requirements')
+        self.assertIn('Please provide a technical proposal.', response['answer'])
+        self.assertNotIn('Thank you for considering', response['answer'])
+        self.assertNotIn('We look forward', response['answer'])
+        self.assertLess(len(response['answer']), 160)
+        self.assertIn(body, response['citations'][0]['excerpt'])
+
+    def test_concise_answer_keeps_conditions_and_corrections_without_keyword_inference(self):
+        cases = (
+            ('You may proceed with procurement.\n\nSubject to director approval.',
+             'You may proceed with procurement.', 'Subject to director approval.'),
+            ('If the director approves:\n\nProceed with procurement.',
+             'Proceed with procurement.', 'If the director approves:'),
+            ("Client approval is confirmed.\n\nIt isn't confirmed.",
+             'Client approval is confirmed.', "It isn't confirmed."),
+            ('The price is AED 100.\n\nThe final price is AED 200.',
+             'The price is AED 100.', 'The final price is AED 200.'),
+            ('The client approved the proposal.\n\nThat statement was incorrect.',
+             'The client approved the proposal.', 'That statement was incorrect.'),
+        )
+        for body, selected, qualification in cases:
+            with self.subTest(qualification=qualification):
+                self.payload['sources'][0]['body'] = body
+                self.provider.side_effect = None
+                self.provider.return_value = {'status': 'completed', 'proposal': {'supported': True, 'citations': [
+                    {'source_id': 'm1-current', 'excerpt': selected},
+                ]}}
+                response = self.call()
+                self.assertIn(selected, response['answer'])
+                self.assertIn(qualification, response['answer'])
+                self.assertLessEqual(len(response['answer']), 800)
+
+    def test_subject_condition_is_retained_with_the_body_claim(self):
+        self.payload['sources'][0].update(subject='Subject to director approval', body='Proceed with procurement.')
+        response = self.call()
+        self.assertIn('Subject to director approval', response['answer'])
+        self.assertIn('Proceed with procurement.', response['answer'])
+
+    def test_overlapping_citations_do_not_repeat_business_clauses(self):
+        first, second = 'Please provide a technical proposal.', 'Please include a cost estimate.'
+        self.payload['sources'][0]['body'] = first + ' ' + second
+        self.provider.side_effect = None
+        self.provider.return_value = {'status': 'completed', 'proposal': {'supported': True, 'citations': [
+            {'source_id': 'm1-current', 'excerpt': first},
+            {'source_id': 'm1-current', 'excerpt': second},
+        ]}}
+        response = self.call(action='extract_requirements')
+        self.assertEqual(response['answer'].count(first), 1)
+        self.assertEqual(response['answer'].count(second), 1)
+
+    def test_display_budget_never_leaves_a_claim_without_its_long_context(self):
+        claim = 'You may proceed with procurement.'
+        qualification = 'Subject to ' + 'director approval and supporting evidence ' * 14 + 'being available.'
+        self.payload['sources'][0]['body'] = claim + '\n\n' + qualification
+        response = self.call()
+        self.assertNotIn(claim, response['answer'])
+        self.assertIn('Source evidence', response['answer'])
+        self.assertIn(qualification, response['citations'][0]['excerpt'])
+
+    def test_clause_budget_never_silently_drops_business_requirements(self):
+        clauses = [f'Provide item {number}.' for number in range(1, 7)]
+        self.payload['sources'][0]['body'] = ' '.join(clauses)
+        response = self.call(action='extract_requirements')
+        self.assertIn('Source evidence', response['answer'])
+        self.assertNotIn(clauses[0], response['answer'])
+        self.assertIn(clauses[-1], response['citations'][0]['excerpt'])
 
     def test_oversized_neighbor_context_is_refused_instead_of_silently_removed(self):
         self.payload['sources'][0]['body'] = 'Proposal deadline: 25 September 2026.\n\nCorrection: ' + 'review ' * 300

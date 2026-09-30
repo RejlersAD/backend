@@ -93,6 +93,21 @@ class EmailAIProviderTests(SimpleTestCase):
         self.assertIn(hostile, arguments['messages'][1]['content'])
         self.assertNotIn('tools', arguments)
 
+    def test_output_cap_lowers_only_this_call_and_respects_lower_configuration(self):
+        self.assertEqual(self.analyze(output_token_limit=1200)['status'], 'completed')
+        self.assertEqual(self.client.chat.completions.create.call_args.kwargs['max_completion_tokens'], 1200)
+        with override_settings(SALES_EMAIL_AI_MAX_OUTPUT_TOKENS=800):
+            self.analyze(output_token_limit=1200)
+            self.assertEqual(self.client.chat.completions.create.call_args.kwargs['max_completion_tokens'], 800)
+        self.analyze()
+        self.assertEqual(self.client.chat.completions.create.call_args.kwargs['max_completion_tokens'], 3500)
+
+    def test_invalid_output_cap_does_not_reach_provider(self):
+        for cap in (True, '1200', 1200.5, 0, 255, 6001):
+            with self.subTest(cap=cap):
+                self.assertEqual(self.analyze(output_token_limit=cap)['error_code'], 'invalid_input')
+        self.constructor.assert_not_called()
+
     def test_disabled_and_unparsed_boolean_do_not_call_provider(self):
         for enabled in (False, 'false', 'true', 1, None):
             with self.subTest(enabled=enabled), override_settings(SALES_EMAIL_AI_ENABLED=enabled):
@@ -331,6 +346,15 @@ class AnthropicEmailAIProviderTests(SimpleTestCase):
             self.assertNotIn(key, arguments)
         self.constructor.return_value.__exit__.assert_called_once()
         self.other_provider.assert_not_called()
+
+    def test_assistant_cap_does_not_change_default_extraction_budget(self):
+        self.assertEqual(self.analyze(output_token_limit=1200)['status'], 'completed')
+        self.assertEqual(self.client.messages.create.call_args.kwargs['max_tokens'], 1200)
+        with override_settings(SALES_EMAIL_AI_MAX_OUTPUT_TOKENS=800):
+            self.analyze(output_token_limit=1200)
+            self.assertEqual(self.client.messages.create.call_args.kwargs['max_tokens'], 800)
+        self.analyze()
+        self.assertEqual(self.client.messages.create.call_args.kwargs['max_tokens'], 3500)
 
     @override_settings(SALES_EMAIL_AI_API_KEY='synthetic-email-key', SALES_EMAIL_AI_MODEL='claude-email-model')
     def test_email_overrides_take_precedence_without_cross_provider_fallback(self):
