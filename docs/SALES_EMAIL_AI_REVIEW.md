@@ -31,8 +31,9 @@ the server validates them and restores their owning and immediately adjacent
 paragraphs to retain request labels, negation, corrections and qualifications.
 Ambiguous occurrences or oversized evidence
 are rejected. At most eight citations, 1800 characters each and 6000 combined,
-are accepted. Factual answer content consists of these verified excerpts, not
-unrestricted generated claims. No relevant evidence produces an honest
+are accepted. Factual answers use verified source clauses or the bounded
+deadline presentation described below, not unrestricted generated claims.
+No relevant evidence produces an honest
 not-established answer. Citation relevance and source truth still require review.
 
 Reply drafts contain a neutral greeting, the source request and explicit editable
@@ -53,6 +54,28 @@ caching is keyed by actor, source content/identity, question/action, provider
 configuration and contract, with a bounded concurrent-call lease. Every request
 rechecks source access before cache reuse; lists/conversion do not invoke this
 assistant. This adds no model migration, dependency or provider activation.
+
+Concise-answer follow-up, 30 September 2026: deadline checks and common direct
+deadline questions show the owning response/submission purpose, date and time.
+Unstated timezones remain unstated; interest responses, agreement returns and
+proposal submissions remain distinct. Corrections, negation and conflicting
+dates require review; relative or ambiguous dates are not silently resolved.
+The full verified citations stay available in the existing Source evidence
+disclosure. Other answers retain complete bounded source clauses and relevant
+qualifications, with duplicate passages removed. No summarization call is added.
+Ask AI's output ceiling is 1200 tokens or the lower configured limit, while
+normal extraction keeps its existing budget. Truncated provider output remains
+an explicit failure. Actual credit and latency savings depend on usage; they
+are not inferred from the token ceiling. The source-bound five-minute cache is
+retained and the validation revision invalidates older verbose results.
+
+Concise-answer verification: 192 assistant/presenter/provider/AI-analysis,
+reviewed-opportunity integration and mailbox-browsing tests passed in the
+network-disabled Python 3.11 production-image harness. Providers were synthetic;
+SQLite exercised functional guards, not migration history or PostgreSQL locks.
+Scoped critical lint passed. Evidence: `artifacts/email-concise-tests.log`.
+No frontend or schema change is required; actual production provider billing
+and interpretation of arbitrary messages were not measured by these tests.
 
 Diagnostic follow-up, 29 September 2026: assistant errors additionally return
 an allowlisted `reason`, while retaining the existing HTTP status, `code` and

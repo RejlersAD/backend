@@ -234,12 +234,13 @@ def _provider_error(error):
 
 
 @sensitive_variables()
-def analyze_email_sources(payload, schema, *, instructions=''):
+def analyze_email_sources(payload, schema, *, instructions='', output_token_limit=None):
     """Return an untrusted structured proposal or a safe failure result.
 
     Authorization/source scope and semantic validation belong to the caller.
-    ``schema`` and ``instructions`` must originate in server code, never email or
-    request parameters. Oversized sources are rejected rather than silently cut.
+    ``schema``, ``instructions`` and an optional per-call output ceiling must
+    originate in server code, never email or request parameters. The ceiling
+    cannot increase the configured budget. Oversized sources are rejected.
     """
     config = _configuration()
     if not config.enabled:
@@ -252,6 +253,10 @@ def analyze_email_sources(payload, schema, *, instructions=''):
         return _result(config, 'failed', 'invalid_schema')
     if not isinstance(instructions, str):
         return _result(config, 'failed', 'invalid_instructions')
+    if output_token_limit is not None and (type(output_token_limit) is not int or not 256 <= output_token_limit <= 6000):
+        return _result(config, 'failed', 'invalid_input')
+    output_tokens = (min(config.max_output_tokens, output_token_limit)
+                     if output_token_limit is not None else config.max_output_tokens)
     try:
         source_text = _json_text(payload)
         if len(source_text.encode('utf-8')) > MAX_INPUT_BYTES:
@@ -269,7 +274,7 @@ def analyze_email_sources(payload, schema, *, instructions=''):
             if config.provider == 'anthropic':
                 with _anthropic_client(config) as client:
                     response = client.messages.create(
-                        model=config.model, max_tokens=config.max_output_tokens,
+                        model=config.model, max_tokens=output_tokens,
                         system=system_text, messages=[{'role': 'user', 'content': source_text}],
                         stream=False,
                         # extra_body preserves the current wire contract on older
@@ -279,7 +284,7 @@ def analyze_email_sources(payload, schema, *, instructions=''):
             else:
                 with _openai_client(config) as client:
                     response = client.chat.completions.create(
-                        model=config.model, max_completion_tokens=config.max_output_tokens,
+                        model=config.model, max_completion_tokens=output_tokens,
                         store=False, stream=False,
                         response_format={'type': 'json_schema', 'json_schema': {
                             'name': 'radai_sales_email_review', 'strict': True, 'schema': schema,
