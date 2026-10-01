@@ -6,11 +6,27 @@ Extraction + BYOK endpoints:
 
     POST /api/v1/pid-verification/extract-valve-mto/        (start)
         multipart/form-data: pid_file=<PDF>, vision_provider=<openai|claude>
-        (optional), vision_api_key=<key> (optional — see BYOK note below)
+        (optional), vision_api_key=<key> (optional — see BYOK note below),
+        scan_mode=<quick|thorough> (optional — defaults to "thorough" when
+        omitted; see services.piping_valve_mto_extractor._scan_mode_params
+        for exactly what each resolves to)
         → 202 {status: "queued", job_id, ...}
 
     GET  /api/v1/pid-verification/extract-valve-mto/<job_id>/   (poll)
         → live job snapshot (progress, partial rows, final result)
+
+Long-running extractions (Thorough Scan's 2x2-tile/2-pass design can mean
+25+ minutes end-to-end on a dense multi-page PDF): extract_valve_mto_view
+below has NO execution timeout of its own to raise — confirmed by reading
+it end to end. It stages the upload, calls start_job() (which spawns an
+independent daemon thread and returns a job_id immediately — see
+services.valve_mto_job_store.start_job/_run_in_thread), and responds 202
+without ever blocking on the extraction itself. The background thread
+then runs for exactly as long as its Vision batches take, with no
+timeout/kill-switch cutting it off early. The real per-call ceiling that
+WAS too tight for Thorough Scan is services.piping_valve_mto_extractor's
+own VISION_TIMEOUT_SECS (raised 90s -> 300s) and max_tokens (raised to
+40000) — see that module's own comments on both.
 
     POST /api/v1/pid-verification/extract-valve-mto/test-key/
         ({provider, api_key}) — connectivity check for a BYOK key before
@@ -117,11 +133,17 @@ def extract_valve_mto_view(request):
 
     vision_provider = (request.data.get('vision_provider') or '').strip() or None
     vision_api_key  = (request.data.get('vision_api_key') or '').strip() or None
+    # Defaults to 'thorough' when not provided at all — same default
+    # services.piping_valve_mto_extractor._scan_mode_params itself falls
+    # back to, so this is belt-and-suspenders rather than the only place
+    # the default is enforced; kept explicit here too so it's visible
+    # right where the request is parsed, not just buried in the extractor.
+    scan_mode = (request.data.get('scan_mode') or '').strip().lower() or 'thorough'
 
     try:
         job_id = start_job(
             tmp_path, upload.name, vision_provider=vision_provider, vision_api_key=vision_api_key,
-            user_id=request.user.pk,
+            user_id=request.user.pk, scan_mode=scan_mode,
         )
     except Exception as exc:
         logger.exception('Failed to start extraction job: %s', exc)
