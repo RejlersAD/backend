@@ -26,6 +26,58 @@ UNAVAILABLE_HEADLINES = (
 )
 
 
+def _workbook_aging(source, as_of):
+    """Finance's unpaid-status formula, kept in each recorded original currency."""
+    from apps.finance.services.invoice_performance import source_snapshot_metadata
+    from apps.finance.services.receivables_dashboard import UNPAID_STATUSES
+
+    grouped = {}
+    overdue_count = 0
+    for row in source.filter(payment_status__in=UNPAID_STATUSES).values(
+            'currency', 'invoice_amount', 'balance_to_be_received', 'balance_currency',
+            'payment_status', 'due_date').iterator(chunk_size=1000):
+        currency = row['currency'] or 'UNSPECIFIED'
+        item = grouped.setdefault(currency, {'invoice_count': 0, 'missing_balance_count': 0,
+                                             'unknown_due_date_count': 0, 'buckets': defaultdict(Decimal)})
+        item['invoice_count'] += 1
+        overdue_count += row['payment_status'] == 'overdue'
+        amount = row['invoice_amount']
+        if row['payment_status'] == 'partial':
+            amount = row['balance_to_be_received']
+            if amount != 0 and row['balance_currency'] != currency:
+                amount = None
+        if currency == 'UNSPECIFIED':
+            amount = None
+        days = (as_of - row['due_date']).days if row['due_date'] else None
+        key = ('unknown_due_date' if days is None else 'current' if days <= 0 else
+               'days_1_30' if days <= 30 else 'days_31_60' if days <= 60 else 'over60')
+        item['unknown_due_date_count'] += days is None
+        item['missing_balance_count'] += amount is None
+        if amount is not None:
+            item['buckets'][key] += amount
+    rows = []
+    for currency, item in sorted(grouped.items()):
+        complete = not item['missing_balance_count']
+        rows.append({
+            'currency': currency, 'status': 'available' if complete else 'incomplete',
+            'total': str(sum(item['buckets'].values(), Decimal('0')).quantize(Decimal('0.01'))) if complete else None,
+            'buckets': [{'id': key, 'label': label,
+                         'amount': str(item['buckets'][key].quantize(Decimal('0.01'))) if complete else None}
+                        for key, label in BUCKETS],
+            **{key: item[key] for key in ('invoice_count', 'missing_balance_count', 'unknown_due_date_count')},
+        })
+    missing = sum(row['missing_balance_count'] for row in rows)
+    snapshot = source._receivables_snapshot
+    return {
+        'status': 'incomplete' if missing else 'available', 'by_currency': rows,
+        'missing_balance_count': missing, 'unknown_due_date_count': sum(row['unknown_due_date_count'] for row in rows),
+        'invoice_count': sum(row['invoice_count'] for row in rows), 'overdue_invoice_count': overdue_count,
+        'source': source_snapshot_metadata(snapshot), 'source_updated_at': snapshot.imported_at.isoformat(),
+        'as_of_date': as_of.isoformat(),
+        'description': 'Published Finance workbook: New, Overdue and Pending use recorded Invoice Amount; Partial uses recorded Balance to be received in the matching original currency. Signed values and zeros are retained. Missing or mismatched balances withhold their currency total. Due dates determine ageing; recorded Overdue status determines overdue invoice count.',
+    }
+
+
 def _aging(allowed, as_of):
     if not allowed:
         return {'status': 'restricted', 'by_currency': [], 'missing_balance_count': None,
@@ -33,6 +85,11 @@ def _aging(allowed, as_of):
                 'source_updated_at': None, 'as_of_date': as_of.isoformat(),
                 'description': 'Outgoing-invoice read access is required.'}
     from apps.invoice_tracker.models import CustomerInvoice
+    from apps.finance.services.receivables_source import get_active_receivables_source
+
+    published = get_active_receivables_source()
+    if published is not None:
+        return _workbook_aging(published, as_of)
 
     # CustomerInvoice's authorized register has shared module-wide visibility.
     # Preserve that scope and the original currency; never use the AED cache.
@@ -98,10 +155,14 @@ def _receivable_metric(identifier, label, aging, bucket=None):
     amounts = [{'currency': row['currency'], 'amount':
                 next(item['amount'] for item in row['buckets'] if item['id'] == bucket) if bucket else row['total']}
                for row in complete]
+    workbook = aging.get('source', {}).get('mode') == 'workbook'
     row = metric(identifier, label, unit='currency', status='partial' if aging['status'] == 'incomplete' else aging['status'], by_currency=amounts,
-                 source='Customer invoice register', route=None if aging['status'] == 'restricted' else '/finance/outgoing-invoices',
+                 source='Published Finance workbook' if workbook else 'Customer invoice register',
+                 route=None if aging['status'] == 'restricted' else '/finance' if workbook else '/finance/outgoing-invoices',
                  description=('Unpaid positive recorded balances more than 60 days past contractual due date.' if bucket
                               else 'Unpaid positive recorded customer invoice balances, including invoices with an unknown due date.'))
+    if workbook:
+        row['description'] = row['definition'] = aging['description'] + (' This metric includes only balances more than 60 days past due.' if bucket else '')
     row['incomplete_currencies'] = [item['currency'] for item in aging['by_currency'] if item['status'] == 'incomplete']
     if aging['status'] != 'available':
         row['reason'] = ('One or more currency totals are withheld because invoice balances are missing.'
@@ -115,7 +176,9 @@ def build_financial_performance(user, context, finance_section):
     as_of = timezone.localtime(context['generated_at']).date()
     try:
         with transaction.atomic():
-            aging = _aging('finance_outgoing' in context['allowed_modules'], as_of)
+            aging = context.get('_finance_aging')
+            if aging is None:
+                aging = _aging('finance_outgoing' in context['allowed_modules'], as_of)
     except Exception:
         logger.exception('Executive financial aging source failed')
         aging = {'status': 'error', 'by_currency': [], 'missing_balance_count': None,
@@ -137,6 +200,7 @@ def build_financial_performance(user, context, finance_section):
         'status': finance_section['status'],
         'source_updated_at': finance_section.get('source_updated_at'),
         'source_timestamp_kind': finance_section.get('source_timestamp_kind'),
+        'source': aging.get('source'),
         'kpis': kpis, 'working_capital': {'metrics': working_capital, 'aging': aging},
         'actions': list(finance_section.get('actions', [])),
         'controls': {

@@ -12,11 +12,33 @@ from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 
 from apps.core.project_models import Project, ProjectMember
+from apps.finance.receivables_source_models import ReceivablesSourceRow, ReceivablesSourceSnapshot
 from apps.invoice_tracker.models import CustomerInvoice
 from apps.invoice_tracker import tests_collections as collection_helpers
 from apps.portfolio.recorded_invoices import build_recorded_invoices
 from apps.rbac.models import Permission, UserPermissionOverride
 from . import test_executive as executive_fixtures
+
+
+def finance_source():
+    ReceivablesSourceSnapshot.objects.filter(is_active=True).update(is_active=False)
+    return ReceivablesSourceSnapshot.objects.create(
+        sha256=uuid4().hex * 2, file_name='synthetic-finance.xlsx', sheet_name='External Invoice ',
+        last_row=8, row_count=3, is_active=True)
+
+
+def source_invoice(snapshot, number, project='P-1', **changes):
+    values = {
+        'snapshot': snapshot, 'row_number': 6 + snapshot.rows.count(), 'invoice_number': number,
+        'rad_project_no': project, 'invoice_amount': Decimal('100'), 'invoice_amount_aed': Decimal('100'),
+        'currency': 'AED', 'currency_status': 'recorded', 'payment_status': 'partial',
+        'actual_payment_received': Decimal('20'), 'actual_payment_currency': 'AED',
+        'actual_payment_currency_status': 'recorded', 'balance_to_be_received': Decimal('31'),
+        'balance_currency': 'AED', 'balance_currency_status': 'recorded',
+        'invoice_date': date(2026, 9, 1),
+    }
+    values.update(changes)
+    return ReceivablesSourceRow.objects.create(**values)
 
 
 class RecordedInvoiceTests(TestCase):
@@ -245,6 +267,118 @@ class RecordedInvoiceTests(TestCase):
         self.assertIsNone(report['total_rows'])
 
 
+class RecordedFinanceSourceTests(TestCase):
+    setUp = RecordedInvoiceTests.setUp
+    grant = RecordedInvoiceTests.grant
+    row = staticmethod(RecordedInvoiceTests.row)
+    report = RecordedInvoiceTests.report
+    currency = staticmethod(RecordedInvoiceTests.currency)
+    invoice = RecordedInvoiceTests.invoice
+
+    def test_published_source_replaces_operational_register_without_writes_or_operational_ids(self):
+        self.grant()
+        old = self.invoice('OLD-REGISTER', invoice_amount=Decimal('999'))
+        snapshot = finance_source()
+        row = source_invoice(snapshot, 'SOURCE', register_invoice_id=old.pk)
+        with CaptureQueriesContext(connection) as queries:
+            report = self.report()
+        self.assertEqual([item['invoice_number'] for item in report['rows']], ['SOURCE'])
+        self.assertFalse(any('invoice_tracker_customerinvoice' in item['sql'] for item in queries))
+        self.assertFalse(any(item['sql'].lstrip().upper().startswith(('INSERT ', 'UPDATE ', 'DELETE ')) for item in queries))
+        self.assertEqual(report['finance_snapshot_id'], snapshot.pk)
+        self.assertEqual(report['source']['kind'], 'finance_source_snapshot')
+        self.assertEqual(report['source']['route'], '/finance')
+        self.assertEqual(report['source']['published_at'], snapshot.imported_at.isoformat())
+        self.assertEqual(report['rows'][0]['source_row_number'], row.row_number)
+        self.assertIsNone(report['rows'][0]['id'])
+        self.assertIsNone(report['rows'][0]['detail_route'])
+        self.assertEqual(report['project_groups'][0]['register_route'], '/finance')
+        # The recorded workbook balance deliberately disagrees with amount - receipt.
+        self.assertEqual(self.currency(report)['calculated_receivable_balance']['value'], '31.00')
+        self.assertEqual(self.currency(report)['calculated_receivable_balance']['basis'], 'recorded_source_balance')
+
+    def test_source_switch_and_pinned_read_are_coherent(self):
+        self.grant()
+        first = finance_source()
+        source_invoice(first, 'FIRST')
+        from apps.finance.services.receivables_source import get_active_receivables_source
+        pinned = get_active_receivables_source()
+        second = finance_source()
+        source_invoice(second, 'SECOND', invoice_amount=Decimal('200'))
+        with patch('apps.portfolio.recorded_invoices.get_active_receivables_source', return_value=pinned):
+            report = self.report()
+        self.assertEqual(report['finance_snapshot_id'], first.pk)
+        self.assertEqual(report['rows'][0]['invoice_number'], 'FIRST')
+        current = self.report()
+        self.assertEqual(current['finance_snapshot_id'], second.pk)
+        self.assertEqual(self.currency(current)['invoice_amount']['value'], '200.00')
+
+    def test_currency_conflicts_missing_values_and_zero_are_not_recalculated(self):
+        self.grant()
+        snapshot = finance_source()
+        source_invoice(snapshot, 'DIFFERENT', actual_payment_currency='USD', balance_currency='EUR')
+        source_invoice(snapshot, 'MISSING', actual_payment_received=None, balance_to_be_received=None)
+        source_invoice(snapshot, 'ZERO', actual_payment_received=Decimal('0'), balance_to_be_received=Decimal('0'),
+                       actual_payment_currency='', actual_payment_currency_status='not_recorded',
+                       balance_currency='', balance_currency_status='not_recorded')
+        source_invoice(snapshot, 'CONFLICT', currency='AED', currency_status='conflict')
+        report = self.report()
+        aed = self.currency(report)
+        self.assertEqual(aed['invoice_amount']['value'], '300.00')
+        self.assertIsNone(aed['actual_payment_received']['value'])
+        self.assertEqual(aed['actual_payment_received']['known_value'], '0.00')
+        self.assertEqual(aed['actual_payment_received']['missing_count'], 2)
+        self.assertIsNone(aed['calculated_receivable_balance']['value'])
+        self.assertEqual(aed['calculated_receivable_balance']['known_value'], '0.00')
+        self.assertIsNone(self.currency(report, 'UNSPECIFIED')['invoice_amount']['known_value'])
+        different = next(row for row in report['rows'] if row['invoice_number'] == 'DIFFERENT')
+        self.assertEqual(different['actual_payment_received'], '20.00')
+        self.assertEqual(different['actual_payment_currency'], 'USD')
+        self.assertEqual(different['calculated_receivable_balance'], '31.00')
+        self.assertEqual(different['balance_currency'], 'EUR')
+
+    def test_duplicate_source_rows_and_excluded_statuses_stay_visible_without_inflating_totals(self):
+        self.grant()
+        snapshot = finance_source()
+        source_invoice(snapshot, 'DUPLICATE')
+        source_invoice(snapshot, ' duplicate ', project=' p-1 ')
+        source_invoice(snapshot, 'SAFE', project='P-2')
+        source_invoice(snapshot, 'CANCELLED', payment_status='cancelled')
+        source_invoice(snapshot, 'CREDIT', payment_status='credit_note')
+        source_invoice(snapshot, '   ')
+        report = self.report(limit=2)
+        self.assertEqual(report['total_rows'], 6)
+        self.assertEqual(report['coverage']['conflicting_invoice_count'], 3)
+        self.assertEqual(report['coverage']['excluded_invoice_count'], 2)
+        self.assertEqual(self.currency(report)['invoice_amount']['value'], '100.00')
+        self.assertEqual(len({row['record_key'] for row in self.report()['rows']}), 6)
+
+    def test_source_matching_preserves_parent_scope_and_explicit_denial(self):
+        self.grant()
+        snapshot = finance_source()
+        source_invoice(snapshot, 'CHILD')
+        source_invoice(snapshot, 'PARENT', project='P')
+        source_invoice(snapshot, 'PREFIX', project='P-10')
+        self.assertEqual([row['invoice_number'] for row in self.report(full_source=False)['rows']], ['CHILD'])
+        self.assertEqual(self.report(rows=[])['total_rows'], 0)
+        permission = Permission.objects.get(module__code='finance_outgoing', action='read')
+        UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
+        with patch('apps.portfolio.recorded_invoices.get_active_receivables_source',
+                   side_effect=AssertionError('Denied access must not inspect Finance data')):
+            report = self.report()
+        self.assertEqual(report['status'], 'restricted')
+        self.assertIsNone(report['source'])
+
+    def test_active_source_failure_never_falls_back_to_operational_records(self):
+        self.grant()
+        self.invoice('OLD-REGISTER')
+        source_invoice(finance_source(), 'SOURCE')
+        with patch('apps.portfolio.recorded_invoices.get_active_receivables_source', side_effect=DatabaseError('synthetic')):
+            report = self.report()
+        self.assertEqual(report['status'], 'error')
+        self.assertEqual(report['rows'], [])
+
+
 @override_settings(ROOT_URLCONF='apps.invoice_tracker.tests_collections')
 class RecordedInvoiceProjectFilterTests(TestCase):
     setUp = collection_helpers.CollectionsTests.setUp
@@ -362,3 +496,43 @@ class RecordedInvoiceAPITests(TestCase):
         self.assertEqual(response.data['total_rows'], 0)
         self.assertEqual(response.data['rows'], [])
         self.assertEqual(response.data['project_groups'], [])
+
+    def test_finance_publication_between_pages_requires_reload_and_keeps_poc_version(self):
+        client = self.authorize()
+        portfolio = self.source()
+        self.row(portfolio)
+        first = finance_source()
+        source_invoice(first, 'FIRST-1')
+        source_invoice(first, 'FIRST-2')
+        params = {'snapshot_id': portfolio.pk, 'limit': 1}
+        first_page = client.get(self.url, params)
+        self.assertEqual(first_page.status_code, 200, first_page.data)
+        self.assertEqual(first_page.data['finance_snapshot_id'], first.pk)
+        self.assertEqual(first_page.data['source_snapshot_id'], portfolio.pk)
+        next_page = client.get(self.url, {**params, 'finance_snapshot_id': first.pk, 'offset': 1})
+        self.assertEqual(next_page.status_code, 200, next_page.data)
+        self.assertEqual(next_page.data['rows'][0]['invoice_number'], 'FIRST-2')
+        second = finance_source()
+        source_invoice(second, 'SECOND')
+        stale = client.get(self.url, {**params, 'finance_snapshot_id': first.pk, 'offset': 1})
+        self.assertEqual(stale.status_code, 409, stale.data)
+        self.assertEqual(stale.data['code'], 'finance_source_changed')
+        refreshed = client.get(self.url, params)
+        self.assertEqual(refreshed.data['finance_snapshot_id'], second.pk)
+        self.assertEqual(refreshed.data['rows'][0]['invoice_number'], 'SECOND')
+        self.assertEqual(client.get(self.url, {**params, 'snapshot_id': portfolio.pk + 1}).status_code, 409)
+
+    def test_first_finance_import_invalidates_legacy_pages_and_guards_still_apply(self):
+        client = self.authorize()
+        self.row(self.source())
+        self.invoice('LEGACY')
+        first = client.get(self.url)
+        self.assertEqual(first.data['finance_snapshot_id'], 0)
+        source_invoice(finance_source(), 'SOURCE')
+        self.assertEqual(client.get(self.url, {'finance_snapshot_id': 0}).status_code, 409)
+        self.assertEqual(client.get(self.url, {'finance_snapshot_id': -1}).status_code, 400)
+        self.assertEqual(client.get(self.url, {'finance_snapshot_id': 'invalid'}).status_code, 400)
+        permission = Permission.objects.get(module__code='finance_outgoing', action='read')
+        UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
+        denied = client.get(self.url, {'finance_snapshot_id': 0})
+        self.assertEqual(denied.status_code, 403)

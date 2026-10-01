@@ -1,9 +1,9 @@
 """Read-only links from authorized portfolio identities to outgoing invoices.
 
-The POC workbook has project totals, not invoice numbers. These links therefore
-identify current register invoices by their recorded project number; they never
-claim an invoice-level workbook reconciliation or allocate parent invoices to
-multiple subprojects.
+The POC workbook has project totals, not invoice numbers. These reads therefore
+match published Finance source rows (or the pre-import register) by recorded
+project number; they never claim an invoice-level workbook reconciliation or
+allocate parent invoices to multiple subprojects.
 """
 import logging
 from collections import Counter, defaultdict
@@ -15,6 +15,7 @@ from django.db.models import Count
 from django.db.models.functions import Trim, Upper
 from django.utils import timezone
 
+from apps.finance.services.receivables_source import get_active_receivables_source
 from apps.invoice_tracker.models import CustomerInvoice
 from apps.invoice_tracker.services.receivable_balance import receivable_balance
 from apps.rbac.action_policy import module_action_allowed
@@ -38,6 +39,23 @@ DESCRIPTION = (
     'totals include only unambiguous invoices and exclude cancelled invoices '
     'and credit notes; excluded records remain visible for review.'
 )
+SOURCE_DESCRIPTION = (
+    'Published Finance workbook invoices matched by exact project number. The '
+    'POC workbook has no invoice numbers. Parent invoices are shown once and '
+    'are not allocated to subprojects. Receipts and balances are recorded source '
+    'values from this Finance snapshot, not historical POC-cutoff balances. '
+    'No currency conversion or invoice-amount-minus-receipts recalculation is '
+    'applied. Totals exclude ambiguous identities, cancelled invoices and credit '
+    'notes. Missing amounts and conflicting currencies remain unknown.'
+)
+SOURCE_FIELDS = (
+    'row_number', 'currency_status', 'balance_to_be_received', 'balance_currency',
+    'balance_currency_status', 'actual_payment_currency', 'actual_payment_currency_status',
+)
+
+
+class FinanceSourceChanged(ValueError):
+    """Connected invoice pagination must restart after Finance publication."""
 
 
 def normalize_invoice_project_code(value):
@@ -156,7 +174,16 @@ def _metric(values, *, basis, currency):
     }
 
 
-def _totals(records):
+def _same_currency_value(row, field, currency_field, status_field):
+    """Validate each independently recorded currency before aggregation."""
+    value = row[field]
+    if value is None or Decimal(value) == 0:
+        return value
+    return value if (row[status_field] == 'recorded' and row[currency_field] == row['currency']
+                     and row['currency'] != 'UNSPECIFIED') else None
+
+
+def _totals(records, *, source_snapshot=False):
     groups = defaultdict(list)
     for row in records:
         groups[row['currency']].append(row)
@@ -171,11 +198,17 @@ def _totals(records):
             'invoice_amount': _metric((row['invoice_amount'] for row in included),
                                       basis='recorded_invoice_amount', currency=currency),
             'actual_payment_received': _metric(
-                (row['actual_payment_received'] if row['actual_payment_received'] is not None else '0'
-                 for row in included), basis='recorded_receipts_blank_is_zero', currency=currency),
+                ((_same_currency_value(row, 'actual_payment_received', 'actual_payment_currency',
+                                       'actual_payment_currency_status') if source_snapshot else
+                  row['actual_payment_received'] if row['actual_payment_received'] is not None else '0')
+                 for row in included), basis='recorded_source_receipts' if source_snapshot else
+                 'recorded_receipts_blank_is_zero', currency=currency),
             'calculated_receivable_balance': _metric(
-                (row['calculated_receivable_balance'] for row in included),
-                basis='invoice_amount_less_current_receipts_blank_is_zero', currency=currency),
+                ((_same_currency_value(row, 'calculated_receivable_balance', 'balance_currency',
+                                       'balance_currency_status') if source_snapshot else
+                  row['calculated_receivable_balance']) for row in included),
+                basis='recorded_source_balance' if source_snapshot else
+                'invoice_amount_less_current_receipts_blank_is_zero', currency=currency),
             'recorded_aed_invoice_amount': _metric((row['invoice_amount_aed'] for row in included),
                                                   basis='stored_aed_amount_no_conversion', currency='AED'),
         }
@@ -188,27 +221,38 @@ def _totals(records):
     return totals
 
 
-def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0):
+def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0,
+                            finance_snapshot_id=None):
     """Caller supplies authorized, filtered PortfolioRow dictionaries, before pagination."""
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
         raise ValueError('Invoice page limit must be between 1 and 200.')
     if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100000:
         raise ValueError('Invoice offset must be between 0 and 100000.')
+    if finance_snapshot_id is not None and (isinstance(finance_snapshot_id, bool)
+            or not isinstance(finance_snapshot_id, int) or finance_snapshot_id < 0):
+        raise ValueError('Finance source version must be a nonnegative integer.')
     if not module_action_allowed(user, 'finance_outgoing', 'read'):
         return _empty('restricted', limit, offset, 'Outgoing Invoices read access is required.')
     try:
         with transaction.atomic():
             identities, matches, ambiguous, withheld = _matches(user, rows, full_source)
-            source = CustomerInvoice.objects.annotate(
+            source = get_active_receivables_source()
+            snapshot = getattr(source, '_receivables_snapshot', None)
+            selected_snapshot_id = snapshot.pk if snapshot else 0
+            if finance_snapshot_id is not None and finance_snapshot_id != selected_snapshot_id:
+                raise FinanceSourceChanged('Finance source changed. Reload connected invoices.')
+            if source is None:
+                source = CustomerInvoice.objects
+            source = source.annotate(
                 _portfolio_project=Upper(Trim('rad_project_no')),
                 _portfolio_number=Upper(Trim('invoice_number')),
             ).filter(_portfolio_project__in=set(matches) | ambiguous)
             invoices = list(source.order_by('invoice_number', 'rad_project_no', 'id').values(
-                *FIELDS, '_portfolio_project', '_portfolio_number',
+                *FIELDS, *(SOURCE_FIELDS if snapshot else ()), '_portfolio_project', '_portfolio_number',
             ))
             # Check IDs against the unfiltered register. A second physical row
             # on another project must not become an apparently safe detail URL.
-            id_counts = dict(CustomerInvoice._base_manager.filter(
+            id_counts = {} if snapshot else dict(CustomerInvoice._base_manager.filter(
                 pk__in={row['id'] for row in invoices},
             ).order_by().values('pk').annotate(_records=Count('pk')).values_list('pk', '_records'))
             composite_counts = Counter((row['_portfolio_number'], row['_portfolio_project']) for row in invoices)
@@ -217,7 +261,7 @@ def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0
                 key = invoice['_portfolio_project']
                 match = matches.get(key)
                 conflicts = []
-                if id_counts.get(invoice['id'], 0) != 1:
+                if not snapshot and id_counts.get(invoice['id'], 0) != 1:
                     conflicts.append('duplicate_invoice_id')
                 if composite_counts[(invoice['_portfolio_number'], key)] > 1:
                     conflicts.append('duplicate_invoice_project')
@@ -226,27 +270,37 @@ def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0
                 if key in ambiguous:
                     conflicts.append('ambiguous_project_identity')
                 excluded_status = invoice['payment_status'] in EXCLUDED_STATUSES
-                balance = receivable_balance(invoice['invoice_amount'], invoice['actual_payment_received'])
+                balance = (invoice['balance_to_be_received'] if snapshot else
+                           receivable_balance(invoice['invoice_amount'], invoice['actual_payment_received']))
                 record = {
                     **{field: invoice[field] for field in (
                         'invoice_number', 'rad_project_no', 'project_id', 'project_name',
                         'company', 'account', 'category', 'payment_status',
                     )},
-                    'id': str(invoice['id']) if id_counts.get(invoice['id']) == 1 else None,
-                    'record_key': f'invoice-{index}', 'project_number': key,
+                    'id': str(invoice['id']) if not snapshot and id_counts.get(invoice['id']) == 1 else None,
+                    'record_key': f'source-{snapshot.pk}-{invoice["row_number"]}' if snapshot else f'invoice-{index}',
+                    'project_number': key,
                     'project_code': match['project_code'] if match else None,
                     'subproject_code': match['subproject_code'] if match else None,
                     'match_level': match['match_level'] if match else None,
                     'match_status': 'conflict' if conflicts else 'matched', 'conflict_codes': conflicts,
-                    'currency': _key(invoice['currency']) or 'UNSPECIFIED',
+                    'currency': ((_key(invoice['currency']) or 'UNSPECIFIED') if not snapshot or
+                                 invoice['currency_status'] == 'recorded' else 'UNSPECIFIED'),
                     **{field: _money(invoice[field]) for field in
                        ('invoice_amount', 'invoice_amount_aed', 'actual_payment_received')},
                     'calculated_receivable_balance': _money(balance),
+                    **({
+                        'source_snapshot': True, 'source_row_number': invoice['row_number'],
+                        'currency_status': invoice['currency_status'],
+                        'balance_basis': 'recorded_source_balance',
+                        **{field: invoice[field] for field in ('balance_currency', 'balance_currency_status',
+                           'actual_payment_currency', 'actual_payment_currency_status')},
+                    } if snapshot else {}),
                     **{field: invoice[field].isoformat() if invoice[field] else None
                        for field in ('invoice_date', 'due_date', 'payment_date')},
                     'excluded_from_totals': bool(conflicts or excluded_status),
                     'exclusion_reason': 'identity_conflict' if conflicts else invoice['payment_status'] if excluded_status else None,
-                    'detail_route': f'{REGISTER_ROUTE}/{invoice["id"]}' if not conflicts else None,
+                    'detail_route': f'{REGISTER_ROUTE}/{invoice["id"]}' if not snapshot and not conflicts else None,
                 }
                 records.append(record)
                 if match:
@@ -254,14 +308,15 @@ def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0
                         groups[key] = {
                             **{field: value for field, value in match.items() if field != '_identity'},
                             'invoice_count': 0, 'matched_invoice_count': 0, 'conflict_count': 0,
-                            'register_route': f'{REGISTER_ROUTE}?{urlencode({"queue": "all", "project_exact": key})}',
+                            'register_route': '/finance' if snapshot else
+                                              f'{REGISTER_ROUTE}?{urlencode({"queue": "all", "project_exact": key})}',
                         }
                     groups[key]['invoice_count'] += 1
                     groups[key]['conflict_count'] += bool(conflicts)
                     groups[key]['matched_invoice_count'] += not conflicts
                     if not conflicts and match['_identity']:
                         matched_identities.add(match['_identity'])
-            totals = _totals(records)
+            totals = _totals(records, source_snapshot=bool(snapshot))
             conflict_count = sum(bool(row['conflict_codes']) for row in records)
             updated = max((row['updated_at'] for row in invoices if row['updated_at']), default=None)
             partial = conflict_count or ambiguous or withheld or any(
@@ -269,10 +324,20 @@ def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0
             )
             return {
                 'status': 'partial' if partial else 'available',
-                'source': {'mode': 'operational', 'label': 'Recorded outgoing invoices',
+                'finance_snapshot_id': selected_snapshot_id,
+                'source': ({'kind': 'finance_source_snapshot', 'mode': 'workbook',
+                            'label': 'Published Finance workbook', 'route': '/finance',
+                            'snapshot_id': snapshot.pk, 'file_name': snapshot.file_name,
+                            'sheet_name': snapshot.sheet_name,
+                            'updated_at': snapshot.imported_at.isoformat(),
+                            'published_at': snapshot.imported_at.isoformat(),
+                            'as_of_date': snapshot.imported_at.date().isoformat(),
+                            'date_basis': 'published_workbook_values', 'read_only': True,
+                            'currency_conversion_applied': False} if snapshot else
+                           {'mode': 'operational', 'label': 'Recorded outgoing invoices',
                            'route': f'{REGISTER_ROUTE}?queue=all', 'updated_at': updated.isoformat() if updated else None,
                            'as_of_date': timezone.localdate().isoformat(), 'date_basis': 'current_recorded_values',
-                           'currency_conversion_applied': False},
+                            'currency_conversion_applied': False}),
                 'coverage': {
                     'source_identity_count': len(identities), 'matched_source_identity_count': len(matched_identities),
                     'unmatched_source_identity_count': len(identities) - len(matched_identities),
@@ -286,8 +351,11 @@ def build_recorded_invoices(user, rows, *, full_source=False, limit=50, offset=0
                 'project_groups': [groups[key] for key in sorted(groups)],
                 'rows': records[offset:offset + limit], 'total_rows': len(records),
                 'offset': offset, 'limit': limit, 'returned_rows': len(records[offset:offset + limit]),
-                'truncated': offset + limit < len(records), 'description': DESCRIPTION,
+                'truncated': offset + limit < len(records),
+                'description': SOURCE_DESCRIPTION if snapshot else DESCRIPTION,
             }
+    except FinanceSourceChanged:
+        raise
     except Exception:
         logger.exception('Recorded portfolio invoices unavailable')
         return _empty('error', limit, offset, 'Recorded outgoing invoices could not be read. Try again later.')

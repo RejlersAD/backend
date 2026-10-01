@@ -41,7 +41,8 @@ class PortfolioConnectionsAPITests(TestCase):
         response = client.get(self.url, {'pm': 'pm1', 'snapshot_id': snapshot.pk, 'limit': 1, 'offset': 2})
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual({row['id'] for row in build.call_args.args[1]}, {one.pk, two.pk})
-        self.assertEqual(build.call_args.kwargs, {'full_source': True, 'limit': 1, 'offset': 2})
+        self.assertEqual(build.call_args.kwargs, {'full_source': True, 'limit': 1, 'offset': 2,
+                                                 'finance_snapshot_id': None})
         self.assertEqual(response.data['source_snapshot_id'], snapshot.pk)
         self.assertEqual(response['Cache-Control'], 'private, no-store')
         self.assertEqual(response.data['workbook_reporting_date'], snapshot.reporting_date.isoformat())
