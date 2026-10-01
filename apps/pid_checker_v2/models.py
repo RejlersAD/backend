@@ -264,6 +264,20 @@ class PidCheckerV2LineListUpload(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_line_lists',
     )
+    # Scopes this upload to one PIDCheckerV2 "project" — PIDCheckerV2 has no
+    # project model of its own; it reuses apps.pid_verification.PIDVProject
+    # (the same project the frontend's pidProjectsService.js already talks
+    # to), matching the pattern already used by LegendSymbolImage.project
+    # below. Nullable so pre-existing uploads from the brief global-per-user
+    # period (see the now-reversed migration 0022) keep their data instead
+    # of being deleted — they simply won't surface under any project filter
+    # until re-uploaded within a project.
+    owner_project = models.ForeignKey(
+        'pid_verification.PIDVProject',
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='checker_v2_line_lists',
+    )
     filename = models.CharField(max_length=LINE_LIST_FILENAME_MAX_LEN)
     sheet_name = models.CharField(max_length=200, blank=True, default='')
     title = models.CharField(max_length=LINE_LIST_TITLE_MAX_LEN, blank=True, default='')
@@ -285,9 +299,9 @@ class PidCheckerV2LineListUpload(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['created_by'],
+                fields=['created_by', 'owner_project'],
                 condition=models.Q(is_active=True),
-                name='uniq_pidv2_active_line_list_per_user',
+                name='uniq_pidv2_active_line_list_per_user_project',
             ),
         ]
 
@@ -351,6 +365,15 @@ class PidCheckerV2EquipmentListUpload(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_equipment_lists',
     )
+    # See PidCheckerV2LineListUpload.owner_project — same pattern. Named
+    # 'owner_project' (not 'project') because 'project' below is already a
+    # free-text CharField holding the project name from the Excel header.
+    owner_project = models.ForeignKey(
+        'pid_verification.PIDVProject',
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='checker_v2_equipment_lists',
+    )
     filename = models.CharField(max_length=EQUIPMENT_LIST_FILENAME_MAX_LEN)
     sheet_name = models.CharField(max_length=200, blank=True, default='')
     title = models.CharField(max_length=EQUIPMENT_LIST_TITLE_MAX_LEN, blank=True, default='')
@@ -374,9 +397,9 @@ class PidCheckerV2EquipmentListUpload(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['created_by'],
+                fields=['created_by', 'owner_project'],
                 condition=models.Q(is_active=True),
-                name='uniq_pidv2_active_equipment_list_per_user',
+                name='uniq_pidv2_active_equip_list_per_user_project',
             ),
         ]
 
@@ -454,6 +477,15 @@ class PidCheckerV2InstrumentIndexUpload(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_instrument_indexes',
     )
+    # See PidCheckerV2LineListUpload.owner_project — same pattern. Named
+    # 'owner_project' (not 'project') because 'project' below is already a
+    # free-text CharField holding the project name from the Excel header.
+    owner_project = models.ForeignKey(
+        'pid_verification.PIDVProject',
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='checker_v2_instrument_indexes',
+    )
     filename = models.CharField(max_length=INSTRUMENT_INDEX_FILENAME_MAX_LEN)
     sheet_name = models.CharField(max_length=200, blank=True, default='')
     title = models.CharField(max_length=INSTRUMENT_INDEX_TITLE_MAX_LEN, blank=True, default='')
@@ -477,9 +509,9 @@ class PidCheckerV2InstrumentIndexUpload(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['created_by'],
+                fields=['created_by', 'owner_project'],
                 condition=models.Q(is_active=True),
-                name='uniq_pidv2_active_instrument_index_per_user',
+                name='uniq_pidv2_active_instr_index_per_user_project',
             ),
         ]
 
@@ -603,7 +635,10 @@ def legend_symbol_image_upload_path(instance, filename):
     needing to seed anything.
     """
     ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'png'
-    return f'legend_symbol_images/{instance.project_id}/{instance.section}/{uuid.uuid4().hex}.{ext}'
+    # A seeded is_default=True row has no project (see seed_pid_default_symbols) —
+    # route those under a 'defaults' folder instead of a literal 'None'.
+    project_segment = instance.project_id or 'defaults'
+    return f'legend_symbol_images/{project_segment}/{instance.section}/{uuid.uuid4().hex}.{ext}'
 
 
 class LegendSymbolImage(models.Model):
@@ -613,15 +648,22 @@ class LegendSymbolImage(models.Model):
     Re-uploading for the same (project, section, symbol_name) replaces the
     row rather than accumulating duplicates — see ``unique_together``.
 
-    This table only ever holds project-specific overrides. The shared
-    library of default pictures lives outside the database entirely, as
-    static files — see ``services/default_symbol_images.py``.
+    A second, separate source of rows: ``is_default=True`` (project=None) —
+    the repo-committed static/default_symbols/ library, mirrored into this
+    table by the ``seed_pid_default_symbols`` management command (run
+    automatically post-migrate — see apps.py) so the shared picture library
+    survives independently of the static files on disk too, not just as a
+    static-file fallback. ``services/default_symbol_images.py`` still reads
+    the static files directly as a second-line fallback for any picture not
+    yet (re-)seeded. A project's own upload always takes priority over a
+    default with the same (section, symbol_name) — see SymbolImagesListView.
     """
 
     image_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
     project = models.ForeignKey(
         'pid_verification.PIDVProject',
         on_delete=models.CASCADE,
+        null=True, blank=True,
         related_name='legend_symbol_images',
     )
     legend_sheet = models.ForeignKey(
@@ -634,6 +676,7 @@ class LegendSymbolImage(models.Model):
     symbol_name = models.CharField(max_length=SYMBOL_IMAGE_NAME_MAX_LEN)
     image_file = models.ImageField(upload_to=legend_symbol_image_upload_path, max_length=500, null=True, blank=True)
     content_type = models.CharField(max_length=SYMBOL_IMAGE_CONTENT_TYPE_MAX_LEN, default='image/png')
+    is_default = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -644,6 +687,13 @@ class LegendSymbolImage(models.Model):
         unique_together = [('project', 'section', 'symbol_name')]
         indexes = [
             models.Index(fields=['project', 'section']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['section', 'symbol_name'],
+                condition=models.Q(is_default=True),
+                name='uniq_pidv2_default_symbol_per_section',
+            ),
         ]
 
     def __str__(self) -> str:

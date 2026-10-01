@@ -3,7 +3,9 @@ P&ID Verification URL Configuration
 """
 from django.urls import path
 from . import views
-from .piping_valve_mto_view import extract_valve_mto_view, extract_valve_mto_status_view
+from .piping_valve_mto_view import (
+    extract_valve_mto_view, extract_valve_mto_status_view, test_valve_mto_api_key_view,
+)
 
 app_name = 'pid_verification'
 
@@ -67,7 +69,16 @@ urlpatterns = [
     # DCS / Instrument Symbol Compliance Analysis (AI — Gemini + OpenAI dual-chain)
     path('analyze-dcs/<str:document_id>/',                    views.analyze_dcs,   name='analyze-dcs'),
 
-    # Piping — Valve MTO extraction (async job pattern)
-    path('extract-valve-mto/',                                extract_valve_mto_view,        name='extract-valve-mto'),
-    path('extract-valve-mto/<str:job_id>/',                   extract_valve_mto_status_view, name='extract-valve-mto-status'),
+    # Piping — Valve MTO extraction (async job pattern + BYOK key test).
+    # test-key/ MUST be registered before the <str:job_id>/ pattern below —
+    # Django tries urlpatterns in order and job_id's str converter would
+    # otherwise greedily match the literal segment "test-key" as a job id.
+    path('extract-valve-mto/',                                extract_valve_mto_view,          name='extract-valve-mto'),
+    path('extract-valve-mto/test-key/',                       test_valve_mto_api_key_view,     name='extract-valve-mto-test-key'),
+    # NOTE: Valve MTO's Legend Sheet feature has NO dedicated endpoints —
+    # it uses apps.pid_checker_v2's EXISTING legend API (LegendSheetsModal
+    # / pidCheckerV2API.js on the frontend) directly. See
+    # piping_valve_mto_view.py's own top docstring for the correction
+    # history (an earlier version wrongly built its own endpoints here).
+    path('extract-valve-mto/<str:job_id>/',                   extract_valve_mto_status_view,   name='extract-valve-mto-status'),
 ]

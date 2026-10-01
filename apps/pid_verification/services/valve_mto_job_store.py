@@ -212,7 +212,11 @@ def _heartbeat_loop(job_id: str, stop_event: threading.Event) -> None:
             return
 
 
-def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
+def _run_in_thread(
+    job_id: str, pdf_path: str, filename: str,
+    vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
+    user_id=None,
+) -> None:
     """Execute extraction; clean up the temp file when done."""
     # Late import — keeps this module importable without the heavy deps.
     from .piping_valve_mto_extractor import extract_valve_mto_streaming
@@ -236,6 +240,9 @@ def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
             on_partial=lambda rows, meta: JobStore.update(
                 job_id, rows=rows, project_meta=meta,
             ),
+            vision_provider=vision_provider,
+            vision_api_key=vision_api_key,
+            user_id=user_id,
         )
         # Soft-coded: extractor flips status to 'error' when every batch fails
         # with a fatal OpenAI error (e.g. insufficient_quota). Propagate the
@@ -274,12 +281,28 @@ def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
             pass
 
 
-def start_job(pdf_path: str, filename: str) -> str:
-    """Create a job snapshot in cache+disk and start a daemon thread."""
+def start_job(
+    pdf_path: str, filename: str,
+    vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
+    user_id=None,
+) -> str:
+    """Create a job snapshot in cache+disk and start a daemon thread.
+
+    vision_provider/vision_api_key: BYOK passthrough — see
+    piping_valve_mto_extractor._resolve_vision_credential's own docstring
+    for the exact precedence. Both default to None (existing behaviour:
+    admin-managed OpenAI key, or nothing) so no existing caller breaks.
+
+    user_id: whoever started this extraction — used to look up their own
+    uploaded Legend Sheets (see piping_valve_mto_extractor's
+    _build_legend_context) so the Vision prompt can be grounded in the
+    user's own legend data. None (default) means no legend context is
+    injected, same as before this feature existed.
+    """
     job_id = JobStore.create({'filename': filename})
     th = threading.Thread(
         target=_run_in_thread,
-        args=(job_id, pdf_path, filename),
+        args=(job_id, pdf_path, filename, vision_provider, vision_api_key, user_id),
         name=f'valve-mto-{job_id[:8]}',
         daemon=True,
     )

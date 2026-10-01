@@ -5,10 +5,35 @@ Aligned with centralized environment configuration (9-3-26 commit).
 """
 
 import os
+import sys
 from pathlib import Path
 from urllib.parse import quote
 from decouple import config
 import dj_database_url
+
+# BUG FIX: real, confirmed server-startup crash on Windows — several
+# modules loaded during Django startup (this file included, further
+# below, plus various apps' own startup-time print()/logger.info() calls
+# used as visible "[X] [OK] registered" banners) contain emoji/unicode
+# characters. Windows' default console codepage (cp1252, sometimes
+# cp437) can't encode most of those, and a plain `print()` to a cp1252
+# console raises UnicodeEncodeError, which crashes the ENTIRE process —
+# not just skips that one line. This is Django's first-loaded module
+# (every entry point — manage.py, wsgi.py, asgi.py, celery.py — imports
+# it before anything else), so reconfiguring stdout/stderr to UTF-8 HERE,
+# before any of this file's own prints run, protects every one of those
+# entry points and every app's startup banner at once, instead of
+# hand-fixing each emoji individually across the codebase (a real scan
+# found 378 such print() calls — not something to chase one at a time).
+# reconfigure() is Python 3.7+; errors='replace' means even a genuinely
+# unencodable character degrades to a visible '?' instead of crashing.
+# A misconfigured/redirected stream without reconfigure() (rare, e.g.
+# some CI log capture) is not fatal to fix — never let this block startup.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -208,6 +233,7 @@ INSTALLED_APPS = [
     'apps.non_teff_metadata',     # Non-TEFF Metadata Extractor — multi-format document metadata extraction
     'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
     'apps.instrument_io_workflow',  # Instrument IO List Workflow — CRS-style multi-revision IO List doc handling
+    'apps.valve_mto',            # Valve MTO — server-side persistence for the Piping Valve MTO workspace
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.project_organizer',    # Project Organizer — shared, cross-tool project registry (additive)
     'apps.valve_standards',      # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
