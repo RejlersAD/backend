@@ -63,6 +63,8 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'piping_critical_line_list', 'name': 'Critical Line List',        'icon': 'GitBranch',   'order': 24, 'description': '5-document critical line list with full 35-column enrichment'},
     # ── Instrument sub-module code (split from shared instrument_datasheet code) ──
     {'code': 'instrument_io_list',     'name': 'Instrument IO List',           'icon': 'CircleStack', 'order': 25, 'description': 'Generate or QC an Input/Output list from the instrument register'},
+    # SOFT-CODED: 1.8 Legend Manager — central legend library shared by all tools
+    {'code': 'legend_manager',         'name': 'Manage Legends',               'icon': 'BookOpen',    'order': 27, 'description': 'Central legend-sheet library — one legend pack per project, inherited by every extraction tool'},
     # ── Admin / Platform ─────────────────────────────────────────────────
     {'code': 'admin_dashboard',        'name': 'Admin Dashboard',              'icon': 'ChartBar',    'order': 50, 'description': 'System overview & analytics dashboard for administrators'},
     {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 51, 'description': 'Manage users, roles, and permissions'},
@@ -346,6 +348,7 @@ DEFAULT_ROLE_MODULES = [
     'hmb_extractor',
     'pid_line_list',
     'pid_equipment_list',
+    'legend_manager',
     # ── Piping Engineering ────────────────────────────────────────────
     'piping_critical_line_list',
     'piping_pms',
@@ -400,6 +403,7 @@ ENGINEERING_SECTION_MODULES = [
     'piping_datasheet',
     'piping_pms',
     'piping_critical_line_list',
+    'legend_manager',
     # ── Digitization ─────────────────────────────────────────────────
     'digitization_datasheet',
     'spec_customization',
@@ -497,6 +501,7 @@ MODULE_DISCIPLINE_MAP = {
     'non_teff_metadata': 'Digitization',
     'smart_plant_3d': 'Digitization',
     'valve_standards_reference': 'Digitization',
+    'legend_manager':    'Process',
     'qhse':              'QHSE',
     'crs_documents':     'CRS',
     'user_mgmt':         'Admin',

@@ -9,6 +9,7 @@ from .views import (
     LegendSheetDetailView,
     LegendSheetActivateView,
     LegendSheetDefaultTemplateView,
+    LegendPackUploadView,
     ValidateLineTagsView,
     LineListUploadView,
     LineListDetailView,
@@ -47,6 +48,7 @@ LEGENDS_LIST_PATH = 'legends/'
 LEGENDS_DETAIL_PATH = 'legends/<uuid:legend_id>/'
 LEGENDS_ACTIVATE_PATH = 'legends/<uuid:legend_id>/activate/'
 LEGENDS_DEFAULT_TEMPLATE_PATH = 'legends/default-template/'
+LEGENDS_PACK_UPLOAD_PATH = 'legends/pack-upload/'
 LINE_LISTS_LIST_PATH = 'line-lists/'
 LINE_LISTS_DETAIL_PATH = 'line-lists/<uuid:line_list_id>/'
 LINE_LISTS_ACTIVATE_PATH = 'line-lists/<uuid:line_list_id>/activate/'
@@ -84,6 +86,8 @@ urlpatterns = [
     # Legend Sheets — default-template must be BEFORE the UUID pattern
     path(LEGENDS_DEFAULT_TEMPLATE_PATH, LegendSheetDefaultTemplateView.as_view(),
          name='legends-default-template'),
+    path(LEGENDS_PACK_UPLOAD_PATH, LegendPackUploadView.as_view(),
+         name='legends-pack-upload'),
     path(LEGENDS_LIST_PATH, LegendSheetListCreateView.as_view(),
          name='legends-list'),
     path(LEGENDS_ACTIVATE_PATH, LegendSheetActivateView.as_view(),

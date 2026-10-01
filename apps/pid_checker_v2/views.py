@@ -15,6 +15,7 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.generics import ListAPIView, RetrieveAPIView
@@ -182,26 +183,50 @@ def _resolve_active_legend(user, section: str) -> PidCheckerV2LegendSheet | None
     )
 
 
+def _resolve_request_project(request):
+    """Resolve the optional shared Project Organizer project from the request.
+
+    Accepts ``project_id`` in POST data or query params. Returns the Project
+    instance or None. Imported lazily to avoid a hard dependency cycle between
+    pid_checker_v2 and project_organizer at module import time.
+    """
+    project_id = (
+        request.data.get('project_id')
+        or request.query_params.get('project_id')
+        or None
+    )
+    if not project_id:
+        return None
+    try:
+        from apps.project_organizer.models import Project
+        return Project.objects.filter(project_id=project_id).first()
+    except Exception:
+        return None
+
+
 # Sources reported to the client so the UI can show which legend is in use.
 LEGEND_SOURCE_EXPLICIT = 'explicit'      # legend_id from client
+LEGEND_SOURCE_PROJECT = 'project'        # project-level legend pack (inherited)
 LEGEND_SOURCE_ACTIVE = 'active'          # user's activated legend
 LEGEND_SOURCE_LATEST = 'latest'          # most-recent legend (no active)
 LEGEND_SOURCE_DEFAULT = 'default'        # built-in default template
 
 
-def _resolve_legend_smart(user, section: str, legend_id=None):
+def _resolve_legend_smart(user, section: str, legend_id=None, project=None):
     """Smart-fallback legend resolver used by validation.
 
     Returns a tuple: (legend_obj_or_None, definition_dict, name, source).
 
     Priority:
       1. Explicit legend_id
-      2. User's active legend for the section
-      3. User's most-recently updated legend for the section
-      4. Built-in default template (compiled on the fly — no DB row)
+      2. PROJECT legend pack for the section (active project legend)  ← NEW
+      3. User's active (global) legend for the section
+      4. User's most-recently updated (global) legend for the section
+      5. Built-in default template (compiled on the fly — no DB row)
 
     This means the validate endpoint always has something to compare
     against and never blocks the user with "activate one first".
+    Project legends let one upload per project serve every tool.
     """
     if legend_id:
         obj = (
@@ -211,6 +236,25 @@ def _resolve_legend_smart(user, section: str, legend_id=None):
         )
         if obj:
             return obj, obj.definition, obj.name, LEGEND_SOURCE_EXPLICIT
+
+    # Project-scoped legend pack (inherited by all tools in the project).
+    # Matches any active legend for this section bound to the project,
+    # regardless of which teammate uploaded it (created by anyone on the
+    # project) — falling back to the most recently updated one.
+    if project is not None:
+        obj = (
+            PidCheckerV2LegendSheet.objects
+            .filter(project=project, section=section, is_active=True)
+            .order_by('-updated_at')
+            .first()
+        ) or (
+            PidCheckerV2LegendSheet.objects
+            .filter(project=project, section=section)
+            .order_by('-updated_at')
+            .first()
+        )
+        if obj:
+            return obj, obj.definition, obj.name, LEGEND_SOURCE_PROJECT
 
     obj = _resolve_active_legend(user, section)
     if obj:
@@ -427,11 +471,23 @@ class LegendSheetListCreateView(APIView):
         section = request.query_params.get('section')
         if section:
             qs = qs.filter(section=section)
+        # Optional project scope: include project-pack legends (any uploader)
+        # alongside the user's own, flagged so the UI can show "inherited".
+        project = _resolve_request_project(request)
+        if project is not None:
+            qs = (
+                PidCheckerV2LegendSheet.objects
+                .filter(Q(created_by=request.user) | Q(project=project))
+            )
+            if section:
+                qs = qs.filter(section=section)
         qs = qs.order_by('-updated_at')
-        return Response(
-            PidCheckerV2LegendSheetSerializer(qs, many=True).data,
-            status=status.HTTP_200_OK,
-        )
+        data = PidCheckerV2LegendSheetSerializer(qs, many=True).data
+        for row in data:
+            row['inherited'] = bool(
+                project is not None and row.get('project') and str(row['project']) == str(project.project_id)
+            )
+        return Response(data, status=status.HTTP_200_OK)
 
     def post(self, request):
         serializer = PidCheckerV2LegendSheetSerializer(data=request.data)
@@ -514,6 +570,51 @@ class LegendSheetDefaultTemplateView(APIView):
         })
 
 
+class LegendPackUploadView(APIView):
+    """POST a single project legend pack file → auto-split into per-section
+    project legends (Phase 2 — configure once per project, all tools inherit).
+
+    Multipart form:
+        file        (required)  legend pack PDF/image
+        project_id  (required)  shared Project Organizer project UUID
+        name        (optional)  pack display name
+        use_ai      (optional)  default true — AI vision parse for scanned packs
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        from .services.legend_pack_splitter import split_legend_pack
+
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'error': 'file is required (multipart)'}, status=status.HTTP_400_BAD_REQUEST)
+
+        project = _resolve_request_project(request)
+        if project is None:
+            return Response(
+                {'error': 'project_id is required and must reference an existing project'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        use_ai = str(request.data.get('use_ai', 'true')).lower() not in ('false', '0', 'no')
+        name = (request.data.get('name') or '').strip()
+
+        try:
+            summary = split_legend_pack(
+                upload.read(), upload.name,
+                user=request.user, project=project, name=name, use_ai=use_ai,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception('[LegendPack] pack upload failed')
+            return Response({'error': 'Legend pack processing failed on the server.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response(summary, status=status.HTTP_201_CREATED)
+
+
 class ValidateLineTagsView(APIView):
     """POST tags + active legend → return per-tag findings with optional AI diagnosis.
 
@@ -534,8 +635,10 @@ class ValidateLineTagsView(APIView):
 
         section = request.data.get('section') or SECTION_LINE_LIST
         legend_id = request.data.get('legend_id')
+        # Optional project context — enables project-legend inheritance.
+        project_obj = _resolve_request_project(request)
         legend_obj, definition, legend_name, legend_source = _resolve_legend_smart(
-            request.user, section, legend_id=legend_id,
+            request.user, section, legend_id=legend_id, project=project_obj,
         )
         if definition is None:
             return Response(

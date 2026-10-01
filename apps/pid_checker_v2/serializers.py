@@ -52,7 +52,7 @@ class PidCheckerV2ExtractionDetailSerializer(serializers.ModelSerializer):
 
 # ── Legend Sheets ─────────────────────────────────────────────────────
 LEGEND_FIELDS = (
-    'legend_id', 'section', 'name', 'description',
+    'legend_id', 'section', 'name', 'description', 'project',
     'definition', 'is_active', 'created_at', 'updated_at',
 )
 LEGEND_READ_ONLY = ('legend_id', 'is_active', 'created_at', 'updated_at')

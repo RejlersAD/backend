@@ -196,6 +196,17 @@ class PidCheckerV2LegendSheet(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_legends',
     )
+    # SOFT-CODED: optional project scope (shared Project Organizer project).
+    # NULL = user-global legend (existing behaviour). When set, this legend is
+    # the project-level pack inherited by every tool resolving that section for
+    # that project (see _resolve_legend_smart). SET_NULL so deleting a project
+    # turns its legends back into user-global ones instead of losing them.
+    project = models.ForeignKey(
+        'project_organizer.Project',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='pid_checker_v2_legends',
+    )
     section = models.CharField(
         max_length=LEGEND_SECTION_MAX_LEN,
         choices=LEGEND_SECTION_CHOICES,
@@ -212,12 +223,16 @@ class PidCheckerV2LegendSheet(models.Model):
         ordering = ['-updated_at']
         indexes = [
             models.Index(fields=['created_by', 'section', '-updated_at']),
+            models.Index(fields=['project', 'section']),
         ]
         constraints = [
+            # One active legend per (user, section, project). NULL project is
+            # treated as distinct by Postgres, so a global active legend and a
+            # project active legend can coexist for the same (user, section).
             models.UniqueConstraint(
-                fields=['created_by', 'section'],
+                fields=['created_by', 'section', 'project'],
                 condition=models.Q(is_active=True),
-                name='uniq_pidv2_active_legend_per_user_section',
+                name='uniq_pidv2_active_legend_per_user_section_project',
             ),
         ]
 
