@@ -1139,6 +1139,17 @@ PORTFOLIO_SHAREPOINT_DRIVE_ID = config('PORTFOLIO_SHAREPOINT_DRIVE_ID', default=
 PORTFOLIO_SHAREPOINT_ITEM_ID = config('PORTFOLIO_SHAREPOINT_ITEM_ID', default='')
 PORTFOLIO_SHAREPOINT_URL = config('PORTFOLIO_SHAREPOINT_URL', default='')
 
+# Finance reads its own invoice workbook into the existing receivables source.
+# Credentials and identifiers are intentionally independent of the POC workbook.
+FINANCE_SHAREPOINT_SYNC_ENABLED = config('FINANCE_SHAREPOINT_SYNC_ENABLED', default=False, cast=bool)
+FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS = config('FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS', default=3600, cast=int)
+FINANCE_SHAREPOINT_TENANT_ID = config('FINANCE_SHAREPOINT_TENANT_ID', default='')
+FINANCE_SHAREPOINT_CLIENT_ID = config('FINANCE_SHAREPOINT_CLIENT_ID', default='')
+FINANCE_SHAREPOINT_CLIENT_SECRET = config('FINANCE_SHAREPOINT_CLIENT_SECRET', default='')
+FINANCE_SHAREPOINT_DRIVE_ID = config('FINANCE_SHAREPOINT_DRIVE_ID', default='')
+FINANCE_SHAREPOINT_ITEM_ID = config('FINANCE_SHAREPOINT_ITEM_ID', default='')
+FINANCE_SHAREPOINT_URL = config('FINANCE_SHAREPOINT_URL', default='')
+
 for _app_config_module in (
     'apps.timesheet.config',
     'apps.project_control.config',
@@ -1156,6 +1167,11 @@ for _app_config_module in (
 from apps.portfolio.schedule import portfolio_beat_schedule
 CELERY_BEAT_SCHEDULE.update(portfolio_beat_schedule(
     enabled=PORTFOLIO_SYNC_ENABLED, interval_seconds=PORTFOLIO_SYNC_INTERVAL_SECONDS))
+
+from apps.finance.sharepoint_schedule import finance_sharepoint_beat_schedule
+CELERY_BEAT_SCHEDULE.update(finance_sharepoint_beat_schedule(
+    enabled=FINANCE_SHAREPOINT_SYNC_ENABLED,
+    interval_seconds=FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS))
 
 from apps.sales.schedule import mailbox_sync_beat_schedule
 CELERY_BEAT_SCHEDULE.update(mailbox_sync_beat_schedule(
