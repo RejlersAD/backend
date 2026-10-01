@@ -9,6 +9,7 @@ from django.utils import timezone
 from apps.core.models import TimeStampedModel
 import uuid
 from decimal import Decimal
+from .workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload  # noqa: F401
 
 User = get_user_model()
 

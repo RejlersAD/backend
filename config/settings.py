@@ -714,6 +714,20 @@ SALES_EMAIL_INTAKE_WEBHOOK_KEY = config(
 # Automatic readers require both deployment opt-in and a separately authorized
 # application mailbox. No scheduled source import is enabled by a migration.
 SALES_MAILBOX_SYNC_ENABLED = config('SALES_MAILBOX_SYNC_ENABLED', default=False, cast=bool)
+
+# Separate Sales document-writer authority; never borrow Finance/mailbox credentials.
+# Destination must be an existing Opportunities container, explicitly verified
+# by its stable drive/item IDs and complete decoded SharePoint web path.
+SALES_WORKSPACE_ENABLED = config('SALES_WORKSPACE_ENABLED', default=False, cast=bool)
+SALES_WORKSPACE_TENANT_ID = config('SALES_WORKSPACE_TENANT_ID', default='')
+SALES_WORKSPACE_CLIENT_ID = config('SALES_WORKSPACE_CLIENT_ID', default='')
+SALES_WORKSPACE_CLIENT_SECRET = config('SALES_WORKSPACE_CLIENT_SECRET', default='')
+SALES_WORKSPACE_HOSTNAME = config('SALES_WORKSPACE_HOSTNAME', default='')
+SALES_WORKSPACE_DRIVE_ID = config('SALES_WORKSPACE_DRIVE_ID', default='')
+SALES_WORKSPACE_ROOT_ITEM_ID = config('SALES_WORKSPACE_ROOT_ITEM_ID', default='')
+SALES_WORKSPACE_ROOT_PATH = config('SALES_WORKSPACE_ROOT_PATH', default='')
+SALES_WORKSPACE_MAX_UPLOAD_BYTES = config('SALES_WORKSPACE_MAX_UPLOAD_BYTES', default=10485760, cast=int)
+SALES_ATTACHMENT_ROOT = config('SALES_ATTACHMENT_ROOT', default='')
 SALES_MAILBOX_SYNC_INTERVAL_SECONDS = config('SALES_MAILBOX_SYNC_INTERVAL_SECONDS', default=60, cast=int)
 SALES_MAILBOX_SYNC_MAX_STEPS = config('SALES_MAILBOX_SYNC_MAX_STEPS', default=30, cast=int)
 SALES_MAILBOX_SYNC_WORK_SECONDS = config('SALES_MAILBOX_SYNC_WORK_SECONDS', default=60, cast=int)
@@ -1204,6 +1218,11 @@ CELERY_BEAT_SCHEDULE.update(mailbox_sync_beat_schedule(
     enabled=SALES_MAILBOX_SYNC_ENABLED,
     interval_seconds=SALES_MAILBOX_SYNC_INTERVAL_SECONDS,
 ))
+if SALES_WORKSPACE_ENABLED:
+    CELERY_BEAT_SCHEDULE['sales-opportunity-workspaces'] = {
+        'task': 'apps.sales.tasks.dispatch_opportunity_workspaces',
+        'schedule': 60.0, 'options': {'expires': 60},
+    }
 
 # ==============================================================================
 # End of Celery Configuration

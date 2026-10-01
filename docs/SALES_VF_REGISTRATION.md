@@ -2,6 +2,13 @@
 
 Implementation: 30 September 2026. Not a production deployment.
 
+Subsequent phase, 1 October 2026: the configurable
+[opportunity document workspace](SALES_OPPORTUNITY_WORKSPACE.md) now persists
+setup intent with the same registration transaction. Its six-folder SharePoint
+integration is disabled until separately configured; a network-drive destination
+and live storage activation remain unresolved. The registration evidence below
+describes the original phase and does not certify this later integration.
+
 ## Approved scope
 
 RADAI issues new VF codes beginning at **Q-102101**, on the existing Sales Deal.
