@@ -25,6 +25,23 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+@shared_task(name='finance.sync_receivables_sharepoint', bind=True,
+             max_retries=3, ignore_result=True)
+def sync_receivables_sharepoint(self):
+    """Read the configured workbook; retry only temporary Graph failures."""
+    from apps.finance.services.receivables_sharepoint import sync_enabled, sync_finance_sharepoint
+
+    if not sync_enabled():
+        return {'status': 'disabled'}
+    from apps.portfolio.sync import TransientGraphError
+
+    try:
+        return sync_finance_sharepoint()
+    except TransientGraphError as exc:
+        delay = exc.retry_after or min(300, 60 * 2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay, max_retries=3)
+
+
 @shared_task(
     name='finance.process_vendor_invoice_ocr', bind=True,
     max_retries=2, default_retry_delay=15, time_limit=180,
