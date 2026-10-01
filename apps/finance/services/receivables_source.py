@@ -6,9 +6,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from django.db import transaction
+from django.utils import timezone
 from openpyxl import load_workbook
 
-from apps.finance.receivables_source_models import ReceivablesSourceRow, ReceivablesSourceSnapshot
+from apps.finance.receivables_source_models import (
+    ReceivablesSourceRow, ReceivablesSourceSnapshot, ReceivablesSyncState,
+)
 from .workbook_summary import validate_snapshot, validate_source_summary
 from .workbook_summary_snapshot import (
     FOOTER_LABELS, _cell_currency, _cell_kind, _text, generate_workbook_snapshot,
@@ -22,6 +25,16 @@ SOURCE_HEADERS = {'A': 'Invoice #', 'B': 'Invoice Date', 'C': 'Invoice Sent',
                   'Y': 'Balance to be received', 'Z': 'Payment Date',
                   'AA': 'Actual Payment Received', 'AC': 'Remarks', 'AD': 'Project ID', 'AE': 'Inv. CUR'}
 MONEY_QUANTUM = Decimal('0.00000001')
+
+
+class ReceivablesSourceChanged(ValueError):
+    """Publication lost its captured source generation or synchronization lease."""
+
+
+def require_sync_publication(state, expected_generation, expected_sync_token):
+    if (state.generation != expected_generation or state.sync_token != expected_sync_token
+            or state.sync_expires_at is None or state.sync_expires_at <= timezone.now()):
+        raise ReceivablesSourceChanged('The Finance source or synchronization lease changed; retry synchronization.')
 
 
 def _money(cell):
@@ -161,7 +174,8 @@ def read_receivables_source(path, *, sheet='External Invoice ', first_row=6, las
 
 
 def import_receivables_source(path, *, sheet='External Invoice ', first_row=6, last_row=4409,
-                               header_row=5, dry_run=False, original_filename=None):
+                               header_row=5, dry_run=False, original_filename=None,
+                               expected_generation=None, expected_sync_token=None):
     """Stage and activate one immutable source version; never save operational invoices."""
     metadata, rows, reconciliation = read_receivables_source(
         path, sheet=sheet, first_row=first_row, last_row=last_row, header_row=header_row,
@@ -183,6 +197,9 @@ def import_receivables_source(path, *, sheet='External Invoice ', first_row=6, l
         return result
     identity = {key: metadata[key] for key in ('sha256', 'sheet_name', 'header_row', 'first_row', 'last_row')}
     with transaction.atomic():
+        sync_state = ReceivablesSyncState.locked()
+        if expected_generation is not None or expected_sync_token is not None:
+            require_sync_publication(sync_state, expected_generation, expected_sync_token)
         # Serialize switches when versions exist; the conditional unique constraint
         # also prevents two first imports from publishing simultaneous active sources.
         list(ReceivablesSourceSnapshot.objects.select_for_update().values_list('pk', flat=True))
@@ -215,6 +232,14 @@ def import_receivables_source(path, *, sheet='External Invoice ', first_row=6, l
         if activated:
             ReceivablesSourceSnapshot.objects.filter(is_active=True).update(is_active=False)
             ReceivablesSourceSnapshot.objects.filter(pk=snapshot.pk).update(is_active=True)
+            # Every activation, including A -> B -> A, invalidates an in-flight
+            # reader and its conditional-GET checkpoint. Sync restores its own
+            # verified checkpoint in this same publication transaction.
+            sync_state.generation += 1
+            sync_state.remote_identity = ''
+            sync_state.etag = ''
+            sync_state.remote_snapshot = None
+            sync_state.save(update_fields=['generation', 'remote_identity', 'etag', 'remote_snapshot'])
         result.update(snapshot_id=snapshot.pk, created=created, activated=activated)
     return result
 

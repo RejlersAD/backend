@@ -25,6 +25,32 @@ class ReceivablesSourceSnapshot(models.Model):
         ]
 
 
+class ReceivablesSyncState(models.Model):
+    """One publication lock and remote checkpoint for the Finance workbook."""
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    generation = models.PositiveBigIntegerField(default=0)
+    sync_token = models.UUIDField(null=True, blank=True)
+    sync_expires_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=500, blank=True, default='')
+    remote_identity = models.CharField(max_length=64, blank=True, default='')
+    etag = models.CharField(max_length=512, blank=True, default='')
+    remote_snapshot = models.ForeignKey(
+        ReceivablesSourceSnapshot, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
+
+    class Meta:
+        constraints = [models.CheckConstraint(check=models.Q(id=1), name='finance_ar_sync_singleton')]
+
+    @classmethod
+    def locked(cls):
+        """Caller must hold an atomic transaction; always lock before snapshots."""
+        cls.objects.get_or_create(pk=1)
+        return cls.objects.select_for_update().get(pk=1)
+
+
 class ReceivablesSourceRow(models.Model):
     snapshot = models.ForeignKey(ReceivablesSourceSnapshot, on_delete=models.CASCADE, related_name='rows')
     row_number = models.PositiveIntegerField()

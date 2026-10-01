@@ -1,5 +1,10 @@
 # Receivables source facts
 
+Automatic inbound reading of a configured SharePoint workbook is documented in
+[finance-sharepoint.md](finance-sharepoint.md). It uses this same source importer
+and requires separate server configuration; local imports do not establish a
+live Microsoft connection.
+
 The receivables source tables retain Finance's external workbook rows separately
 from operational customer invoices. Importing a snapshot never updates
 `CustomerInvoice`, derives payment statuses, fills missing due dates, recalculates
