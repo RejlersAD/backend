@@ -139,3 +139,70 @@ class ValveMTORow(models.Model):
 
     def __str__(self) -> str:
         return f'{self.tag_number or "(untagged)"} [{self.project_id}]'
+
+
+# Deliberately its OWN tuple, not imported from apps.pid_checker_v2 —
+# same cross-app isolation convention this codebase already uses
+# elsewhere (e.g. apps.instrument_io_workflow's own independent legend/
+# vision reimplementations). Matches ValveMTO.jsx's own
+# VALVE_MTO_LEGEND_SECTIONS constant exactly.
+VALVE_MTO_LEGEND_SECTIONS = (
+    'valve', 'piping', 'line_list', 'instrument_signal',
+    'control_valve_regulator', 'scope_symbols', 'limit_line',
+)
+VALVE_MTO_LEGEND_SECTION_CHOICES = tuple((s, s.replace('_', ' ').title()) for s in VALVE_MTO_LEGEND_SECTIONS)
+
+
+class ValveMTOLegend(models.Model):
+    """Valve MTO's OWN legend/reference-data table — fully isolated from
+    apps.pid_checker_v2's PidCheckerV2LegendSheet (used by P&ID
+    Verification V1/V2). Architectural fix for a real, confirmed bug this
+    session: that shared table has only ONE active legend per (user,
+    section), with no per-module dimension at all, so Valve MTO's own
+    auto-created defaults (needed active to feed its Vision prompt — see
+    piping_valve_mto_extractor.py's _build_legend_context) kept silently
+    becoming the active legend in P&ID V1/V2 too, since both modules read
+    the exact same row. Giving Valve MTO its own table removes the shared
+    state entirely — no amount of activating here can ever affect P&ID.
+
+    Same (legend_id UUID distinct from PK, section, name, description,
+    definition JSON, is_active, created_by, timestamps) shape as
+    PidCheckerV2LegendSheet on purpose, so the existing frontend code
+    written against that shape (LegendSheetsModal.jsx, ValveMTO.jsx) needs
+    minimal changes beyond swapping which API module it calls.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='valve_mto_legends',
+    )
+    section = models.CharField(max_length=32, choices=VALVE_MTO_LEGEND_SECTION_CHOICES)
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default='')
+    definition = models.JSONField(default=dict)
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        verbose_name = 'Valve MTO Legend'
+        verbose_name_plural = 'Valve MTO Legends'
+        indexes = [
+            models.Index(fields=['created_by', 'section', '-updated_at']),
+        ]
+        constraints = [
+            # Mirrors PidCheckerV2LegendSheet's own
+            # uniq_pidv2_active_legend_per_user_section_project constraint
+            # (minus the project dimension — Valve MTO legends aren't
+            # project-scoped) — exactly one active legend per user+section.
+            models.UniqueConstraint(
+                fields=['created_by', 'section'],
+                condition=models.Q(is_active=True),
+                name='uniq_valve_mto_active_legend_per_user_section',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.name} [{self.section}] ({"active" if self.is_active else "inactive"})'

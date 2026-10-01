@@ -1,6 +1,23 @@
 from rest_framework import serializers
 
-from .models import ValveMTOProject, ValveMTORow
+from .models import ValveMTOLegend, ValveMTOProject, ValveMTORow
+
+
+class ValveMTOLegendSerializer(serializers.ModelSerializer):
+    # 'legend_id' (not 'id') on purpose — matches the shape
+    # PidCheckerV2LegendSheetSerializer already returns, which
+    # LegendSheetsModal.jsx/ValveMTO.jsx were written against (e.g.
+    # `activateLegend(created.legend_id)`), so swapping which service
+    # module they call needed no further shape changes.
+    legend_id = serializers.UUIDField(source='id', read_only=True)
+
+    class Meta:
+        model = ValveMTOLegend
+        fields = [
+            'legend_id', 'section', 'name', 'description', 'definition',
+            'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['is_active', 'created_at', 'updated_at']
 
 
 class ValveMTORowSerializer(serializers.ModelSerializer):

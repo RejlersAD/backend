@@ -27,8 +27,9 @@ from rest_framework.response import Response
 
 from .excel_export import export_project_to_xlsx
 from .fluid_codes import FLUID_CODES
-from .models import ValveMTOProject, ValveMTORow
+from .models import ValveMTOLegend, ValveMTOProject, ValveMTORow
 from .serializers import (
+    ValveMTOLegendSerializer,
     ValveMTOProjectDetailSerializer, ValveMTOProjectSerializer, ValveMTORowSerializer,
 )
 
@@ -154,3 +155,49 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
         )
         resp['Content-Disposition'] = f'attachment; filename="{filename}"'
         return resp
+
+
+class ValveMTOLegendViewSet(viewsets.ModelViewSet):
+    """Valve MTO's OWN, fully isolated legend/reference-data API — see
+    models.ValveMTOLegend's own docstring for why this exists as a
+    separate table+endpoint rather than reusing apps.pid_checker_v2's.
+
+    GET/POST       /api/v1/valve-mto/legends/            (?section= filter)
+    GET/PUT/DELETE /api/v1/valve-mto/legends/{id}/
+    POST           /api/v1/valve-mto/legends/{id}/activate/
+    GET            /api/v1/valve-mto/legends/active/      (?section= filter)
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ValveMTOLegendSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        qs = ValveMTOLegend.objects.filter(created_by=self.request.user)
+        section = self.request.query_params.get('section')
+        if section:
+            qs = qs.filter(section=section)
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    # ---- activate: deactivate every sibling in this section, activate this one
+    @action(detail=True, methods=['post'], url_path='activate')
+    def activate(self, request, id=None):
+        legend = self.get_object()
+        with transaction.atomic():
+            ValveMTOLegend.objects.filter(
+                created_by=request.user, section=legend.section, is_active=True,
+            ).exclude(pk=legend.pk).update(is_active=False)
+            legend.is_active = True
+            legend.save(update_fields=['is_active', 'updated_at'])
+        return Response(ValveMTOLegendSerializer(legend).data)
+
+    # ---- the current user's active legend per section (optionally one section)
+    @action(detail=False, methods=['get'], url_path='active')
+    def active(self, request):
+        qs = ValveMTOLegend.objects.filter(created_by=request.user, is_active=True)
+        section = request.query_params.get('section')
+        if section:
+            qs = qs.filter(section=section)
+        return Response(ValveMTOLegendSerializer(qs, many=True).data)

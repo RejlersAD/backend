@@ -93,7 +93,7 @@ VISION_MODELS = {
     'openai': VISION_MODEL,
     'claude': os.getenv('VALVE_MTO_CLAUDE_MODEL', 'claude-sonnet-5'),
 }
-TEST_CONNECTION_MAX_TOKENS = 5
+TEST_CONNECTION_MAX_TOKENS = 16
 
 # Canonical row schema — must match frontend `valveMTO.config.js` VALVE_COLUMNS.
 # NOTE: order does not affect extraction; new keys are additive. Frontend
@@ -1185,9 +1185,19 @@ def _format_legend_definition(definition: dict) -> str:
 
 
 def _build_legend_context(user_id) -> str:
-    """Formats this user's own ACTIVE legend sheets (apps.pid_checker_v2,
-    sections in LEGEND_SECTIONS_ESSENTIAL/_OPTIONAL) into the
-    "LEGEND REFERENCE:" block injected into the Vision prompt.
+    """Formats this user's own ACTIVE legend sheets (apps.valve_mto's OWN
+    ValveMTOLegend table, sections in LEGEND_SECTIONS_ESSENTIAL/_OPTIONAL)
+    into the "LEGEND REFERENCE:" block injected into the Vision prompt.
+
+    CHANGED (architectural fix, this session): used to read
+    apps.pid_checker_v2.PidCheckerV2LegendSheet — the SAME table P&ID
+    Verification V1/V2 reads, which has only one active legend per (user,
+    section) with no per-module dimension at all. Valve MTO's own
+    auto-created defaults needing to be active here kept silently
+    becoming the active legend in P&ID V1/V2 too (confirmed real,
+    repeatedly reported this session). apps.valve_mto.models.ValveMTOLegend
+    is a fully separate table — activating a legend here can no longer
+    affect P&ID V1/V2 at all, by construction, not by convention.
 
     Returns '' (never raises) when the user has no active legend for any
     of these sections — Vision then falls back to its own general
@@ -1197,15 +1207,15 @@ def _build_legend_context(user_id) -> str:
     if not user_id:
         return ''
     try:
-        from apps.pid_checker_v2.models import PidCheckerV2LegendSheet
+        from apps.valve_mto.models import ValveMTOLegend
     except Exception as exc:  # noqa: BLE001
-        logger.warning('[ValveMTO] pid_checker_v2 legend model unavailable: %s', exc)
+        logger.warning('[ValveMTO] valve_mto legend model unavailable: %s', exc)
         return ''
 
     try:
         all_sections = LEGEND_SECTIONS_ESSENTIAL + LEGEND_SECTIONS_OPTIONAL
         by_section = {
-            s.section: s for s in PidCheckerV2LegendSheet.objects.filter(
+            s.section: s for s in ValveMTOLegend.objects.filter(
                 created_by_id=user_id, is_active=True, section__in=all_sections,
             )
         }
@@ -1508,15 +1518,32 @@ def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
     try:
         if provider == 'claude':
             import anthropic
-            client = lazy_provider_client(
-                'anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS,
-            )
-            client.messages.create(
-                model=VISION_MODELS['claude'],
-                max_tokens=TEST_CONNECTION_MAX_TOKENS,
-                thinking={'type': 'disabled'},
-                messages=[{'role': 'user', 'content': 'Hi'}],
-            )
+            # TEMPORARY DIAGNOSTIC: bypassing lazy_provider_client for this
+            # one call ONLY, on purpose. That wrapper (apps.core.
+            # ai_consumer_clients._ProviderClient._invoke) catches the real
+            # Anthropic exception and immediately re-raises it as
+            # AIProviderOperationError, which intentionally throws away the
+            # provider's actual error body — by the time an exception would
+            # reach a try/except wrapped around client.messages.create()
+            # below, it's already sanitized to a generic "(400)" string
+            # either way. A raw client here is the only way to see
+            # Anthropic's real error without touching ai_consumer_clients.py
+            # (out of scope for this diagnostic). Still tests EXACTLY the
+            # key passed in, same as before. REMOVE this raw-client diagnostic
+            # once the real cause is found and fixed — restore
+            # lazy_provider_client for the final version.
+            raw_client = anthropic.Anthropic(api_key=api_key, timeout=VISION_TIMEOUT_SECS)
+            try:
+                raw_client.messages.create(
+                    model=VISION_MODELS['claude'],
+                    max_tokens=TEST_CONNECTION_MAX_TOKENS,
+                    thinking={'type': 'disabled'},
+                    messages=[{'role': 'user', 'content': 'Hi'}],
+                )
+            except Exception as e:
+                logger.error(f"[ValveMTO] Test connection raw error: {str(e)}")
+                logger.error(f"[ValveMTO] Error type: {type(e).__name__}")
+                raise  # re-raise so normal error handling continues
         else:
             from openai import OpenAI
             client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS)
