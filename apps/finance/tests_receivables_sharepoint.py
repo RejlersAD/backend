@@ -329,3 +329,89 @@ class FinanceSharePointTests(TestCase):
         with self.assertRaisesMessage(FinanceSharePointSyncError, 'valid HTTPS'):
             resolve_finance_sharepoint_link('https://example.sharepoint.com.attacker.test/private')
         self.client.resolve_link.assert_not_called()
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True, FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800)
+    def test_scheduled_first_import_is_immediate_and_restart_obeys_checkpoint(self):
+        started = timezone.now()
+        with patch('apps.finance.services.receivables_sharepoint.timezone.now', return_value=started):
+            first = sync_finance_sharepoint(scheduled=True)
+        self.assertEqual(first['status'], 'synchronized')
+        self.client_class.reset_mock()
+        with patch('apps.finance.services.receivables_sharepoint.timezone.now',
+                   return_value=started + timedelta(seconds=12, milliseconds=100)):
+            second = sync_finance_sharepoint(scheduled=True)
+        self.assertEqual(second, {'status': 'not_due', 'retry_after_seconds': 1788})
+        self.client_class.assert_not_called()
+        self.assertEqual(self.state().last_attempt_at, started)
+        self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 1)
+        with patch('apps.finance.services.receivables_sharepoint.timezone.now',
+                   return_value=started + timedelta(seconds=1800)):
+            self.client.metadata.return_value = None
+            third = sync_finance_sharepoint(scheduled=True)
+        self.assertEqual(third['status'], 'unchanged')
+        self.assertEqual(self.state().last_attempt_at, started + timedelta(seconds=1800))
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True, FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800)
+    def test_manual_sync_remains_immediate_after_a_scheduled_attempt(self):
+        sync_finance_sharepoint(scheduled=True)
+        self.client.reset_mock()
+        self.client.metadata.return_value = None
+        self.assertEqual(sync_finance_sharepoint()['status'], 'unchanged')
+        self.client.metadata.assert_called_once_with('version-1')
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True, FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800)
+    def test_failure_keeps_cadence_and_previous_source_across_restarts(self):
+        previous = import_receivables_source(self.path, last_row=None)
+        started = timezone.now()
+        self.client.metadata.side_effect = PortfolioSyncError('SharePoint returned HTTP 403.')
+        with patch('apps.finance.services.receivables_sharepoint.timezone.now', return_value=started):
+            with self.assertRaises(PortfolioSyncError):
+                sync_finance_sharepoint(scheduled=True)
+        self.client.reset_mock()
+        with patch('apps.finance.services.receivables_sharepoint.timezone.now',
+                   return_value=started + timedelta(seconds=10)):
+            result = sync_finance_sharepoint(scheduled=True)
+        self.assertEqual(result, {'status': 'not_due', 'retry_after_seconds': 1790})
+        self.client.metadata.assert_not_called()
+        self.assertEqual(ReceivablesSourceSnapshot.objects.get(is_active=True).pk, previous['snapshot_id'])
+        self.assertIn('403', self.state().last_error)
+        self.assert_released()
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True, FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800)
+    def test_transient_retry_is_bound_to_the_failed_attempt_and_cannot_be_reused(self):
+        self.client.metadata.side_effect = TransientGraphError(429, 60)
+        with self.assertRaises(TransientGraphError) as caught:
+            sync_finance_sharepoint(scheduled=True)
+        retry_of = caught.exception.finance_retry_of
+        self.assertEqual(retry_of, (self.state().last_attempt_at, self.state().generation))
+        self.client.metadata.side_effect = None
+        self.assertEqual(sync_finance_sharepoint(scheduled=True, retry_of=retry_of)['status'], 'synchronized')
+        self.client.reset_mock()
+        self.assertEqual(sync_finance_sharepoint(scheduled=True, retry_of=retry_of), {'status': 'superseded'})
+        self.client.metadata.assert_not_called()
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True)
+    def test_manual_publication_cancels_a_pending_transient_retry(self):
+        self.client.metadata.side_effect = TransientGraphError(503)
+        with self.assertRaises(TransientGraphError) as caught:
+            sync_finance_sharepoint(scheduled=True)
+        manual = import_receivables_source(self.path, last_row=None)
+        self.client.reset_mock()
+        self.assertEqual(sync_finance_sharepoint(scheduled=True, retry_of=caught.exception.finance_retry_of),
+                         {'status': 'superseded'})
+        self.client.metadata.assert_not_called()
+        self.assertEqual(ReceivablesSourceSnapshot.objects.get(is_active=True).pk, manual['snapshot_id'])
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True)
+    def test_another_failed_manual_attempt_cancels_a_pending_transient_retry(self):
+        self.client.metadata.side_effect = TransientGraphError(503)
+        with self.assertRaises(TransientGraphError) as caught:
+            sync_finance_sharepoint(scheduled=True)
+        self.client.metadata.side_effect = PortfolioSyncError('SharePoint returned HTTP 403.')
+        with self.assertRaises(PortfolioSyncError):
+            sync_finance_sharepoint()
+        self.client.reset_mock()
+        self.assertEqual(sync_finance_sharepoint(scheduled=True, retry_of=caught.exception.finance_retry_of),
+                         {'status': 'superseded'})
+        self.client.metadata.assert_not_called()
+        self.assertIn('403', self.state().last_error)

@@ -68,7 +68,7 @@ Invoice` sheet and row-5 headers, detects the final invoice row and rejects gaps
 or unexpected headers. It reads saved formula results; Excel calculations are
 not executed. The maximum downloaded XLSX size is 25 MiB.
 
-After the first successful publication, enable
+For the existing local Celery deployment, after the first successful publication, enable
 `FINANCE_SHAREPOINT_SYNC_ENABLED=true` and restart the backend, worker and single
 Celery beat scheduler with matching settings. When Docker Compose mounts or
 `env_file` values change, recreate the containers; a plain restart does not
@@ -115,16 +115,18 @@ See [receivables-source.md](receivables-source.md) for preserved field semantics
 ## Checks
 
 ```sh
-python manage.py test apps.finance.tests_receivables_sharepoint apps.finance.tests_sharepoint_operations apps.finance.tests_receivables_source apps.finance.tests_receivables_source_dashboard apps.finance.tests_customer_invoice_source_register apps.portfolio.tests.test_sync --settings=config.settings_portfolio_test --noinput
+python manage.py test apps.finance.tests_receivables_sharepoint apps.finance.tests_sharepoint_operations apps.finance.tests_receivables_source apps.finance.tests_receivables_source_dashboard apps.finance.tests_customer_invoice_source_register apps.finance.tests_workbook_summary apps.portfolio.tests.test_sync apps.finance.tests_sharepoint_runtime --settings=config.settings_portfolio_test --noinput
+python -m unittest apps.finance.tests_railway_runtime -v
 ```
 
 These tests use an isolated database and simulated Graph responses; they do not
 establish live access or finance-data reconciliation. Validate the additive
 migration and concurrent publisher behavior separately against PostgreSQL.
 
-`apps.finance.tests_receivables_sharepoint_postgres` adds three real concurrent
-publisher/lease checks. Run it with intentionally isolated PostgreSQL test
-settings; it skips on SQLite. Do not point tests at a running application DB.
+`apps.finance.tests_receivables_sharepoint_postgres` includes five real concurrent
+publisher, lease, schedule and retry checks. Run it with intentionally isolated
+PostgreSQL test settings; it skips on SQLite. Run the supervisor tests on Linux
+to exercise process-group signaling. Do not point tests at a running application DB.
 
 On 30 September 2026, 120 functional regressions and all three PostgreSQL 16
 concurrency tests passed. The additive migration also passed forward/backward/
@@ -179,22 +181,63 @@ Deploy this backend change against the latest production branch, preserving
 unrelated newer changes. Railway's existing pre-deploy command applies the full
 migration graph; verify Finance `0015` before publishing a workbook. Keep the
 five Finance identity/resource settings in the production server's secret
-configuration, set the interval to `1800`, and retain scheduling disabled until
-production dry-run validation and initial publication succeed.
+configuration and set the interval to `1800`. For the automatic in-service runtime
+below, enabling the switch starts validation and publication through the existing
+ETL. Operators using the manual command path can validate and publish first while
+the schedule remains disabled.
 
-For an existing Celery worker and single approved beat scheduler, supply the
-matching Finance settings to all participating processes, verify the effective
-broker and non-eager task execution, then enable Finance scheduling. The default
-web runtime can start an optional worker but does not start beat. Inspect the
-actual production services before adding a scheduler: the application's shared
-beat configuration also includes other departments' jobs. A dedicated Finance
-cron job is an alternative when no existing scheduler is available; configure
-that service separately from the web service and pause the cron itself to stop
-it, because the manual sync command intentionally works with the schedule flag
-disabled.
+### Existing Railway backend: registered variables control execution
+
+The backend runtime now supervises the web server and an opt-in Finance process
+inside the same existing service. No additional Railway service, CLI login or
+new credential type is required. The process uses the same Microsoft Graph
+reader, validation/transformation, established source rules and SQL publication
+service used by the local importer. It does not start other departments' jobs.
+
+After all five Finance identity/resource values are registered on the backend,
+set these existing variables in Railway and deploy their staged changes:
+
+```dotenv
+FINANCE_SHAREPOINT_SYNC_ENABLED=true
+FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800
+```
+
+The first due attempt runs on startup. Every publication validates the entire
+workbook before atomically replacing the active reporting snapshot. Subsequent
+attempts use the registered interval. The database lock and durable attempt time
+prevent multiple backend replicas or restarts from starting duplicate scheduled
+attempts. Existing publication leases continue protecting manual and Celery
+imports. Existing local Celery behavior is preserved; the production runner does
+not require enabling the generic Celery worker or shared beat schedule.
+
+The Finance process emits only safe status, count and timing metadata. Failed
+validation/access preserves the last successful source. Transient Graph failures
+have bounded retries; newer attempts/publications invalidate stale retries.
+The web and background processes receive shutdown signals, and unexpected child
+failure exits the runtime so Railway's existing restart policy can recover it.
+This supervision also covers an explicitly enabled Celery worker: its unexpected
+exit restarts the backend even when Finance synchronization is disabled.
+To pause automatic Finance updates, set the enabled variable to false and deploy.
+Manual sync commands remain available to authorized operators independently.
+
+Release verification on 1 October passed 139 functional tests, all 13 Linux
+supervisor tests and five PostgreSQL concurrency tests. The Finance migration
+forward/reverse/reapply and model drift checks also passed on a disposable
+database. A Docker packaging smoke used the repository ignore rules and verified
+disabled execution without Django; it did not rebuild all production dependencies.
+These isolated checks do not establish live production activation.
+
+Do not configure an additional Finance timer alongside this runtime. Existing
+installations intentionally using a separate Celery worker/beat can continue
+their prior deployment arrangement instead of adopting this web runtime; the
+local Docker Compose command does not use Railway's runtime entrypoint.
 
 Verify the deployed revision, migration state, real production workbook
 validation/publication, preserved prior snapshot, repeat sync without duplication
 and an actual scheduled run. Public HTTP health alone does not establish Finance
 database or worker readiness. Do not report the live connection active until
 these production checks have been observed.
+
+The dashboard's **Refresh data** action reads the active SQL snapshot. Its
+publication date changes when a new source is published; a successful unchanged
+remote check updates the internal sync checkpoint without creating a new snapshot.
