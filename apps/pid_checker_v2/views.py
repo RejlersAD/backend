@@ -549,6 +549,127 @@ class LegendSheetActivateView(APIView):
         return Response(PidCheckerV2LegendSheetSerializer(obj).data)
 
 
+def _legend_lookup_field(definition: dict):
+    """The one field in a legend definition that carries a {code:
+    description} lookup table, if any — format-only sections have none."""
+    for field in (definition or {}).get('fields', []) or []:
+        if isinstance(field.get('lookup'), dict):
+            return field
+    return None
+
+
+class LegendLookupAddView(APIView):
+    """POST → add ONE lookup entry to the user's active legend for a
+    section, without resending the whole definition — backs the "+ Add to
+    Legend" quick-add button on an unrecognised cross-check finding."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        section = request.data.get('section')
+        code = (request.data.get('code') or '').strip()
+        description = (request.data.get('description') or '').strip()
+        if not section or not code:
+            return Response(
+                {'error': 'section and code are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        legend = PidCheckerV2LegendSheet.objects.filter(
+            created_by=request.user, section=section, is_active=True,
+        ).first()
+        if not legend:
+            return Response(
+                {'error': f'No active legend for section "{section}"'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        field = _legend_lookup_field(legend.definition)
+        if not field:
+            return Response(
+                {'error': 'no lookup table to add to'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        field['lookup'][code] = description
+        legend.save(update_fields=['definition', 'updated_at'])
+        return Response(PidCheckerV2LegendSheetSerializer(legend).data)
+
+
+class LegendLookupEditView(APIView):
+    """PUT → edit ONE lookup entry in the user's active legend for a
+    section."""
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        section = request.data.get('section')
+        code = (request.data.get('code') or '').strip()
+        description = (request.data.get('description') or '').strip()
+        if not section or not code:
+            return Response(
+                {'error': 'section and code are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        legend = PidCheckerV2LegendSheet.objects.filter(
+            created_by=request.user, section=section, is_active=True,
+        ).first()
+        if not legend:
+            return Response(
+                {'error': f'No active legend for section "{section}"'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        field = _legend_lookup_field(legend.definition)
+        if not field:
+            return Response(
+                {'error': 'no lookup table to add to'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        field['lookup'][code] = description
+        legend.save(update_fields=['definition', 'updated_at'])
+        return Response(PidCheckerV2LegendSheetSerializer(legend).data)
+
+
+class LegendLookupDeleteView(APIView):
+    """DELETE → remove ONE lookup entry from the user's active legend for
+    a section."""
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        section = request.data.get('section')
+        code = request.data.get('code')
+        if not section or not code:
+            return Response(
+                {'error': 'section and code are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        legend = PidCheckerV2LegendSheet.objects.filter(
+            created_by=request.user, section=section, is_active=True,
+        ).first()
+        if legend:
+            field = _legend_lookup_field(legend.definition)
+            if field:
+                field['lookup'].pop(code, None)
+                legend.save(update_fields=['definition', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LegendLookupSectionsView(APIView):
+    """GET → which of the current user's active legends have a lookup
+    table at all — several sections are format/regex-only and have no
+    lookup field, so offering them in "Add to Legend"'s Section dropdown
+    let a user pick one and then fail on save with "no lookup table to
+    add to" no matter what they typed. Filters the dropdown down to only
+    sections a code can actually be added to."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        legends = PidCheckerV2LegendSheet.objects.filter(
+            created_by=request.user, is_active=True,
+        )
+        sections = [l.section for l in legends if _legend_lookup_field(l.definition)]
+        return Response({'sections': sections})
+
+
 class LegendSheetDefaultTemplateView(APIView):
     """GET → return the built-in default template for a section (?section=line_list)."""
 
@@ -686,25 +807,75 @@ class ValidateLineTagsView(APIView):
 # Master Line List (Excel) upload + cross-check
 # ═════════════════════════════════════════════════════════════════════
 
-def _resolve_active_line_list(user):
+def _clean_project_uuid(project_uuid):
+    """Validate a client-supplied 'project_id' as a real UUID, else None.
+
+    A malformed value (e.g. the literal string 'undefined'/'null' a stale
+    frontend build or a race on initial mount can send before a project is
+    selected) must NOT reach a queryset filter as-is: Django validates a
+    UUIDField lookup value eagerly and raises django.core.exceptions.
+    ValidationError, which DRF's exception handler does NOT catch (it only
+    catches rest_framework.exceptions.ValidationError) — so it previously
+    escaped as an unhandled 500 instead of a clean response. Treating it
+    the same as "no project_id given" fixes that without hiding a genuine
+    bug (nothing sends a malformed value under normal use; this is a
+    defensive floor, not the actual fix for whatever produced it).
+    """
+    if not project_uuid:
+        return None
+    try:
+        return str(uuid.UUID(str(project_uuid)))
+    except (ValueError, TypeError, AttributeError):
+        logger.warning('Ignoring malformed project_id query value: %r', project_uuid)
+        return None
+
+
+def _resolve_owner_project(project_uuid):
+    """Look up the PIDVProject instance for a 'project_id' UUID string sent
+    by the frontend (PIDCheckerV2.jsx reuses V1's project system — see
+    PidCheckerV2LineListUpload.owner_project). Returns None if blank/unknown
+    (unscoped — matches legacy pre-project uploads and the "no project
+    selected" state), not the id we'd assign to owner_project= directly:
+    the FK's DB column is PIDVProject's own integer PK, NOT this UUID, so
+    callers must go through this resolver rather than passing the UUID as
+    owner_project_id.
+    """
+    project_uuid = _clean_project_uuid(project_uuid)
+    if not project_uuid:
+        return None
+    from apps.pid_verification.models import PIDVProject
+    return PIDVProject.objects.filter(project_id=project_uuid).first()
+
+
+def _owner_project_filter(project_uuid):
+    """Queryset filter kwargs scoping to the project_id UUID above — same
+    reasoning: filters through the relation (owner_project__project_id),
+    never against the raw owner_project_id column.
+    """
+    project_uuid = _clean_project_uuid(project_uuid)
+    return {'owner_project__project_id': project_uuid} if project_uuid else {'owner_project__isnull': True}
+
+
+def _resolve_active_line_list(user, owner_project_id=None):
     return (
         PidCheckerV2LineListUpload.objects
-        .filter(created_by=user, is_active=True)
+        .filter(created_by=user, is_active=True, **_owner_project_filter(owner_project_id))
         .first()
     )
 
 
-def _persist_line_list(user, filename: str, parsed: dict) -> PidCheckerV2LineListUpload:
-    """Save parsed rows and mark this upload as the active one."""
+def _persist_line_list(user, filename: str, parsed: dict, owner_project_id=None) -> PidCheckerV2LineListUpload:
+    """Save parsed rows and mark this upload as the active one (within its project)."""
     meta = parsed.get('meta') or {}
     with transaction.atomic():
-        # Deactivate any previously-active line list for this user
+        # Deactivate any previously-active line list for this user IN THIS PROJECT
         PidCheckerV2LineListUpload.objects.filter(
-            created_by=user, is_active=True,
+            created_by=user, is_active=True, **_owner_project_filter(owner_project_id),
         ).update(is_active=False)
 
         upload = PidCheckerV2LineListUpload.objects.create(
             created_by=user,
+            owner_project=_resolve_owner_project(owner_project_id),
             filename=filename[:300],
             sheet_name=(meta.get('sheet_name') or '')[:200],
             title=(meta.get('title') or '')[:500],
@@ -749,7 +920,7 @@ class LineListUploadView(APIView):
     def get(self, request):
         qs = (
             PidCheckerV2LineListUpload.objects
-            .filter(created_by=request.user)
+            .filter(created_by=request.user, **_owner_project_filter(request.query_params.get('project_id')))
             .order_by('-created_at')[:HISTORY_PAGE_SIZE]
         )
         return Response(PidCheckerV2LineListListSerializer(qs, many=True).data)
@@ -776,7 +947,7 @@ class LineListUploadView(APIView):
             return Response({'error': f'parse failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        obj = _persist_line_list(request.user, upload.name, parsed)
+        obj = _persist_line_list(request.user, upload.name, parsed, owner_project_id=request.data.get('project_id') or None)
         return Response(
             PidCheckerV2LineListDetailSerializer(obj).data,
             status=status.HTTP_201_CREATED,
@@ -826,7 +997,7 @@ class LineListActivateView(APIView):
         )
         with transaction.atomic():
             PidCheckerV2LineListUpload.objects.filter(
-                created_by=request.user, is_active=True,
+                created_by=request.user, owner_project_id=obj.owner_project_id, is_active=True,
             ).exclude(pk=obj.pk).update(is_active=False)
             if not obj.is_active:
                 obj.is_active = True
@@ -859,7 +1030,7 @@ class CrossCheckView(APIView):
                 .first()
             )
         else:
-            line_list = _resolve_active_line_list(request.user)
+            line_list = _resolve_active_line_list(request.user, owner_project_id=request.data.get('project_id') or None)
         if line_list is None:
             return Response(
                 {'error': 'No master Line List uploaded yet. Upload one first.'},
@@ -921,10 +1092,10 @@ class CrossCheckView(APIView):
 # Master Equipment List (Excel) upload + cross-check
 # ═════════════════════════════════════════════════════════════════════
 
-def _resolve_active_equipment_list(user):
+def _resolve_active_equipment_list(user, owner_project_id=None):
     return (
         PidCheckerV2EquipmentListUpload.objects
-        .filter(created_by=user, is_active=True)
+        .filter(created_by=user, is_active=True, **_owner_project_filter(owner_project_id))
         .first()
     )
 
@@ -939,16 +1110,17 @@ EQUIPMENT_LIST_KNOWN_FIELDS = {
 }
 
 
-def _persist_equipment_list(user, filename: str, parsed: dict) -> PidCheckerV2EquipmentListUpload:
-    """Save parsed rows and mark this upload as the active one."""
+def _persist_equipment_list(user, filename: str, parsed: dict, owner_project_id=None) -> PidCheckerV2EquipmentListUpload:
+    """Save parsed rows and mark this upload as the active one (within its project)."""
     meta = parsed.get('meta') or {}
     with transaction.atomic():
         PidCheckerV2EquipmentListUpload.objects.filter(
-            created_by=user, is_active=True,
+            created_by=user, is_active=True, **_owner_project_filter(owner_project_id),
         ).update(is_active=False)
 
         upload = PidCheckerV2EquipmentListUpload.objects.create(
             created_by=user,
+            owner_project=_resolve_owner_project(owner_project_id),
             filename=filename[:300],
             sheet_name=(meta.get('sheet_name') or '')[:200],
             title=(meta.get('title') or '')[:500],
@@ -1008,7 +1180,7 @@ class EquipmentListUploadView(APIView):
     def get(self, request):
         qs = (
             PidCheckerV2EquipmentListUpload.objects
-            .filter(created_by=request.user)
+            .filter(created_by=request.user, **_owner_project_filter(request.query_params.get('project_id')))
             .order_by('-created_at')[:HISTORY_PAGE_SIZE]
         )
         return Response(PidCheckerV2EquipmentListListSerializer(qs, many=True).data)
@@ -1035,7 +1207,7 @@ class EquipmentListUploadView(APIView):
             return Response({'error': f'parse failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        obj = _persist_equipment_list(request.user, upload.name, parsed)
+        obj = _persist_equipment_list(request.user, upload.name, parsed, owner_project_id=request.data.get('project_id') or None)
         return Response(
             PidCheckerV2EquipmentListDetailSerializer(obj).data,
             status=status.HTTP_201_CREATED,
@@ -1072,7 +1244,7 @@ class EquipmentListActivateView(APIView):
         )
         with transaction.atomic():
             PidCheckerV2EquipmentListUpload.objects.filter(
-                created_by=request.user, is_active=True,
+                created_by=request.user, owner_project_id=obj.owner_project_id, is_active=True,
             ).exclude(pk=obj.pk).update(is_active=False)
             if not obj.is_active:
                 obj.is_active = True
@@ -1110,7 +1282,7 @@ class EquipmentCrossCheckView(APIView):
                 .first()
             )
         else:
-            equipment_list = _resolve_active_equipment_list(request.user)
+            equipment_list = _resolve_active_equipment_list(request.user, owner_project_id=request.data.get('project_id') or None)
         if equipment_list is None:
             return Response(
                 {'error': 'No master Equipment List uploaded yet. Upload one first.'},
@@ -1194,10 +1366,10 @@ class EquipmentCrossCheckView(APIView):
 # Instrument Index — upload / list / detail / activate / cross-check
 # ---------------------------------------------------------------------
 
-def _resolve_active_instrument_index(user):
+def _resolve_active_instrument_index(user, owner_project_id=None):
     return (
         PidCheckerV2InstrumentIndexUpload.objects
-        .filter(created_by=user, is_active=True)
+        .filter(created_by=user, is_active=True, **_owner_project_filter(owner_project_id))
         .first()
     )
 
@@ -1212,16 +1384,17 @@ INSTRUMENT_INDEX_KNOWN_FIELDS = {
 }
 
 
-def _persist_instrument_index(user, filename: str, parsed: dict) -> PidCheckerV2InstrumentIndexUpload:
+def _persist_instrument_index(user, filename: str, parsed: dict, owner_project_id=None) -> PidCheckerV2InstrumentIndexUpload:
     meta = parsed.get('meta') or {}
     summary = parsed.get('summary') or {}
     with transaction.atomic():
         PidCheckerV2InstrumentIndexUpload.objects.filter(
-            created_by=user, is_active=True
+            created_by=user, is_active=True, **_owner_project_filter(owner_project_id)
         ).update(is_active=False)
 
         upload = PidCheckerV2InstrumentIndexUpload.objects.create(
             created_by=user,
+            owner_project=_resolve_owner_project(owner_project_id),
             filename=filename[:300],
             sheet_name=(meta.get('sheet_name') or '')[:200],
             title=(meta.get('title') or '')[:500],
@@ -1281,7 +1454,7 @@ class InstrumentIndexUploadView(APIView):
     def get(self, request):
         qs = (
             PidCheckerV2InstrumentIndexUpload.objects
-            .filter(created_by=request.user)
+            .filter(created_by=request.user, **_owner_project_filter(request.query_params.get('project_id')))
             .order_by('-is_active', '-created_at')
         )
         return Response(PidCheckerV2InstrumentIndexListSerializer(qs, many=True).data)
@@ -1308,7 +1481,7 @@ class InstrumentIndexUploadView(APIView):
             return Response({'error': f'parse failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        obj = _persist_instrument_index(request.user, upload.name, parsed)
+        obj = _persist_instrument_index(request.user, upload.name, parsed, owner_project_id=request.data.get('project_id') or None)
         return Response(
             PidCheckerV2InstrumentIndexDetailSerializer(obj).data,
             status=status.HTTP_201_CREATED,
@@ -1344,8 +1517,8 @@ class InstrumentIndexActivateView(APIView):
         )
         with transaction.atomic():
             PidCheckerV2InstrumentIndexUpload.objects.filter(
-                created_by=request.user, is_active=True
-            ).update(is_active=False)
+                created_by=request.user, owner_project_id=obj.owner_project_id, is_active=True
+            ).exclude(pk=obj.pk).update(is_active=False)
             obj.is_active = True
             obj.save(update_fields=['is_active', 'updated_at'])
         return Response(PidCheckerV2InstrumentIndexDetailSerializer(obj).data)
@@ -1381,7 +1554,7 @@ class InstrumentCrossCheckView(APIView):
                 .first()
             )
         else:
-            instrument_index = _resolve_active_instrument_index(request.user)
+            instrument_index = _resolve_active_instrument_index(request.user, owner_project_id=request.data.get('project_id') or None)
         if instrument_index is None:
             return Response(
                 {'error': 'No master Instrument Index uploaded yet. Upload one first.'},
@@ -1627,6 +1800,13 @@ def _get_symbol_images_with_fallback(project_id):
         LegendSymbolImage.objects
         .exclude(project__project_id=project_id)
         .exclude(image_file='')
+        # is_default=True rows have project=None, so an unqualified
+        # .exclude(project__project_id=...) above actually INCLUDES them
+        # (a NULL relation never matches the lookup, so exclude() keeps
+        # it) — they're a distinct tier (see SymbolImagesListView), not a
+        # real "another project already uploaded this" fallback, so keep
+        # them out of this query explicitly.
+        .exclude(is_default=True)
         .order_by('-updated_at')
     )
     for r in other_rows:
@@ -1640,15 +1820,19 @@ def _get_symbol_images_with_fallback(project_id):
 
 
 class SymbolImagesListView(APIView):
-    """GET the legend symbol pictures available to a project. Three tiers,
+    """GET the legend symbol pictures available to a project. Four tiers,
     in priority order — each only fills gaps the previous one left:
       1. The project's own uploads.
       2. Any OTHER project's upload of that same (section, symbol_name) —
          see _get_symbol_images_with_fallback().
-      3. The repo-committed static default-picture library — see
-         services/default_symbol_images.py. Covers a symbol nobody has
-         ever uploaded a picture for on ANY project, including on a fresh
-         server with an empty database.
+      3. The shared default library seeded into the DB (LegendSymbolImage,
+         is_default=True, project=None) — see
+         services/seed_default_symbols.py (management command +
+         automatic post_migrate hook in apps.py).
+      4. The repo-committed static default-picture library — see
+         services/default_symbol_images.py. Final safety net for a
+         picture dropped into static/default_symbols/ but not yet
+         (re-)seeded into the DB.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1666,9 +1850,23 @@ class SymbolImagesListView(APIView):
             'content_type': r.content_type,
             'image_url': r.image_file.url,
         } for r in rows]
+        covered_keys = {(img['section'], _normalise_symbol_name(img['symbol_name'])) for img in images}
+
+        from .models import LegendSymbolImage
+        default_rows = LegendSymbolImage.objects.filter(is_default=True).exclude(image_file='')
+        for r in default_rows:
+            key = (r.section, _normalise_symbol_name(r.symbol_name))
+            if key in covered_keys:
+                continue
+            covered_keys.add(key)
+            images.append({
+                'section': r.section,
+                'symbol_name': r.symbol_name,
+                'content_type': r.content_type,
+                'image_url': r.image_file.url,
+            })
 
         from .services.default_symbol_images import list_default_symbol_images
-        covered_keys = {(img['section'], _normalise_symbol_name(img['symbol_name'])) for img in images}
         images.extend(list_default_symbol_images(exclude_keys=covered_keys))
 
         return Response({'images': images, 'total_count': len(images)}, status=status.HTTP_200_OK)

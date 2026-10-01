@@ -81,7 +81,21 @@ def export_document_to_xlsx(document, columns: str = 'all') -> bytes:
     _write_header(ws_r, headers_r)
     for r_idx, row in enumerate(document.extracted_rows.all(), start=2):
         d = row.data or {}
-        ws_r.cell(row=r_idx, column=1, value=row.tag_number)
+        # DISPLAY-ONLY fallback, same as the frontend table's "Tag No"
+        # column — a pid_drawing row's tag_number is genuinely blank by
+        # design for kind='equipment'/'line'/'symbol' (each stores its own
+        # identifier elsewhere, or has no real tag at all). Never writes
+        # this fallback back to row.tag_number itself — the real column
+        # (equipment_tag/line_tag) is still exported separately too, this
+        # only avoids a wall of blank cells in the one column most
+        # reviewers scan first.
+        tag_display = row.tag_number
+        if not tag_display and document.document_type == 'pid_drawing':
+            tag_display = (
+                d.get('equipment_tag') or d.get('line_tag')
+                or (f"(untagged — {d['symbol_type']})" if d.get('symbol_type') else '')
+            )
+        ws_r.cell(row=r_idx, column=1, value=tag_display)
         ws_r.cell(row=r_idx, column=2, value=row.page_number)
         for c_idx, col in enumerate(headers_r[2:], start=3):
             ws_r.cell(row=r_idx, column=c_idx, value=d.get(col, ''))

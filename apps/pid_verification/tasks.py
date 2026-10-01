@@ -481,6 +481,92 @@ def _process_one_page(doc, seg, file_path: str, pdf_bytes: bytes, project_legend
     drawing_obj.metadata = metadata
     drawing_obj.save(update_fields=['metadata'])
 
+    # ── Cross-reference: tag-occurrence index + continuation markers ─────
+    # Feeds apps.pid_verification_v2.services.cross_reference (shared,
+    # reused rather than duplicated — see that module's own docstring):
+    # group_multi_page_tags() needs one PIDVTagIndex row per tag
+    # OCCURRENCE (this page's reading of it, not one row per unique tag),
+    # detect_continuation_refs() needs this page's raw text while it's
+    # already in memory. Both run here, per-page, so they work identically
+    # whether this page ran inline or via the parallel per-page fan-out
+    # (process_pid_page) — persisted immediately (PIDVTagIndex rows to the
+    # DB, continuation refs into drawing_obj.metadata) rather than returned
+    # up, since a fan-out page has no shared in-memory accumulator to
+    # return into; _finalize_document reads all of this back once every
+    # page is done. Non-fatal by design (best-effort, like the comparison/
+    # AI/bridge steps above) — a failure here never loses the page's
+    # rule-engine findings.
+    try:
+        from apps.pid_verification.models import PIDVTagIndex
+        from apps.pid_verification_v2.services.comparison_engine import normalize_tag
+        from apps.pid_verification_v2.services.cross_reference import detect_continuation_refs
+
+        # BUG FIX: clear this page's PREVIOUS tag-index rows before writing
+        # new ones — re-processing (Re-check "run fresh") calls this
+        # function again for the same page, and without this, old rows
+        # would accumulate alongside new ones on every re-run, inflating
+        # group_multi_page_tags()'s counts and eventually reporting a tag
+        # as appearing on more pages than it actually does — exactly the
+        # kind of false positive this feature must avoid. Same idempotency
+        # granularity as drawing_obj.findings.all().delete() above (this
+        # page only, not the whole document — a fan-out page must not
+        # touch another page's rows).
+        PIDVTagIndex.objects.filter(document=doc, page_number=seg.page_index).delete()
+
+        tag_index_rows = []
+        for item in extraction.get('instruments', []):
+            raw = item.get('tag') or ''
+            if raw:
+                # strip_leading_digit_noise=True — this codebase's OWN
+                # documented, tested scope for that flag is exactly
+                # "instrument-index tags, where a leaked 1-2 digit prefix
+                # is a PDF row-merge artifact" (normalize_tag's own
+                # docstring). Deliberately NOT applied to line/valve/
+                # equipment tags below — a line tag's leading digit is its
+                # real pipe SIZE, not noise; stripping it there would be a
+                # false match (two different pipe sizes treated as the
+                # same tag), exactly the false-positive risk to avoid.
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw, strip_leading_digit_noise=True),
+                    raw_tag=raw, tag_type='instrument',
+                ))
+        for item in extraction.get('valves', []):
+            raw = item.get('tag') or ''
+            if raw:
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw), raw_tag=raw, tag_type='valve',
+                ))
+        for item in extraction.get('equipment', []):
+            raw = item.get('tag') or ''
+            if raw:
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw), raw_tag=raw, tag_type='equipment',
+                ))
+        for item in extraction.get('line_tags', []):
+            raw = item.get('text') or ''
+            if raw:
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw), raw_tag=raw, tag_type='line',
+                ))
+        if tag_index_rows:
+            PIDVTagIndex.objects.bulk_create(tag_index_rows)
+
+        continuation_refs = detect_continuation_refs(raw_text)
+        if continuation_refs:
+            metadata = drawing_obj.metadata or {}
+            metadata['continuation_refs'] = continuation_refs
+            drawing_obj.metadata = metadata
+            drawing_obj.save(update_fields=['metadata'])
+    except Exception:
+        logger.warning(
+            '[PIDVTask] Cross-reference indexing failed for drawing_id=%s (non-fatal)',
+            seg.drawing_id, exc_info=True,
+        )
+
     # ── Graph + deterministic rule engine ────────────────────────────────
     graph = build_graph(extraction)
     rule_findings = run_rules(extraction, graph)
@@ -662,6 +748,88 @@ def _finalize_document(doc, document_id: str) -> None:
     from apps.pid_verification.services.export_service import generate_excel, generate_pdf, upload_to_s3
 
     doc.refresh_from_db()
+
+    # ── Cross-reference: multi-page tags + continuation markers ──────────
+    # Runs ONCE per document, now that every page's PIDVTagIndex rows and
+    # continuation_refs (drawing.metadata) exist — see _process_one_page's
+    # own comment for why those are written per-page instead of returned.
+    # Persisted as regular PIDVFinding rows (category='cross_reference')
+    # so the existing Cross-Reference UI panel (PIDVerification.jsx /
+    # PIDVerificationV2.jsx — both already built, waiting for exactly this
+    # data, no new UI needed) picks them up with no separate fetch. Before
+    # generate_excel/generate_pdf below so these findings are included in
+    # the exported reports too. Non-fatal: a failure here never blocks the
+    # document from completing.
+    try:
+        from apps.pid_verification.models import PIDVFinding
+        from apps.pid_verification_v2.services.cross_reference import group_multi_page_tags, resolve_continuations
+
+        tag_rows = list(doc.tag_index.values('tag', 'raw_tag', 'page_number', 'tag_type'))
+        multi_page_tags = group_multi_page_tags(tag_rows)
+
+        drawings = list(doc.drawings.all())
+        known_pages = {d.page_index for d in drawings}
+        page_refs = {
+            d.page_index: (d.metadata or {}).get('continuation_refs', [])
+            for d in drawings
+            if (d.metadata or {}).get('continuation_refs')
+        }
+        continuations = resolve_continuations(page_refs, known_pages)
+
+        xref_bulk = []
+        if drawings and (multi_page_tags or continuations):
+            # Cross-reference findings are document-wide (span multiple
+            # pages), not any one page's — attached to the FIRST drawing
+            # so they have a real PIDVDrawing FK to hang off, same as
+            # every other PIDVFinding.
+            anchor_drawing = drawings[0]
+            for t in multi_page_tags:
+                pages_1indexed = ', '.join(str(p + 1) for p in t['pages'])  # 0-indexed page_index -> human-facing sheet number
+                xref_bulk.append(PIDVFinding(
+                    drawing=anchor_drawing,
+                    sl_no=len(xref_bulk) + 1,
+                    category='cross_reference',
+                    rule_id='XREF-001',
+                    issue_observed=f"Tag {t['tag']} found on pages {pages_1indexed}",
+                    action_required='Verify this tag is consistently represented on every listed sheet.',
+                    evidence=f"type={t['tag_type']}",
+                    direction='N/A',
+                    severity='info',
+                    status='open',
+                ))
+            for c in continuations:
+                rule_id = {'confirmed': 'XREF-002', 'missing': 'XREF-003', 'unresolvable': 'XREF-004'}[c['status']]
+                to_display = str(c['to_page'] + 1) if c['to_page'] is not None else (c['matched_text'] or '?')
+                xref_bulk.append(PIDVFinding(
+                    drawing=anchor_drawing,
+                    sl_no=len(xref_bulk) + 1,
+                    category='cross_reference',
+                    rule_id=rule_id,
+                    issue_observed=(
+                        f"Continuation marker on page {c['from_page'] + 1} "
+                        f"({c['pattern']}: {c['matched_text']}) references sheet {to_display}"
+                    ),
+                    action_required=(
+                        'None — target sheet exists.' if c['status'] == 'confirmed'
+                        else 'Referenced sheet was not found in this document — verify the sheet number or that all pages were uploaded.' if c['status'] == 'missing'
+                        else 'References a separate drawing — verify manually.'
+                    ),
+                    evidence=c['matched_text'],
+                    direction='N/A',
+                    severity='info',
+                    status='open',
+                ))
+        if xref_bulk:
+            PIDVFinding.objects.bulk_create(xref_bulk, batch_size=500)
+        logger.info(
+            '[PIDVTask] Cross-reference: %d multi-page tag(s), %d continuation marker(s) for document_id=%s',
+            len(multi_page_tags), len(continuations), document_id,
+        )
+    except Exception:
+        logger.warning(
+            '[PIDVTask] Cross-reference finalize failed for document_id=%s (non-fatal)',
+            document_id, exc_info=True,
+        )
 
     excel_bytes = generate_excel(doc)
     if excel_bytes:

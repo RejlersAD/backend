@@ -236,7 +236,9 @@ def process_pid_document(self, document_id: str, context: dict = None):
                 '[PIDVTask] Persisted %d drawing(s) / %d total finding(s) for document_id=%s',
                 len(result_context.segments), total_findings_created, document_id,
             )
-            
+
+            _finalize_cross_reference(doc, document_id)
+
             # Mark document as completed
             doc.status = PIDVDocument.Status.COMPLETED
             doc.save(update_fields=['status', 'updated_at'])
@@ -679,6 +681,77 @@ def _persist_segment_result(doc, seg, result_context) -> int:
     drawing_obj.metadata = metadata
     drawing_obj.save(update_fields=['metadata'])
 
+    # ── Cross-reference: tag-occurrence index + continuation markers ─────
+    # Mirrors apps.pid_verification's own _process_one_page (V1) — see its
+    # comment for the full rationale. Feeds
+    # apps.pid_verification_v2.services.cross_reference: group_multi_page_
+    # tags() needs one PIDVTagIndex row per tag OCCURRENCE,
+    # detect_continuation_refs() needs this page's raw text while it's
+    # already in memory. Non-fatal — a failure here never loses this
+    # page's rule/comparison/AI findings above.
+    try:
+        from apps.pid_verification_v2.models import PIDVTagIndex
+        from apps.pid_verification_v2.services.comparison_engine import normalize_tag
+        from apps.pid_verification_v2.services.cross_reference import detect_continuation_refs
+
+        # BUG FIX: clear this page's PREVIOUS tag-index rows before writing
+        # new ones — see V1's matching comment (apps.pid_verification.
+        # tasks._process_one_page) for the full rationale: without this,
+        # re-processing accumulates stale rows and eventually reports a
+        # tag as appearing on more pages than it actually does.
+        PIDVTagIndex.objects.filter(document=doc, page_number=seg.page_index).delete()
+
+        tag_index_rows = []
+        for item in extraction.get('instruments', []):
+            raw = item.get('tag') or ''
+            if raw:
+                # strip_leading_digit_noise=True only for instruments — see
+                # V1's matching comment (normalize_tag's own docstring
+                # scopes this flag to instrument-tag PDF-bleed artifacts
+                # only; applying it to line tags would strip a real pipe
+                # size, a false match).
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw, strip_leading_digit_noise=True),
+                    raw_tag=raw, tag_type='instrument',
+                ))
+        for item in extraction.get('valves', []):
+            raw = item.get('tag') or ''
+            if raw:
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw), raw_tag=raw, tag_type='valve',
+                ))
+        for item in extraction.get('equipment', []):
+            raw = item.get('tag') or ''
+            if raw:
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw), raw_tag=raw, tag_type='equipment',
+                ))
+        for item in extraction.get('line_tags', []):
+            raw = item.get('text') or ''
+            if raw:
+                tag_index_rows.append(PIDVTagIndex(
+                    document=doc, page_number=seg.page_index,
+                    tag=normalize_tag(raw), raw_tag=raw, tag_type='line',
+                ))
+        if tag_index_rows:
+            PIDVTagIndex.objects.bulk_create(tag_index_rows)
+
+        raw_text = extraction.get('raw_text', '') or ''
+        continuation_refs = detect_continuation_refs(raw_text)
+        if continuation_refs:
+            metadata = drawing_obj.metadata or {}
+            metadata['continuation_refs'] = continuation_refs
+            drawing_obj.metadata = metadata
+            drawing_obj.save(update_fields=['metadata'])
+    except Exception:
+        logger.warning(
+            '[PIDVTask] Cross-reference indexing failed for drawing_id=%s (non-fatal)',
+            seg.drawing_id, exc_info=True,
+        )
+
     # Merge findings for THIS page only
     page_findings = (
         seg_bucket.get('rule_findings', []) +
@@ -706,6 +779,89 @@ def _persist_segment_result(doc, seg, result_context) -> int:
         logger.info('[PIDVTask] Created %d findings for drawing_id=%s', len(bulk), seg.drawing_id)
 
     return len(bulk)
+
+
+def _finalize_cross_reference(doc, document_id: str) -> None:
+    """Cross-reference: multi-page tags + continuation markers — runs ONCE
+    per document, called from BOTH completion paths (the inline pipeline
+    above and finalize_pid_document below), now that every page's
+    PIDVTagIndex rows and continuation_refs (drawing.metadata) exist — see
+    _persist_segment_result's own comment for why those are written
+    per-page instead of returned.
+
+    Persisted as regular PIDVFinding rows (category='cross_reference') so
+    the existing Cross-Reference UI panel (PIDVerification.jsx /
+    PIDVerificationV2.jsx — both already built, waiting for exactly this
+    data, no new UI needed) picks them up with no separate fetch. Mirrors
+    apps.pid_verification.tasks._finalize_document exactly — non-fatal, a
+    failure here never blocks the document from completing.
+    """
+    try:
+        from apps.pid_verification_v2.models import PIDVFinding
+        from apps.pid_verification_v2.services.cross_reference import group_multi_page_tags, resolve_continuations
+
+        tag_rows = list(doc.tag_index.values('tag', 'raw_tag', 'page_number', 'tag_type'))
+        multi_page_tags = group_multi_page_tags(tag_rows)
+
+        drawings = list(doc.drawings.all())
+        known_pages = {d.page_index for d in drawings}
+        page_refs = {
+            d.page_index: (d.metadata or {}).get('continuation_refs', [])
+            for d in drawings
+            if (d.metadata or {}).get('continuation_refs')
+        }
+        continuations = resolve_continuations(page_refs, known_pages)
+
+        xref_bulk = []
+        if drawings and (multi_page_tags or continuations):
+            anchor_drawing = drawings[0]
+            for t in multi_page_tags:
+                pages_1indexed = ', '.join(str(p + 1) for p in t['pages'])
+                xref_bulk.append(PIDVFinding(
+                    drawing=anchor_drawing,
+                    sl_no=len(xref_bulk) + 1,
+                    category='cross_reference',
+                    rule_id='XREF-001',
+                    issue_observed=f"Tag {t['tag']} found on pages {pages_1indexed}",
+                    action_required='Verify this tag is consistently represented on every listed sheet.',
+                    evidence=f"type={t['tag_type']}",
+                    direction='N/A',
+                    severity='info',
+                    status='open',
+                ))
+            for c in continuations:
+                rule_id = {'confirmed': 'XREF-002', 'missing': 'XREF-003', 'unresolvable': 'XREF-004'}[c['status']]
+                to_display = str(c['to_page'] + 1) if c['to_page'] is not None else (c['matched_text'] or '?')
+                xref_bulk.append(PIDVFinding(
+                    drawing=anchor_drawing,
+                    sl_no=len(xref_bulk) + 1,
+                    category='cross_reference',
+                    rule_id=rule_id,
+                    issue_observed=(
+                        f"Continuation marker on page {c['from_page'] + 1} "
+                        f"({c['pattern']}: {c['matched_text']}) references sheet {to_display}"
+                    ),
+                    action_required=(
+                        'None — target sheet exists.' if c['status'] == 'confirmed'
+                        else 'Referenced sheet was not found in this document — verify the sheet number or that all pages were uploaded.' if c['status'] == 'missing'
+                        else 'References a separate drawing — verify manually.'
+                    ),
+                    evidence=c['matched_text'],
+                    direction='N/A',
+                    severity='info',
+                    status='open',
+                ))
+        if xref_bulk:
+            PIDVFinding.objects.bulk_create(xref_bulk, batch_size=500)
+        logger.info(
+            '[PIDVTask] Cross-reference: %d multi-page tag(s), %d continuation marker(s) for document_id=%s',
+            len(multi_page_tags), len(continuations), document_id,
+        )
+    except Exception:
+        logger.warning(
+            '[PIDVTask] Cross-reference finalize failed for document_id=%s (non-fatal)',
+            document_id, exc_info=True,
+        )
 
 
 @shared_task(
@@ -849,6 +1005,8 @@ def finalize_pid_document(self, page_results, document_id: str):
 
     try:
         doc.refresh_from_db()
+
+        _finalize_cross_reference(doc, document_id)
 
         excel_bytes = generate_excel(doc)
         if excel_bytes:

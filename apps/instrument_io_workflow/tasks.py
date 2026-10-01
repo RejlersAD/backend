@@ -710,6 +710,7 @@ def finalize_io_document(
             from .services.pid_vision_extractor import (
                 _dedupe_rows, _backfill_missing_unit_prefix_across_rows,
                 _warn_about_remaining_unprefixed_tags, _warn_about_tags_mentioned_only_in_location,
+                _backfill_line_tags_via_location_mentions, _backfill_missing_service_description,
                 _drop_empty_rows,
             )
             io_rows = _dedupe_rows(io_rows)
@@ -724,12 +725,14 @@ def finalize_io_document(
             _backfill_missing_unit_prefix_across_rows(io_rows)
             _warn_about_remaining_unprefixed_tags(io_rows)
             _warn_about_tags_mentioned_only_in_location(io_rows)
+            _backfill_line_tags_via_location_mentions(io_rows)
             # See _drop_empty_rows's own docstring — this fan-out path
             # (large documents, one Celery subtask per page) has its own
             # combine step separate from pid_vision_extractor's single-
             # process entry point, so the filter has to be applied here
             # too, not just there.
             io_rows = _drop_empty_rows(io_rows)
+            _backfill_missing_service_description(io_rows)
             # BUG FIX: this used to only check whether any FOUND row's
             # remarks mentioned "local OCR" — a real, confirmed symptom
             # from a live upload: a P&ID drawing uploaded with no API key
@@ -785,6 +788,7 @@ def finalize_io_document(
             # process_io_document) — nothing to compare a fresh no-key run
             # against, and Force Fresh Analysis on OCR wouldn't mean much
             # anyway (there's no Vision non-determinism to guard against).
+            compare_pending = None
             if compare_best and extraction_mode_for_compare != 'ocr':
                 from .services.results_cache import load_vision_results_cache
                 existing_cached = load_vision_results_cache(digest, scan_mode_for_compare, extraction_mode_for_compare)
@@ -792,15 +796,32 @@ def finalize_io_document(
                     cached_rows = existing_cached['io_rows']
                     fresh_count, cached_count = len(io_rows), len(cached_rows)
                     if fresh_count < cached_count:
+                        # BUG FIX: this used to silently discard the fresh
+                        # run and auto-keep the cached result whenever it
+                        # had more rows — the user explicitly wants to
+                        # decide instead. io_rows is left as the FRESH
+                        # result (so the document shows something real
+                        # either way while awaiting a decision) and the
+                        # existing cache is deliberately left UNTOUCHED
+                        # below (still holds the better cached_count rows,
+                        # safe regardless of which way the user resolves
+                        # this). 'compare_pending' on extraction_stats is
+                        # the signal the frontend polls for to show the
+                        # choice dialog; views.py's resolve_compare_choice
+                        # action is where the user's pick actually takes
+                        # effect.
                         logger.info(
-                            '[IOWF] compare_best: fresh run (%d rows) worse than cached '
-                            '(%d rows) for document %s — keeping cached result',
+                            '[IOWF] compare_best: fresh run (%d rows) has FEWER rows than cached '
+                            '(%d rows) for document %s — awaiting user choice, not auto-resolving',
                             fresh_count, cached_count, document_id,
                         )
-                        io_rows = cached_rows
+                        compare_pending = {
+                            'fresh_count': fresh_count, 'cached_count': cached_count,
+                            'scan_mode': scan_mode_for_compare, 'extraction_mode': extraction_mode_for_compare,
+                        }
                         warnings = [
-                            f'Cached result is better ({cached_count} rows vs {fresh_count} rows). '
-                            f'Keeping cached result!'
+                            f'New analysis found FEWER rows ({fresh_count}) than the cached result '
+                            f'({cached_count}). Choose which result to keep.'
                         ] + warnings
                     elif fresh_count > cached_count:
                         logger.info(
@@ -836,6 +857,13 @@ def finalize_io_document(
         # still show 0).
         if document_type == 'pid_drawing':
             result['stats']['scan_mode'] = 'thorough' if thorough else 'quick'
+            # Frontend polls extraction_stats.compare_pending to know
+            # whether to show the "Keep Previous / Use New Result" choice
+            # dialog — see this block's own BUG FIX comment above and
+            # views.py's resolve_compare_choice(), which is what actually
+            # acts on the user's pick and clears this again.
+            if compare_pending:
+                result['stats']['compare_pending'] = compare_pending
         result['stats']['tokens_used_total'] = IOListDocument.objects.filter(
             id=document_id,
         ).values_list('tokens_used_total', flat=True).first() or 0
@@ -862,7 +890,12 @@ def finalize_io_document(
         # OCR quality is unreliable enough (often 0 rows) that caching it
         # would just mean the NEXT no-key upload of this file silently
         # reuses that same low-quality result instead of trying OCR fresh.
-        if document_type == 'pid_drawing' and extraction_mode_for_compare != 'ocr':
+        # Also skipped while compare_pending is set — the fresh run had
+        # FEWER rows than what's already cached, and the user hasn't
+        # chosen yet; overwriting here would destroy the better cached
+        # result before resolve_compare_choice() gets a chance to offer
+        # it as an option.
+        if document_type == 'pid_drawing' and extraction_mode_for_compare != 'ocr' and not compare_pending:
             save_vision_results_cache(
                 digest, 'thorough' if thorough else 'quick', io_rows, warnings,
                 extraction_mode=extraction_mode_for_compare,

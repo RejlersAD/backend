@@ -162,6 +162,15 @@ LINE_TAG_PATTERN = re.compile(
 # malformed values elsewhere.
 UNIT_LINE_NUMBER_PATTERN = re.compile(r'^\d{3,5}-\d{2,5}[A-Z]?$')
 
+# Drawing-annotation markers (flag/callout/revision-mark shapes that point
+# to a note or revision elsewhere on the sheet) — never a real P&ID
+# process symbol, so a "symbol" item classified as one of these is pure
+# noise in the I/O list. See _parse_tags's own BUG FIX comment.
+_DRAWING_ANNOTATION_MARKER_RE = re.compile(
+    r'FLAG\s*(CALLOUT|NOTE|MARKER)|REVISION\s*MARK|NOTE\s*MARKER|NOTE\s*CALLOUT',
+    re.I,
+)
+
 
 def _extract_line_tag_token(raw_value: str) -> str:
     """A line-kind item's raw tag text (or an instrument's 'line_tag'
@@ -224,22 +233,77 @@ VISION_SYSTEM_PROMPT = (
 
 VISION_USER_PROMPT = """Identify EVERY unique instrument tag, equipment tag, line number, AND visual symbol on this P&ID image.
 
-TWO-PART TASK FOR EVERY INSTRUMENT — read this before anything else below.
-Finding an instrument's tag is only HALF the job. For every single
-instrument you report (kind "instrument" — see section 1), you must ALSO
-physically trace the pipe it sits on or connects to via its instrument
-lead line, and read THAT pipe's own line-number callout into "line_tag"
-on the SAME item. Do not treat this as optional metadata to fill in only
-if convenient — treat every instrument balloon as a two-step lookup:
-(1) read the tag, (2) follow the line to it, read the line tag. Only
-skip step 2, leaving "line_tag" as "", when the instrument genuinely has
-no physical pipe connection at all (e.g. a panel/DCS-mounted function
-instrument with no lead line drawn to any pipe) — never skip it just
-because the line's callout is small, faint, or requires looking a little
-further along the pipe than the balloon itself. Full instructions for
-both steps are in section 1 below; the JSON shape is in the RETURN
-FORMAT section; and the SELF-CONSISTENCY CHECK near the end of this
-prompt has you re-verify this specific requirement before you finish.
+PRIORITY ORDER — read this FIRST, it governs everything below. A real,
+confirmed regression happened when this wasn't stated clearly enough:
+adding the Stage 2 line-matching and service-description work below (see
+further down) measurably REDUCED the total number of tags found on the
+same real drawings (957 tags dropped to 694) — the extra enrichment work
+was crowding out the more important job of finding every tag in the
+first place. That must never happen again. In order:
+  1. MOST IMPORTANT, never sacrificed for anything else: find and report
+     EVERY instrument, equipment, line, and untagged symbol on the page.
+     A complete list with some blank "line_tag"/"service" fields is
+     ALWAYS better than a shorter list with more fields filled in.
+  2. Only once you are confident #1 is complete, spend additional effort
+     on Stage 2 line-matching and inferring a service description from
+     context (both described below) — these are enrichment on TOP of a
+     complete list, never a reason to spend less effort finding tags.
+  3. If you ever feel forced to choose between finding one more tag/
+     symbol/line versus matching/describing one you already found,
+     ALWAYS choose finding the new one — leave the other's "line_tag" or
+     "service" blank rather than skip an item entirely.
+This applies to every section below, including the ACCURACY and SCAN THE
+ENTIRE IMAGE instructions near the end — those exhaustiveness
+requirements are NOT optional or secondary to Stage 2/SERVICE
+DESCRIPTION; they are #1 above.
+
+TWO-STAGE TASK — read this before anything else below (after PRIORITY
+ORDER above). Two earlier,
+narrower phrasings of this instruction (asking you to identify each
+instrument's connected line AT THE SAME TIME as reading its tag, one
+balloon at a time) measurably failed: real runs against real drawings
+came back with "line_tag" filled in on well under a quarter of
+instrument items, even though the connected line is almost always
+physically present and readable. Combining "find the tag" and "find its
+line" into one single per-balloon lookup was the problem — it is easy to
+do the first half and quietly skip the second under time pressure. Do
+these as two SEPARATE passes instead:
+
+STAGE 1 — ENUMERATE EVERYTHING FIRST, INCLUDING EVERY LINE'S POSITION.
+Read the whole drawing once and report every instrument, equipment tag,
+LINE, and untagged symbol you can find, exactly as sections 1-4 below
+describe — with ONE addition to section 3 (LINE TAGS): for every "line"
+item, ALSO set "location" to a short approximate position on the drawing
+(the same short format section 4 already uses for symbols, e.g.
+"middle-right, running from D-103 to K-101") — do not leave a line's
+"location" blank the way earlier versions of this prompt did. You now
+have a complete list of every line tag AND roughly where each one runs.
+Leave every instrument's "line_tag" as "" for now — do NOT try to find
+connected lines during this stage; that is Stage 2's job specifically,
+kept separate on purpose so it gets its own full pass instead of being
+squeezed into the middle of tag-reading.
+
+STAGE 2 — MATCH EACH INSTRUMENT TO A LINE FROM YOUR OWN STAGE-1 LIST.
+Only after Stage 1's array is complete (per PRIORITY ORDER above, Stage 1
+completeness is never sacrificed for this), go through your "instrument"
+items and, WHERE IT IS QUICK AND CLEAR, match each to a line from your
+own Stage-1 list: look at its instrument lead line, follow it to the
+pipe it touches, find which Stage-1 "line" that pipe is (use each
+line's "location" as your guide), and copy that line's own "tag" into
+the instrument's "line_tag" — copy it exactly, do not re-read it a
+second time. Do NOT create a new, separate "line" item for it — you're
+pairing it with the ONE you already have. Leave "line_tag" as "" both
+when the instrument genuinely has no lead line at all AND whenever the
+match isn't quick/obvious — a blank "line_tag" is always an acceptable,
+correct outcome; spending so much time chasing a hard match that it
+costs you a tag elsewhere is not. This is a lighter, best-effort pass on
+top of an already-complete Stage 1, not a second exhaustive scan of the
+whole page.
+
+Full instructions for what counts as each kind are in sections 1-4
+below; the JSON shape is in the RETURN FORMAT section; and the
+LINE_TAG CHECK near the end of this prompt covers Stage 2, but per
+PRIORITY ORDER above, never at the cost of the tag list itself.
 
 Four kinds of item appear on a P&ID — classify each one by its symbol or
 context, not just its text shape:
@@ -260,23 +324,25 @@ context, not just its text shape:
    ALSO set "symbol_type" to the instrument's full descriptive type (e.g.
    "PRESSURE TRANSMITTER", "FLOW ELEMENT", "LEVEL GAUGE", "TEMPERATURE
    ELEMENT") — leave it "" if you can't tell what kind of instrument it is.
-   CONNECTED LINE (REQUIRED — see TWO-PART TASK at the very top of this
-   prompt) — for a field-mounted instrument (plain circle balloon, or a
-   valve-type instrument per the VALVE-TYPE paragraph just below),
-   physically trace the pipe/line it sits directly on or connects to via
-   its instrument lead line — a short line running from the balloon to
-   the pipe — and read THAT pipe's own callout (see LINE TAGS, section 3
-   below, for its shape — e.g. 6"-FL-AC6N-8112). This is a real, separate
-   look at the drawing, not something to infer from the instrument's own
-   tag or position alone. Set "line_tag" to that connected line's full
-   tag on the SAME instrument item — do NOT report it a second time as a
-   separate kind "line" item as well (that would be reporting the same
-   physical line twice). Leave "line_tag" as "" ONLY when the instrument
-   genuinely has no lead line drawn to any pipe at all (e.g. a panel-
-   mounted/DCS-function instrument) or the connected line's callout is
-   truly illegible — do not guess, do not reuse a nearby unrelated line's
-   tag, but also do not skip this step just because it takes a second
-   look along the pipe.
+   CONNECTED LINE (Stage 2 — see TWO-STAGE TASK at the very top of this
+   prompt) — leave "line_tag" as "" here during Stage 1; you fill it in
+   during Stage 2, AFTER every instrument/equipment/line/symbol on the
+   page has already been enumerated (with every line's own "location"
+   recorded per section 3 below). In Stage 2, for a field-mounted
+   instrument (plain circle balloon, or a valve-type instrument per the
+   VALVE-TYPE paragraph just below), physically trace the pipe/line it
+   sits directly on or connects to via its instrument lead line — a short
+   line running from the balloon to the pipe — then find WHICH line in
+   your own Stage-1 list that pipe is (match by its "location"), and copy
+   THAT line's already-read "tag" into this instrument's "line_tag" — do
+   NOT report it a second time as a separate kind "line" item as well
+   (that would be reporting the same physical line twice). Leave
+   "line_tag" as "" ONLY when the instrument genuinely has no lead line
+   drawn to any pipe at all (e.g. a panel-mounted/DCS-function instrument)
+   or the connected line truly isn't in your Stage-1 list at all — do not
+   guess, do not reuse a nearby unrelated line's tag, but also do not
+   skip this step just because it takes a careful look to tell which of
+   several nearby lines it actually is.
    VALVE-TYPE INSTRUMENTS (FUNC = PSV, PV, FCV, LCV, PCV, SDV, XV, MOV and
    similar) are usually NOT drawn inside a round balloon at all — the tag
    text sits directly beside/above/below the actual valve BODY symbol
@@ -363,6 +429,11 @@ common too, e.g. a real drawing's own line callout '6"-1520-HY-1025-
    The inch mark (") after the size is often present but sometimes
    omitted on the drawing — read the digits either way, preserve the
    mark exactly as drawn (don't add or remove it).
+   ALSO set "location" (see TWO-STAGE TASK at the top of this prompt and
+   section 4's own "location" format below) to a short approximate
+   position of THIS line on the drawing — this is what Stage 2 uses to
+   match an instrument to the correct line among several nearby ones, so
+   it matters for every "line" item now, not only for "symbol" items.
 
 4. UNTAGGED SYMBOLS — kind: "symbol"
    Any visual P&ID symbol below that has NO legible alphanumeric tag next
@@ -433,14 +504,34 @@ not ALSO appear as the "tag" of its own instrument/equipment item
 elsewhere in your answer, add one now — don't let a tag exist only as
 someone else's location reference.
 
-LINE_TAG CHECK — before finishing, go back through every item you
-reported with kind "instrument" and confirm "line_tag" is actually
-filled in, not left "" by default. For each one still blank, look again
-at the drawing specifically for its connected pipe (per CONNECTED LINE
-in section 1) before accepting that it truly has none — an empty
-"line_tag" should be the result of a genuine second look finding no
-connected line, never of only reading the tag and moving on to the next
-balloon without tracing its line at all.
+LINE_TAG CHECK — this is Stage 2 (see TWO-STAGE TASK and PRIORITY ORDER
+at the top). Once your array already has every instrument, equipment,
+line, and symbol in it (that part is never skipped or shortened), spend
+some additional effort matching "instrument" items to a line from your
+Stage-1 list where it's quick and clear to do. An empty "line_tag" is a
+fine, correct outcome — for an instrument with no lead line, OR simply
+because you chose to spend your effort finding one more tag/symbol
+instead of chasing a hard match. Do not sacrifice completeness of the
+tag/symbol/line list to raise how many "line_tag" fields are filled in.
+
+SERVICE DESCRIPTION — a real, observed gap: many small field instruments
+(a plain pressure/temperature/flow gauge or indicator with no controller
+function) have NO separate line of descriptive text printed next to
+their balloon at all — just the tag. Leaving "service" empty for these
+is a normal, correct outcome, not a gap you must chase down for every
+item. When it's QUICK and OBVIOUS, you can do better: the equipment or
+line the instrument's lead line connects to often HAS its own label/
+service text — e.g. an instrument on the discharge line of "1520-K-101
+MAKEUP GAS COMPRESSOR" is monitoring makeup gas compressor discharge,
+even with no text of its own. When that connection is immediately
+visible, set "service" to a short, literal description of it (e.g.
+"MAKEUP GAS COMPRESSOR DISCHARGE PRESSURE") — never a generic
+restatement of the function code alone (e.g. do not just write
+"PRESSURE GAUGE" as the service for a PG — that adds nothing). Do NOT
+spend extended time tracing an instrument's connections purely to fill
+"service" — per PRIORITY ORDER above, finding one more tag anywhere on
+the page is always worth more than filling in one more "service" field;
+leave it "" whenever the connection isn't obvious at a glance.
 
 ACCURACY — read every character exactly as printed. Do NOT guess,
 abbreviate, truncate, or autocomplete from a similar-looking tag
@@ -475,11 +566,16 @@ next to other tags) are still real tags — look for them specifically,
 don't only report the large/bold ones that are easy to spot at a glance.
 
 EXCLUDE from the tag/symbol list: drawing/reference numbers, revision
-blocks, NOTE/TYPE callouts, title-block text — none of these are
-themselves tags or symbols to report as an item. The ONE exception: still
-READ any unit-number-prefix note per UNIT NUMBER PREFIX above and use it
-to fill "unit_prefix" (and, per that section, "tag" itself) — reading
-that note is not the same as reporting it as its own item.
+blocks, NOTE/TYPE callouts, title-block text, and DRAWING-ANNOTATION
+MARKERS such as a diamond/triangle/rectangle "flag" or "callout" shape
+that references a note or revision (a real, observed false positive:
+these have been reported as kind "symbol" with symbol_type like "DIAMOND
+FLAG CALLOUT" or "TRIANGLE REVISION MARK") — none of these are process
+symbols and none of them belong in the I/O list; they are drawing
+metadata, not equipment/instrumentation. The ONE exception: still READ
+any unit-number-prefix note per UNIT NUMBER PREFIX above and use it to
+fill "unit_prefix" (and, per that section, "tag" itself) — reading that
+note is not the same as reporting it as its own item.
 
 Return ONLY a JSON array of objects — no prose, no markdown fences. Each
 object:
@@ -487,8 +583,8 @@ object:
    "tag": "<tag exactly as read, INCLUDING the unit-number prefix when one applies (see UNIT NUMBER PREFIX above) — or \"\" for an untagged symbol>",
    "function_code": "<instrument FUNC or equipment EQUIPCODE, else empty>",
    "symbol_type": "<full descriptive type, e.g. PRESSURE TRANSMITTER, GATE VALVE — empty if unknown>",
-   "service": "<the FULL service/description text printed near the tag, not shortened — or empty string>",
-   "location": "<short, consistent approximate position on the drawing — only meaningful for kind \"symbol\", else empty>",
+   "service": "<the FULL service/description text printed near the tag, not shortened — see SERVICE DESCRIPTION below for what to do when no separate label exists — or empty string>",
+   "location": "<short, consistent approximate position on the drawing — meaningful for kind \"symbol\" and, per the TWO-STAGE TASK/section 3, kind \"line\" too — else empty>",
    "unit_prefix": "<unit number per UNIT NUMBER PREFIX above, or \"\" — only meaningful for kind \"instrument\"/\"equipment\"/\"line\", else empty>",
    "line_tag": "<the connected pipe line's own full tag per CONNECTED LINE above — only meaningful for kind \"instrument\", else empty>"}
 
@@ -1113,6 +1209,25 @@ def _parse_tags(raw: str) -> list[dict]:
                 rejected_bad_shape += 1
                 logger.info('[IOWF] _parse_tags: rejected a "symbol" item with no symbol_type')
                 continue
+            # BUG FIX (real, confirmed): the model sometimes reports a
+            # drawing-annotation marker (a flag/callout/revision-mark
+            # shape that references a note or revision elsewhere on the
+            # sheet, not a process symbol) as kind "symbol" — e.g.
+            # symbol_type "DIAMOND FLAG CALLOUT (260)" or "TRIANGLE
+            # REVISION MARK". These have no tag AND no service by nature
+            # (they're pointers to drawing metadata, not equipment), so
+            # they only ever add noise rows to the I/O list. The prompt
+            # now also tells the model to exclude these outright (see
+            # EXCLUDE... above) — this is a code-level safety net for
+            # whatever slips through anyway, and for results already
+            # cached before that prompt change.
+            if _DRAWING_ANNOTATION_MARKER_RE.search(symbol_type):
+                logger.info(
+                    '[IOWF] _parse_tags: rejected a drawing-annotation marker (symbol_type=%r), not a process symbol',
+                    symbol_type,
+                )
+                rejected_bad_shape += 1
+                continue
             symbol_candidates.append({
                 'kind': kind,
                 'tag': '',
@@ -1191,7 +1306,13 @@ def _parse_tags(raw: str) -> list[dict]:
             'function_code': (item.get('function_code') or '').strip().upper(),
             'symbol_type': symbol_type,
             'service': (item.get('service') or '').strip(),
-            'location': '',
+            # BUG FIX: this used to be hardcoded '' for every tagged kind
+            # — harmless for 'instrument'/'equipment' (location was never
+            # meaningful for those), but silently discarded a "line"
+            # item's own location just added to the prompt (TWO-STAGE
+            # TASK/section 3) for Stage-2 instrument-to-line matching. See
+            # _row_from_tag_info's 'line' branch, which now stores this.
+            'location': (item.get('location') or '').strip() if kind == 'line' else '',
             'unit_prefix': unit_prefix,
             # BUG FIX: this dict — not the raw parsed JSON item — is what
             # _row_from_tag_info actually receives (see
@@ -1390,6 +1511,13 @@ def _row_from_tag_info(tag_info: dict, page_index: int) -> dict:
         record.update({
             'line_tag': tag,
             'service_description': tag_info['service'],
+            # Populated per the TWO-STAGE TASK prompt change — an
+            # instrument's line_tag is matched against this location
+            # during Stage 2 (see the prompt's own comment), and keeping
+            # it on the persisted row too lets a human reviewer verify
+            # that match against the actual drawing, the same way a
+            # "symbol" row's location already does.
+            'location': location,
         })
     elif kind == 'symbol':
         record.update({
@@ -1536,6 +1664,54 @@ def _warn_about_remaining_unprefixed_tags(rows: list[dict]) -> None:
     )
 
 
+def _backfill_missing_service_description(rows: list[dict]) -> int:
+    """Guarantee every surviving row (see _drop_empty_rows — a row with
+    NOTHING at all is already gone before this runs) has a non-blank
+    'service_description', without ever fabricating page content that
+    isn't actually there. Real, confirmed gap: many small field
+    instruments and most untagged 'symbol' items have no separate
+    service text printed on the drawing at all — the prompt's own SERVICE
+    DESCRIPTION section now asks Vision to infer one from context where
+    possible, but a genuine "nothing nearby to go on" case is a real,
+    correct outcome, not a bug — this only ensures that case is never
+    rendered as a silently blank cell.
+
+    Fallback order, each one strictly using data ALREADY on this exact
+    row (never borrowed from another row, never invented free text):
+      1. 'symbol_type' — the instrument/equipment/valve TYPE name itself
+         (e.g. "PRESSURE GAUGE") is real, already-extracted information,
+         just not a unique per-tag description.
+      2. 'location' — for a 'line'/'symbol' row with no symbol_type
+         either, its approximate position is still real information.
+      3. An explicit, honest placeholder naming the row's own kind — used
+         only when 1 and 2 both have nothing; this is clearly NOT drawing
+         text (obvious from its wording), never mistakable for a real
+         extracted description.
+    Every backfilled row's 'remarks' notes which fallback was used, so a
+    reviewer can tell a real page description from this one at a glance.
+    Mutates `rows` in place; returns how many rows were backfilled.
+    """
+    count = 0
+    for row in rows:
+        if (row.get('service_description') or '').strip():
+            continue
+        fallback = (row.get('symbol_type') or '').strip() or (row.get('location') or '').strip()
+        if fallback:
+            row['service_description'] = fallback
+            row['remarks'] = (row.get('remarks') or '') + (
+                ' No separate service description found on the drawing for this item — '
+                'showing its symbol/instrument type or position instead.'
+            )
+        else:
+            kind_label = row.get('kind') or 'item'
+            row['service_description'] = f'(no service description found on the drawing for this {kind_label})'
+            row['remarks'] = (row.get('remarks') or '') + (
+                ' No service description, symbol type, or location was available for this item on the drawing.'
+            )
+        count += 1
+    return count
+
+
 # Matches a tag-shaped mention inside free text (e.g. a 'location'
 # field's "near PSV1521A" or "connecting PY-1599A/B/C/D loops"). The
 # trailing single letter + optional "/X/Y/Z" run captures the real,
@@ -1611,6 +1787,65 @@ def _warn_about_tags_mentioned_only_in_location(rows: list[dict]) -> None:
             'missed tag, not just a location reference: %s',
             len(mentioned_but_missing), sorted(mentioned_but_missing),
         )
+
+
+def _backfill_line_tags_via_location_mentions(rows: list[dict]) -> int:
+    """Safety net for the TWO-STAGE TASK prompt's own Stage 2 (see
+    VISION_USER_PROMPT) — matches a still-unmatched instrument to a line
+    when there's real textual evidence of the connection, without ever
+    fabricating a match: specifically, when a "line" item's own
+    "location" text (now populated per section 3/Stage 1 — e.g. "middle,
+    running past PT-1600") explicitly names this instrument's own tag.
+    That is Vision itself recording the connection in free text even when
+    it failed to also copy the line's tag into the instrument's
+    "line_tag" field during Stage 2 — this recovers that evidence rather
+    than losing it.
+
+    Deliberately does NOT attempt geometric/coordinate-based "nearest
+    line" matching — Vision's JSON response carries no pixel coordinates,
+    only short free-text location descriptions, so there is no reliable
+    numeric distance to compute; guessing a line by vague proximity alone
+    (e.g. both say "middle-left") without the line's text actually naming
+    THIS instrument would be fabricating a connection that was never
+    actually confirmed on the drawing. Only ever assigns a line_tag this
+    function can point to real, quoted textual evidence for.
+
+    Runs per-page (a line only connects instruments drawn on the same
+    sheet) and only among rows already surviving dedup/drop. Mutates
+    `rows` in place; returns how many instrument rows were backfilled.
+    """
+    by_page: dict = {}
+    for r in rows:
+        by_page.setdefault(r.get('page_number'), []).append(r)
+
+    count = 0
+    for page_rows in by_page.values():
+        lines_on_page = [r for r in page_rows if r.get('kind') == 'line' and r.get('line_tag') and r.get('location')]
+        if not lines_on_page:
+            continue
+        for r in page_rows:
+            if r.get('kind') != 'instrument' or (r.get('line_tag') or '').strip():
+                continue
+            tag_norm = _normalize_for_mention_check(r.get('tag_number') or '')
+            if not tag_norm:
+                continue
+            for line_row in lines_on_page:
+                mentions = _expand_grouped_tag_mentions(line_row.get('location') or '')
+                if any(_normalize_for_mention_check(m) in tag_norm or tag_norm in _normalize_for_mention_check(m)
+                       for m in mentions):
+                    r['line_tag'] = line_row['line_tag']
+                    r['remarks'] = (r.get('remarks') or '') + (
+                        f" line_tag matched from line {line_row['line_tag']!r}, whose own "
+                        f"location text explicitly named this instrument."
+                    )
+                    count += 1
+                    logger.info(
+                        '[IOWF] _backfill_line_tags_via_location_mentions: instrument %r <- line %r '
+                        '(location mentioned this tag)',
+                        r.get('tag_number'), line_row['line_tag'],
+                    )
+                    break
+    return count
 
 
 def _extract_tags_from_image(
@@ -1869,7 +2104,9 @@ def extract_pid_tags_via_vision(
     _backfill_missing_unit_prefix_across_rows(deduped)
     _warn_about_remaining_unprefixed_tags(deduped)
     _warn_about_tags_mentioned_only_in_location(deduped)
+    _backfill_line_tags_via_location_mentions(deduped)
     deduped = _drop_empty_rows(deduped)
+    _backfill_missing_service_description(deduped)
 
     warnings: list[str] = []
     if failed_pages:
