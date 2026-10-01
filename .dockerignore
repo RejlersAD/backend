@@ -115,6 +115,7 @@ pid_training_examples.json
 
 # Railway/Cloud specific
 railway_*.py
+!railway_runtime.py
 verify_railway_*.py
 
 # Local development

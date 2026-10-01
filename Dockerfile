@@ -14,7 +14,7 @@
 #    comment previously said railway_start.sh, which is NOT what CMD
 #    actually invokes; corrected to match reality so the next person
 #    tracing a timeout/startup setting doesn't check the wrong script)
-# 3. railway_runtime.sh → starts Gunicorn with bulletproof WSGI
+# 3. railway_runtime.sh → supervises Gunicorn and explicitly enabled background processes
 # 4. Bulletproof WSGI → always responds (even if Django fails)
 # ============================================
 
@@ -69,6 +69,6 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # Railway applies the complete migration graph through railway.toml's
-# preDeployCommand. The runtime script starts the optional Celery worker before
-# replacing itself with Gunicorn.
+# preDeployCommand. The runtime script supervises the web server, the optional
+# Celery worker, and Finance SharePoint sync when its registered switch is true.
 CMD ["bash", "railway_runtime.sh"]
