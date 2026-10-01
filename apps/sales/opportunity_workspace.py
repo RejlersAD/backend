@@ -1,10 +1,8 @@
 """Opportunity-bound storage commands and a SQL-backed provisioning outbox."""
 from datetime import timedelta
-import hashlib
 import re
 from uuid import uuid4
 
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.db import transaction
@@ -16,9 +14,10 @@ from apps.rbac.action_policy import module_action_allowed
 from apps.rbac.data_visibility_mixin import build_visibility_filter
 
 from .models import Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload
+from .attachment_streams import configured_limit, prepare_upload
 from .workflow import _audit
 from .workspace_graph import (
-    WorkspaceError, WorkspaceGraph, file_projection, valid_name, version_projection, workspace_config,
+    WorkspaceError, WorkspaceGraph, file_projection, version_projection, workspace_config,
 )
 
 
@@ -57,8 +56,9 @@ MESSAGES = {
     'private_storage_changed': 'The private storage destination changed. An administrator must restore or reconcile its attachment mappings.',
     'attachment_missing': 'This attachment is unavailable in the selected opportunity folder.',
     'attachment_integrity_failed': 'The stored attachment could not be verified. Contact your administrator.',
-    'download_too_large': 'This file exceeds the 50 MiB download limit. Open it in SharePoint.',
+    'download_too_large': 'This file exceeds the configured download limit. Open it in SharePoint.',
     'document_changed': 'The document changed while it was being read. Refresh the folder and retry.',
+    'version_stale': 'A newer document version exists. Refresh its details before uploading a new version.',
 }
 
 
@@ -128,7 +128,10 @@ def delete_client_with_workspace_guard(client):
 
 def workspace_projection(opportunity, actor):
     from .private_attachments import private_storage_projection
+    from .folder_tags import folder_tag_rows
+    from .document_classification import type_catalog
     require_access(actor, opportunity)
+    tags = folder_tag_rows(opportunity, actor)
     workspace = OpportunityWorkspace.objects.filter(opportunity=opportunity).first()
     config = workspace_config()
     state = workspace.status if workspace else 'not_created'
@@ -180,8 +183,11 @@ def workspace_projection(opportunity, actor):
         'error_code': code or None,
         'web_url': root_url,
         'can_manage': bool(manage and config), 'can_upload': bool(can_upload),
+        'can_edit_tags': bool(manage),
+        'type_catalog': type_catalog(),
         'folders': [{
             'key': key, 'name': name, 'purpose': purpose,
+            'tag': tags[key]['tag'], 'tag_token': tags[key]['expected_token'],
             'item_count': live_folders.get(key, {}).get('item_count'),
             'web_url': live_folders.get(key, {}).get('web_url') if linked else None,
         } for key, name, purpose in FOLDERS],
@@ -378,7 +384,8 @@ def list_workspace_files(opportunity, actor, key, cursor=None):
             'next_cursor': next_cursor}
 
 
-MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+def download_limit():
+    return configured_limit('SALES_WORKSPACE_MAX_DOWNLOAD_BYTES')
 
 
 def _ready_file(opportunity, actor, key, file_id, *actions):
@@ -402,10 +409,11 @@ def workspace_file_details(opportunity, actor, key, file_id):
     _, graph, _, item = _ready_file(opportunity, actor, key, file_id)
     result = file_projection(graph, item)
     size = result['size']
+    limit = download_limit()
     return {**result, 'is_folder': False, 'folder_key': key,
             'can_download': workspace_allowed(actor, 'export') and isinstance(size, int)
-                            and not isinstance(size, bool) and 0 <= size <= MAX_DOWNLOAD_BYTES,
-            'max_download_bytes': MAX_DOWNLOAD_BYTES}
+                            and not isinstance(size, bool) and size >= 0 and (limit is None or size <= limit),
+            'max_download_bytes': limit}
 
 
 def list_workspace_file_versions(opportunity, actor, key, file_id, cursor=None):
@@ -440,7 +448,7 @@ def download_workspace_file(opportunity, actor, key, file_id):
     _, graph, _, item = _ready_file(opportunity, actor, key, file_id, 'export')
     output = None
     try:
-        output = graph.download(file_id, item.get('size'), MAX_DOWNLOAD_BYTES)
+        output = graph.download(file_id, item.get('size'), download_limit())
         # A completed buffer is still private. Recheck scope/authority and current
         # file identity before returning it, including deletion/move during I/O.
         _, current_graph, _, current = _ready_file(opportunity, _actor(actor.pk), key, file_id, 'export')
@@ -457,25 +465,28 @@ def download_workspace_file(opportunity, actor, key, file_id):
 
 
 def upload_limit():
-    return max(1, min(int(getattr(settings, 'SALES_WORKSPACE_MAX_UPLOAD_BYTES', 10 * 1024 * 1024)), 10 * 1024 * 1024))
+    return configured_limit('SALES_WORKSPACE_MAX_UPLOAD_BYTES')
 
 
 def upload_workspace_file(opportunity, actor, key, uploaded, request_id):
     # Validate before reading the payload or making any remote request.
     require_access(actor, opportunity, 'create', 'update')
-    if not uploaded or not valid_name(uploaded.name) or uploaded.size <= 0 or uploaded.size > upload_limit():
-        raise ValidationError({'file': f'Choose a nonempty file with a valid filename, up to {upload_limit()} bytes.'})
-    content = uploaded.read(upload_limit() + 1)
-    if len(content) != uploaded.size or len(content) > upload_limit():
-        raise ValidationError({'file': 'The file size is invalid.'})
-    digest = hashlib.sha256(content).hexdigest()
+    try:
+        with prepare_upload(uploaded) as prepared:
+            return _upload_workspace_prepared(opportunity, actor, key, uploaded, request_id, prepared)
+    except OSError:
+        raise WorkspaceAPIError('private_storage_unavailable') from None
+
+
+def _upload_workspace_prepared(opportunity, actor, key, uploaded, request_id, prepared):
+    digest = prepared['sha256']
     workspace, graph, folder = _ready_folder(opportunity, actor, key, 'create', 'update')
     with transaction.atomic():
         OpportunityWorkspace.objects.select_for_update().get(pk=workspace.pk)
         attempt = OpportunityWorkspaceUpload.objects.filter(workspace=workspace, request_id=request_id).first()
         if attempt:
             if (attempt.provider, attempt.actor_id, attempt.folder_key, attempt.name, attempt.size, attempt.sha256) != (
-                    'sharepoint', actor.pk, key, uploaded.name, len(content), digest):
+                    'sharepoint', actor.pk, key, uploaded.name, prepared['size'], digest):
                 raise WorkspaceAPIError('upload_conflict', 409)
             if attempt.status == 'ready':
                 return attempt.result, False
@@ -486,16 +497,26 @@ def upload_workspace_file(opportunity, actor, key, uploaded, request_id):
         else:
             attempt = OpportunityWorkspaceUpload.objects.create(
                 workspace=workspace, request_id=request_id, actor=actor, folder_key=key,
-                name=uploaded.name, size=len(content), sha256=digest,
+                name=uploaded.name, size=prepared['size'], sha256=digest,
             )
         _audit(opportunity, actor, 'workspace_upload_started', data={'upload_id': str(attempt.pk), 'folder_key': key})
     # This ledger must have committed before I/O (route guard exempts only this action).
+    transfer_finished = False
     try:
-        require_access(_actor(actor.pk), opportunity, 'create', 'update')
-        active = workspace_config()
-        if not active or active.fingerprint != graph.config.fingerprint:
-            raise WorkspaceError('configuration_changed')
-        item = graph.upload(folder['id'], uploaded.name, content)
+        def current_scope():
+            current_actor = _actor(actor.pk)
+            require_access(current_actor, opportunity, 'create', 'update')
+            active = workspace_config()
+            if not active or active.fingerprint != graph.config.fingerprint:
+                raise WorkspaceError('configuration_changed')
+            current_workspace, current_graph, current_folder = _ready_folder(opportunity, current_actor, key, 'create', 'update')
+            if (current_workspace.pk != workspace.pk or current_graph.config.fingerprint != graph.config.fingerprint
+                    or current_folder['id'] != folder['id']):
+                raise WorkspaceError('remote_scope_changed')
+        item = graph.upload(folder['id'], uploaded.name, prepared['original'],
+                            size=prepared['size'], before_chunk=current_scope)
+        transfer_finished = True
+        current_scope()
         result = file_projection(graph, item)
         with transaction.atomic():
             attempt.status, attempt.result = 'ready', result
@@ -508,6 +529,7 @@ def upload_workspace_file(opportunity, actor, key, uploaded, request_id):
                 else 'authority_changed' if isinstance(exc, PermissionDenied) else 'recovery_required')
         # Even a timeout can mean Graph committed: retain identity and never overwrite/retry blindly.
         OpportunityWorkspaceUpload.objects.filter(pk=attempt.pk).update(
-            status='failed' if code in {'name_conflict', 'remote_access_denied', 'remote_busy', 'configuration_changed', 'authority_changed'} else 'uncertain',
+            status='failed' if not transfer_finished and not getattr(exc, 'upload_started', False) and code in {
+                'name_conflict', 'remote_access_denied', 'remote_busy', 'configuration_changed', 'authority_changed'} else 'uncertain',
             error_code=code, updated_at=timezone.now())
         raise WorkspaceAPIError(code, 409 if code == 'name_conflict' else 424) from None

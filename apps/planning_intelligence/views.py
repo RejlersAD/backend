@@ -165,6 +165,13 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         with transaction.atomic():
             serializer.instance = PlanningProject.objects.select_for_update().get(pk=serializer.instance.pk)
+            from rest_framework.exceptions import PermissionDenied
+            if not can_write_project(self.request.user, serializer.instance):
+                raise PermissionDenied('You cannot modify this planning workspace.')
+            if 'enterprise_project' in serializer.validated_data:
+                serializer.validated_data['enterprise_project'] = serializer.validate_enterprise_project(
+                    serializer.validated_data['enterprise_project'],
+                )
             # Recheck mode/date protection after a concurrent WBS save or baseline.
             serializer._validated_data = serializer.validate(serializer.validated_data)
             before = PlanningProjectSerializer(serializer.instance).data
@@ -386,8 +393,16 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         job.refresh_from_db()
         return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         """Legacy standalone workspaces archive; canonical projects use their owner command."""
+        from rest_framework.exceptions import PermissionDenied
+        from apps.sales.models import BidPreparation
+        instance = PlanningProject.objects.select_for_update(no_key=True).get(pk=instance.pk)
+        if instance.is_deleted or not can_write_project(self.request.user, instance):
+            raise PermissionDenied('You cannot archive this planning workspace.')
+        if BidPreparation.objects.filter(planning_project=instance).exists():
+            raise ValidationError('This workspace retains a Sales preparation connection and cannot be archived.')
         if instance.enterprise_project_id:
             from apps.core.project_deletion import ProjectDeleteConflict
             raise ProjectDeleteConflict('Permanently delete the linked project from Project Control.',

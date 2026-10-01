@@ -23,6 +23,7 @@ import logging
 import os
 
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -118,12 +119,23 @@ def _user_can_modify(user, project: Project) -> bool:
     return project.created_by_id == getattr(user, 'id', None)
 
 
-def _serialize_project(p: Project, *, activity_count: int | None = None) -> dict:
+def _serialize_project(p: Project, *, activity_count: int | None = None, user=None) -> dict:
+    canonical_project, canonical_client = None, None
+    if user and p.enterprise_project_id:
+        from apps.core.project_models import Project as EnterpriseProject
+        from apps.core.shared_record_targets import visible_payload
+        enterprise = EnterpriseProject.objects.filter(pk=p.enterprise_project_id).first()
+        canonical_project = visible_payload(user, 'project', enterprise)
+        if canonical_project and enterprise.client_id:
+            canonical_client = visible_payload(user, 'client', enterprise.client)
     return {
         'project_id':     str(p.project_id),
         'name':           p.name,
         'code':           p.code,
         'client':         p.client,
+        'enterprise_project': canonical_project['id'] if canonical_project else None,
+        'canonical_project': canonical_project,
+        'canonical_client': canonical_client,
         'plant':          p.plant,
         'discipline':     p.discipline,
         'description':    p.description,
@@ -167,6 +179,9 @@ def _filtered_queryset(user):
 
 
 def _sanitize_payload(data: dict, whitelist: set) -> dict:
+    if 'enterprise_project' in data or 'enterprise_project_id' in data:
+        from rest_framework.exceptions import ValidationError
+        raise ValidationError({'enterprise_project': 'Use Shared records to review this project identity.'})
     out = {}
     for k in whitelist:
         if k in data:
@@ -182,10 +197,13 @@ def _sanitize_payload(data: dict, whitelist: set) -> dict:
     return out
 
 
-def _get_accessible_project(user, project_id):
+def _get_accessible_project(user, project_id, *, lock=False):
     """Returns (project, error_response). error_response is None on success."""
     try:
-        p = Project.objects.select_related('created_by').get(project_id=project_id)
+        queryset = Project.objects.select_related('created_by')
+        if lock:
+            queryset = queryset.select_for_update(of=('self',))
+        p = queryset.get(project_id=project_id)
     except Project.DoesNotExist:
         return None, Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
     if _is_admin(user) or p.created_by_id == getattr(user, 'id', None):
@@ -221,7 +239,7 @@ def _list_projects(request):
         )
 
     qs = qs[:PROJECT_RBAC['list_limit']]
-    items = [_serialize_project(p) for p in qs]
+    items = [_serialize_project(p, user=request.user) for p in qs]
     return Response({
         'role':  _user_role(request.user),
         'total': len(items),
@@ -239,18 +257,19 @@ def _create_project(request):
     except Exception as exc:
         logger.exception('Project create failed')
         return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-    return Response(_serialize_project(p, activity_count=0), status=status.HTTP_201_CREATED)
+    return Response(_serialize_project(p, activity_count=0, user=request.user), status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def project_detail(request, project_id):
-    p, err = _get_accessible_project(request.user, project_id)
+    p, err = _get_accessible_project(request.user, project_id, lock=request.method != 'GET')
     if err:
         return err
 
     if request.method == 'GET':
-        return Response(_serialize_project(p))
+        return Response(_serialize_project(p, user=request.user))
 
     if not _user_can_modify(request.user, p):
         return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
@@ -259,8 +278,10 @@ def project_detail(request, project_id):
         updates = _sanitize_payload(request.data or {}, ALLOWED_UPDATE_FIELDS)
         for k, v in updates.items():
             setattr(p, k, v)
-        p.save()
-        return Response(_serialize_project(p))
+        # Only posted metadata is writable here. In addition to the row lock,
+        # this keeps a stale instance from erasing reviewed identity annotations.
+        p.save(update_fields=[*updates, 'updated_at'])
+        return Response(_serialize_project(p, user=request.user))
 
     # DELETE
     p.delete()

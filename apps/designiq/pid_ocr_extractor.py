@@ -218,7 +218,7 @@ class PIDLineExtractor:
         # Remove extra whitespace
         text = ' '.join(text.split())
         # Handle quote marks
-        text = text.replace('"', '"').replace(''', "'")
+        text = text.replace('"', '"').replace("'", "'")
         
         logger.info(f"  🔍 Searching for line numbers in {len(text)} characters from {source}")
         

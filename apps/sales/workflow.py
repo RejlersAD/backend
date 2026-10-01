@@ -80,8 +80,8 @@ def submit_qualification(opportunity, actor):
 @transaction.atomic
 def record_bid_decision(opportunity, actor, decision, reason=''):
     opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
-    from apps.rbac.approval_eligibility import require_configured_approval
-    require_configured_approval(actor, 'sales_opportunities', opportunity, 'bid_decision')
+    from .bid_decision_access import require_bid_decision_access
+    decision_authority = require_bid_decision_access(actor, opportunity)
     if opportunity.stage != 'qualified':
         raise ValidationError({'stage': 'Bid decision is available only for a qualified opportunity.'})
     if decision not in {'bid', 'conditional_bid', 'no_bid'}:
@@ -92,7 +92,7 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
         raise ValidationError({'detail': 'Complete the estimated value and currency before a bid decision.'})
     approval_value = Decimal(str(getattr(settings, 'SALES_MANAGEMENT_APPROVAL_VALUE', 5000000)))
     requires_management = opportunity.risk_level in {'high', 'critical'} or opportunity.estimated_value >= approval_value
-    if requires_management and actor.id == opportunity.owner_id:
+    if decision_authority == 'configured_route' and requires_management and actor.id == opportunity.owner_id:
         raise ValidationError({
             'approver': 'A high-risk or high-value bid decision requires independent management approval.',
         })
@@ -106,7 +106,7 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
     opportunity.save()
     _audit(
         opportunity, actor, 'bid_decision', from_stage=old, to_stage=opportunity.stage,
-        reason=reason, data={'decision': decision},
+        reason=reason, data={'decision': decision, 'decision_authority': decision_authority},
     )
     return opportunity
 
@@ -309,6 +309,7 @@ def convert_to_project(opportunity_id, actor, *, project_code, project_name=None
         currency=opportunity.currency,
         scope_type=opportunity.scope_type,
         client_name=opportunity.client.company_name,
+        client=opportunity.client,
         location=opportunity.location,
         tags=opportunity.tags,
         custom_fields={

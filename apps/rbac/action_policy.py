@@ -229,10 +229,33 @@ def operation_action(request, view):
     if explicit:
         return explicit
     operation = getattr(view, 'action', '') or view.__class__.__name__
+    if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'QuoteViewSet'):
+        review_actions = {'review': 'read', 'review_bind': 'update', 'review_content': 'read',
+                          'review_download': 'read', 'review_comment': 'create',
+                          'review_resolve': 'update', 'review_submit': 'update',
+                          'preparation': 'read', 'preparation_sources': 'read',
+                          'preparation_preview': 'read', 'prepare': 'update',
+                          'preparation_opportunities': 'read', 'draft_field': 'read'}
+        if operation in review_actions:
+            # PDF bytes additionally require the source opportunity export grant.
+            return review_actions[operation]
     if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'DealViewSet'):
+        if operation in {'bid_decision_justification', 'proposal_draft_field'}:
+            return 'read'
+        if operation == 'bid_decision':
+            from apps.sales.bid_decision_access import use_module_rbac_for_bid_decision
+            if use_module_rbac_for_bid_decision():
+                # Only the explicit, temporary Sales fallback uses module access.
+                # The locked command rechecks record scope and explicit denies.
+                return 'read'
         storage_actions = {'workspace': 'read', 'workspace_files': 'read',
                            'workspace_file': 'read', 'workspace_versions': 'read', 'workspace_download': 'export',
-                           'workspace_setup': 'update', 'workspace_upload': 'create'}
+                           'workspace_setup': 'update', 'workspace_upload': 'create', 'workspace_upload_version': 'create',
+                           'workspace_folder_tag': 'update',
+                           'workspace_file_classification': 'read' if method in ('GET', 'HEAD') else 'update',
+                           'workspace_file_classification_retry': 'update',
+                           'bid_preparation': 'read' if method == 'GET' else 'update',
+                           'bid_preparation_candidates': 'read'}
         if operation in storage_actions:
             return storage_actions[operation]
     if operation == 'review_assistant' and (view.__class__.__module__, view.__class__.__name__) in {

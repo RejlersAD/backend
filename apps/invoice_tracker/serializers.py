@@ -24,6 +24,9 @@ class InvoiceAttachmentSerializer(serializers.ModelSerializer):
 
 
 class CustomerInvoiceSerializer(serializers.ModelSerializer):
+    canonical_project = serializers.SerializerMethodField()
+    canonical_client = serializers.SerializerMethodField()
+    canonical_links = serializers.SerializerMethodField()
     calculated_receivable_balance = serializers.SerializerMethodField()
     attachments = InvoiceAttachmentSerializer(many=True, read_only=True)
     attachments_count = serializers.IntegerField(source='attachments.count', read_only=True)
@@ -34,14 +37,36 @@ class CustomerInvoiceSerializer(serializers.ModelSerializer):
         balance = receivable_balance(obj.invoice_amount, obj.actual_payment_received)
         return format(balance, '.2f') if balance is not None else None
 
+    def get_canonical_links(self, obj):
+        from apps.finance.shared_record_links import canonical_links
+        cache = getattr(self, '_canonical_links_cache', None)
+        if cache is None:
+            cache = self._canonical_links_cache = {}
+        if id(obj) not in cache:
+            cache[id(obj)] = canonical_links(obj, getattr(self.context.get('request'), 'user', None))
+        return cache[id(obj)]
+
+    def get_canonical_project(self, obj):
+        link = self.get_canonical_links(obj)['links']['project']
+        return link['id'] if link else None
+
+    def get_canonical_client(self, obj):
+        link = self.get_canonical_links(obj)['links']['client']
+        return link['id'] if link else None
+
     class Meta:
         model = CustomerInvoice
-        fields = '__all__'
+        exclude = ['canonical_identity_basis']
         read_only_fields = ['id', 'created_at', 'updated_at', 'created_by',
                             'days_overdue', 'attachments', 'attachments_count',
                             'payment_status_label', 'category_label']
 
     def validate(self, attrs):
+        protected = {'canonical_project', 'canonical_client', 'canonical_identity_basis', 'canonical_links'}
+        if protected.intersection(getattr(self, 'initial_data', {})):
+            raise serializers.ValidationError({
+                'canonical_links': 'Use the shared-record review command to change canonical references.',
+            })
         category = attrs.get('category', getattr(self.instance, 'category', None))
         financial_fields = (
             'ppc_value', 'retention', 'invoice_amount', 'invoice_amount_aed',

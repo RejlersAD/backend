@@ -428,6 +428,11 @@ class ApprovedHourEntry(BaseModel):
     """Project labour actual requiring independent approval before ledger posting."""
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='approved_hour_entries')
+    employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='project_hour_entries',
+        help_text='Canonical identity; employee code and name retain the recorded source labels.',
+    )
     control_account = models.ForeignKey(
         ControlAccount, on_delete=models.PROTECT, related_name='approved_hour_entries',
     )

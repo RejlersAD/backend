@@ -82,10 +82,12 @@ class FakeGraph:
     def children(self, parent, next_link=None):
         return {'value': [i for i in self.items.values() if i['parentReference']['id'] == parent]}
 
-    def upload(self, parent, name, content):
+    def upload(self, parent, name, content, *, size=None, before_chunk=None):
+        if before_chunk:
+            before_chunk()
         self.uploads += 1
         item = self.make(str(uuid4()), name, parent, folder=False)
-        item['size'] = len(content)
+        item['size'] = len(content) if isinstance(content, bytes) else size
         self.items[item['id']] = item
         return item
 
@@ -494,7 +496,7 @@ class WorkspaceGuardDurabilityTests(WorkspaceFixtures, TransactionTestCase):
             'upload_request_id': str(uuid4()), 'file': SimpleUploadedFile('scope.pdf', b'bytes'),
         })
         force_authenticate(request, user=self.actor)
-        def fail_remote(*args):
+        def fail_remote(*args, **kwargs):
             self.assertFalse(connection.in_atomic_block)
             self.assertEqual(OpportunityWorkspaceUpload.objects.count(), 1)
             raise WorkspaceError('remote_unavailable')

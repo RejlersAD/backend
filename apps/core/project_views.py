@@ -92,7 +92,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         team_size = ProjectMember.objects.filter(project_id=OuterRef('pk')).order_by().values(
             'project_id',
         ).annotate(total=Count('pk')).values('total')[:1]
-        queryset = self.filter_queryset(self.get_queryset()).select_related('owner').annotate(
+        queryset = self.filter_queryset(self.get_queryset()).select_related('owner', 'client').annotate(
             _portfolio_team_size=Coalesce(Subquery(team_size), 0, output_field=IntegerField()),
         )
         page = self.paginate_queryset(queryset)

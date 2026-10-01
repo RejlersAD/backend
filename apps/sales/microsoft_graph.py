@@ -34,6 +34,8 @@ class SalesMailboxReadError(RuntimeError):
 
 class SalesMicrosoftGraphService:
     MAILBOX_PAGE_SIZE = 50
+    MAILBOX_SEARCH_MAX_LENGTH = 256
+    MAILBOX_SEARCH_RESULT_LIMIT = 1000
     MAILBOX_CURSOR_MAX_AGE = 900
     MAILBOX_CURSOR_SALT = 'sales-mailbox-messages-v1'
     CONVERSATION_PAGE_SIZE = 25
@@ -301,7 +303,25 @@ class SalesMicrosoftGraphService:
             'client': self.connection.client_id,
         }
 
-    def _read_mailbox_cursor(self, cursor, user_id):
+    @classmethod
+    def _normalize_mailbox_search(cls, search):
+        if search is None:
+            return ''
+        if not isinstance(search, str) or len(search) > 2048:
+            raise SalesMailboxReadError('Enter a mailbox search of at most 256 characters.', 400)
+        # Pasted subjects can contain NBSP, line breaks and repeated whitespace.
+        normalized = ' '.join(search.split())
+        if len(normalized) > cls.MAILBOX_SEARCH_MAX_LENGTH:
+            raise SalesMailboxReadError('Enter a mailbox search of at most 256 characters.', 400)
+        if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+            raise SalesMailboxReadError('Enter a valid mailbox search.', 400)
+        return normalized
+
+    @staticmethod
+    def _mailbox_search_hash(search):
+        return hashlib.sha256(search.encode('utf-8')).hexdigest() if search else None
+
+    def _read_mailbox_cursor(self, cursor, user_id, *, search=''):
         if not isinstance(cursor, str) or not cursor or len(cursor) > 24000:
             raise SalesMailboxReadError('The email page is invalid. Refresh the mailbox.', 400)
         try:
@@ -315,6 +335,9 @@ class SalesMicrosoftGraphService:
             raise SalesMailboxReadError('The email page is invalid. Refresh the mailbox.', 400) from None
         if not isinstance(payload, dict) or payload.get('scope') != self._mailbox_cursor_scope(user_id):
             raise SalesMailboxReadError('The email page is invalid. Refresh the mailbox.', 400)
+        # Older browse-only cursors have no search key and remain valid for browsing.
+        if payload.get('search') != self._mailbox_search_hash(search):
+            raise SalesMailboxReadError('The email page belongs to a different search. Search again.', 400)
         try:
             return self._validate_mailbox_next_link(payload.get('next'))
         except SalesMailboxReadError:
@@ -451,16 +474,28 @@ class SalesMicrosoftGraphService:
                 return invalid
         return metadata
 
-    def list_messages(self, *, user_id, cursor=None):
+    def list_messages(self, *, user_id, cursor=None, search=None):
         """Read one mailbox-wide page without importing or changing messages."""
+        search = self._normalize_mailbox_search(search)
         url = self._mailbox_messages_url()
         params = {
             '$top': self.MAILBOX_PAGE_SIZE,
             '$select': f'{self.MESSAGE_FIELDS},toRecipients,ccRecipients',
             '$orderby': 'receivedDateTime desc',
         }
+        if search:
+            # Search individual literal words so pasted subject punctuation and
+            # reply-prefix spacing do not impose an exact indexed phrase.
+            # Keep internal reference/email punctuation; no user token is KQL.
+            terms = re.findall(r'[^\W_]+(?:[-.@_][^\W_]+)*', search)
+            if not terms:
+                raise SalesMailboxReadError('Enter a word or reference to search mail.', 400)
+            expression = ' AND '.join(json.dumps(term, ensure_ascii=False) for term in terms)
+            params['$search'] = json.dumps(expression, ensure_ascii=False)
+            # Graph message search orders by sent time and cannot use $orderby.
+            del params['$orderby']
         if cursor is not None:
-            url = self._read_mailbox_cursor(cursor, user_id)
+            url = self._read_mailbox_cursor(cursor, user_id, search=search)
             params = None
         payload = self._read_mailbox_json(url, params=params)
         records = payload.get('value')
@@ -473,13 +508,18 @@ class SalesMicrosoftGraphService:
             if next_link == url:
                 raise SalesMailboxReadError('Microsoft returned an invalid mailbox page.')
             next_cursor = signing.dumps(
-                {'scope': self._mailbox_cursor_scope(user_id), 'next': next_link},
+                {
+                    'scope': self._mailbox_cursor_scope(user_id), 'next': next_link,
+                    'search': self._mailbox_search_hash(search),
+                },
                 salt=self.MAILBOX_CURSOR_SALT, compress=True,
             )
         return {
             'mailbox_address': self.connection.mailbox_address,
             'results': results,
             'next_cursor': next_cursor,
+            'search': search,
+            'search_result_limit': self.MAILBOX_SEARCH_RESULT_LIMIT if search else None,
         }
 
     @classmethod

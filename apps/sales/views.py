@@ -87,13 +87,15 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
     def messages(self, request, pk=None):
         connection = self.get_object()
         if (
-            set(request.query_params) - {'cursor'}
+            set(request.query_params) - {'cursor', 'search'}
             or len(request.query_params.getlist('cursor')) > 1
+            or len(request.query_params.getlist('search')) > 1
         ):
             return Response({'detail': 'The email page request is invalid.'}, status=400)
         try:
             result = SalesMicrosoftGraphService(connection).list_messages(
                 user_id=request.user.pk, cursor=request.query_params.get('cursor'),
+                search=request.query_params.get('search'),
             )
         except SalesMailboxReadError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
@@ -661,6 +663,20 @@ class FrameworkAgreementViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 # ==============================================================================
 
 class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    @action(detail=True, methods=['get', 'post'], url_path='bid-preparation')
+    def bid_preparation(self, request, pk=None):
+        from .bid_preparation import bid_projection, connect_preparation
+        result = (bid_projection(pk, request.user) if request.method == 'GET' else
+                  connect_preparation(pk, request.user, request.data))
+        return Response(result, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path='bid-preparation-candidates')
+    def bid_preparation_candidates(self, request, pk=None):
+        from .bid_preparation import project_candidates
+        return Response(project_candidates(pk, request.user, request.query_params.get('search', ''),
+                                           request.query_params.get('page', 1)),
+                        headers={'Cache-Control': 'no-store, private'})
+
     business_approval_actions = {'bid_decision', 'approve_award', 'reject_award'}
     """
     ViewSet for Deal/Opportunity Management
@@ -690,7 +706,8 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='workspace')
     def workspace(self, request, pk=None):
         from .opportunity_workspace import workspace_projection
-        return Response(workspace_projection(self.get_object(), request.user))
+        return Response(workspace_projection(self.get_object(), request.user),
+                        headers={'Cache-Control': 'no-store, private'})
 
     @action(detail=True, methods=['post'], url_path='workspace/setup')
     def workspace_setup(self, request, pk=None):
@@ -700,6 +717,14 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             raise ValidationError({'detail': 'Workspace setup uses the saved opportunity and configured destination.'})
         setup_workspace(opportunity, request.user)
         return Response(workspace_projection(opportunity, request.user), status=202)
+
+    @action(detail=True, methods=['patch'], url_path=r'workspace/folders/(?P<folder_key>[^/]+)/tag')
+    def workspace_folder_tag(self, request, pk=None, folder_key=None):
+        from .folder_tags import save_folder_tag
+        if request.query_params:
+            raise ValidationError({'detail': 'Folder tags belong to the opportunity category and do not accept storage parameters.'})
+        return Response(save_folder_tag(self.get_object().pk, request.user, folder_key, request.data),
+                        headers={'Cache-Control': 'no-store, private'})
 
     @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files')
     def workspace_files(self, request, pk=None, folder_key=None):
@@ -754,6 +779,41 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                                                 request.FILES.get('file'), request_id)
         return Response(result, status=201 if created else 200)
 
+    @action(detail=True, methods=['post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/versions/upload')
+    def workspace_upload_version(self, request, pk=None, folder_key=None, file_id=None):
+        from .private_attachments import upload_private_version
+        if (set(request.data) - {'file', 'upload_request_id', 'expected_token', 'revision_note'}
+                or len(request.FILES.getlist('file')) != 1 or request.query_params):
+            raise ValidationError({'file': 'Upload one file, its request ID, current head token and optional revision note.'})
+        request_id = serializers.UUIDField().run_validation(request.data.get('upload_request_id'))
+        result, created = upload_private_version(
+            self.get_object(), request.user, folder_key, file_id, request.FILES.get('file'), request_id,
+            request.data.get('expected_token'), request.data.get('revision_note', ''),
+        )
+        return Response(result, status=201 if created else 200, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get', 'post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/classification')
+    def workspace_file_classification(self, request, pk=None, folder_key=None, file_id=None):
+        from .document_classification import get_document_classification, save_document_classification
+        if request.query_params:
+            raise ValidationError({'detail': 'Document classification uses the selected opportunity and file.'})
+        opportunity = self.get_object()
+        if request.method in ('GET', 'HEAD'):
+            result = get_document_classification(opportunity.pk, request.user, folder_key, file_id)
+        else:
+            result = save_document_classification(opportunity.pk, request.user, folder_key, file_id, request.data)
+        return Response(result, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/classification/retry')
+    def workspace_file_classification_retry(self, request, pk=None, folder_key=None, file_id=None):
+        from .document_classification import retry_document_classification
+        if request.query_params:
+            raise ValidationError({'detail': 'Classification retry uses the selected opportunity and file.'})
+        result = retry_document_classification(
+            self.get_object().pk, request.user, folder_key, file_id, request.data,
+        )
+        return Response(result, headers={'Cache-Control': 'no-store, private'})
+
     def perform_destroy(self, instance):
         from .opportunity_workspace import delete_opportunity_with_workspace_guard
         delete_opportunity_with_workspace_guard(instance)
@@ -805,9 +865,10 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @transaction.atomic
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
-        instance = self.get_object()
+        instance = Deal.objects.select_for_update(no_key=True).get(pk=self.get_object().pk)
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -867,6 +928,22 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             request.data.get('decision'), request.data.get('reason', ''),
         )
         return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'], url_path='bid-decision-justification')
+    def bid_decision_justification(self, request, pk=None):
+        from .bid_justification import draft_bid_justification
+        if request.query_params:
+            raise ValidationError({'detail': 'Provide the selected decision and text in the request body.'})
+        result = draft_bid_justification(request.user, pk, request.data)
+        return Response(result, headers={'Cache-Control': 'private, no-store'})
+
+    @action(detail=True, methods=['post'], url_path='proposal-draft-field')
+    def proposal_draft_field(self, request, pk=None):
+        from .proposal_draft_ai import draft_proposal_field
+        if request.query_params:
+            raise ValidationError({'detail': 'Provide the proposal field and draft text in the request body.'})
+        result = draft_proposal_field(request.user, request.data, opportunity_id=pk)
+        return Response(result, headers={'Cache-Control': 'private, no-store'})
 
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
@@ -1079,6 +1156,42 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
 
 class QuoteViewSet(viewsets.ModelViewSet):
+    @action(detail=False, methods=['get'], url_path='preparation-opportunities')
+    def preparation_opportunities(self, request):
+        from .proposal_readiness import preparation_opportunities
+        return Response(preparation_opportunities(request.user, request.query_params),
+                        headers={'Cache-Control': 'private, no-store'})
+
+    @action(detail=True, methods=['post'], url_path='draft-field')
+    def draft_field(self, request, pk=None):
+        from .proposal_draft_ai import draft_proposal_field
+        if request.query_params:
+            raise ValidationError({'detail': 'Provide the proposal field and draft text in the request body.'})
+        result = draft_proposal_field(request.user, request.data, quote_id=pk)
+        return Response(result, headers={'Cache-Control': 'private, no-store'})
+
+    @action(detail=True, methods=['get'], url_path='preparation')
+    def preparation(self, request, pk=None):
+        from .bid_preparation import preparation_projection
+        return Response(preparation_projection(pk, request.user), headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path='preparation-sources')
+    def preparation_sources(self, request, pk=None):
+        from .bid_preparation import preparation_sources
+        return Response(preparation_sources(pk, request.user, request.query_params.get('search', ''),
+                                            request.query_params.get('page', 1)),
+                        headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path='preparation-preview')
+    def preparation_preview(self, request, pk=None):
+        from .bid_preparation import preview_preparation
+        return Response(preview_preparation(pk, request.user, request.data), headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path='prepare')
+    def prepare(self, request, pk=None):
+        from .bid_preparation import apply_preparation
+        return Response(apply_preparation(pk, request.user, request.data), headers={'Cache-Control': 'no-store, private'})
+
     business_approval_actions = {'approve'}
     """
     ViewSet for Quote/Proposal Management
@@ -1086,20 +1199,94 @@ class QuoteViewSet(viewsets.ModelViewSet):
     🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
-    queryset = Quote.objects.select_related('client', 'deal', 'prepared_by')
+    queryset = Quote.objects.select_related('client', 'deal', 'prepared_by').order_by('-created_at', '-id')
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['status', 'client', 'deal']
     search_fields = ['quote_number', 'client__company_name', 'deal__deal_name']
+
+    def get_queryset(self):
+        from .bid_preparation import visible_deals
+        return super().get_queryset().filter(deal__in=visible_deals(self.request.user))
+
+    @action(detail=False, methods=['post'], url_path='export')
+    def export(self, request):
+        from .proposal_export import proposal_export_ids, proposal_export_response
+
+        if not all(module_action_allowed(request.user, 'sales_proposals', verb)
+                   for verb in ('read', 'export')) or not module_action_allowed(
+                       request.user, 'sales_opportunities', 'read'):
+            raise PermissionDenied('You do not have access to export proposals.')
+        if request.query_params:
+            raise ValidationError({'ids': 'Send the selected proposal IDs in the request body.'})
+        identifiers = proposal_export_ids(request.data)
+        return proposal_export_response(self.get_queryset(), identifiers, request.user)
+
+    @action(detail=True, methods=['get'], url_path='review')
+    def review(self, request, pk=None):
+        from .proposal_review import review_projection
+        return Response(review_projection(pk, request.user, request.query_params.get('document_id'),
+                                          request.query_params.get('comments_cursor')),
+                        headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path='review/documents')
+    def review_bind(self, request, pk=None):
+        from .proposal_review import review_command
+        result, created = review_command(pk, request.user, 'bind', request.data)
+        return Response(result, status=201 if created else 200, headers={'Cache-Control': 'no-store, private'})
+
+    def _review_pdf(self, request, pk, document_id):
+        from django.http import FileResponse
+        from .proposal_review import review_content
+        content, name = review_content(pk, request.user, document_id)
+        response = FileResponse(content, as_attachment=True, filename=name, content_type='application/pdf')
+        response['Cache-Control'] = 'no-store, private'
+        response['X-Content-Type-Options'] = 'nosniff'
+        response['Content-Security-Policy'] = "sandbox; default-src 'none'"
+        return response
+
+    @action(detail=True, methods=['get'], url_path=r'review/documents/(?P<document_id>[^/]+)/content')
+    def review_content(self, request, pk=None, document_id=None):
+        return self._review_pdf(request, pk, document_id)
+
+    @action(detail=True, methods=['get'], url_path=r'review/documents/(?P<document_id>[^/]+)/download')
+    def review_download(self, request, pk=None, document_id=None):
+        return self._review_pdf(request, pk, document_id)
+
+    @action(detail=True, methods=['post'], url_path=r'review/documents/(?P<document_id>[^/]+)/comments')
+    def review_comment(self, request, pk=None, document_id=None):
+        from .proposal_review import review_command
+        result, created = review_command(pk, request.user, 'comment', request.data, document_id)
+        return Response(result, status=201 if created else 200, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path=r'review/documents/(?P<document_id>[^/]+)/comments/(?P<comment_id>[^/]+)/resolve')
+    def review_resolve(self, request, pk=None, document_id=None, comment_id=None):
+        from .proposal_review import review_command
+        result, _ = review_command(pk, request.user, 'resolve', request.data, document_id, comment_id)
+        return Response(result, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path=r'review/documents/(?P<document_id>[^/]+)/submit')
+    def review_submit(self, request, pk=None, document_id=None):
+        from .proposal_review import review_command
+        result, created = review_command(pk, request.user, 'submit', request.data, document_id)
+        return Response(result, status=201 if created else 200, headers={'Cache-Control': 'no-store, private'})
     
     def get_serializer_class(self):
         if self.action in ['retrieve', 'create', 'update', 'partial_update']:
             return QuoteDetailSerializer
         return QuoteListSerializer
     
+    @transaction.atomic
     def perform_create(self, serializer):
         """Set prepared_by to current user"""
+        deal = Deal.objects.select_for_update(no_key=True).get(pk=serializer.validated_data['deal'].pk)
+        serializer.validated_data['deal'] = deal
+        client = Client.objects.select_for_update(no_key=True).get(pk=deal.client_id)
+        if serializer.validated_data['client'].pk != client.pk:
+            raise ValidationError({'client': 'Proposal client must match its opportunity.'})
+        serializer.validated_data['client'] = client
+        serializer.validate(serializer.validated_data)
         quote = serializer.save(prepared_by=self.request.user)
         _audit(
             quote.deal, self.request.user, 'proposal_revision_created',
@@ -1110,16 +1297,40 @@ class QuoteViewSet(viewsets.ModelViewSet):
             },
         )
 
+    @transaction.atomic
     def update(self, request, *args, **kwargs):
+        quote = Quote.objects.select_for_update().get(pk=self.get_object().pk)
+        from .bid_preparation import require_editable
+        require_editable(quote)
+        if quote.review_documents.exists() and any(
+                key in request.data and str(request.data[key]) != str(getattr(quote, key + '_id' if key in {'deal', 'client'} else key))
+                for key in ('deal', 'client', 'version', 'quote_number')):
+            return Response({'detail': 'Review evidence retains this proposal identity. Create a separate proposal revision.'},
+                            status=status.HTTP_409_CONFLICT)
         if self.get_object().status in {'submitted', 'sent', 'viewed', 'won', 'lost'}:
             return Response(
                 {'detail': 'Submitted proposal versions are immutable. Create a new revision.'},
                 status=status.HTTP_409_CONFLICT,
             )
-        return super().update(request, *args, **kwargs)
+        serializer = self.get_serializer(quote, data=request.data, partial=kwargs.pop('partial', False))
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
 
+    @transaction.atomic
     def destroy(self, request, *args, **kwargs):
-        if self.get_object().status not in {'draft', 'cancelled'}:
+        quote = Quote.objects.select_for_update().get(pk=self.get_object().pk)
+        from .bid_preparation import quote_has_protected_evidence
+        if quote.preparation_revisions.exists():
+            return Response({'detail': 'This proposal retains preparation evidence and cannot be deleted.'},
+                            status=status.HTTP_409_CONFLICT)
+        if quote_has_protected_evidence(quote):
+            return Response({'detail': 'This proposal retains approval or submission evidence and cannot be deleted.'},
+                            status=status.HTTP_409_CONFLICT)
+        if quote.review_documents.exists():
+            return Response({'detail': 'This proposal has document review evidence and cannot be deleted.'},
+                            status=status.HTTP_409_CONFLICT)
+        if quote.status not in {'draft', 'cancelled'}:
             return Response(
                 {'detail': 'Only draft or cancelled proposal versions may be deleted.'},
                 status=status.HTTP_409_CONFLICT,
@@ -1127,9 +1338,12 @@ class QuoteViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def approve(self, request, pk=None):
         from rest_framework.exceptions import ValidationError
-        quote = self.get_object()
+        quote = Quote.objects.select_for_update().get(pk=self.get_object().pk)
+        from .bid_preparation import require_editable
+        require_editable(quote)
         from apps.rbac.approval_eligibility import require_configured_approval
         require_configured_approval(request.user, 'sales_proposals', quote, 'approve')
         missing = [name for name, value in [
@@ -1165,11 +1379,12 @@ class QuoteViewSet(viewsets.ModelViewSet):
         return Response(QuoteDetailSerializer(quote).data)
     
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def send_to_client(self, request, pk=None):
         """
         Mark quote as sent to client
         """
-        quote = self.get_object()
+        quote = Quote.objects.select_for_update().get(pk=self.get_object().pk)
         from rest_framework.exceptions import ValidationError
         if quote.status == 'submitted':
             raise ValidationError({'submission': 'This exact proposal version has already been submitted.'})
@@ -1221,11 +1436,14 @@ class QuoteViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def mark_viewed(self, request, pk=None):
         """
         Mark quote as viewed by client
         """
-        quote = self.get_object()
+        quote = Quote.objects.select_for_update().get(pk=self.get_object().pk)
+        if quote.status not in {'submitted', 'sent', 'viewed'}:
+            raise ValidationError({'status': 'Only a submitted proposal can be marked viewed.'})
         if not quote.viewed_date:
             quote.viewed_date = timezone.now()
         quote.status = 'viewed'

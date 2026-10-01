@@ -1,6 +1,7 @@
 """Small, bounded Graph transport. Never accepts a client-provided remote URL."""
 from dataclasses import dataclass
 import hashlib
+from io import BytesIO
 import json
 import re
 from tempfile import SpooledTemporaryFile
@@ -209,7 +210,6 @@ class WorkspaceGraph:
     def download(self, item_id, expected_size, max_bytes):
         """Fully validate a bounded spool before exposing any bytes to the caller."""
         output = SpooledTemporaryFile(max_size=1024 * 1024, mode='w+b')
-        started = monotonic()
 
         def receive(response):
             if response.status_code in (401, 403):
@@ -225,7 +225,7 @@ class WorkspaceGraph:
             received = 0
             for chunk in response.iter_content(65536):
                 received += len(chunk)
-                if received > max_bytes or received > expected_size or monotonic() - started > 60:
+                if (max_bytes is not None and received > max_bytes) or received > expected_size:
                     raise WorkspaceError('invalid_remote_response')
                 output.write(chunk)
             if received != expected_size:
@@ -233,7 +233,7 @@ class WorkspaceGraph:
 
         try:
             if (not isinstance(expected_size, int) or isinstance(expected_size, bool)
-                    or expected_size < 0 or expected_size > max_bytes):
+                    or expected_size < 0 or (max_bytes is not None and expected_size > max_bytes)):
                 raise WorkspaceError('download_too_large')
             with self.session.request('GET', self.graph_root + self.path(item_id) + '/content',
                                       headers=self._authorization(), allow_redirects=False,
@@ -259,7 +259,13 @@ class WorkspaceGraph:
                 raise WorkspaceError('remote_unavailable') from None
             raise
 
-    def upload(self, parent_id, name, content):
+    def upload(self, parent_id, name, content, *, size=None, before_chunk=None):
+        if isinstance(content, bytes):
+            size, content = len(content), BytesIO(content)
+        if type(size) is not int or size <= 0:
+            raise WorkspaceError('invalid_remote_response')
+        if before_chunk:
+            before_chunk()
         endpoint = self.graph_root + self.path(parent_id) + ':/' + quote(name, safe='') + ':/createUploadSession'
         session = self._json('POST', endpoint, json={'item': {
             '@microsoft.graph.conflictBehavior': 'fail', 'name': name,
@@ -275,12 +281,33 @@ class WorkspaceGraph:
                 or not (parsed.hostname == self.config.hostname
                         or bool(re.fullmatch(r'[a-z0-9.-]+\.up\.1drv\.com', parsed.hostname or '')))):
             raise WorkspaceError('invalid_remote_response')
-        # Under the server's 10 MiB bound; one fragment (<60 MiB) is supported.
-        result = self._json('PUT', upload_url, authenticated=False, data=content, headers={
-            'Content-Length': str(len(content)), 'Content-Range': f'bytes 0-{len(content)-1}/{len(content)}',
-            'Content-Type': 'application/octet-stream',
-        })
-        return self.validate_item(result, name=name, parent_id=parent_id, folder=False)
+        # 5 MiB is a multiple of Graph's 320 KiB alignment and below its 60 MiB
+        # per-fragment ceiling. Only this fixed fragment enters memory.
+        offset, started = 0, False
+        try:
+            while offset < size:
+                if before_chunk:
+                    before_chunk()
+                chunk = content.read(min(5 * 1024 * 1024, size - offset))
+                if not chunk or len(chunk) != min(5 * 1024 * 1024, size - offset):
+                    raise WorkspaceError('invalid_remote_response')
+                started = True
+                result = self._json('PUT', upload_url, authenticated=False, data=chunk, headers={
+                    'Content-Length': str(len(chunk)), 'Content-Range': f'bytes {offset}-{offset + len(chunk) - 1}/{size}',
+                    'Content-Type': 'application/octet-stream',
+                })
+                offset += len(chunk)
+                if offset < size and result.get('nextExpectedRanges') != [f'{offset}-']:
+                    raise WorkspaceError('invalid_remote_response')
+            item = self.validate_item(result, name=name, parent_id=parent_id, folder=False)
+            if type(item.get('size')) is not int or item['size'] != size:
+                raise WorkspaceError('invalid_remote_response')
+            return item
+        except Exception as exc:
+            # Any attempted fragment can have committed remotely, including a
+            # lost final response. Never turn that into a blind fresh upload.
+            exc.upload_started = started
+            raise
 
 
 def file_projection(graph, item):

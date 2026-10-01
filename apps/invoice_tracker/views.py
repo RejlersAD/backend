@@ -24,6 +24,7 @@ from zipfile import BadZipFile
 from openpyxl.utils.exceptions import InvalidFileException
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.db.models import Count, Sum, Q
 from django.db.models.functions import Trim, Upper
 from django.http import Http404
@@ -263,6 +264,13 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
         instance.recompute_overdue()
         instance.save(update_fields=['days_overdue'])
 
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        # Obtain the source lock before DRF reloads/validates the edited row.
+        # This serializes source edits with canonical identity review.
+        list(CustomerInvoice.objects.select_for_update().filter(pk=self.get_object().pk))
+        return super().update(request, *args, **kwargs)
+
     # ── Aggregated stats ────────────────────────────────────────────
     @action(detail=False, methods=['get'])
     def stats(self, request):
@@ -404,16 +412,18 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
 
     # ── Recompute a single invoice ─────────────────────────────────
     @action(detail=True, methods=['post'], url_path='recompute')
+    @transaction.atomic
     def recompute(self, request, pk=None):
         """Re-apply every Excel-derived formula and persist the result.
         Useful after FX rates change, after a payment is logged, or when
         the user clicks the 'Recompute' button in the detail drawer."""
+        list(CustomerInvoice.objects.select_for_update().filter(pk=self.get_object().pk))
         invoice = self.get_object()
         changed = invoice.recompute_all()
         invoice.save(_skip_recompute=True)  # avoid double-recompute on save
         return Response({
             'changed_fields': sorted(changed),
-            'invoice': CustomerInvoiceSerializer(invoice).data,
+            'invoice': CustomerInvoiceSerializer(invoice, context={'request': request}).data,
         })
 
 

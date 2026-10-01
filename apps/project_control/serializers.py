@@ -377,6 +377,14 @@ class ReportingPeriodAuditSerializer(serializers.ModelSerializer):
 
 
 class ApprovedHourEntrySerializer(FinancialScopeSerializerMixin, serializers.ModelSerializer):
+    employee = serializers.UUIDField(source='employee_id', required=False, allow_null=True)
+    employee_identity = serializers.SerializerMethodField()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if self.context.get('request') and instance.employee_id and data.get('employee_identity') is None:
+            data['employee'] = None
+        return data
     control_account_code = serializers.CharField(source='control_account.code', read_only=True)
     reporting_period_name = serializers.CharField(source='reporting_period.name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -386,7 +394,7 @@ class ApprovedHourEntrySerializer(FinancialScopeSerializerMixin, serializers.Mod
         model = ApprovedHourEntry
         fields = [
             'id', 'project', 'control_account', 'control_account_code', 'reporting_period',
-            'reporting_period_name', 'employee_code', 'employee_name', 'work_date', 'hours',
+            'reporting_period_name', 'employee', 'employee_identity', 'employee_code', 'employee_name', 'work_date', 'hours',
             'hourly_cost_rate', 'labor_actual_cost', 'currency', 'source_type',
             'source_reference', 'status', 'status_display', 'notes', 'created_by',
             'submitted_by', 'submitted_at', 'approved_by', 'approved_by_name', 'approved_at',
@@ -397,6 +405,16 @@ class ApprovedHourEntrySerializer(FinancialScopeSerializerMixin, serializers.Mod
             'submitted_at', 'approved_by', 'approved_by_name', 'approved_at', 'reversed_by',
             'reversed_at', 'reversal_reason', 'created_at', 'updated_at',
         )
+        extra_kwargs = {'employee_code': {'required': False}}
+
+    def get_employee_identity(self, obj):
+        if not obj.employee_id:
+            return None
+        from apps.core.shared_record_targets import candidate_payload, visible_employees
+        request = self.context.get('request')
+        if request and not visible_employees(request.user, project=obj.project).filter(pk=obj.employee_id).exists():
+            return None
+        return candidate_payload(obj.employee, 'employee')
 
     def get_approved_by_name(self, obj):
         return _user_name(obj.approved_by)
@@ -404,6 +422,23 @@ class ApprovedHourEntrySerializer(FinancialScopeSerializerMixin, serializers.Mod
     def validate(self, attrs):
         attrs = super().validate(attrs)
         project = attrs.get('project', getattr(self.instance, 'project', None))
+        if self.instance and 'employee_id' in attrs and attrs['employee_id'] != self.instance.employee_id:
+            raise serializers.ValidationError({'employee': 'Use Shared records to review the employee identity.'})
+        if self.instance and self.instance.employee_id:
+            for field in ('employee_code', 'employee_name'):
+                if field in attrs and attrs[field] != getattr(self.instance, field):
+                    raise serializers.ValidationError({field: 'Recorded labels of a linked employee cannot be changed.'})
+        if not self.instance and attrs.get('employee_id'):
+            from apps.core.shared_record_targets import require_target
+            request = self.context.get('request')
+            employee = require_target(getattr(request, 'user', None), 'employee', attrs['employee_id'], project=project)
+            expected = {'employee_code': employee.employee_code, 'employee_name': employee.get_full_name()}
+            for field, canonical_value in expected.items():
+                if attrs.get(field) and attrs[field].strip() != canonical_value:
+                    raise serializers.ValidationError({field: 'The entered label does not match the selected employee.'})
+                attrs[field] = canonical_value
+        if not attrs.get('employee_code', getattr(self.instance, 'employee_code', '')):
+            raise serializers.ValidationError({'employee_code': 'Select an employee or provide the original employee code.'})
         account = attrs.get('control_account', getattr(self.instance, 'control_account', None))
         period = attrs.get('reporting_period', getattr(self.instance, 'reporting_period', None))
         work_date = attrs.get('work_date', getattr(self.instance, 'work_date', None))

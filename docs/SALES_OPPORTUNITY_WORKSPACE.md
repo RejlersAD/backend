@@ -1,5 +1,85 @@
 # Sales opportunity document workspace
 
+## Larger files and lossless storage - 1 October 2026
+
+The upload/download paths no longer impose a fixed Sales size limit. Optional
+`SALES_WORKSPACE_MAX_UPLOAD_BYTES` and SharePoint-only
+`SALES_WORKSPACE_MAX_DOWNLOAD_BYTES` accept a positive deployment limit; zero
+(the default) means no application cap and is projected as JSON `null`.
+Infrastructure timeouts, disk space and provider limits still apply. Private
+downloads use the saved original/stored sizes and hashes, never a later upload
+limit. All file extensions are accepted as attachments; folders can hold mixed
+types. The multipart command still accepts one file and one request UUID, so a
+multiple-selection interface can retain independent success/failure/retry state.
+
+RADAI readiness adds `automatic_compression: "lossless_if_smaller"`. Each new
+private file exposes `storage_encoding` (`identity` or `gzip`) and `stored_size`.
+Existing `name`, `mime_type`, `size` and SHA-256 identity describe the **original**
+file. Fixed-size reads prepare disk-backed original/gzip streams; deterministic
+gzip is selected only when it saves bytes. Compressed formats may stay unchanged.
+No document conversion, image resampling, text rewriting or archive extraction
+occurs. Downloads return the original filename and exact original bytes, after
+verifying both the stored representation and decoded size/hash in temporary
+files. The saved original size also bounds decoding. All temporary handles close
+on failure; existing scope, export, no-store and attachment disposition apply.
+
+Sales migration `0017_attachment_storage_encoding` adds `storage_encoding`,
+nullable `stored_size` and `stored_sha256` to the existing ledger. Legacy identity
+rows with null/blank storage metadata remain raw files checked by original
+size/hash. There is no object rewrite, backfill or workspace provisioning. New
+representation evidence commits before object writes; uncertain retries retain
+that representation and never replace corrupt/partial objects. Completion/audit
+remain atomic, and current authority/storage identity are rechecked.
+
+Reversal refuses once representation evidence exists. **Retaining the schema alone
+is not sufficient for application rollback:** an encoding-aware reader must stay
+in use after gzip writes. Pre-encoding application versions cannot serve these
+objects. A downgrade requires a separately planned and verified decompression
+migration preserving original identity; none is performed automatically here.
+
+SharePoint keeps native original files. Its upload-session transport sends
+sequential 5 MiB fragments, rechecking current opportunity access, configuration
+and folder scope before each fragment. Returned ranges and final identity/size
+must match. Any attempted-fragment failure remains uncertain and cannot blindly
+start a new remote upload. Signed upload URLs remain server-only and never
+receive a Graph bearer. This change does not activate SharePoint or synchronize
+the two stores.
+
+Application processing uses disk spools and bounded buffers; the existing S3
+adapter may first spool an object using its own configured memory threshold
+(currently 100 MiB). Disk capacity and provider/network timeouts remain relevant.
+Railway's documented ingress requires each request body to finish within five
+minutes, with an overall fifteen-minute active request ceiling. A larger worker
+timeout does not remove those edge limits. Browser downloads currently use an
+authenticated Blob. This is not a resumable browser-to-server transfer or an
+unlimited-file-size guarantee. See [Graph upload sessions](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)
+and [Railway network limits](https://docs.railway.com/networking/public-networking/specs-and-limits).
+
+Verification completed in isolated fixtures:
+
+- From `backend`, `..\.venv\Scripts\python.exe manage.py test apps.sales.tests.test_attachment_streaming apps.sales.tests.test_private_attachments apps.sales.tests.test_opportunity_workspace apps.sales.tests.test_workspace_documents apps.sales.tests.test_proposal_review apps.sales.tests.test_folder_tags apps.sales.tests.test_folder_tags_postgresql --settings=config.settings_procurement_postgresql_test --noinput`
+  passed all 133 cases, no skips (346.079 seconds), using disposable loopback
+  PostgreSQL on port15449. Log: workspace
+  `artifacts/sales-large-attachments-postgresql.log`.
+- The final source delta adds safe handling of initial temporary-file allocation
+  failure and rejects boolean Graph size metadata. The final focused command,
+  `..\.venv\Scripts\python.exe manage.py test apps.sales.tests.test_attachment_streaming --settings=config.settings_release_test --noinput`,
+  passed all 14 cases (11.426 seconds). This includes those final changes after
+  the combined PostgreSQL process loaded its sources; the counts are not additive.
+  Log: workspace `artifacts/sales-attachment-streaming-tests.log`.
+- `..\.venv\Scripts\python.exe manage.py makemigrations sales --check --dry-run --settings=config.settings_shared_record_migrations`
+  reports no model drift. Changed-source F-code and whitespace checks passed.
+  Log: workspace `artifacts/sales-large-attachments-migration-drift.log`.
+- The actual isolated PostgreSQL0017 migration probe preserved original fields
+  across 11 source/review tables, applied/reversed/reapplied legacy-compatible
+  schema, checked database constraints and refused reversal for gzip, new raw
+  and partial representation evidence. Log: backend
+  `artifacts/opportunity-upload-compression-migration.log`. It reconstructs the
+  preceding schema and is not a full historical-chain migration certificate.
+
+These checks use synthetic records and local temporary objects. They do not
+certify live SharePoint delivery, production quotas, ingress or storage durability.
+
 ## Private RADAI attachments - 1 October 2026
 
 The user explicitly requests uploads without personal SharePoint access. Sales
@@ -23,7 +103,7 @@ still the separately verified SharePoint connection. Choose RADAI explicitly:
 - `GET .../workspace/folders/{key}/files/?storage=radai` lists only local attachments
   using a signed, provider/destination/opportunity/category-bound 15-minute cursor.
 - `POST .../workspace/folders/{key}/upload/` includes `storage=radai` alongside the
-  existing multipart file and UUID. The upload limit remains 10 MiB. Omission of
+  existing multipart file and UUID, with the optional deployment limit above. Omission of
   `storage`, or `storage=sharepoint`, preserves the original remote upload behavior.
 - RADAI file IDs are `radai-{upload-uuid}`; the existing file details, versions and
   download routes resolve them only inside the authorized opportunity/category.
@@ -162,7 +242,8 @@ Set these server variables in API, worker and Beat environments:
 | `SALES_WORKSPACE_DRIVE_ID` | Verified Graph document-library ID |
 | `SALES_WORKSPACE_ROOT_ITEM_ID` | Existing, administrator-provisioned Opportunities container ID |
 | `SALES_WORKSPACE_ROOT_PATH` | Complete decoded path to that container, ending `/Opportunities` |
-| `SALES_WORKSPACE_MAX_UPLOAD_BYTES` | Optional lower file-size limit; default and hard cap 10 MiB |
+| `SALES_WORKSPACE_MAX_UPLOAD_BYTES` | Optional positive upload limit; default zero means no Sales application cap |
+| `SALES_WORKSPACE_MAX_DOWNLOAD_BYTES` | Optional positive SharePoint download limit; default zero means no Sales application cap |
 
 No Finance or mailbox credential fallback exists. Credentials and destination
 identifiers are never accepted from API callers. The supplied destination is
@@ -209,12 +290,12 @@ All routes use `/api/v1/sales/deals/{id}/` and existing scoped Deal lookup:
   ID; if unavailable, is_current remains null. Versions retain provider order.
 - `GET workspace/folders/{key}/files/{file_id}/download/`: authenticated binary
   attachment requiring current opportunity read and export grants. The server
-  retrieves at most 50 MiB; larger files remain available through Open SharePoint.
+  honors the optional configured SharePoint download limit; Open SharePoint remains available.
   The complete download is checked before any bytes are returned. Details,
   versions and download responses use private/no-store cache controls.
 - `POST workspace/folders/{key}/upload/`: multipart `file` plus UUID
   `upload_request_id`; returns the created file projection with 201 or 200 for an
-  identical completed retry. Nonempty files only, up to the configured 10 MiB cap.
+  identical completed retry. Nonempty files only, subject to the optional configured upload limit.
   Reusing a UUID for different bytes/name/folder/actor returns 409. Upload sessions use
   Graph conflictBehavior=fail; same-name files are never replaced or auto-renamed.
 
@@ -244,8 +325,8 @@ Download requests use a server-built Graph content endpoint. A provider-returned
 files.1drv.com, with no credentials, custom port, fragment or control characters.
 Only that first vetted redirect is followed, without the Graph Authorization
 header. Subsequent redirects are refused; signed URLs never enter API responses,
-database records or application logs. Per-request connect/read timeouts, a
-60-second body deadline and the 50 MiB cap bound transport. The spool uses memory
+database records or application logs. Per-request connect/read timeouts, the
+known source size and optional configured download cap bound transport. The spool uses memory
 for its first 1 MiB and temporary storage thereafter, and is closed on failure.
 Declared and received sizes must match. Before exposing the complete attachment,
 the service reloads the actor, rechecks permissions/configuration and re-verifies
@@ -294,6 +375,46 @@ way to resolve an uncertain result. Provider conflict never authorizes overwrite
 
 Graph references: [folder creation](https://learn.microsoft.com/en-us/graph/api/driveitem-post-children?view=graph-rest-1.0),
 [upload-session conflict and upload URL contract](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0).
+
+## Custom opportunity folder tags - 1 October 2026
+
+The user selected custom editable tags for the folder overview. Each canonical
+Deal/category pair can hold one optional single-line tag, at most 64 characters.
+Tags are shared by the logical category across RADAI and SharePoint. Empty text
+clears the tag; tags do not rename folders, classify files, or grant approval.
+
+Sales migration `0016_opportunity_folder_tags` adds a unique OpportunityFolderTag
+row with text, revision, latest command fingerprint and actor/time. It neither
+backfills opportunities nor creates workspaces, upload records or provider work.
+The SQL category constraint accepts the existing six categories only. Reversal
+refuses after any tag row exists, including a cleared row; retain this additive
+schema when reverting application code so revision/retry evidence survives.
+
+Existing `GET deals/{id}/workspace/` returns each folder's `tag` (empty when unset)
+and `tag_token`, plus top-level `can_edit_tags`. GET does not create tag records.
+`PATCH deals/{id}/workspace/folders/{folder_key}/tag/` accepts exactly
+`{tag:string, expected_token:string}` and returns
+`{folder_key, tag, expected_token, replayed}`. Use the returned token for the next
+edit. Storage/provider query parameters are not accepted by this category-level
+command. The response and workspace projection are private/no-store.
+
+Read/update Sales opportunity grants and current Deal visibility authorize edits;
+upload/create/export grants and SharePoint readiness are not required. Commands
+recheck the active actor and access under actor/Deal/tag locks and commit the
+required opportunity audit atomically. Tokens bind actor, opportunity, category,
+tag revision and value, and expire after one hour. Resending the same latest
+token/normalized text replays one saved effect. A later edit, competing value,
+wrong actor/category/opportunity or invalid/expired token returns409. Unknown
+categories, nontext/multiline tags, oversized tags and unknown payload fields
+return400. Access loss denies retries. The UI must preserve entered text after
+failure and refresh explicitly after a conflict.
+
+An unchanged value is a no-op. A changed value increments its category revision;
+editing another category does not invalidate that token. Tag writes never invoke
+storage adapters or alter SharePoint provisioning/lease/recovery state, workflow
+stages, approvals or item counts. Guarded API cases are in `test_folder_tags.py`;
+`test_folder_tags_postgresql.py` observes concurrent writers and identical retries.
+Executed verification is recorded in the workspace feature brief.
 
 ## Verification
 
