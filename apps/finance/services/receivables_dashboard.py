@@ -16,7 +16,7 @@ from django.utils import timezone
 from apps.rbac.action_policy import module_action_allowed
 from .command_center import ROUTES, _payable_queryset
 from .workbook_summary import build_workbook_summary
-from .invoice_performance import build_invoice_performance
+from .invoice_performance import build_invoice_performance, source_snapshot_metadata
 from .receivables_source import get_active_receivables_source
 
 
@@ -283,8 +283,7 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
                         reporting_basis = 'recorded_aed'
                     available_filters['currencies'] = sorted(set(available_filters['currencies']) | {'AED'})
                     result['source'].update(
-                        mode='workbook', snapshot_id=snapshot.pk, file_name=snapshot.file_name,
-                        sheet_name=snapshot.sheet_name, sha256=snapshot.sha256,
+                        **source_snapshot_metadata(snapshot),
                     )
             if available_filters is not None:
                 filters.update(available_filters)
@@ -306,7 +305,9 @@ def build_receivables_dashboard(user, *, currency='AED', company='', months=12, 
         'status': next(iter(states)) if len(states) == 1 else 'partial',
         'filters': filters, 'sources': sources,
         'workbook_summary': build_workbook_summary(user, source_snapshot=reporting_snapshot),
-        'invoice_performance': build_invoice_performance(user, currency=currency, company=company, as_of=as_of),
+        'invoice_performance': build_invoice_performance(
+            user, currency=currency, company=company, as_of=as_of,
+            source_snapshot=reporting_snapshot, source_error=sources['receivables']['status'] == 'error'),
         'kpis': ar.get('kpis', {key: _unknown_metric() for key in KPI_NAMES}),
         'customers': ar.get('customers', []), 'priority_invoices': ar.get('priority_invoices', []),
         'priority_invoice_count': sources['receivables']['open_count'],

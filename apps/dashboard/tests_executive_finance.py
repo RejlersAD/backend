@@ -188,8 +188,10 @@ class ExecutiveFinanceTests(TestCase):
             )
             actual = self.report(currency='usd', company=' Acme ', months=6, as_of='2026-08-01')
         self.assertEqual(actual, expected)
-        self.assertEqual(actual['workbook_summary']['invoice_count'], 4404)
-        self.assertEqual(actual['workbook_summary']['totals']['invoice_amount_aed'], '466151390.16')
+        # Operational invoices do not constitute a published workbook. The
+        # SharePoint source contract never substitutes packaged finance totals.
+        self.assertEqual(actual['workbook_summary']['status'], 'unavailable')
+        self.assertNotIn('totals', actual['workbook_summary'])
         self.assertEqual(actual['kpis']['unpaid']['amount'], '30.00')
         self.assertEqual(actual['kpis']['overdue']['amount'], '0.00')
         self.assertEqual(len(actual['customers']), 1)

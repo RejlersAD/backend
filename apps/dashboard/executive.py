@@ -5,7 +5,7 @@ grant and retains its source's row visibility. A failed source never becomes 0.
 """
 import logging
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
 
@@ -175,10 +175,14 @@ def _build_finance(user, context):
         return restricted('finance')
     from apps.finance.models import Invoice
     from apps.invoice_tracker.models import CustomerInvoice
+    from .financial_performance import _aging, _receivable_metric
 
     can_ap, can_ar = 'finance_incoming' in allowed, 'finance_outgoing' in allowed
+    aging = _aging(can_ar, timezone.localtime(context['generated_at']).date())
+    context['_finance_aging'] = aging
+    workbook = aging.get('source', {}).get('mode') == 'workbook'
     ap = _visible(Invoice.objects.all(), user, 'finance', 'submitted_by') if can_ap else Invoice.objects.none()
-    ar = CustomerInvoice.objects.all() if can_ar else CustomerInvoice.objects.none()
+    ar = CustomerInvoice.objects.all() if can_ar and not workbook else CustomerInvoice.objects.none()
     active_ap = ap.exclude(payment_status='cancelled')
     active_ar = ar.exclude(payment_status='cancelled')
     money_field = DecimalField(max_digits=20, decimal_places=2)
@@ -193,6 +197,9 @@ def _build_finance(user, context):
         (can_ap, 'payables', 'Outstanding payables', active_ap, payable_balance,
          'Supplier invoice register', 'total_amount'),
     ]:
+        if identifier == 'receivables' and workbook:
+            metrics.append(_receivable_metric(identifier, label, aging))
+            continue
         if can_read:
             missing = queryset.filter(**{f'{required_field}__isnull': True}).count()
             if missing:
@@ -208,13 +215,16 @@ def _build_finance(user, context):
         overdue = ar.exclude(payment_status__in=['paid', 'cancelled']).filter(
             due_date__lt=timezone.localtime(context['generated_at']).date(), balance_to_be_received__gt=0,
         )
-        count = overdue.count()
+        count = aging['overdue_invoice_count'] if workbook else overdue.count()
         metrics.append(metric('overdue_receivables', 'Overdue receivables', count,
-                              source='Customer invoice register', description='Unpaid invoices past their due date with a recorded positive balance.'))
+                              source='Published Finance workbook' if workbook else 'Customer invoice register',
+                              description='Source rows with recorded Overdue payment status.' if workbook else
+                              'Unpaid invoices past their due date with a recorded positive balance.'))
         if count:
             actions.append(action('finance-overdue-receivables', 'finance', f'{count} overdue customer invoices',
-                                  severity='high', owner='Finance', route='/finance/outgoing-invoices',
-                                  detail='Review collection owners and due dates in the customer invoice register.'))
+                                  severity='high', owner='Finance', route='/finance' if workbook else '/finance/outgoing-invoices',
+                                  detail='Review recorded payment statuses and due dates in the published Finance workbook.' if workbook else
+                                  'Review collection owners and due dates in the customer invoice register.'))
     if can_ap:
         count = ap.filter(match_status='exception').count()
         metrics.append(metric('invoice_match_exceptions', 'Invoice match exceptions', count,
@@ -228,6 +238,14 @@ def _build_finance(user, context):
         'No FX conversion is applied. Source registers do not establish consolidated group coverage.',
     ])
     timestamps = [qs.aggregate(latest=Max('updated_at'))['latest'] for qs, permitted in [(ap, can_ap), (ar, can_ar)] if permitted]
+    if workbook:
+        section['source'] = aging['source']
+        timestamps.append(datetime.fromisoformat(aging['source_updated_at']))
+        _source_timestamp(section, timestamps, 'Latest Finance workbook publication or authorized supplier invoice update')
+        section['source_timestamp_kind'] = 'latest_source_event' if can_ap else 'snapshot_publication'
+        if not can_ap:
+            section['source_timestamp_label'] = 'Finance workbook publication in RADAI'
+        return section
     return _source_timestamp(section, timestamps, 'Latest authorized invoice register update')
 
 

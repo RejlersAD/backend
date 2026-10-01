@@ -164,6 +164,49 @@ the application separately enforces the 25 MiB workbook limit.
 
 ## Workbook interpretation
 
+### Connected Finance invoices
+
+The Portfolio connected-invoice panel reads the active immutable Finance SQL
+snapshot published by the SharePoint/Graph pipeline. It does not contact Graph
+when a page loads. Before the first Finance import, it retains the operational
+outgoing-invoice reader. An active-source read failure returns an error rather
+than substituting old register data.
+
+`GET /api/v1/dashboard/executive/portfolio-workbook/outgoing-invoices/` retains
+Executive Dashboard, Project Control and Outgoing Invoices read requirements,
+exact project/subproject matching, parent-scope checks and explicit denials.
+Duplicate or missing invoice identities and ambiguous project identities stay
+visible for authorized review but remain excluded from totals, as do cancelled
+invoices and credit notes. A child project alone never grants parent access.
+
+For source-backed responses, `source.kind=finance_source_snapshot`,
+`source.mode=workbook`, and `source.snapshot_id` identify the Finance publication.
+`published_at`/`updated_at` record its import timestamp, not a live workbook edit
+time. Rows expose their workbook row number and a versioned `record_key`.
+Operational `id` and `detail_route` are null; the read-only source route is
+`/finance`. Historical register-ID provenance cannot authorize a detail link.
+
+For compatibility, the row and total `calculated_receivable_balance` keys hold
+the **recorded source balance** with `balance_basis`/metric `basis` set to
+`recorded_source_balance`. They are not recalculated from invoice amount less
+receipts. Source receipt blanks and balance blanks remain unknown. Totals retain
+the invoice-currency grouping and validate the receipt and balance currencies
+independently: nonzero values whose recorded currency conflicts with that group
+are withheld, while the raw row amount and its own currency remain available.
+No exchange-rate conversion is performed.
+
+Pagination accepts both the existing Portfolio `snapshot_id` and optional
+`finance_snapshot_id`. Return `finance_snapshot_id` on subsequent pages, including
+zero for the pre-import register fallback. A changed Finance source returns HTTP
+409 with `code=finance_source_changed`; reload the first page without the old
+Finance token. Portfolio publication changes retain the existing `source_changed`
+conflict. Each response pins immutable Finance rows to its selected version.
+
+The Finance invoice source does not replace the separate POC workbook's revenue,
+forecast, delivery or margin figures. Those keep their own source and cutoff.
+
+### POC and forecast facts
+
 The importer validates the expected header profile and uses dated header groups
 to locate current and historical values. It handles the second resource
 deputation header section separately: booked hours, recognized revenue and sold

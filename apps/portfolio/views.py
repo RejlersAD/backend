@@ -63,13 +63,14 @@ class PortfolioRevenueView(PortfolioWorkbookView):
 
 class OutgoingInvoiceFilters(WorkbookFilters):
     snapshot_id = serializers.IntegerField(required=False, min_value=1)
+    finance_snapshot_id = serializers.IntegerField(required=False, min_value=0)
 
 
 class PortfolioOutgoingInvoicesView(PortfolioWorkbookView):
     """Live, read-only outgoing invoices for the authorized workbook project scope."""
 
     def get(self, request):
-        from .recorded_invoices import build_recorded_invoices
+        from .recorded_invoices import FinanceSourceChanged, build_recorded_invoices
         from .scope import workbook_scope
 
         if not all(module_action_allowed(request.user, module, 'read')
@@ -79,6 +80,7 @@ class PortfolioOutgoingInvoicesView(PortfolioWorkbookView):
         filters.is_valid(raise_exception=True)
         values = dict(filters.validated_data)
         expected_snapshot = values.pop('snapshot_id', None)
+        expected_finance_snapshot = values.pop('finance_snapshot_id', None)
         limit, offset = values.pop('limit', 50), values.pop('offset', 0)
         try:
             with transaction.atomic():
@@ -93,9 +95,13 @@ class PortfolioOutgoingInvoicesView(PortfolioWorkbookView):
                                               'detail': 'Portfolio source changed. Refresh the portfolio to reload connected invoices.'}, status=409)
                 scope = workbook_scope(snapshot, request.user, **values)
                 report = build_recorded_invoices(request.user, scope['rows'], full_source=scope['full_source'],
-                                                 limit=limit, offset=offset)
+                                                 limit=limit, offset=offset,
+                                                 finance_snapshot_id=expected_finance_snapshot)
                 report.update(source_snapshot_id=snapshot.pk, workbook_reporting_date=snapshot.reporting_date.isoformat())
                 return _private_response(report, status=503 if report.get('status') == 'error' else 200)
+        except FinanceSourceChanged:
+            return _private_response({'status': 'error', 'code': 'finance_source_changed',
+                                      'detail': 'Finance source changed. Reload connected invoices.'}, status=409)
         except Exception:
             logger.exception('Recorded portfolio invoices unavailable')
             return _private_response({'status': 'error', 'detail': 'Connected outgoing invoices could not be loaded. Try again shortly.',

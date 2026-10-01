@@ -42,6 +42,19 @@ DEFINITIONS = {
     'plan': 'Only approved Finance inputs with approval evidence are used. Budget and forecast are on the same recorded invoice-value basis and original currency. Workspace plans are withheld when filtering one customer.',
 }
 SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / 'data' / 'invoice_performance_summary.json'
+_ACTIVE_SOURCE = object()
+
+
+def source_snapshot_metadata(snapshot):
+    """Public provenance for the pinned SQL publication, without remote credentials."""
+    published = snapshot.imported_at.isoformat()
+    return {
+        'kind': 'finance_source_snapshot', 'mode': 'workbook', 'snapshot_id': snapshot.pk,
+        'file_name': snapshot.file_name, 'sheet_name': snapshot.sheet_name,
+        'sha256': snapshot.sha256, 'imported_at': published, 'source_updated_at': published,
+        'timestamp_basis': 'snapshot_publication', 'label': 'Published Finance workbook',
+        'route': '/finance',
+    }
 
 
 def _money(value):
@@ -288,7 +301,8 @@ def _apply_finance_inputs(result, inputs, status, reason, future_months):
                               'description': DEFINITIONS['plan']}
 
 
-def build_invoice_performance(user, *, currency='AED', company='', as_of=None):
+def build_invoice_performance(user, *, currency='AED', company='', as_of=None,
+                              source_snapshot=_ACTIVE_SOURCE, source_error=False):
     """Read all matching invoices; preserve source authorization and null values."""
     as_of = as_of or timezone.localdate()
     currency = (currency or '').strip().upper() or 'UNSPECIFIED'
@@ -296,15 +310,17 @@ def build_invoice_performance(user, *, currency='AED', company='', as_of=None):
     result = _empty(currency, company, as_of, 'restricted', 'Read access to customer invoices is required.')
     if not module_action_allowed(user, 'finance_outgoing', 'read'):
         return result
+    if source_error:
+        return _empty(currency, company, as_of, 'error', 'The authorised invoice performance source could not be read.')
     try:
         with transaction.atomic():
-            return _build(user, currency, company, as_of)
+            return _build(user, currency, company, as_of, source_snapshot=source_snapshot)
     except Exception:
         logger.exception('Executive invoice performance source unavailable')
         return _empty(currency, company, as_of, 'error', 'The authorised invoice performance source could not be read.')
 
 
-def _build(user, currency, company, as_of):
+def _build(user, currency, company, as_of, *, source_snapshot=_ACTIVE_SOURCE):
     current = as_of.replace(day=1)
     months = [_month_offset(current, index) for index in range(-11, 1)]
     keys = [month.strftime('%Y-%m') for month in months]
@@ -313,8 +329,26 @@ def _build(user, currency, company, as_of):
     ytd = _cohort()
     coverage = dict.fromkeys(COVERAGE_COUNTS, 0)
     first_date, last_date, source_updated = None, None, None
-    snapshot = _load_workbook_snapshot() if not company else None
-    source_rows = (row for row in snapshot['days'] if row['currency'] == currency) if snapshot else _read_invoice_rows(currency, company)
+    from .receivables_source import get_active_receivables_source
+    if source_snapshot is _ACTIVE_SOURCE:
+        published_rows = get_active_receivables_source()
+        source_snapshot = getattr(published_rows, '_receivables_snapshot', None)
+    else:
+        published_rows = source_snapshot.rows.all() if source_snapshot is not None else None
+    # Once a SQL publication exists, neither a stale artifact nor an operational
+    # invoice can replace it, including for an empty company/currency selection.
+    snapshot = _load_workbook_snapshot() if source_snapshot is None and not company else None
+    if published_rows is not None:
+        published_rows = published_rows.annotate(normalized_currency=Upper(Trim('currency'))).filter(
+            normalized_currency='' if currency == 'UNSPECIFIED' else currency)
+        if company:
+            published_rows = published_rows.annotate(recorded_company=Trim('company')).filter(recorded_company=company)
+        source_rows = published_rows.order_by().values(
+            'category', 'payment_status', 'invoice_date', 'invoice_amount',
+            'actual_payment_received', 'actual_payment_currency', 'updated_at').iterator(chunk_size=1000)
+    else:
+        source_rows = ((row for row in snapshot['days'] if row['currency'] == currency)
+                       if snapshot else _read_invoice_rows(currency, company))
     for row in source_rows:
         if snapshot:
             daily = row['coverage']
@@ -364,6 +398,8 @@ def _build(user, currency, company, as_of):
         first_date = min(first_date, invoice_date) if first_date else invoice_date
         last_date = max(last_date, invoice_date) if last_date else invoice_date
         invoiced, received = row['invoice_amount'], row['actual_payment_received']
+        if source_snapshot is not None and received not in (None, ZERO) and row['actual_payment_currency'] != currency:
+            received = None
         for value, missing_key, negative_key in (
             (invoiced, 'missing_invoice_amount_count', 'negative_invoice_amount_count'),
             (received, 'missing_receipt_count', 'negative_receipt_count'),
@@ -392,7 +428,14 @@ def _build(user, currency, company, as_of):
     result = _empty(currency, company, as_of, 'unavailable', 'No dated external customer invoices are available in this currency and scope.')
     result['coverage'] = coverage
     result['source_updated_at'] = source_updated.isoformat() if source_updated else None
-    if snapshot:
+    if source_snapshot is not None:
+        result['source'] = source_snapshot_metadata(source_snapshot)
+        result['source_updated_at'] = source_snapshot.imported_at.isoformat()
+        result['workbook_coverage'] = {'source_row_count': source_snapshot.row_count,
+                                      'scope': 'full published workbook before company, currency and invoice-date filtering'}
+        result['definitions']['scope'] = 'Published Finance external invoice workbook, including paid invoices, read from one immutable SQL snapshot. Company and original-currency filters apply. Cancelled and credit-note rows are excluded; missing or conflicting receipt currencies remain unknown.'
+        result['definitions']['source_date'] = 'Source timestamp records workbook publication in RADAI, not when Finance last edited an invoice. First and last invoice dates describe the dated source population.'
+    elif snapshot:
         result['source'] = {**snapshot['source'], 'kind': 'finance_workbook',
                             'label': 'Finance invoice workbook · verified original currency', 'route': '/finance/outgoing-invoices',
                             'timestamp_basis': 'snapshot_generation_time_not_invoice_update'}

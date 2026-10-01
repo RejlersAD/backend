@@ -15,7 +15,47 @@ each invoice before summing, so overpayments do not offset other invoices.
 Receipts and outstanding are current values grouped by invoice issue month.
 They are not monthly cash flows or historical receivables balances.
 
-## Refresh the workbook source
+## Published Finance source
+
+Executive Overview, Financial Performance and connected Portfolio invoices now
+prefer the active immutable Finance SQL publication produced by the SharePoint
+Graph connector or the existing reviewed source importer. Page reads make no
+Graph requests and do not copy source rows into operational invoices. A newly
+published workbook is visible on the next read, including customer filters.
+
+The receivables response pins its source totals and invoice-period performance
+to the same snapshot. `invoice_performance.source.kind` is
+`finance_source_snapshot`, with `mode=workbook`, `snapshot_id`, file/sheet and
+SHA-256 provenance, `imported_at`, `source_updated_at`, and
+`timestamp_basis=snapshot_publication`. Publication time describes extraction
+into RADAI, not Finance's last edit time. Source navigation opens `/finance`;
+source row IDs never identify editable operational invoices.
+
+Invoice-period measures retain the original-currency contract above, even when
+the receivables dashboard displays recorded AED equivalents. Receipt currencies
+are checked independently; mismatched or blank receipts remain unknown.
+Duplicate invoice-number rows remain separate workbook evidence. Company and
+currency selections with no source rows stay unavailable rather than falling
+back to older operational records or a private JSON artifact.
+
+Executive department receivables and ageing use Finance's established unpaid
+status formula: New, Overdue and Pending use Invoice Amount; Partial uses the
+recorded Balance to be received, only in its matching original currency.
+Signed values and zero are preserved. Recorded Overdue status supplies the
+overdue invoice count; contractual due dates supply the ageing buckets.
+Missing amounts withhold the affected currency total. The original operational
+behavior remains available before the first Finance source publication.
+
+Source failures remain explicit; they do not trigger a stale-data fallback.
+Existing independent Executive, Finance outgoing and project permissions remain
+in force. Portfolio forecasts and POC revenue continue to use the separate
+Portfolio workbook; Finance synchronization does not replace those facts.
+
+## Legacy artifact before the first SQL publication
+
+The instructions below apply only when no active Finance SQL snapshot exists.
+They are not required for the SharePoint integration and cannot override its
+published source.
 
 The application can use a privately provisioned daily snapshot from the same
 workbook as the existing invoice overview. The source SHA-256 and invoice-row
