@@ -48,6 +48,19 @@ def fluid_codes_view(request):
 
 class ValveMTOProjectViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
+    # BUG FIX (real, confirmed): ModelViewSet auto-applies this project's
+    # DEFAULT_PAGINATION_CLASS (config/settings.py — PageNumberPagination)
+    # unless told not to, wrapping list() responses as
+    # {count, next, previous, results: [...]} instead of a plain array.
+    # valveMtoService.js's listProjects() (and ValveMTO.jsx's own
+    # `Array.isArray(data) ? data : []` callers) were written expecting a
+    # plain array — found while diagnosing the SAME bug class on
+    # ValveMTOLegendViewSet below (reported as Manage Legends showing
+    # empty); this viewset has the identical shape and the identical
+    # caller pattern, so it would silently drop every "Cloud Projects"
+    # result the same way. Disabling pagination here restores the plain-
+    # array response both call sites already assume.
+    pagination_class = None
 
     def get_queryset(self):
         return ValveMTOProject.objects.filter(created_by=self.request.user)
@@ -170,6 +183,19 @@ class ValveMTOLegendViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = ValveMTOLegendSerializer
     lookup_field = 'id'
+    # BUG FIX (real, confirmed root cause of "Manage Legends shows empty
+    # / No legends yet" even with active rows in the DB): ModelViewSet
+    # auto-applies this project's DEFAULT_PAGINATION_CLASS, wrapping
+    # list() as {count, next, previous, results: [...]}. Both
+    # ValveMTO.jsx's autoPopulateLegendSection and LegendSheetsModal.jsx's
+    # refresh() do `Array.isArray(rows) ? rows : []` on the raw response
+    # — an object (not an array) always evaluated to [], so the UI always
+    # saw zero legends AND auto-create never saw its own prior creation,
+    # recreating duplicates every time it ran. apps.pid_checker_v2's
+    # equivalent endpoint is a plain APIView (no auto-pagination), which
+    # is why that one never had this problem and nothing here was ever
+    # written to unwrap `.results`.
+    pagination_class = None
 
     def get_queryset(self):
         qs = ValveMTOLegend.objects.filter(created_by=self.request.user)
