@@ -227,6 +227,12 @@ def operation_action(request, view):
     if explicit:
         return explicit
     operation = getattr(view, 'action', '') or view.__class__.__name__
+    if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'DealViewSet'):
+        storage_actions = {'workspace': 'read', 'workspace_files': 'read',
+                           'workspace_file': 'read', 'workspace_versions': 'read', 'workspace_download': 'export',
+                           'workspace_setup': 'update', 'workspace_upload': 'create'}
+        if operation in storage_actions:
+            return storage_actions[operation]
     if operation == 'review_assistant' and (view.__class__.__module__, view.__class__.__name__) in {
         ('apps.sales.views', 'SalesMailboxConnectionViewSet'),
         ('apps.sales.intake_views', 'SalesEmailIntakeViewSet'),

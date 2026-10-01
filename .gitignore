@@ -427,3 +427,9 @@ apps/finance/data/invoice_performance_summary.json
 !apps/sales/migrations/0011_*.py
 !docs/SALES_VF_REGISTRATION.md
 !docs/SALES_OPPORTUNITY_REGISTER_EXPORT.md
+
+# Opportunity workspace transport contract and synthetic regression coverage.
+!apps/sales/tests/test_opportunity_workspace.py
+!apps/sales/tests/test_workspace_documents.py
+!apps/sales/tests/test_private_attachments.py
+!docs/SALES_OPPORTUNITY_WORKSPACE.md

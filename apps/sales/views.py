@@ -480,6 +480,10 @@ class ClientViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     search_fields = ['client_code', 'company_name', 'email', 'phone']
     ordering_fields = ['created_at', 'company_name', 'health_score', 'lifetime_value']
     ordering = ['-created_at']
+
+    def perform_destroy(self, instance):
+        from .opportunity_workspace import delete_client_with_workspace_guard
+        delete_client_with_workspace_guard(instance)
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -682,6 +686,77 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     search_fields = ['deal_code', 'deal_name', 'client__company_name']
     ordering_fields = ['deal_code', 'id', 'created_at', 'expected_close_date', 'estimated_value', 'weighted_value']
     ordering = ['-created_at']
+
+    @action(detail=True, methods=['get'], url_path='workspace')
+    def workspace(self, request, pk=None):
+        from .opportunity_workspace import workspace_projection
+        return Response(workspace_projection(self.get_object(), request.user))
+
+    @action(detail=True, methods=['post'], url_path='workspace/setup')
+    def workspace_setup(self, request, pk=None):
+        from .opportunity_workspace import setup_workspace, workspace_projection
+        opportunity = self.get_object()
+        if request.data:
+            raise ValidationError({'detail': 'Workspace setup uses the saved opportunity and configured destination.'})
+        setup_workspace(opportunity, request.user)
+        return Response(workspace_projection(opportunity, request.user), status=202)
+
+    @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files')
+    def workspace_files(self, request, pk=None, folder_key=None):
+        from .opportunity_workspace import list_workspace_files
+        provider = request.query_params.get('storage', 'sharepoint')
+        if provider not in ('radai', 'sharepoint'):
+            raise ValidationError({'storage': 'Choose RADAI or SharePoint storage.'})
+        if provider == 'radai':
+            from .private_attachments import list_private_files
+            return Response(list_private_files(self.get_object(), request.user, folder_key, request.query_params.get('cursor')))
+        return Response(list_workspace_files(self.get_object(), request.user, folder_key, request.query_params.get('cursor')))
+
+    @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)')
+    def workspace_file(self, request, pk=None, folder_key=None, file_id=None):
+        from .opportunity_workspace import workspace_file_details
+        return Response(workspace_file_details(self.get_object(), request.user, folder_key, file_id),
+                        headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/versions')
+    def workspace_versions(self, request, pk=None, folder_key=None, file_id=None):
+        from .opportunity_workspace import list_workspace_file_versions
+        return Response(list_workspace_file_versions(self.get_object(), request.user, folder_key, file_id,
+                                                      request.query_params.get('cursor')),
+                        headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/download')
+    def workspace_download(self, request, pk=None, folder_key=None, file_id=None):
+        from django.http import FileResponse
+        from .opportunity_workspace import download_workspace_file
+        content, name = download_workspace_file(self.get_object(), request.user, folder_key, file_id)
+        response = FileResponse(content, as_attachment=True, filename=name, content_type='application/octet-stream')
+        response['Cache-Control'] = 'no-store, private'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+    @action(detail=True, methods=['post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/upload')
+    def workspace_upload(self, request, pk=None, folder_key=None):
+        from .opportunity_workspace import upload_workspace_file
+        opportunity = self.get_object()
+        request_id = serializers.UUIDField().run_validation(request.data.get('upload_request_id'))
+        provider = request.data.get('storage', 'sharepoint')
+        if provider not in ('radai', 'sharepoint'):
+            raise ValidationError({'storage': 'Choose RADAI or SharePoint storage.'})
+        if set(request.data) - {'file', 'upload_request_id', 'storage'} or len(request.FILES.getlist('file')) != 1:
+            raise ValidationError({'file': 'Upload one file and its upload_request_id.'})
+        if provider == 'radai':
+            from .private_attachments import upload_private_file
+            result, created = upload_private_file(opportunity, request.user, folder_key,
+                                                  request.FILES.get('file'), request_id)
+            return Response(result, status=201 if created else 200)
+        result, created = upload_workspace_file(opportunity, request.user, folder_key,
+                                                request.FILES.get('file'), request_id)
+        return Response(result, status=201 if created else 200)
+
+    def perform_destroy(self, instance):
+        from .opportunity_workspace import delete_opportunity_with_workspace_guard
+        delete_opportunity_with_workspace_guard(instance)
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
