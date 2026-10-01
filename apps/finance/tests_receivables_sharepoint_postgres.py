@@ -2,7 +2,7 @@
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Barrier, Event, Lock, Thread
+from threading import Barrier, Event, Lock, Thread, get_ident
 import traceback
 from unittest import skipUnless
 from unittest.mock import patch
@@ -15,6 +15,7 @@ from openpyxl import Workbook
 from apps.finance.receivables_source_models import ReceivablesSourceSnapshot, ReceivablesSyncState
 from apps.finance.services.receivables_source import SOURCE_HEADERS, import_receivables_source
 from apps.finance.services.receivables_sharepoint import FinanceSharePointSyncError, _lease, sync_finance_sharepoint
+from apps.portfolio.sync import TransientGraphError
 
 
 @skipUnless(connection.vendor == 'postgresql', 'Requires PostgreSQL transactions and row locks.')
@@ -202,3 +203,68 @@ class FinanceSharePointPostgresTests(TransactionTestCase):
         self.assertEqual(state.last_error, 'Synthetic replacement worker status')
         self.assertEqual(state.generation, 0)
         self.assertFalse(ReceivablesSourceSnapshot.objects.exists())
+
+    def scheduled_workers(self, **options):
+        """Race the first lock in each session, without pausing later locks."""
+        first_lock = Barrier(2, timeout=10)
+        seen, guard = set(), Lock()
+        original_locked = ReceivablesSyncState.locked
+
+        def synchronized_lock(cls):
+            with guard:
+                first_visit = get_ident() not in seen
+                seen.add(get_ident())
+            if first_visit:
+                first_lock.wait()
+            return original_locked()
+
+        with patch.object(ReceivablesSyncState, 'locked', classmethod(synchronized_lock)):
+            return self.run_workers({
+                'first': lambda: sync_finance_sharepoint(scheduled=True, **options),
+                'second': lambda: sync_finance_sharepoint(scheduled=True, **options),
+            })
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True, FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800)
+    def test_two_scheduled_replicas_publish_once_and_restart_waits_for_due_time(self):
+        with patch('apps.portfolio.sync.SharePointWorkbookClient') as transport:
+            transport.return_value.metadata.return_value = self.metadata
+            transport.return_value.download.return_value = self.content
+            results = self.scheduled_workers()
+            statuses = [result['status'] for result in results.values()]
+            self.assertEqual(statuses.count('synchronized'), 1)
+            self.assertEqual(sum(status in ('busy', 'not_due') for status in statuses), 1)
+            transport.assert_called_once()
+            transport.return_value.download.assert_called_once()
+            checkpoint = ReceivablesSyncState.objects.get(pk=1).last_attempt_at
+            transport.reset_mock()
+            restarted = sync_finance_sharepoint(scheduled=True)
+            self.assertEqual(restarted['status'], 'not_due')
+            self.assertGreater(restarted['retry_after_seconds'], 0)
+            transport.assert_not_called()
+        state = ReceivablesSyncState.objects.get(pk=1)
+        self.assertEqual(state.last_attempt_at, checkpoint)
+        self.assertEqual(state.generation, 1)
+        self.assertIsNone(state.sync_token)
+        self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 1)
+
+    @override_settings(FINANCE_SHAREPOINT_SYNC_ENABLED=True, FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800)
+    def test_two_retries_of_one_failure_cannot_both_bypass_the_due_time(self):
+        with patch('apps.portfolio.sync.SharePointWorkbookClient') as transport:
+            transport.return_value.metadata.side_effect = TransientGraphError(503)
+            with self.assertRaises(TransientGraphError) as caught:
+                sync_finance_sharepoint(scheduled=True)
+            retry_of = caught.exception.finance_retry_of
+            transport.reset_mock()
+            transport.return_value.metadata.side_effect = None
+            transport.return_value.metadata.return_value = self.metadata
+            transport.return_value.download.return_value = self.content
+            results = self.scheduled_workers(retry_of=retry_of)
+            statuses = [result['status'] for result in results.values()]
+            self.assertEqual(statuses.count('synchronized'), 1)
+            self.assertEqual(sum(status in ('busy', 'superseded') for status in statuses), 1)
+            transport.assert_called_once()
+        state = ReceivablesSyncState.objects.get(pk=1)
+        self.assertEqual(state.generation, 1)
+        self.assertEqual(state.last_error, '')
+        self.assertIsNone(state.sync_token)
+        self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 1)

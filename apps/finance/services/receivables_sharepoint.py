@@ -1,5 +1,6 @@
 """Read one Finance SharePoint workbook into immutable receivables snapshots."""
 from datetime import timedelta
+from math import ceil
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -29,6 +30,17 @@ def sync_enabled():
     }
 
 
+def sync_interval_seconds():
+    """Use the same interval bounds as the existing Celery schedule."""
+    from apps.finance.sharepoint_schedule import finance_sharepoint_beat_schedule
+
+    entry = finance_sharepoint_beat_schedule(
+        enabled=True,
+        interval_seconds=getattr(settings, 'FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS', 3600),
+    )['finance-sharepoint-sync']
+    return int(entry['schedule'])
+
+
 def finance_sharepoint_configuration(*, require_item=True):
     # Portfolio is not installed in some existing Finance test/settings bundles.
     # Import only when this adapter is actually used; its HTTP transport is reused.
@@ -43,12 +55,25 @@ def finance_sharepoint_configuration(*, require_item=True):
     return SharePointConfiguration(*values)
 
 
-def _lease():
+def _lease(*, scheduled=False, retry_of=None):
     with transaction.atomic():
         state = ReceivablesSyncState.locked()
         now = timezone.now()
         if state.sync_token and (state.sync_expires_at is None or state.sync_expires_at > now):
             return None
+        if scheduled:
+            # Check cadence while holding the publication lock. Replicas and
+            # restarted processes cannot all begin the same scheduled attempt.
+            if retry_of is not None:
+                if (retry_of != (state.last_attempt_at, state.generation)
+                        or not state.last_error
+                        or (state.last_success_at and state.last_attempt_at
+                            and state.last_success_at >= state.last_attempt_at)):
+                    return {'status': 'superseded'}
+            elif state.last_attempt_at:
+                remaining = (state.last_attempt_at + timedelta(seconds=sync_interval_seconds()) - now).total_seconds()
+                if remaining > 0:
+                    return {'status': 'not_due', 'retry_after_seconds': ceil(remaining)}
         state.sync_token = uuid.uuid4()
         state.sync_expires_at = now + timedelta(seconds=LEASE_SECONDS)
         state.last_attempt_at = now
@@ -67,13 +92,17 @@ def _safe_result(result, status):
     return {'status': status, **{key: result[key] for key in ('snapshot_id', 'created', 'activated', 'row_count')}}
 
 
-def sync_finance_sharepoint(*, dry_run=False):
-    """Manual calls work with scheduling disabled. No SharePoint writes occur."""
-    from apps.portfolio.sync import PortfolioSyncError, SharePointWorkbookClient
+def sync_finance_sharepoint(*, dry_run=False, scheduled=False, retry_of=None):
+    """Scheduled calls share a durable cadence; manual calls remain immediate."""
+    if scheduled and not sync_enabled():
+        return {'status': 'disabled'}
+    from apps.portfolio.sync import PortfolioSyncError, SharePointWorkbookClient, TransientGraphError
 
-    acquired = _lease()
+    acquired = _lease(scheduled=scheduled, retry_of=retry_of)
     if acquired is None:
         return {'status': 'busy'}
+    if isinstance(acquired, dict):
+        return acquired
     source, active_id = acquired
     token, generation = source.sync_token, source.generation
     try:
@@ -140,6 +169,10 @@ def sync_finance_sharepoint(*, dry_run=False):
         else:
             error = FinanceSharePointSyncError('Finance synchronization failed; the previous source remains available.')
         ReceivablesSyncState.objects.filter(pk=1, sync_token=token).update(last_error=str(error))
+        if scheduled and isinstance(error, TransientGraphError):
+            # In-process retry identity only; never serialized or logged. A
+            # manual attempt/publication or another due worker invalidates it.
+            error.finance_retry_of = (source.last_attempt_at, generation)
         raise error from None
     finally:
         ReceivablesSyncState.objects.filter(pk=1, sync_token=token).update(sync_token=None, sync_expires_at=None)
