@@ -52,6 +52,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
       "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" && \
     pip install --no-cache-dir -r requirements.txt
 
+# PaddleOCR resolves an OpenCV contrib wheel that needs libGL even without a
+# display. Keep the shared-library layer after Python dependencies so repairing
+# runtime libraries does not reinstall the large CPU/OCR wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip check \
+    && python -c "import cv2, olefile"
+
 # ── Layer 2: Application code
 COPY . .
 
