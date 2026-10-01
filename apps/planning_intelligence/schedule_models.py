@@ -187,6 +187,11 @@ class ScheduleResource(BaseModel):
     TYPE_CHOICES = [('labor', 'Labor'), ('equipment', 'Equipment'), ('material', 'Material')]
 
     project = models.ForeignKey(PlanningProject, on_delete=models.CASCADE, related_name='schedule_resources')
+    employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='planning_resources',
+        help_text='Optional named employee; an unlinked labor resource may describe a role or crew.',
+    )
     code = models.CharField(max_length=64)
     name = models.CharField(max_length=255)
     resource_type = models.CharField(max_length=16, choices=TYPE_CHOICES, default='labor')

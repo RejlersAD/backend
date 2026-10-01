@@ -111,6 +111,7 @@ class PlanningFileListSerializer(serializers.ModelSerializer):
 
 
 class PlanningProjectSerializer(serializers.ModelSerializer):
+    canonical_client = serializers.SerializerMethodField()
     file_count = serializers.SerializerMethodField()
     latest_generation_version = serializers.SerializerMethodField()
     ai_enabled = serializers.SerializerMethodField()
@@ -122,7 +123,7 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = PlanningProject
         fields = [
-            'id', 'enterprise_project', 'name', 'client', 'location', 'phase', 'planning_mode', 'effective_date',
+            'id', 'enterprise_project', 'canonical_client', 'name', 'client', 'location', 'phase', 'planning_mode', 'effective_date',
             'planned_end_date', 'duration_days', 'duration_months',
             'scope_summary', 'exclusions', 'budgeted_effort_hours',
             'calendar_overrides', 'review_cycle_overrides',
@@ -135,6 +136,14 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
         # deliberately NOT included in `fields` above — it must never be
         # serialized to the API. Use the dedicated ai-settings action
         # (views.PlanningProjectViewSet.ai_settings) to read/write it.
+
+    def get_canonical_client(self, obj):
+        request = self.context.get('request')
+        if not request or not obj.enterprise_project_id:
+            return None
+        from apps.core.shared_record_targets import visible_payload
+        project = obj.enterprise_project
+        return visible_payload(request.user, 'client', project.client) if project.client_id else None
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -224,6 +233,8 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
 
     def validate_enterprise_project(self, value):
         request = self.context.get('request')
+        if self.instance and not self.instance.enterprise_project_id and value is not None:
+            raise serializers.ValidationError('Use Shared records to review this existing workspace identity.')
         if self.instance and self.instance.enterprise_project_id:
             if value is None or value.pk != self.instance.enterprise_project_id:
                 raise serializers.ValidationError(

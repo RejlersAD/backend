@@ -18,12 +18,12 @@ class ModuleActionGuardMixin:
     def dispatch(self, request, *args, **kwargs):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return super().dispatch(request, *args, **kwargs)
-        # This one storage command commits an attempt before contacting Graph,
+        # These storage commands commit an attempt before contacting storage,
         # then commits its result/uncertainty separately. An outer rollback would
         # erase retry identity after an external effect. All permission checks
         # below still execute; no other Sales or approval command is exempted.
         if (self.__class__.__module__, self.__class__.__name__) == ('apps.sales.views', 'DealViewSet') and (
-                getattr(self, 'action_map', {}).get(request.method.lower()) == 'workspace_upload'):
+                getattr(self, 'action_map', {}).get(request.method.lower()) in ('workspace_upload', 'workspace_upload_version')):
             return super().dispatch(request, *args, **kwargs)
         # Keep eligibility checks and the ensuing decision in one transaction.
         # DRF converts exceptions to responses; explicitly roll back those too.

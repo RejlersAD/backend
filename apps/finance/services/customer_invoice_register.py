@@ -111,7 +111,7 @@ def _source_currency_total(source, amount_field, currency_field, default_currenc
     }
 
 
-def _build_source_register(source, *, currency, company, page, page_size, ordering, as_of, payment_status):
+def _build_source_register(source, *, currency, company, page, page_size, ordering, as_of, payment_status, user=None):
     """Read one pinned workbook snapshot without operational recomputation."""
     snapshot = source._receivables_snapshot
     source = source.exclude(payment_status__in=['cancelled', 'credit_note']).annotate(
@@ -190,7 +190,8 @@ def _build_source_register(source, *, currency, company, page, page_size, orderi
         'invoice_amount_aed', 'register_amount_due_home', 'register_days_overdue',
         'actual_payment_received', 'normalized_receipt_currency',
     )[offset:offset + page_size]
-    for row in rows:
+    from apps.finance.shared_record_links import project_register_links
+    for row in project_register_links(rows, user, source=True):
         row_currency = row['normalized_currency'] or 'UNSPECIFIED'
         receipt_currency = row['normalized_receipt_currency'] or 'UNSPECIFIED'
         amount = row['invoice_amount'] if row_currency != 'UNSPECIFIED' else None
@@ -198,6 +199,7 @@ def _build_source_register(source, *, currency, company, page, page_size, orderi
         data['rows'].append({
             'id': f"source:{row['id']}", 'invoice_route': None,
             'source_snapshot': True, 'source_row': row['row_number'],
+            'canonical_links': row['canonical_links'],
             'account': row['account'], 'company': row['company'].strip(),
             'customer': row['company'].strip() or 'Customer not recorded',
             'invoice_number': row['invoice_number'],
@@ -237,6 +239,7 @@ def build_customer_invoice_register(user, *, currency='AED', company='', page=1,
                 return _build_source_register(
                     workbook_source, currency=currency, company=company, page=page,
                     page_size=page_size, ordering=ordering, as_of=as_of, payment_status=payment_status,
+                    user=user,
                 )
             source = annotate_receivable_balance(_selected(CustomerInvoice.objects.exclude(
                 payment_status__in=['cancelled', 'credit_note'],
@@ -294,11 +297,13 @@ def build_customer_invoice_register(user, *, currency='AED', company='', page=1,
                 'register_days_overdue', 'payment_date', 'actual_payment_received', 'remarks',
             )[offset:offset + page_size]
             status_labels = dict(PaymentStatus.choices)
-            for row in rows:
+            from apps.finance.shared_record_links import project_register_links
+            for row in project_register_links(rows, user):
                 row_currency = row['normalized_currency'] or 'UNSPECIFIED'
                 amount = row['register_amount'] if row_currency != 'UNSPECIFIED' else None
                 data['rows'].append({
                     'id': row['id'], 'account': row['account'],
+                    'canonical_links': row['canonical_links'],
                     'company': row['company'].strip(), 'customer': row['company'].strip() or 'Customer not recorded',
                     'invoice_number': row['invoice_number'],
                     'invoice_date': row['invoice_date'].isoformat() if row['invoice_date'] else None,

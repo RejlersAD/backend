@@ -13,8 +13,39 @@ version is activated; each request pins its source version.
 
 The source key includes the workbook SHA-256, sheet and verified row bounds.
 Invoice numbers are not row keys: duplicate workbook invoice numbers remain
-separate facts. An operational invoice link is recorded only when the invoice
-number occurs once in the workbook and matches an existing register record.
+separate facts. Historical operational invoice IDs are unverified provenance;
+current publication does not create an operational invoice relationship.
+
+## Reviewed canonical references
+
+The shared-record review workspace can annotate an active source row with an
+existing RADAI project and Sales client. Finance migration `0016` stores these
+references in `ReceivablesSourceIdentity`, beside the immutable source row. It
+does not change the workbook, source values, invoice amounts or payment status.
+Each new workbook publication needs its own review; neither an invoice number
+nor worksheet position proves identity across source versions.
+
+Operational `CustomerInvoice` gets separate optional canonical references in
+invoice-tracker migration `0006`. Original company/account/project text is
+preserved. The customer source is `company`; `account` and external `project_id`
+retain their distinct meanings. These protected fields are changed only through
+the shared-record link command, which requires source update authority, target
+visibility, a reviewed freshness token, reason and retry UUID. The shared command
+commits its audit in the same transaction. No automatic name matching or master
+record creation is performed.
+
+Register responses expose `canonical_links` with minimal authorized target
+labels and a state. Changed source identity, unavailable target access and
+partially reviewed recorded references return `needs_review`. Stale links do
+not appear as current IDs. Existing physical duplicate invoice IDs must first
+use the outgoing invoice register's dedicated duplicate review; the shared
+queue excludes them. No source annotation creates an operational detail URL.
+
+These additive migrations leave existing rows unlinked. Reverse guards prevent
+dropping reviewed identity annotations. Roll back application code while retaining
+the additive schema and evidence if operational recovery is needed. An unused
+schema can be reversed after stopping the newer application. The shared command
+audit is separately retained by the core migration.
 
 Headers are checked before import. The default source is `External Invoice `
 (including its trailing space), header row 5, invoice rows 6 through 4409.

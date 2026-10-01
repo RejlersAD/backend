@@ -105,7 +105,8 @@ class PrivateAttachmentTests(PrivateFixtures, TestCase):
     def test_invalid_provider_category_and_file_rejected_before_storage(self):
         self.assertEqual(self.upload(storage='external').status_code, 400)
         self.assertEqual(self.upload(content=b'').status_code, 400)
-        self.assertEqual(self.upload(name='Scope.pdf', content=b'x' * (10 * 1024 * 1024 + 1)).status_code, 400)
+        with override_settings(SALES_WORKSPACE_MAX_UPLOAD_BYTES=10):
+            self.assertEqual(self.upload(name='Scope.pdf', content=b'x' * 11).status_code, 400)
         self.upload_url = self.url + 'folders/foreign/upload/'
         self.assertEqual(self.upload().status_code, 400)
         self.assertEqual(self.api.get(self.url + 'folders/proposal/files/', {'storage': 'external'}).status_code, 400)

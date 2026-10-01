@@ -70,6 +70,17 @@ class CustomerInvoice(models.Model):
     rad_project_no = models.CharField(max_length=64, blank=True, default='', db_index=True)
     project_name = models.TextField(blank=True, default='')
     project_id = models.CharField(max_length=64, blank=True, default='')
+    # Reviewed identity annotations; imported labels and financial facts retain
+    # their original meaning. Only the shared-record command writes these.
+    canonical_project = models.ForeignKey(
+        'core.Project', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='customer_invoice_references',
+    )
+    canonical_client = models.ForeignKey(
+        'sales.Client', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='customer_invoice_references',
+    )
+    canonical_identity_basis = models.JSONField(default=dict, blank=True)
 
     # ── Dates ───────────────────────────────────────────────────────
     invoice_date = models.DateField(null=True, blank=True, db_index=True)
@@ -153,6 +164,17 @@ class CustomerInvoice(models.Model):
 
     def save(self, *args, **kwargs):
         skip = kwargs.pop('_skip_recompute', False)
+        write_identity = kwargs.pop('_write_identity', False)
+        protected = {'canonical_project', 'canonical_client', 'canonical_identity_basis'}
+        if not self._state.adding and not write_identity:
+            fields = kwargs.get('update_fields')
+            if fields is None:
+                # Generic editors and maintenance routines may hold an older
+                # instance. Their full save cannot erase a concurrent review.
+                kwargs['update_fields'] = [field.name for field in self._meta.concrete_fields
+                                           if not field.primary_key and field.name not in protected]
+            elif (protected | {'canonical_project_id', 'canonical_client_id'}).intersection(fields):
+                raise ValueError('Canonical invoice references require the shared-record review command.')
         if not skip:
             self.recompute_all()
         return super().save(*args, **kwargs)

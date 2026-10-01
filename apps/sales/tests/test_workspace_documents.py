@@ -14,7 +14,7 @@ from apps.rbac.action_policy import operation_action
 from apps.rbac.models import RolePermission
 from apps.rbac.route_guard import ModuleActionGuardMixin
 from apps.sales.models import Deal, OpportunityAuditEvent, OpportunityWorkspaceUpload
-from apps.sales.opportunity_workspace import MAX_DOWNLOAD_BYTES
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # Explicit transport-test limit, not an application default.
 from apps.sales.tests.test_opportunity_workspace import CONFIG, WorkspaceFixtures
 from apps.sales.views import DealViewSet
 from apps.sales.workspace_graph import WorkspaceError, WorkspaceGraph, workspace_config
@@ -164,9 +164,10 @@ class WorkspaceDocumentTests(WorkspaceFixtures, TestCase):
         self.assertIn('Technical Proposal.docx', result['Content-Disposition'])
         self.assertEqual(result['Cache-Control'], 'no-store, private')
         self.assertEqual(result['X-Content-Type-Options'], 'nosniff')
-        self.graph.download.assert_called_once_with(self.item['id'], 5, MAX_DOWNLOAD_BYTES)
+        self.graph.download.assert_called_once_with(self.item['id'], 5, None)
 
-    def test_large_file_cannot_be_downloaded_but_sharepoint_link_remains(self):
+    @override_settings(SALES_WORKSPACE_MAX_DOWNLOAD_BYTES=MAX_DOWNLOAD_BYTES)
+    def test_configured_large_file_limit_keeps_sharepoint_link_available(self):
         self.item['size'] = MAX_DOWNLOAD_BYTES + 1
         details = self.api.get(self.file_url)
         self.assertFalse(details.data['can_download'])

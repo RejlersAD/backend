@@ -11,6 +11,7 @@ from .email_permissions import (
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from apps.rbac.action_policy import module_action_allowed
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
@@ -504,6 +505,10 @@ class DealCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         framework = attrs.get('framework', getattr(self.instance, 'framework', None))
         client = attrs.get('client', getattr(self.instance, 'client', None))
+        if self.instance and getattr(client, 'pk', None) != self.instance.client_id:
+            from .models import BidPreparation
+            if BidPreparation.objects.filter(opportunity=self.instance).exists():
+                raise serializers.ValidationError({'client': 'The preparation connection retains its canonical client.'})
         if framework and framework.client_id != getattr(client, 'id', None):
             raise serializers.ValidationError({
                 'framework': 'The framework must belong to the selected client.',
@@ -523,13 +528,17 @@ class QuoteListSerializer(serializers.ModelSerializer):
     """Lightweight quote list serializer"""
     client_name = serializers.CharField(source='client.company_name', read_only=True)
     deal_name = serializers.CharField(source='deal.deal_name', read_only=True)
+    deal_code = serializers.CharField(source='deal.deal_code', read_only=True)
+    submission_due_date = serializers.DateField(source='deal.submission_due_date', read_only=True, allow_null=True)
+    service_categories = serializers.JSONField(source='deal.service_categories', read_only=True)
     prepared_by_name = serializers.CharField(source='prepared_by.get_full_name', read_only=True)
     days_until_expiry = serializers.SerializerMethodField()
     
     class Meta:
         model = Quote
         fields = [
-            'id', 'quote_number', 'version', 'deal', 'deal_name', 'client',
+            'id', 'quote_number', 'version', 'deal', 'deal_name', 'deal_code',
+            'submission_due_date', 'service_categories', 'client',
             'client_name', 'status', 'total_amount', 'currency', 'issue_date',
             'valid_until', 'prepared_by', 'prepared_by_name', 'created_at',
             'days_until_expiry'
@@ -548,27 +557,60 @@ class QuoteListSerializer(serializers.ModelSerializer):
 
 class QuoteDetailSerializer(serializers.ModelSerializer):
     """Detailed quote serializer"""
+    issue_date = serializers.DateField(default=serializers.CreateOnlyDefault(timezone.localdate))
     client_details = ClientListSerializer(source='client', read_only=True)
     deal_details = DealListSerializer(source='deal', read_only=True)
     prepared_by_details = UserBasicSerializer(source='prepared_by', read_only=True)
+    PROTECTED_FIELDS = ('prepared_by', 'approved_by', 'approved_at', 'approval_history',
+                        'submitted_version_hash', 'submission_recipient', 'submission_evidence',
+                        'sent_date', 'viewed_date', 'response_date', 'expected_margin_percent')
     
     class Meta:
         model = Quote
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'prepared_by', 'approved_by', 'approved_at',
+                            'approval_history', 'submitted_version_hash', 'submission_recipient',
+                            'submission_evidence', 'sent_date', 'viewed_date', 'response_date', 'expected_margin_percent']
 
     def validate(self, attrs):
+        from .bid_preparation import DRAFT_STATES, require_editable, visible_deals
+        from .email_permissions import visible_email_clients
+        for field in self.PROTECTED_FIELDS:
+            if field in self.initial_data:
+                current = getattr(self.instance, field, None) if self.instance else None
+                current = getattr(current, 'pk', current)
+                supplied = self.initial_data[field]
+                if (self.instance is None and supplied not in (None, '', [], {})) or (
+                        self.instance is not None and str(supplied) != str(current)):
+                    raise serializers.ValidationError({field: 'This field is maintained by its governed workflow.'})
+        if attrs.get('status', 'draft') not in DRAFT_STATES:
+            raise serializers.ValidationError({'status': 'Use the governed proposal command for this status.'})
+        if self.instance:
+            require_editable(self.instance)
+            for field in ('deal', 'client', 'version', 'quote_number'):
+                if field in attrs and attrs[field] != getattr(self.instance, field):
+                    raise serializers.ValidationError({field: 'Proposal identity is retained. Create a separate revision.'})
         deal = attrs.get('deal', getattr(self.instance, 'deal', None))
         client = attrs.get('client', getattr(self.instance, 'client', None))
+        actor = getattr(self.context.get('request'), 'user', None) or self.context.get('actor')
+        if not self.instance:
+            from .proposal_readiness import require_proposal_creation
+            _, deal, client = require_proposal_creation(actor, deal, client)
+            attrs['deal'], attrs['client'] = deal, client
+            return attrs
+        if actor:
+            if (not module_action_allowed(actor, 'sales_opportunities', 'read')
+                    or not deal or not visible_deals(actor).filter(pk=deal.pk).exists()):
+                raise serializers.ValidationError({'deal': 'Choose an opportunity within your Sales access.'})
+            if (not module_action_allowed(actor, 'sales_clients', 'read')
+                    or not client or not visible_email_clients(actor).filter(pk=client.pk).exists()):
+                raise serializers.ValidationError({'client': 'Choose a client within your current Sales access.'})
         if deal and client and deal.client_id != client.id:
             raise serializers.ValidationError({
                 'client': 'Proposal client must match its opportunity.',
             })
-        if not self.instance and deal and deal.stage != 'proposal':
-            raise serializers.ValidationError({
-                'deal': 'A proposal can only be created after an approved bid decision.',
-            })
-        if client and (client.status != 'active' or not client.new_proposals_permitted):
+        from .proposal_readiness import client_permits_proposal_preparation
+        if client and not client_permits_proposal_preparation(client):
             raise serializers.ValidationError({
                 'client': 'This client is not currently permitted for new proposals.',
             })

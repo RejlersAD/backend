@@ -93,6 +93,7 @@ class OpportunityWorkflowTests(TestCase):
         self.assertEqual(opportunity.stage, 'converted')
         self.assertEqual(repeated.converted_project_id, project.pk)
         self.assertEqual(project.contract_value, Decimal('1235000'))
+        self.assertEqual(project.client_id, self.client.pk)
         self.assertEqual(project.scope_type, 'detailed_engineering')
         self.assertEqual(project.custom_fields['source_opportunity_code'], 'OPP-2026-001')
         self.assertTrue(Estimate.objects.filter(
@@ -117,7 +118,7 @@ class OpportunityWorkflowTests(TestCase):
             with self.assertRaises(ValidationError):
                 require_project_manager(nominee)
 
-    @override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={})
+    @override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={}, SALES_BID_DECISION_RBAC_FALLBACK_ENABLED=False)
     def test_missing_business_route_cannot_be_replaced_by_admin_access(self):
         self.approver.is_superuser = True
         self.approver.save(update_fields=['is_superuser'])

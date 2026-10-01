@@ -216,6 +216,17 @@ class ActivityRelationshipSerializer(serializers.ModelSerializer):
 
 class ScheduleResourceSerializer(serializers.ModelSerializer):
     can_edit = serializers.SerializerMethodField()
+    employee = serializers.UUIDField(source='employee_id', required=False, allow_null=True)
+    employee_identity = serializers.SerializerMethodField()
+
+    def get_employee_identity(self, obj):
+        if not obj.employee_id:
+            return None
+        from apps.core.shared_record_targets import candidate_payload, visible_employees
+        request = self.context.get('request')
+        if request and not visible_employees(request.user, project=obj.project.enterprise_project).filter(pk=obj.employee_id).exists():
+            return None
+        return candidate_payload(obj.employee, 'employee')
 
     def get_can_edit(self, obj):
         from .services.resource_planning import resource_is_locked
@@ -240,6 +251,24 @@ class ScheduleResourceSerializer(serializers.ModelSerializer):
         if self.instance and attrs.get('project', self.instance.project).pk != self.instance.project_id:
             raise serializers.ValidationError({'project': 'Resources cannot be moved to another project.'})
         value = lambda field, default=None: attrs.get(field, getattr(self.instance, field, default))
+        if self.instance and 'employee_id' in attrs and attrs['employee_id'] != self.instance.employee_id:
+            raise serializers.ValidationError({'employee': 'Use Shared records to review the employee identity.'})
+        if self.instance and self.instance.employee_id:
+            for field in ('code', 'name', 'resource_type'):
+                if field in attrs and attrs[field] != getattr(self.instance, field):
+                    raise serializers.ValidationError({field: 'Identity labels of a linked resource cannot be changed.'})
+        if attrs.get('employee_id'):
+            from apps.core.shared_record_targets import require_target
+            project = value('project')
+            if value('resource_type', 'labor') != 'labor' or not project.enterprise_project_id:
+                raise serializers.ValidationError({'employee': 'Named employees require a labor resource linked to an enterprise project.'})
+            request = self.context.get('request')
+            employee = require_target(getattr(request, 'user', None), 'employee', attrs['employee_id'], project=project.enterprise_project)
+            if not self.instance:
+                for field, canonical_value in (('code', employee.employee_code), ('name', employee.get_full_name())):
+                    if attrs.get(field) and attrs[field].strip() != canonical_value:
+                        raise serializers.ValidationError({field: 'The entered label does not match the selected employee.'})
+                    attrs[field] = canonical_value
         for field in ('unit_cost', 'capacity_units_per_day'):
             if value(field, 0) < 0:
                 raise serializers.ValidationError({field: 'Use a nonnegative value.'})
@@ -254,7 +283,10 @@ class ScheduleResourceSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         from .services.resource_planning import mask_resource_costs
-        return mask_resource_costs(super().to_representation(instance), self.context.get('request'), instance.project)
+        data = super().to_representation(instance)
+        if self.context.get('request') and instance.employee_id and data.get('employee_identity') is None:
+            data['employee'] = None
+        return mask_resource_costs(data, self.context.get('request'), instance.project)
 
 
 class ActivityAssignmentSerializer(serializers.ModelSerializer):

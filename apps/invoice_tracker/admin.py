@@ -19,7 +19,8 @@ class CustomerInvoiceAdmin(admin.ModelAdmin):
                      'project_name', 'customer_inv_reference', 'bank_reference_code')
     date_hierarchy = 'invoice_date'
     inlines = [InvoiceAttachmentInline]
-    readonly_fields = ('created_at', 'updated_at', 'days_overdue')
+    readonly_fields = ('created_at', 'updated_at', 'days_overdue', 'canonical_project',
+                       'canonical_client', 'canonical_identity_basis')
 
 
 @admin.register(InvoiceAttachment)

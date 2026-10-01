@@ -121,6 +121,11 @@ class Project(BaseModel):
 
     # Metadata
     client_name = models.CharField(max_length=255, blank=True)
+    client = models.ForeignKey(
+        'sales.Client', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='enterprise_projects',
+        help_text='Canonical client; client_name retains the recorded project label.',
+    )
     location = models.CharField(max_length=255, blank=True)
     tags = models.JSONField(default=list, blank=True)
     custom_fields = models.JSONField(default=dict, blank=True)
