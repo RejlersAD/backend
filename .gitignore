@@ -457,6 +457,9 @@ apps/finance/data/invoice_performance_summary.json
 !apps/sales/tests/test_proposal_draft_ai.py
 !docs/SALES_PROPOSAL_READINESS.md
 !docs/SALES_PROPOSAL_DRAFT_AI.md
+!docs/SALES_LIFECYCLE_RELEASE_TESTS.md
+!docs/SALES_LIFECYCLE_RELEASE_MIGRATIONS.md
+!docs/SALES_LIFECYCLE_RELEASE.md
 !apps/sales/tests/test_bid_preparation_postgresql.py
 !apps/sales/tests/test_folder_tags.py
 !apps/sales/tests/test_folder_tags_postgresql.py

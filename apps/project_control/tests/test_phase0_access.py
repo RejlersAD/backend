@@ -1,12 +1,23 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
 from rest_framework.test import APIClient
 
 from apps.core.project_models import Project, ProjectMember
 from apps.users.models import User
 
 from ..models import Estimate
+from ..views import EstimateViewSet
 
 
+# Exercise the object-access layer independently of the shared router, whose
+# callbacks the separate module/action guard suites wrap during test discovery.
+router = DefaultRouter()
+router.register('estimates', EstimateViewSet, basename='phase0-test-estimate')
+urlpatterns = [path('api/v1/project-control/', include(router.urls))]
+
+
+@override_settings(ROOT_URLCONF=__name__)
 class ProjectControlAccessTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='pc-owner', email='pc-owner@example.com')

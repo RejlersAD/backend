@@ -295,7 +295,9 @@ class BidDecisionAccessTests(TestCase):
         self.assertEqual(OpportunityAuditEvent.objects.filter(opportunity=self.deal).count(), 1)
 
     def test_audit_failure_rolls_back_the_bid_decision(self):
-        with patch('apps.sales.workflow._audit', side_effect=RuntimeError('Synthetic audit failure')):
+        # Fail persistence, not the imported helper: a lazily loaded domain
+        # module must not retain this test's mocked function after cleanup.
+        with patch.object(OpportunityAuditEvent.objects, 'create', side_effect=RuntimeError('Synthetic audit failure')):
             with self.assertRaisesRegex(RuntimeError, 'Synthetic audit failure'):
                 self.decide()
         self.assert_undecided()
