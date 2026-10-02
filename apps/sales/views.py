@@ -52,6 +52,7 @@ from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
 from apps.rbac.action_policy import module_action_allowed
 from .workflow import (
     _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
+    record_ceo_decision,
     decide_handover, submit_award, submit_handover_for_acceptance,
     submit_qualification,
 )
@@ -919,11 +920,25 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='submit-qualification')
     def submit_qualification(self, request, pk=None):
-        return self._detail_response(submit_qualification(self.get_object(), request.user))
+        return self._detail_response(
+            submit_qualification(
+                self.get_object(),
+                request.user,
+                special_note=request.data.get('special_note', ''),
+            )
+        )
 
     @action(detail=True, methods=['post'], url_path='bid-decision')
     def bid_decision(self, request, pk=None):
         deal = record_bid_decision(
+            self.get_object(), request.user,
+            request.data.get('decision'), request.data.get('reason', ''),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'], url_path='ceo-decision')
+    def ceo_decision(self, request, pk=None):
+        deal = record_ceo_decision(
             self.get_object(), request.user,
             request.data.get('decision'), request.data.get('reason', ''),
         )

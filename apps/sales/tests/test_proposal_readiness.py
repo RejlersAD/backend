@@ -11,6 +11,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.routers import DefaultRouter
 from rest_framework.test import APIClient
 
+from apps.notifications.models import Notification
 from apps.rbac.models import Organization, RolePermission, UserPermissionOverride, UserProfile
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.models import BidPreparation, Client, Deal, OpportunityAuditEvent, Quote
@@ -44,13 +45,42 @@ class ProposalReadinessTests(TestCase):
         self.url = '/api/v1/sales/quotes/preparation-opportunities/'
 
     def make_deal(self, number, **extra):
-        return Deal.objects.create(**{
+        deal = Deal.objects.create(**{
             'deal_code': f'Q-READY-{number}', 'deal_name': f'Synthetic readiness {number}',
             'client': self.customer, 'owner': self.actor, 'stage': 'proposal', 'bid_decision': 'bid',
             'opportunity_type': 'rfq', 'currency': 'AED', 'service_categories': ['engineering_design'],
             'submission_due_date': date(2026, 12, 1),
             'stage_entered_at': timezone.now() + timedelta(minutes=number), **extra,
         })
+        self._mark_internal_notification_acted(deal)
+        self._mark_ceo_gate_approved(deal)
+        return deal
+
+    def _mark_internal_notification_acted(self, deal):
+        Notification.objects.create(
+            recipient=self.actor,
+            title=f'Qualification submitted for {deal.deal_code}',
+            message='Sales qualification notification acknowledged.',
+            type='qualification_submitted',
+            status='READ',
+            is_read=True,
+            metadata={
+                'module': 'sales',
+                'department': 'sales',
+                'event_type': 'qualification_submitted',
+                'opportunity_id': str(deal.pk),
+            },
+        )
+
+    def _mark_ceo_gate_approved(self, deal):
+        OpportunityAuditEvent.objects.create(
+            opportunity=deal,
+            actor=self.actor,
+            event_type='ceo_gate_decision',
+            from_stage='proposal',
+            to_stage='proposal',
+            data={'decision': 'approved'},
+        )
 
     def payload(self, **extra):
         return {'quote_number': 'READY-PROP-1', 'deal': str(self.deal.pk), 'client': str(self.customer.pk),
@@ -216,6 +246,34 @@ class ProposalReadinessTests(TestCase):
                                       account_manager=self.actor, status='active')
         self.assertEqual(self.create(client=str(other.pk)).status_code, 400)
         self.assertFalse(Quote.objects.exists())
+
+    def test_creation_requires_internal_notification_action(self):
+        Notification.objects.filter(
+            metadata__event_type='qualification_submitted',
+            metadata__opportunity_id=str(self.deal.pk),
+        ).delete()
+        row = self.api.get(self.url).data['results'][0]
+        self.assertFalse(row['can_create_proposal'])
+        self.assertIn('internal qualification notification', row['blocked_reason'])
+        blocked = self.create()
+        self.assertEqual(blocked.status_code, 400, blocked.data)
+        self._mark_internal_notification_acted(self.deal)
+        allowed = self.create()
+        self.assertEqual(allowed.status_code, 201, allowed.data)
+
+    def test_creation_requires_ceo_gate_approval(self):
+        OpportunityAuditEvent.objects.filter(
+            opportunity=self.deal,
+            event_type='ceo_gate_decision',
+        ).delete()
+        row = self.api.get(self.url).data['results'][0]
+        self.assertFalse(row['can_create_proposal'])
+        self.assertIn('CEO go-ahead', row['blocked_reason'])
+        blocked = self.create()
+        self.assertEqual(blocked.status_code, 400, blocked.data)
+        self._mark_ceo_gate_approved(self.deal)
+        allowed = self.create()
+        self.assertEqual(allowed.status_code, 201, allowed.data)
 
     def test_domain_helper_reloads_stale_actor_client_and_bid_state(self):
         Client.objects.filter(pk=self.customer.pk).update(new_proposals_permitted=False)
