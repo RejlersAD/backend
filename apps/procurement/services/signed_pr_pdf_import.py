@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, time
 from decimal import Decimal
 from difflib import SequenceMatcher
@@ -26,10 +27,10 @@ from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 from .requisition_source_documents import SIGNED_PR_TYPE, requisition_source_key
 from .pr_source_approval_review import (
-    REVIEW_KEY, REVIEW_UNSET, normalize_source_approval_submission,
+    REVIEW_KEY, REVIEW_UNSET, SourceApprovalReviewConflict, normalize_source_approval_submission,
     prepare_source_approval_review, source_approval_review_from_metadata, review_for_approver_names,
 )
-from .pr_review_display import default_level_zero_approver, unknown_approver_name
+from .pr_review_display import default_level_zero_approver, unknown_approver_name, is_richa_name
 from .pr_project_references import normalize_project_references, apply_project_references, prepare_reviewed_project_references
 from .purchase_order_project_display import requisition_project_numbers
 
@@ -55,6 +56,10 @@ def _apply_manual_signature_overrides(detected: dict, overrides: dict | None) ->
         raise SignedPRImportError("Manual signature verification contains an unknown approval role.")
     if any(value is not True for value in (overrides or {}).values()):
         raise SignedPRImportError("Each manually verified signature must be confirmed with true.")
+    for role in overrides or {}:
+        rows = [row for row in detected.get('approval_rows') or [] if row.get('role_key') == role]
+        if len(rows) > 1 and any(not row.get('signature_detected') and not row.get('signature_verified') for row in rows):
+            raise SignedPRImportError('Review repeated source signers individually in the saved approval history; one verification cannot confirm multiple rows.')
 
     automatic = {
         role: bool((detected.get("signatures") or {}).get(role))
@@ -76,6 +81,129 @@ def _apply_manual_signature_overrides(detected: dict, overrides: dict | None) ->
         },
         "all_four_signatures": all(effective.values()),
     }
+
+
+def _restore_source_approval_review(detected, metadata, digest):
+    """Project same-document human review without replacing captured OCR evidence."""
+    result = deepcopy(detected)
+    result['captured_approval_rows'] = deepcopy(detected.get('approval_rows') or [])
+    verification = (metadata or {}).get('signed_document_verification') or {}
+    if verification.get('document_sha256') != digest:
+        return result
+    evidence = (metadata or {}).get('signed_approval_evidence') or {}
+    if evidence.get('manual_table_reviewed'):
+        result['manual_table_reviewed'] = True
+    names = evidence.get('reviewed_approver_names') or {}
+    rows = result.get('approval_rows') or []
+    original_rows = evidence.get('rows') or []
+    saved_rows = verification.get('source_approval_rows') or []
+    for row in rows:
+        matches = [index for index, original in enumerate(original_rows)
+                   if original == row]
+        for review in evidence.get('reviewed_source_rows') or []:
+            if review.get('source_row') == row:
+                row.update(deepcopy(review['reviewed_row']))
+                break
+        if len(matches) != 1 or matches[0] >= len(saved_rows):
+            continue
+        previous_row = saved_rows[matches[0]]
+        # The guarded source-row command records a note on the exact row. Do
+        # not turn a legacy role-wide flag into verification of every duplicate.
+        if previous_row.get('role_key') == row.get('role_key') and previous_row.get('special_note'):
+            row['name'] = previous_row.get('user_name') or row.get('name', '')
+            row.update({key: previous_row[key] for key in ('approval_label', 'special_note') if key in previous_row})
+            if previous_row.get('signature_verified') is True and previous_row.get('signature_source') == 'manual':
+                row.update(signature_verified=True, signature_source='manual')
+    for role, name in names.items():
+        role_rows = [row for row in rows if row.get('role_key') == role]
+        unknown_rows = [row for row in role_rows if unknown_approver_name(row.get('name'))]
+        target = role_rows[0] if len(role_rows) == 1 else unknown_rows[0] if len(unknown_rows) == 1 else None
+        if target is not None:
+            target['name'] = name
+        elif not role_rows:
+            recorded = [row for row in verification.get('source_approval_rows') or []
+                        if row.get('role_key') == role and row.get('evidence_source') == 'manual_review']
+            if len(recorded) == 1:
+                rows.append({'role_key': role, 'source_role': recorded[0].get('role') or role.upper(),
+                             'name': name, 'signature_detected': False, 'signature_candidate': False,
+                             'evidence_source': 'manual_review',
+                             **{key: recorded[0][key] for key in ('approval_label', 'special_note') if key in recorded[0]},
+                             **({'signature_verified': True, 'signature_source': 'manual'}
+                                if recorded[0].get('signature_verified') is True else {})})
+        result.setdefault('approver_names', {})[role] = name
+    if rows:
+        result['approval_rows'] = rows
+    return result
+
+
+def _normalize_source_row_corrections(value):
+    if value is REVIEW_UNSET:
+        return []
+    if not isinstance(value, list):
+        raise SignedPRImportError('Source row corrections must be a JSON list.')
+    normalized, seen = [], set()
+    required = {'row_index', 'expected_row', 'approver_name', 'signature_verified', 'special_note'}
+    for correction in value:
+        if not isinstance(correction, dict) or not required <= set(correction) or set(correction) - (required | {'approval_label'}):
+            raise SignedPRImportError('Supply the source row, expected evidence, name, signature confirmation and Special note.')
+        index = correction['row_index']
+        if type(index) is not int or index < 0 or index in seen or not isinstance(correction['expected_row'], dict):
+            raise SignedPRImportError('Select distinct source rows with their full expected evidence.')
+        seen.add(index)
+        name, note = correction['approver_name'], correction['special_note']
+        if not isinstance(name, str) or unknown_approver_name(name) or len(name.strip()) > 200 or any(ord(char) < 32 for char in name):
+            raise SignedPRImportError('Enter the source approver name using at most 200 characters.')
+        if not isinstance(note, str) or not note.strip() or len(note.strip()) > 2000:
+            raise SignedPRImportError('Enter a Special note explaining the source row correction using at most 2000 characters.')
+        if type(correction['signature_verified']) is not bool:
+            raise SignedPRImportError('Each source row signature verification must be an explicit Boolean.')
+        result = {**deepcopy(correction), 'approver_name': name.strip(), 'special_note': note.strip()}
+        if 'approval_label' in correction:
+            if not isinstance(correction['approval_label'], str) or len(correction['approval_label'].strip()) > 20:
+                raise SignedPRImportError('Source row Level labels must contain at most 20 characters.')
+            result['approval_label'] = correction['approval_label'].strip()
+        normalized.append(result)
+    return normalized
+
+
+def _apply_source_row_corrections(detected, corrections):
+    """Apply only individually snapshotted rows; callers hold the existing PR lock."""
+    rows = detected.get('approval_rows') or []
+    changes = []
+    for correction in corrections:
+        index = correction['row_index']
+        if index >= len(rows):
+            raise SourceApprovalReviewConflict()
+        row = rows[index]
+        expected = correction['expected_row']
+        desired = deepcopy(expected)
+        desired.update(name=correction['approver_name'], special_note=correction['special_note'])
+        if 'approval_label' in correction:
+            desired['approval_label'] = correction['approval_label']
+        if is_richa_name(correction['approver_name']):
+            desired['approval_label'] = '0'
+        if correction['signature_verified'] and not expected.get('signature_detected'):
+            desired.update(signature_verified=True, signature_source='manual')
+        if row == desired:
+            continue
+        if row != expected:
+            raise SourceApprovalReviewConflict()
+        role = row.get('role_key')
+        if role not in APPROVAL_ROLES:
+            raise SignedPRImportError('This source row role must be reconciled before correction.')
+        signed = row.get('signature_detected') or row.get('signature_verified') is True or (
+            len([item for item in rows if item.get('role_key') == role]) == 1
+            and (detected.get('manual_signature_overrides') or {}).get(role))
+        if not unknown_approver_name(row.get('name')) and signed:
+            raise SignedPRImportError('A completed, named source approval cannot be changed through PDF import.')
+        before = deepcopy(row)
+        row.update(desired)
+        if len([item for item in rows if item.get('role_key') == role]) == 1:
+            detected.setdefault('approver_names', {})[role] = row['name']
+        changes.append({'row_index': index, 'role_key': role, 'before': before, 'after': deepcopy(row),
+                        'special_note': correction['special_note'],
+                        'signature_verified': correction['signature_verified'] and not bool(before.get('signature_detected') or before.get('signature_verified'))})
+    return changes
 
 
 def _clean(value: str) -> str:
@@ -766,6 +894,16 @@ def preview_signed_pr_pdf(pdf_bytes: bytes, *, filename: str, expected_pr_number
                 "This record-bound import cannot create a different recommendation."
             )
 
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    metadata = existing_pr.price_remarks_data if existing_pr else {}
+    detected = _restore_source_approval_review(detected, metadata, digest)
+    if ((metadata or {}).get('signed_document_verification') or {}).get('document_sha256') == digest:
+        manual = ((metadata or {}).get('signed_approval_evidence') or {}).get('manual_signature_overrides') or {}
+        # Legacy duplicate-role confirmations cannot verify a different source row.
+        manual = {role: True for role, verified in manual.items() if verified is True
+                  and len([row for row in detected.get('approval_rows') or [] if row.get('role_key') == role]) <= 1}
+        detected = _apply_manual_signature_overrides(detected, manual)
+
     return {
         "success": True,
         "preview_only": True,
@@ -776,7 +914,7 @@ def preview_signed_pr_pdf(pdf_bytes: bytes, *, filename: str, expected_pr_number
         "extracted_data": _serialize_extracted_fields(fields),
         "approval_detection": detected,
         "source_approval_review": review_for_approver_names(source_approval_review_from_metadata(
-            existing_pr.price_remarks_data if existing_pr else {}, hashlib.sha256(pdf_bytes).hexdigest(),
+            metadata, digest,
         ), detected.get('approver_names')),
         "document_signed_off": document_is_signed_off(detected),
         "document_comparison": comparison,
@@ -853,9 +991,12 @@ def document_is_signed_off(detected: dict) -> bool:
     """Honor the signed document's own approval rows, without inventing stages."""
     rows = detected.get("approval_rows") or []
     if rows:
+        if not detected.get('table_detected') and not detected.get('manual_table_reviewed'):
+            return False
         return all(
             row.get("role_key") and row.get("name")
-            and (row.get("signature_detected") or (detected.get("manual_signature_overrides") or {}).get(row["role_key"]))
+            and (row.get("signature_detected") or row.get('signature_verified') is True
+                 or (detected.get("manual_signature_overrides") or {}).get(row["role_key"]))
             for row in rows
         )
     # Compatibility for older recorded evidence with canonical role summaries.
@@ -879,10 +1020,17 @@ def import_signed_pr_pdf(
     source_approval_review=REVIEW_UNSET,
     expected_source_approval_review=REVIEW_UNSET,
     reviewed_project_references=REVIEW_UNSET,
+    source_row_corrections=REVIEW_UNSET,
 ) -> dict:
+    source_row_corrections = _normalize_source_row_corrections(source_row_corrections)
     source_approval_review, expected_source_approval_review = normalize_source_approval_submission(
         source_approval_review, expected_source_approval_review,
     )
+    if approvals is not None and (not isinstance(approvals, dict) or set(approvals) - set(APPROVAL_ROLES)
+                                 or any(not isinstance(name, str) or len(name.strip()) > 200
+                                        or any(ord(char) < 32 for char in name) for name in approvals.values())):
+        raise SignedPRImportError('Source approver names must use supported roles and text of at most 200 characters.')
+    approvals = {role: name.strip() for role, name in (approvals or {}).items() if name.strip()}
     if not isinstance(create_new, bool):
         raise SignedPRImportError("Create recommendation must be true or false.")
     if not isinstance(attach_only, bool):
@@ -940,47 +1088,76 @@ def import_signed_pr_pdf(
             **{role: True for role, verified in recorded_overrides.items() if verified is True},
             **(manual_signature_overrides or {}),
         } or None
-    detected = _apply_manual_signature_overrides(
-        detect_approval_evidence(pdf_bytes, _source=source) if source is not None else detect_approval_evidence(pdf_bytes),
-        effective_signature_overrides,
-    )
-    recorded_names = {
-        approval_role(row.get("role_key") or row.get("role", "")): row.get("user_name", "")
-        for row in (previous_verification.get("source_approval_rows") or [])
-        if same_document and isinstance(row, dict) and row.get("user_name")
-    }
-    source_approval_names = {**detected['approver_names'], **recorded_names}
+    captured = detect_approval_evidence(pdf_bytes, _source=source) if source is not None else detect_approval_evidence(pdf_bytes)
+    if isinstance(effective_signature_overrides, dict):
+        effective_signature_overrides = {
+            role: value for role, value in effective_signature_overrides.items()
+            if (manual_signature_overrides or {}).get(role)
+            or len([row for row in captured.get('approval_rows') or [] if row.get('role_key') == role]) <= 1
+        }
+    restored = _restore_source_approval_review(captured, previous_metadata, digest)
+    for row in restored.get('approval_rows') or []:
+        role = row.get('role_key')
+        if same_document and row.get('evidence_source') == 'manual_review' and (
+            approvals.get(role, row.get('name')) != row.get('name') or (
+                (manual_signature_overrides or {}).get(role) and not row.get('signature_verified'))
+        ):
+            raise SourceApprovalReviewConflict()
+    detected = _apply_manual_signature_overrides(restored, effective_signature_overrides)
+    row_corrections = _apply_source_row_corrections(detected, source_row_corrections)
+    recorded_names = ((previous_metadata.get('signed_approval_evidence') or {}).get('reviewed_approver_names') or {}) if same_document else {}
+    source_approval_names = dict(detected['approver_names'])
     approval_names = {**source_approval_names, **(approvals or {})}
+    for role in manual_signature_overrides or {}:
+        if unknown_approver_name(approval_names.get(role)):
+            raise SignedPRImportError('Enter the source approver name before verifying a missed signature.')
     unknown_name_corrections = []
     for role, name in (approvals or {}).items():
-        original_name = recorded_names.get(role) or detected['approver_names'].get(role, '')
+        original_name = source_approval_names.get(role, '')
         captured_rows = [row for row in detected.get('approval_rows', []) if row.get('role_key') == role]
+        unknown_rows = [row for row in captured_rows if unknown_approver_name(row.get('name'))]
+        target = captured_rows[0] if len(captured_rows) == 1 else unknown_rows[0] if len(unknown_rows) == 1 else None
         if name.strip() == original_name.strip():
             continue
-        if captured_rows and unknown_approver_name(original_name):
-            note = reviewed_signatories.get('approver_notes', {}).get(role)
-            if not note or unknown_approver_name(name):
-                raise SignedPRImportError('Enter the source approver name and a Special note explaining its correction.')
-            unknown_name_corrections.append({'role_key': role, 'before': original_name, 'after': name.strip(), 'special_note': note})
-        elif document_is_signed_off(detected):
+        if len(captured_rows) > 1 and target is None:
+            raise SignedPRImportError('Review repeated source signer names individually in the saved approval history.')
+        original_name = target.get('name', '') if target is not None else original_name
+        already_signed = bool(target.get('signature_detected') if target is not None else captured.get('signatures', {}).get(role))
+        already_signed = already_signed or bool(recorded_names.get(role) and (previous_metadata.get('signed_approval_evidence') or {}).get('signatures', {}).get(role))
+        if not unknown_approver_name(original_name) and already_signed:
             raise SignedPRImportError('A completed, named source approval cannot be changed through PDF import.')
+        note = reviewed_signatories.get('approver_notes', {}).get(role)
+        if not note or unknown_approver_name(name):
+            raise SignedPRImportError('Enter the source approver name and a Special note explaining its correction.')
+        unknown_name_corrections.append({'role_key': role, 'before': original_name, 'after': name,
+                                         'special_note': note,
+                                         'signature_verified': bool(detected['manual_signature_overrides'].get(role))})
+        if target is not None:
+            target['name'] = name
+        elif captured.get('approval_rows') or not captured.get('table_detected'):
+            detected.setdefault('approval_rows', []).append({
+                'role_key': role, 'source_role': role.upper(), 'name': name,
+                'signature_detected': False, 'signature_candidate': False, 'evidence_source': 'manual_review',
+            })
+        detected['approver_names'][role] = name
     if source_approval_review is not REVIEW_UNSET:
         previous_review = source_approval_review_from_metadata(previous_metadata, digest)
         normalized_review = review_for_approver_names(source_approval_review, approval_names)
         for role in APPROVAL_ROLES:
-            original_name = recorded_names.get(role) or detected['approver_names'].get(role, '')
+            original_name = source_approval_names.get(role, '')
             name_changed = bool((approvals or {}).get(role) and approvals[role].strip() != original_name.strip())
             label_changed = normalized_review['approval_labels'].get(role, '') != previous_review['approval_labels'].get(role, '')
             captured_role = any(row.get('role_key') == role for row in detected.get('approval_rows', []))
-            if captured_role and unknown_approver_name(original_name) and (name_changed or label_changed) and not normalized_review.get('approver_notes', {}).get(role):
+            if unknown_approver_name(original_name) and (name_changed or (captured_role and label_changed)) and not normalized_review.get('approver_notes', {}).get(role):
                 raise SignedPRImportError('Enter a Special note explaining the unknown approver name or Level correction.')
         source_approval_review = normalized_review
     reviewed_signatories, source_review_envelope = prepare_source_approval_review(
         previous_metadata, digest, uploaded_by, source_approval_review, expected_source_approval_review,
         source_approver_names=source_approval_names,
     )
-    if not detected.get("approval_rows") and all(
-        detected["manual_signature_overrides"].get(role)
+    if not captured.get("approval_rows") and all(
+        (detected["manual_signature_overrides"].get(role) or any(row.get('role_key') == role and row.get('signature_verified') is True
+                                                             for row in detected.get('approval_rows') or []))
         and isinstance(approval_names.get(role), str) and approval_names[role].strip()
         for role in APPROVAL_ROLES
     ):
@@ -988,7 +1165,7 @@ def import_signed_pr_pdf(
         # source roles even when OCR misses the table. Keep this separate from
         # automated table/signature detection, and never infer it from a name,
         # filename, or a global "verified" flag alone.
-        detected["approval_rows"] = [
+        detected["approval_rows"] = detected.get('approval_rows') or [
             {"role_key": role, "source_role": role.upper(), "name": approval_names[role],
              "signature_detected": False, "signature_candidate": False,
              "evidence_source": "manual_review"}
@@ -1149,7 +1326,7 @@ def import_signed_pr_pdf(
         "signed_approval_evidence": {
             **({REVIEW_KEY: source_review_envelope} if source_review_envelope is not None else {}),
             "table_detected": detected.get("table_detected", False),
-            "rows": detected.get("approval_rows", []),
+            "rows": captured.get("approval_rows", []),
             "signatures": detected.get("signatures", {}),
             "automated_signatures": detected.get("automated_signatures", {}),
             "manual_signature_overrides": detected.get("manual_signature_overrides", {}),
@@ -1162,7 +1339,7 @@ def import_signed_pr_pdf(
                 role: approval_names[role] for role in APPROVAL_ROLES
                 if (approvals or {}).get(role) or recorded_names.get(role)
             },
-            "approver_names": detected.get("approver_names", {}),
+            "approver_names": captured.get("approver_names", {}),
             "date_present": detected.get("date_present", False),
             "date_ocr": detected.get("date_ocr", []),
             "approval_date_evidence": detected.get("approval_date_evidence", {}),
@@ -1171,9 +1348,23 @@ def import_signed_pr_pdf(
     for correction in unknown_name_corrections:
         metadata.setdefault('source_approval_reviews', []).append({
             **correction, 'document_sha256': digest, 'reviewed_by_id': str(uploaded_by.pk),
-            'reviewed_at': timezone.now().isoformat(), 'signature_verified': False,
-            'review_kind': 'unknown_name_correction',
+            'reviewed_at': timezone.now().isoformat(),
+            'review_kind': 'unknown_name_correction' if unknown_approver_name(correction['before']) else 'source_name_correction',
         })
+    saved_row_reviews = deepcopy((previous_metadata.get('signed_approval_evidence') or {}).get('reviewed_source_rows') or []) if same_document else []
+    for correction in row_corrections:
+        index = correction['row_index']
+        if index < len(captured.get('approval_rows') or []):
+            captured_row = deepcopy(captured['approval_rows'][index])
+            saved_row_reviews = [review for review in saved_row_reviews if review.get('source_row') != captured_row]
+            saved_row_reviews.append({'source_row': captured_row, 'reviewed_row': deepcopy(correction['after']),
+                                      'row_index': index})
+        metadata.setdefault('source_approval_reviews', []).append({
+            **correction, 'document_sha256': digest, 'reviewed_by_id': str(uploaded_by.pk),
+            'reviewed_at': timezone.now().isoformat(), 'review_kind': 'source_row_correction',
+        })
+    if saved_row_reviews:
+        metadata['signed_approval_evidence']['reviewed_source_rows'] = saved_row_reviews
     if attach_only and original_import_source:
         metadata["import_source"] = original_import_source
     if attach_only:
@@ -1267,8 +1458,10 @@ def import_signed_pr_pdf(
         role = row.get("role_key")
         if role not in approval_fields:
             continue
-        user = _find_unique_active_issuer(approval_names.get(role, row.get("name", "")))
-        present = bool(row.get("signature_detected") or detected["signatures"].get(role))
+        row_name = row.get('name', '') or approval_names.get(role, '')
+        user = _find_unique_active_issuer(row_name)
+        present = bool(row.get("signature_detected") or row.get('signature_verified') is True
+                       or detected["manual_signature_overrides"].get(role))
         user_field, signature_field, status_field, date_field = approval_fields[role]
         if signatures_verified:
             setattr(pr, user_field, user)
@@ -1280,18 +1473,25 @@ def import_signed_pr_pdf(
             "step": len(external_history) + 1, "role": row.get("source_role") or role.upper(),
             "role_key": role,
             "user_id": str(user.pk) if user else None,
-            "user_name": approval_names.get(role) or row.get("name", ""),
+            "user_name": row_name,
             "status": "approved" if present else "not_recorded",
             "approved_at": approved_at.isoformat() if present and approved_at else None,
             "signature_verified": present,
-            "signature_source": detected.get("signature_sources", {}).get(role, "missing"),
+            "signature_source": 'automatic' if row.get('signature_detected') else 'manual' if present else 'missing',
             "signature_candidate": bool(row.get("signature_candidate") or detected.get("signature_candidates", {}).get(role)),
             "source": "signed_purchase_requisition_pdf", "external": True,
+            **({'evidence_source': 'manual_review'} if row.get('evidence_source') == 'manual_review' else {}),
+            **{key: row[key] for key in ('approval_label', 'special_note') if key in row},
         })
         previous_rows = previous_verification.get('source_approval_rows') or []
-        if same_document and row_index < len(previous_rows) and previous_rows[row_index].get('role_key') == role:
-            external_history[-1].update({key: previous_rows[row_index][key] for key in ('approval_label', 'special_note')
-                                         if key in previous_rows[row_index]})
+        previous_original_rows = (previous_metadata.get('signed_approval_evidence') or {}).get('rows') or []
+        original_row = (captured.get('approval_rows') or [])[row_index] if row_index < len(captured.get('approval_rows') or []) else None
+        previous_matches = [index for index, previous_row in enumerate(previous_original_rows)
+                            if original_row is not None and previous_row == original_row]
+        if same_document and len(previous_matches) == 1 and previous_matches[0] < len(previous_rows):
+            previous_row = previous_rows[previous_matches[0]]
+            external_history[-1].update({key: previous_row[key] for key in ('approval_label', 'special_note')
+                                         if key in previous_row and key not in row})
     if signatures_verified:
         if pr.status != "converted":
             pr.status = "approved"

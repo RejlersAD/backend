@@ -224,11 +224,11 @@ class SavedSourceReviewFollowupTests(TestCase):
         self.seed_additional()
         before = self.snapshot()
         changed = deepcopy(annotation_fixtures.REVIEW)
-        changed['additional_approver'].update(name='Corrected Additional', approval_label='6')
+        changed['additional_approvers'][0].update(name='Corrected Additional', approval_label='6')
         response = self.client.post(self.detail_url + 'source-review/', self.review_payload(changed), format='json')
         self.assertEqual(response.status_code, 400, response.data)
         self.assertEqual(self.snapshot(), before)
-        changed['additional_approver']['special_note'] = 'Checked the signature caption in the PDF.'
+        changed['additional_approvers'][0]['special_note'] = 'Checked the signature caption in the PDF.'
         payload = self.review_payload(changed)
         response = self.client.post(self.detail_url + 'source-review/', payload, format='json')
         self.assertEqual(response.status_code, 200, response.data)

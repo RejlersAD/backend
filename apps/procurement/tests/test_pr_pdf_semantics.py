@@ -5,7 +5,9 @@ from django.test import SimpleTestCase
 
 from apps.procurement.services.pr_pdf_semantics import apply_pr_layout_semantics, approval_role
 from apps.procurement.services.pr_pdf_text import extract_pr_pdf_text
-from apps.procurement.services.signed_pr_pdf_import import detect_approval_evidence, extract_signed_pr_fields_from_text
+from apps.procurement.services.signed_pr_pdf_import import (
+    detect_approval_evidence, document_is_signed_off, extract_signed_pr_fields_from_text,
+)
 
 
 class PRLayoutSemanticsTests(SimpleTestCase):
@@ -33,20 +35,27 @@ class PRLayoutSemanticsTests(SimpleTestCase):
         self.assertEqual(approval_role("MoE"), "moe")
         self.assertEqual(approval_role("MoP"), "mop")
         self.assertEqual(approval_role("VP, Op"), "vp")
+        self.assertEqual(approval_role("PM,PD"), "pm")
+        self.assertEqual(approval_role("PD / PM"), "pm")
+        self.assertEqual(approval_role("PM & PD"), "pm")
         for value in ("", "Name", "Signature", "Pankaj Kumar Singh", "Date", "3"):
+            self.assertEqual(approval_role(value), "")
+        for value in ("PM, MoE", "PM, Unknown", "VP, PM"):
             self.assertEqual(approval_role(value), "")
 
 
 class PRScannedApprovalTableTests(SimpleTestCase):
     @staticmethod
-    def make_scan(roles, signed=(), *, rasterized=True, printed=()):
+    def make_scan(roles, signed=(), *, rasterized=True, printed=(), compact=False):
         with pymupdf.open() as original:
             page = original.new_page(width=620, height=850)
             page.insert_text((190, 80), "Purchase Requisition", fontsize=15)
             page.insert_text((70, 110), "PR No. RAD-PRJ-PR-0190_2026", fontsize=11)
             page.insert_text((245, 495), "APPROVALS", fontsize=12)
-            x_rules = (60, 135, 330, 480, 580)
-            y_rules = [505, 540, *[540 + 38 * (index + 1) for index in range(len(roles))]]
+            role_right = 104 if compact else 135
+            row_height = 22 if compact else 38
+            x_rules = (60, role_right, 330, 480, 580)
+            y_rules = [505, 540, *[540 + row_height * (index + 1) for index in range(len(roles))]]
             for x in x_rules:
                 page.draw_line((x, 505), (x, y_rules[-1]), width=0.7)
             for y in y_rules:
@@ -55,9 +64,9 @@ class PRScannedApprovalTableTests(SimpleTestCase):
             page.insert_text((365, 528), "Signature", fontsize=12)
             page.insert_text((490, 528), "Remarks", fontsize=10)
             for index, role in enumerate(roles):
-                baseline = 565 + index * 38
-                page.insert_text((67, baseline), role, fontsize=12)
-                page.insert_text((145, baseline), f"Approver {index + 1}", fontsize=11)
+                baseline = 540 + row_height - (7 if compact else 13) + index * row_height
+                page.insert_text((67, baseline), role, fontsize=8 if compact else 12)
+                page.insert_text((role_right + 10, baseline), f"Approver {index + 1}", fontsize=8 if compact else 11)
                 if role in signed:
                     for offset in (0, 4, 8):
                         page.draw_bezier((352, baseline - 6 + offset), (380, baseline - 35), (430, baseline + 11), (465, baseline - 15 + offset), color=(0.1, 0.2, 0.7), width=1.5)
@@ -100,3 +109,30 @@ class PRScannedApprovalTableTests(SimpleTestCase):
         self.assertEqual([row["role_key"] for row in fields["approval_rows"]], ["pm", "moe", "mop", "vp"])
         self.assertFalse(any(fields["signatures"].values()))
         self.assertFalse(any(fields["signature_candidates"].values()))
+
+    def test_six_approval_rows_keep_combined_and_repeated_roles(self):
+        roles = ("PM", "PM,PD", "PM", "MoE", "MoP", "VP, Op")
+        for rasterized in (False, True):
+            with self.subTest(rasterized=rasterized):
+                pdf = self.make_scan(roles, rasterized=rasterized, compact=True)
+                source = extract_pr_pdf_text(pdf)
+                fields = detect_approval_evidence(pdf, _source=source)
+                self.assertEqual(
+                    [row["role_key"] for row in fields["approval_rows"]],
+                    ["pm", "pm", "pm", "moe", "mop", "vp"],
+                )
+                self.assertEqual(
+                    [row["name"] for row in fields["approval_rows"]],
+                    [f"Approver {index}" for index in range(1, 7)],
+                )
+                self.assertEqual(fields["approver_names"]["vp"], "Approver 6")
+                self.assertFalse(any(fields["signatures"].values()))
+                self.assertFalse(any(fields["signature_candidates"].values()))
+
+    def test_repeated_role_keeps_each_source_signature_independent(self):
+        pdf = self.make_scan(("PM", "PD", "VP, Op"), signed=("PM", "VP, Op"), rasterized=False)
+        fields = detect_approval_evidence(pdf, _source=extract_pr_pdf_text(pdf))
+        self.assertEqual([row["name"] for row in fields["approval_rows"]], ["Approver 1", "Approver 2", "Approver 3"])
+        self.assertEqual([row["signature_detected"] for row in fields["approval_rows"]], [True, False, True])
+        self.assertEqual(fields["approver_names"]["pm"], "Approver 1")
+        self.assertFalse(document_is_signed_off(fields))

@@ -10,7 +10,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 
 from apps.procurement.models import PurchaseRequisition
-from apps.procurement.services.signed_pr_pdf_import import SignedPRImportError, SignedPRStorageError, import_signed_pr_pdf
+from apps.procurement.services.signed_pr_pdf_import import SignedPRImportError, SignedPRStorageError, import_signed_pr_pdf, preview_signed_pr_pdf
 from apps.procurement.tests import test_signed_pr_pdf_creation as creation_fixtures
 
 
@@ -213,6 +213,8 @@ class DuplicateSignedPRReviewTests(TestCase):
             approvals=names, manual_signature_overrides={'pm': True, 'moe': True, 'mop': True},
             approval_date='2026-01-29',
             manual_overrides={**self.reviewed, 'net_total': '1500.75'},
+            source_approval_review={'approver_notes': {role: 'Recovered this source signer from the original PDF.' for role in names}},
+            expected_source_approval_review={},
         )
         pr = PurchaseRequisition.objects.get(pk=first['pr_id'])
         self.assertEqual(pr.status, 'draft')
@@ -220,7 +222,12 @@ class DuplicateSignedPRReviewTests(TestCase):
         old_corrected_fields = pr.price_remarks_data['manual_ocr_review']['corrected_fields']
         old_items = deepcopy(pr.items)
         old_source_price_lines = deepcopy(pr.price_remarks_data['price_lines'])
-        result = self.import_document(existing=pr, manual_signature_overrides={'vp': True})
+        preview = preview_signed_pr_pdf(self.source_bytes, filename='signed.pdf')
+        result = self.import_document(existing=pr, source_row_corrections=[{
+            'row_index': 3, 'expected_row': preview['approval_detection']['approval_rows'][3],
+            'approver_name': names['vp'], 'signature_verified': True,
+            'special_note': 'Individually confirmed the remaining VP signature.',
+        }])
         pr.refresh_from_db()
         self.assertTrue(result['document_signed_off'])
         self.assertEqual(pr.status, 'approved')
@@ -254,6 +261,13 @@ class DuplicateSignedPRReviewTests(TestCase):
              'manual_signature_overrides': {role: True for role in self.approvers}},
         ):
             with self.subTest(arguments=arguments):
+                if arguments.get('manual_signature_overrides'):
+                    with self.assertRaises(SignedPRImportError):
+                        self.import_document(**arguments)
+                    self.assertFalse(PurchaseRequisition.objects.exists())
+                    continue
+                arguments.update(source_approval_review={'approver_notes': {role: 'Recovered name only; signature still unverified.' for role in names}},
+                                 expected_source_approval_review={})
                 result = self.import_document(**arguments)
                 pr = PurchaseRequisition.objects.get(pk=result['pr_id'])
                 self.assertFalse(result['document_signed_off'])

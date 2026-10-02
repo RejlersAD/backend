@@ -187,6 +187,14 @@ def approval_role(value):
         return "mop"
     if role in {"vp", "vpop", "vpo", "vicepresident", "vicepresidentoperations"}:
         return "vp"
+    # Some forms combine titles within the same supported role, for example
+    # PM,PD. Keep that source row and its original label; do not choose between
+    # different approval roles or infer one from a name or row position.
+    parts = re.split(r"[,/;&+]", clean(value))
+    if len(parts) > 1:
+        roles = {approval_role(part) for part in parts}
+        if len(roles) == 1 and "" not in roles:
+            return roles.pop()
     return ""
 
 

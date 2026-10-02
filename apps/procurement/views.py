@@ -631,12 +631,12 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 raise SignedPRImportError('Manual signature verification must be a valid JSON object.') from exc
 
             source_review_options = {}
-            for field in ('source_approval_review', 'expected_source_approval_review', 'reviewed_project_references'):
+            for field in ('source_approval_review', 'expected_source_approval_review', 'reviewed_project_references', 'source_row_corrections'):
                 if field in request.data:
                     try:
                         source_review_options[field] = json.loads(request.data[field])
                     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                        raise SignedPRImportError(f'{field} must be a valid JSON object.') from exc
+                        raise SignedPRImportError(f'{field} must be valid JSON.') from exc
 
             create_value = str(request.data.get('create_new', 'false')).strip().lower()
             if create_value not in {'true', 'false', '1', '0'}:
