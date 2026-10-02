@@ -62,9 +62,13 @@ class _Counters:
         self.created = 0
         self.skipped_existing = 0
         self.skipped_unresolved = 0
+        self.skipped_no_image = 0
 
     def line(self, label: str) -> str:
-        return f'  {label}: {self.created} created, {self.skipped_existing} already existed, {self.skipped_unresolved} skipped (unresolved reference)'
+        base = f'  {label}: {self.created} created, {self.skipped_existing} already existed, {self.skipped_unresolved} skipped (unresolved reference)'
+        if self.skipped_no_image:
+            base += f', {self.skipped_no_image} skipped (image upload failed)'
+        return base
 
 
 class Command(BaseCommand):
@@ -246,7 +250,40 @@ class Command(BaseCommand):
         # ── Symbol images — project is REQUIRED (non-nullable FK) ──────
         # PIDVProject here is the pid_verification (V1) one — that's what
         # LegendSymbolImage.project actually points to (see models.py).
+        #
+        # BUG FIX: this used to unconditionally call obj.save() after the
+        # image-upload attempt, whether or not that attempt actually ran —
+        # `if image_filename and image_filename in zf.namelist():` silently
+        # skipped the upload (missing key, path mismatch, whatever) and
+        # fell straight through to obj.save() anyway, creating a DB row
+        # with an EMPTY image_file. Confirmed real symptom on production:
+        # rows exist in the DB with a path recorded but no matching object
+        # on S3 — the actual gap was this loop being able to leave
+        # image_file unset/blank while still persisting the row as if it
+        # had succeeded, with no warning anywhere. Now: no image bytes
+        # found -> skip the whole record (don't create a broken row);
+        # image bytes found but the upload can't be CONFIRMED to have
+        # landed in storage -> also skip, loudly, instead of trusting
+        # FieldFile.save() blindly. Only a verified-present file gets its
+        # DB row saved at all.
         symbol_counters = _Counters()
+        symbol_storage = LegendSymbolImage._meta.get_field('image_file').storage
+        storage_looks_like_s3 = hasattr(symbol_storage, 'bucket_name')
+        if not storage_looks_like_s3:
+            msg = (
+                f'Symbol images will be uploaded via {type(symbol_storage).__name__}, '
+                f'NOT an S3-backed storage. If this command is running somewhere other '
+                f'than the real production app (a one-off shell, a different environment '
+                f'with USE_S3 unset), the files it "uploads" now will NOT be visible to '
+                f'the actual production web/worker processes reading from S3 afterward — '
+                f'exactly the "DB has a path but the file is missing on S3" symptom this '
+                f'fix addresses. Re-run this command from an environment where USE_S3=True '
+                f'and the S3 credentials actually resolve.'
+            )
+            if strict:
+                raise CommandError(f'--strict: {msg} Aborting, rolling back.')
+            self.stdout.write(self.style.WARNING(f'WARNING: {msg}'))
+
         total = len(records.get('symbol_images', []))
         for i, row in enumerate(records.get('symbol_images', []), start=1):
             if LegendSymbolImage.objects.filter(image_id=row['image_id']).exists():
@@ -263,6 +300,16 @@ class Command(BaseCommand):
                 symbol_counters.skipped_unresolved += 1
                 continue
 
+            image_filename = row.get('image_filename')
+            if not image_filename or image_filename not in zf.namelist():
+                msg = (f"Symbol {row['symbol_name']!r} ({row['section']}) — image file "
+                       f"{image_filename!r} not found in export.zip.")
+                if strict:
+                    raise CommandError(f'--strict: {msg} Aborting, rolling back.')
+                self.stdout.write(self.style.WARNING(f'  SKIP: {msg}'))
+                symbol_counters.skipped_no_image += 1
+                continue
+
             obj = LegendSymbolImage(
                 image_id=row['image_id'],
                 project=project,
@@ -271,11 +318,23 @@ class Command(BaseCommand):
                 symbol_name=row['symbol_name'],
                 content_type=row.get('content_type') or 'image/png',
             )
-            image_filename = row.get('image_filename')
-            if image_filename and image_filename in zf.namelist():
-                data = zf.read(image_filename)
-                dest_name = image_filename.rsplit('/', 1)[-1]
-                obj.image_file.save(dest_name, ContentFile(data), save=False)
+            data = zf.read(image_filename)
+            dest_name = image_filename.rsplit('/', 1)[-1]
+            obj.image_file.save(dest_name, ContentFile(data), save=False)
+
+            # Verified upload, not an assumed one — ask the SAME storage
+            # backend Django just wrote through whether the file is
+            # actually there before trusting it enough to save the DB row.
+            if not obj.image_file.storage.exists(obj.image_file.name):
+                msg = (f"Symbol {row['symbol_name']!r} ({row['section']}) — upload to "
+                       f"{type(obj.image_file.storage).__name__} did not verify as present "
+                       f"afterward; not saving a DB record that would point at a missing file.")
+                if strict:
+                    raise CommandError(f'--strict: {msg} Aborting, rolling back.')
+                self.stdout.write(self.style.WARNING(f'  SKIP: {msg}'))
+                symbol_counters.skipped_no_image += 1
+                continue
+
             obj.save()
             symbol_counters.created += 1
             if i % 25 == 0 or i == total:

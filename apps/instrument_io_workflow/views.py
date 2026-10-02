@@ -36,6 +36,7 @@ from __future__ import annotations
 from apps.core.ai_consumer_clients import provider_available
 
 import logging
+import time
 
 from django.db import transaction
 from django.db.models import Q
@@ -467,6 +468,97 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
             {'cached': False, 'document': ser.data},
             status=status.HTTP_201_CREATED if already_done else status.HTTP_202_ACCEPTED,
         )
+
+    # ---- resolve a pending "keep previous / use new result" choice ----
+    @action(detail=True, methods=['post'], url_path='resolve-compare-choice')
+    def resolve_compare_choice(self, request, pk=None):
+        """Force Fresh Analysis found FEWER rows than the already-cached
+        result — tasks.py's finalize_io_document (see its own comment on
+        the compare_best block) deliberately did NOT auto-pick a winner
+        in that case: it kept the fresh result as this document's current
+        state, left the existing (better) cache entry untouched, and
+        recorded both counts under extraction_stats.compare_pending for
+        the frontend to show a choice dialog. This is where that choice
+        actually takes effect.
+
+        request.data['choice']: 'keep_cached' | 'use_fresh'.
+          - 'keep_cached': re-persist the CACHED rows (still sitting
+            untouched in vision_results_cache) as this document's current
+            state, discarding the fresh run's rows.
+          - 'use_fresh': the fresh rows are already the document's
+            current state (see above) — this just updates the cache to
+            match, so a FUTURE Re-extract/Force Fresh Analysis compares
+            against the fresh run instead of the stale, worse-performing
+            cached one.
+        Either way, clears extraction_stats.compare_pending so the dialog
+        doesn't show again for this document."""
+        document = self.get_object()
+        choice = request.data.get('choice')
+        if choice not in ('keep_cached', 'use_fresh'):
+            return Response(
+                {'error': "'choice' must be 'keep_cached' or 'use_fresh'"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        pending = (document.extraction_stats or {}).get('compare_pending')
+        if not pending:
+            return Response(
+                {'error': 'No pending comparison choice for this document.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        from .services.results_cache import save_vision_results_cache, load_vision_results_cache
+
+        if choice == 'use_fresh':
+            # The fresh rows are already what's persisted — just bring
+            # the cache in line with them so it stops offering a stale,
+            # worse-performing "cached" alternative next time, then clear
+            # the pending flag (persist_extraction isn't involved on this
+            # branch, so nothing else clears it for us).
+            fresh_rows = [
+                {**(r.data or {}), 'tag_number': r.tag_number, 'page_number': r.page_number}
+                for r in document.extracted_rows.all()
+            ]
+            save_vision_results_cache(
+                document.pdf_sha256, pending['scan_mode'], fresh_rows,
+                (document.extraction_stats or {}).get('warnings', []),
+                extraction_mode=pending['extraction_mode'],
+            )
+            stats = dict(document.extraction_stats or {})
+            stats.pop('compare_pending', None)
+            document.extraction_stats = stats
+            document.save(update_fields=['extraction_stats'])
+        else:  # keep_cached
+            cached = load_vision_results_cache(
+                document.pdf_sha256, pending['scan_mode'], pending['extraction_mode'],
+            )
+            if cached is None:
+                return Response(
+                    {'error': 'Cached result is no longer available — it may have expired or been overwritten.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            from .services.page_classifier import classify_pages
+            from .services.orchestrator import combine_and_finalize, persist_extraction
+
+            with document.pdf_file.open('rb') as f:
+                pdf_bytes = f.read()
+            pages = classify_pages(pdf_bytes)
+            # combine_and_finalize builds a brand-new stats dict from
+            # scratch (see its own code) — it never carries over
+            # 'compare_pending', so persist_extraction below clears it as
+            # a natural side effect of overwriting extraction_stats
+            # wholesale; no separate pop() needed on this branch.
+            result = combine_and_finalize(
+                document.pdf_sha256, pages, [], cached['io_rows'],
+                document.uploaded_by, time.time(),
+                document_type='pid_drawing', warnings=cached.get('warnings', []),
+                document_id=document.id,
+            )
+            result['stats']['scan_mode'] = pending['scan_mode']
+            result['stats']['tokens_used_total'] = document.tokens_used_total
+            persist_extraction(document, result)
+
+        ser = self.get_serializer(document)
+        return Response({'document': ser.data}, status=status.HTTP_200_OK)
 
     # ---- stream original PDF for an authenticated in-app preview ----
     @action(detail=True, methods=['get'], url_path='original-pdf')

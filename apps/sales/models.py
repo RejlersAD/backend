@@ -9,6 +9,10 @@ from django.utils import timezone
 from apps.core.models import TimeStampedModel
 import uuid
 from decimal import Decimal
+from .workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload, OpportunityFolderTag, OpportunityDocument  # noqa: F401
+from .classification_models import OpportunityDocumentClassification, OpportunityDocumentClassificationRun, OpportunityDocumentClassificationCommand  # noqa: F401
+from .proposal_review_models import ProposalReviewDocument, ProposalReviewComment, ProposalReviewCommand  # noqa: F401
+from .bid_preparation_models import BidPreparation, QuotePreparationRevision, BidPreparationCommand  # noqa: F401
 
 User = get_user_model()
 

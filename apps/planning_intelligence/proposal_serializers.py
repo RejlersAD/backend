@@ -40,6 +40,8 @@ class ProposalExportRecordSerializer(serializers.ModelSerializer):
 
 
 class TechnicalProposalSerializer(serializers.ModelSerializer):
+    sales_preparation_bound = serializers.SerializerMethodField()
+    sales_origin = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     checked_by_name = serializers.SerializerMethodField()
     approved_by_name = serializers.SerializerMethodField()
@@ -64,6 +66,7 @@ class TechnicalProposalSerializer(serializers.ModelSerializer):
             'rejected_at', 'review_comments', 'approval_comments',
             'workflow_tasks', 'issued_files', 'workflow_permissions',
             'issued_at', 'created_at', 'updated_at',
+            'sales_preparation_bound', 'sales_origin',
         ]
         read_only_fields = [
             'id', 'project', 'schedule_version', 'source_generation', 'proposal_number',
@@ -71,8 +74,43 @@ class TechnicalProposalSerializer(serializers.ModelSerializer):
             'reviewer', 'approver', 'review_due_date', 'approval_due_date',
             'review_submitted_at', 'review_completed_at', 'approval_submitted_at',
             'approved_at', 'rejected_at', 'review_comments', 'approval_comments',
-            'issued_at', 'created_at', 'updated_at',
+            'issued_at', 'created_at', 'updated_at', 'sales_origin', 'sales_preparation_bound',
         ]
+
+    def get_sales_preparation_bound(self, obj):
+        from apps.sales.models import BidPreparation
+        return BidPreparation.objects.filter(planning_project_id=obj.project_id).exists()
+
+    def get_sales_origin(self, obj):
+        request = self.context.get('request')
+        if request is None:
+            return None
+        from rest_framework.exceptions import APIException
+        from .sales_preparation import bound_sales_origin
+        try:
+            origin = bound_sales_origin(obj.project, request.user)
+        except APIException:
+            return None
+        # Saved evidence remains historical; current access is rechecked above.
+        return (obj.snapshot or {}).get('sales_origin') if origin else None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if self.context.get('request') and data['sales_origin'] is None and isinstance(data.get('snapshot'), dict):
+            data['snapshot'] = {key: value for key, value in data['snapshot'].items() if key != 'sales_origin'}
+        return data
+
+    def validate(self, attrs):
+        if self.instance:
+            protected = set(self.Meta.read_only_fields) & set(self.initial_data)
+            if protected:
+                raise serializers.ValidationError({key: 'Use the controlled proposal command for this field.' for key in protected})
+            from apps.sales.models import BidPreparation
+            if BidPreparation.objects.filter(planning_project_id=self.instance.project_id).exists():
+                for key in ('client_name', 'opportunity_reference', 'client_reference'):
+                    if key in attrs and attrs[key] != getattr(self.instance, key):
+                        raise serializers.ValidationError({key: 'This identity comes from the connected Sales opportunity.'})
+        return attrs
 
     @staticmethod
     def _name(user):

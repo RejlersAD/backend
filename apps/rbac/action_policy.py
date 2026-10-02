@@ -16,6 +16,7 @@ ROUTE_MODULES = {
     'pid/equipment/': 'pid_equipment_list',
     'pid/': 'pid_analysis', 'pid-export/': 'pid_analysis',
     'pid-verification/extract-valve-mto/': 'piping_pms',
+    'valve-mto/': 'piping_pms',
     'pid-verification/': 'pid_analysis', 'pid-checker-v2/': 'pid_analysis',
     'pfd/': 'pfd_to_pid', 'pfd-quality/': 'pfd_quality',
     'crs/': 'crs_documents', 'designiq/lists/': 'pid_line_list',
@@ -172,7 +173,8 @@ CREATE_OPERATIONS = {
     'generate_upload_url', 'governance_comments', 'governance_items', 'import_boq', 'import_excel',
     'import_full_xlsx', 'import_reviewed', 'import_signed_pdf', 'import_xlsx', 'intelligent_generate',
     'library_watch_start', 'materialize', 'my_signature', 'my_digital_stamp', 'output_drawings', 'process',
-    'force_fresh_extract', 'quality_check', 're_extract', 'recommend_vendors', 'reserve_number', 'run_assurance',
+    'force_fresh_extract', 'quality_check', 're_extract', 'recommend_vendors', 'reserve_number',
+    'resolve_compare_choice', 'run_assurance',
     'run_three_way_match', 'save_output', 'score_lead', 'send_email', 'send_test_mail',
     'send_test_teams', 'send_to_client', 'send_to_vendor', 'smart_upload', 'snapshots', 'start',
     'start_checklist_stage', 'start_it_checklist', 'start_review', 'start_verification',
@@ -227,6 +229,35 @@ def operation_action(request, view):
     if explicit:
         return explicit
     operation = getattr(view, 'action', '') or view.__class__.__name__
+    if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'QuoteViewSet'):
+        review_actions = {'review': 'read', 'review_bind': 'update', 'review_content': 'read',
+                          'review_download': 'read', 'review_comment': 'create',
+                          'review_resolve': 'update', 'review_submit': 'update',
+                          'preparation': 'read', 'preparation_sources': 'read',
+                          'preparation_preview': 'read', 'prepare': 'update',
+                          'preparation_opportunities': 'read', 'draft_field': 'read'}
+        if operation in review_actions:
+            # PDF bytes additionally require the source opportunity export grant.
+            return review_actions[operation]
+    if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'DealViewSet'):
+        if operation in {'bid_decision_justification', 'proposal_draft_field'}:
+            return 'read'
+        if operation == 'bid_decision':
+            from apps.sales.bid_decision_access import use_module_rbac_for_bid_decision
+            if use_module_rbac_for_bid_decision():
+                # Only the explicit, temporary Sales fallback uses module access.
+                # The locked command rechecks record scope and explicit denies.
+                return 'read'
+        storage_actions = {'workspace': 'read', 'workspace_files': 'read',
+                           'workspace_file': 'read', 'workspace_versions': 'read', 'workspace_download': 'export',
+                           'workspace_setup': 'update', 'workspace_upload': 'create', 'workspace_upload_version': 'create',
+                           'workspace_folder_tag': 'update',
+                           'workspace_file_classification': 'read' if method in ('GET', 'HEAD') else 'update',
+                           'workspace_file_classification_retry': 'update',
+                           'bid_preparation': 'read' if method == 'GET' else 'update',
+                           'bid_preparation_candidates': 'read'}
+        if operation in storage_actions:
+            return storage_actions[operation]
     if operation == 'review_assistant' and (view.__class__.__module__, view.__class__.__name__) in {
         ('apps.sales.views', 'SalesMailboxConnectionViewSet'),
         ('apps.sales.intake_views', 'SalesEmailIntakeViewSet'),

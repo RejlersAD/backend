@@ -13,9 +13,12 @@ from .procurement_lifecycle import ProcurementDeleteConflict
 from .signed_po_pdf_import import (
     SignedPOImportError, _approval_evidence, ensure_retained_po_source, import_signed_po_pdf, preview_signed_po_pdf,
 )
-from .signed_pr_pdf_import import import_signed_pr_pdf, preview_signed_pr_pdf
+from .signed_pr_pdf_import import (
+    import_signed_pr_pdf, preview_signed_pr_pdf, _restore_source_approval_review,
+    _normalize_source_row_corrections, _apply_source_row_corrections,
+)
 from .pr_source_approval_review import (
-    REVIEW_KEY, REVIEW_UNSET, prepare_source_approval_review, source_approval_review_from_metadata,
+    REVIEW_KEY, REVIEW_UNSET, SourceApprovalReviewConflict, prepare_source_approval_review, source_approval_review_from_metadata,
 )
 from .pr_review_display import default_level_zero_approver
 from .pr_project_references import prepare_reviewed_project_references
@@ -38,6 +41,10 @@ def _existing_pair_result(pr, po, source):
     verified = metadata.get('signed_document_verification') or {}
     extracted = source.extracted_data or {}
     evidence = _approval_evidence(previous=extracted)
+    pr_evidence = metadata.get('signed_approval_evidence') or {}
+    pr_detection = _restore_source_approval_review({
+        **pr_evidence, 'approval_rows': pr_evidence.get('rows') or [],
+    }, metadata, verified.get('document_sha256'))
     order_result = {
         'success': True, 'operation': 'attached' if (metadata.get('paired_signed_import') or {}).get('po_operation') == 'attached' else 'already_imported',
         'purchase_order_id': str(po.pk), 'po_number': po.po_number,
@@ -60,7 +67,7 @@ def _existing_pair_result(pr, po, source):
         'status': pr.status, 'database_verified': True,
         'signature_verified': bool(verified.get('signed_off')), 'document_signed_off': bool(verified.get('signed_off')),
         'extracted_data': verified.get('approved_fields') or {},
-        'approval_detection': metadata.get('signed_approval_evidence') or {},
+        'approval_detection': pr_detection,
         'source_approval_review': source_approval_review_from_metadata(metadata, verified.get('document_sha256')),
         'default_level_zero_approver': default_level_zero_approver(),
         'project_numbers': requisition_project_numbers(pr),
@@ -94,6 +101,13 @@ def import_signed_pair(pr_bytes, po_bytes, *, pr_filename, po_filename, request,
                 source = PODocument.objects.filter(confirmed_po=po, document_type='purchase_order').order_by('-created_at', '-id').first() if po else None
                 current_pr_digest = ((existing.price_remarks_data or {}).get('signed_document_verification') or {}).get('document_sha256')
                 if po and source and current_pr_digest == pr_digest and (source.extracted_data or {}).get('source_sha256') == po_digest:
+                    if 'source_row_corrections' in pr_options:
+                        evidence = (existing.price_remarks_data or {}).get('signed_approval_evidence') or {}
+                        detection = _restore_source_approval_review({
+                            **evidence, 'approval_rows': evidence.get('rows') or [],
+                        }, existing.price_remarks_data, pr_digest)
+                        if _apply_source_row_corrections(detection, _normalize_source_row_corrections(pr_options['source_row_corrections'])):
+                            raise SourceApprovalReviewConflict()
                     _, review_envelope = prepare_source_approval_review(
                         existing.price_remarks_data, pr_digest, request.user,
                         pr_options.get('source_approval_review', REVIEW_UNSET),

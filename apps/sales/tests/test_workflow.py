@@ -1,16 +1,20 @@
 from datetime import date, timedelta
 from decimal import Decimal
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from apps.procurement.tests.approval_fixtures import grant_approval, set_position
+from apps.notifications.models import Notification
+from apps.rbac.models import Module, Role, UserProfile
 
 from apps.project_control.models import Estimate
 from apps.sales.models import Client, Deal, FrameworkAgreement, OpportunityAuditEvent, Quote
+from apps.sales.workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload
 from apps.sales.workflow import (
     HANDOVER_REQUIRED_ITEMS, close_opportunity, convert_to_project, decide_award, decide_handover,
-    enter_negotiation, record_bid_decision, submit_award,
+    enter_negotiation, record_bid_decision, record_ceo_decision, submit_award,
     submit_handover_for_acceptance, submit_qualification,
 )
 
@@ -47,6 +51,27 @@ class OpportunityWorkflowTests(TestCase):
             submission_due_date=date.today() + timedelta(days=30),
             expected_start_date=date.today() + timedelta(days=90),
             scope_type='detailed_engineering', project_duration_months=12,
+            opportunity_type='eoi',
+            qualification_data={
+                'event_type': 'RFI (Request for Information)',
+                'published_at': '2026-10-01T16:22:00+04:00',
+                'submission_deadline_at': '2026-10-08T12:00:00+04:00',
+            },
+        )
+        self._attach_required_file(self.opportunity)
+
+    def _attach_required_file(self, opportunity):
+        workspace, _ = OpportunityWorkspace.objects.get_or_create(opportunity=opportunity)
+        OpportunityWorkspaceUpload.objects.create(
+            workspace=workspace,
+            request_id=uuid.uuid4(),
+            actor=self.owner,
+            folder_key='proposal',
+            name='qualification-support.pdf',
+            size=2048,
+            sha256='a' * 64,
+            status='ready',
+            result={'id': 'file-1'},
         )
 
     def test_governed_award_converts_exactly_once(self):
@@ -93,6 +118,7 @@ class OpportunityWorkflowTests(TestCase):
         self.assertEqual(opportunity.stage, 'converted')
         self.assertEqual(repeated.converted_project_id, project.pk)
         self.assertEqual(project.contract_value, Decimal('1235000'))
+        self.assertEqual(project.client_id, self.client.pk)
         self.assertEqual(project.scope_type, 'detailed_engineering')
         self.assertEqual(project.custom_fields['source_opportunity_code'], 'OPP-2026-001')
         self.assertTrue(Estimate.objects.filter(
@@ -111,13 +137,54 @@ class OpportunityWorkflowTests(TestCase):
         self.assertIn('scope_type', exc.exception.detail['missing_fields'])
         self.assertIn('submission_due_date', exc.exception.detail['missing_fields'])
 
+    def test_qualification_requires_attachment_before_submit(self):
+        no_file = Deal.objects.create(
+            deal_code='OPP-2026-003', deal_name='No attachment lead', client=self.client,
+            owner=self.owner, estimated_value=Decimal('1000'), currency='AED',
+            expected_close_date=date.today() + timedelta(days=10),
+            submission_due_date=date.today() + timedelta(days=8),
+            scope_type='detailed_engineering',
+        )
+
+        with self.assertRaises(ValidationError) as exc:
+            submit_qualification(no_file, self.owner)
+
+        self.assertIn('required_attachment', exc.exception.detail['missing_fields'])
+
+    def test_qualification_special_note_creates_sales_notification(self):
+        sales_member = get_user_model().objects.create_user(
+            username='sales-peer', email='peer@example.com', password='test',
+        )
+        module, _ = Module.objects.get_or_create(code='sales', defaults={'name': 'Sales'})
+        role, _ = Role.objects.get_or_create(name='Sales Collaborator', defaults={'is_active': True})
+        if not role.is_active:
+            role.is_active = True
+            role.save(update_fields=['is_active'])
+        role.modules.add(module)
+        profile = UserProfile.objects.create(user=sales_member)
+        profile.roles.add(role)
+
+        submit_qualification(self.opportunity, self.owner, special_note='Prioritize this for Monday kickoff.')
+
+        notification = Notification.objects.filter(recipient=sales_member).latest('created_at')
+        self.assertEqual(notification.category.name, 'APPROVAL')
+        self.assertIn('A new **EOI (Expression of Interest)** has been received from **National Energy Co**.', notification.message)
+        self.assertIn('Opportunity/Reference Number: **OPP-2026-001**', notification.message)
+        self.assertIn('Project Name: **Detailed Engineering Services**', notification.message)
+        self.assertIn('**Submission Deadline:** **8 October 2026 at 12:00 PM**', notification.message)
+        self.assertIn('**Owner:** sales-owner', notification.message)
+        self.assertIn('**Event Type:** RFI (Request for Information)', notification.message)
+        self.assertIn('**Published:** 1 October 2026 at 4:22 PM', notification.message)
+        self.assertIn('**Due Date:** 8 October 2026 at 12:00 PM', notification.message)
+        self.assertIn('**Special Note:** Prioritize this for Monday kickoff.', notification.message)
+
     def test_missing_project_manager_never_falls_back_to_sales_owner(self):
         from apps.sales.workflow import require_project_manager
         for nominee in (None, self.owner):
             with self.assertRaises(ValidationError):
                 require_project_manager(nominee)
 
-    @override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={})
+    @override_settings(RADAI_BUSINESS_APPROVAL_ROUTES={}, SALES_BID_DECISION_RBAC_FALLBACK_ENABLED=False)
     def test_missing_business_route_cannot_be_replaced_by_admin_access(self):
         self.approver.is_superuser = True
         self.approver.save(update_fields=['is_superuser'])
@@ -159,4 +226,49 @@ class OpportunityWorkflowTests(TestCase):
         self.assertEqual(self.opportunity.probability, 0)
         self.assertTrue(OpportunityAuditEvent.objects.filter(
             opportunity=self.opportunity, event_type='opportunity_closed',
+        ).exists())
+
+    def test_only_ceo_can_record_ceo_decision(self):
+        ceo = get_user_model().objects.create_user(
+            username='chief-exec', email='ceo@example.com', password='test',
+        )
+        grant_approval(ceo, 'sales_opportunities')
+        set_position(ceo, 'Chief Executive Officer')
+        submit_qualification(self.opportunity, self.owner)
+        self.opportunity = record_bid_decision(self.opportunity, self.approver, 'bid', 'Gate passed')
+
+        with self.assertRaises(PermissionDenied):
+            record_ceo_decision(self.opportunity, self.owner, 'go')
+
+        updated = record_ceo_decision(self.opportunity, ceo, 'go')
+        self.assertEqual(updated.stage, 'proposal')
+        self.assertTrue(OpportunityAuditEvent.objects.filter(
+            opportunity=self.opportunity,
+            event_type='ceo_gate_decision',
+            data__decision='approved',
+        ).exists())
+
+    def test_ceo_no_go_closes_as_no_bid_with_reason(self):
+        ceo = get_user_model().objects.create_user(
+            username='chief-stop', email='ceo.stop@example.com', password='test',
+        )
+        grant_approval(ceo, 'sales_opportunities')
+        set_position(ceo, 'Chief Executive Officer')
+        submit_qualification(self.opportunity, self.owner)
+        self.opportunity = record_bid_decision(self.opportunity, self.approver, 'conditional_bid', 'Pending commercial clarifications')
+
+        with self.assertRaises(ValidationError):
+            record_ceo_decision(self.opportunity, ceo, 'no_go')
+
+        updated = record_ceo_decision(
+            self.opportunity, ceo, 'no_go',
+            'Strategic priorities changed for this cycle.',
+        )
+        self.assertEqual(updated.stage, 'no_bid')
+        self.assertEqual(updated.bid_decision, 'no_bid')
+        self.assertEqual(updated.bid_decision_reason, 'Strategic priorities changed for this cycle.')
+        self.assertTrue(OpportunityAuditEvent.objects.filter(
+            opportunity=self.opportunity,
+            event_type='ceo_gate_decision',
+            data__decision='rejected',
         ).exists())

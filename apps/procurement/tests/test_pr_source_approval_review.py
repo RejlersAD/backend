@@ -15,7 +15,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps.procurement.models import PODocument, PurchaseOrder, PurchaseRequisition
 from apps.procurement.serializers import PurchaseRequisitionSerializer
 from apps.procurement.services.pr_source_approval_review import (
-    SourceApprovalReviewConflict, SourceApprovalReviewError,
+    SourceApprovalReviewConflict, SourceApprovalReviewError, normalize_source_approval_review,
 )
 from apps.procurement.services.signed_po_pdf_import import SignedPOImportError
 from apps.procurement.services.signed_pr_pdf_import import (
@@ -27,12 +27,12 @@ from . import test_paired_signed_import as pair_fixtures
 from . import test_signed_pr_pdf_creation as creation_fixtures
 
 
-EMPTY_REVIEW = {'approval_labels': {}, 'additional_approver': None}
+EMPTY_REVIEW = {'approval_labels': {}, 'additional_approvers': []}
 REVIEW = {
     'approval_labels': {'pm': '1', 'moe': '2', 'mop': 'Final source', 'vp': '4'},
-    'additional_approver': {
-        'name': 'External Source Signer', 'approval_label': '5', 'signature_verified': True,
-    },
+    'additional_approvers': [{
+        'id': 'legacy-additional', 'name': 'External Source Signer', 'approval_label': '5', 'signature_verified': True,
+    }],
 }
 
 
@@ -84,7 +84,7 @@ class PRSourceApprovalReviewTests(TestCase):
     def test_creation_roundtrip_records_normalized_review_and_server_owned_audit(self):
         requested = deepcopy(REVIEW)
         requested['approval_labels'].update(pm='  1  ', moe='   ')
-        requested['additional_approver']['name'] = '  External Source Signer  '
+        requested['additional_approvers'][0]['name'] = '  External Source Signer  '
         expected = deepcopy(REVIEW)
         expected['approval_labels'].pop('moe')
         before = timezone.now()
@@ -108,7 +108,7 @@ class PRSourceApprovalReviewTests(TestCase):
         pr = PurchaseRequisition.objects.get(pk=self.import_document()['pr_id'])
         original_workflow = deepcopy(pr.approval_workflow_config)
         requested = deepcopy(REVIEW)
-        requested['additional_approver']['signature_verified'] = False
+        requested['additional_approvers'][0]['signature_verified'] = False
         result = self.save_review(requested, existing=pr)
         pr.refresh_from_db()
         self.assertTrue(result['document_signed_off'])
@@ -172,8 +172,8 @@ class PRSourceApprovalReviewTests(TestCase):
         pr = PurchaseRequisition.objects.get(pk=self.save_review()['pr_id'])
         first = self.envelope(pr)
         changed = deepcopy(REVIEW)
-        changed['additional_approver']['name'] = 'Corrected Source Signer'
-        changed['additional_approver']['special_note'] = 'Corrected the source signer spelling.'
+        changed['additional_approvers'][0]['name'] = 'Corrected Source Signer'
+        changed['additional_approvers'][0]['special_note'] = 'Corrected the source signer spelling.'
         self.save_review(changed, expected=REVIEW, existing=pr)
         second = self.envelope(pr)
         self.assertEqual(second['history'][:1], first['history'])
@@ -277,7 +277,7 @@ class PRSourceApprovalReviewTests(TestCase):
         requested = {'approval_labels': {'pm': 'x' * 20}, 'additional_approver': {
             'name': 'n' * 200, 'approval_label': 'y' * 20, 'signature_verified': False,
         }}
-        self.assertEqual(self.save_review(requested)['source_approval_review'], requested)
+        self.assertEqual(self.save_review(requested)['source_approval_review'], normalize_source_approval_review(requested))
 
     def test_storage_failure_rolls_back_annotation_and_preserves_previous_history(self):
         pr = PurchaseRequisition.objects.get(pk=self.save_review()['pr_id'])

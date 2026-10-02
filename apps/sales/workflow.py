@@ -6,12 +6,16 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from rest_framework.exceptions import ValidationError
+from django.utils.dateparse import parse_datetime
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.core.project_models import Project, ProjectMember
 from apps.project_control.models import Estimate
+from apps.notifications.services import NotificationService
+from apps.rbac.models import UserProfile
 
 from .models import Deal, OpportunityAuditEvent, ProjectHandover
+from .workspace_models import OpportunityWorkspaceUpload
 
 
 HANDOVER_REQUIRED_ITEMS = (
@@ -47,19 +51,136 @@ def _require(value, field, missing):
         missing.append(field)
 
 
-def submit_qualification(opportunity, actor):
+def _sales_notification_recipients(actor):
+    profiles = UserProfile.objects.filter(
+        is_deleted=False,
+        user__is_active=True,
+        roles__is_active=True,
+        roles__modules__code='sales',
+        roles__modules__is_active=True,
+    ).select_related('user').distinct()
+    recipients = [profile.user for profile in profiles if profile.user_id != actor.id]
+    return recipients
+
+
+def _read_event_type(opportunity):
+    value = (
+        opportunity.qualification_data.get('event_type')
+        or opportunity.custom_fields.get('event_type')
+        or opportunity.qualification_data.get('request_type')
+        or opportunity.custom_fields.get('request_type')
+        or ''
+    )
+    if value:
+        return str(value).strip()
+    return (opportunity.get_opportunity_type_display() or 'Not provided').strip()
+
+
+def _parse_value_datetime(value):
+    if not value:
+        return None
+    if isinstance(value, str):
+        parsed = parse_datetime(value)
+        return parsed if parsed is not None else None
+    if hasattr(value, 'hour'):
+        return value
+    return None
+
+
+def _render_date_or_datetime(value, *, default_time='12:00 PM'):
+    # Preserve known timestamps; date-only values are rendered with a policy default time.
+    if value is None:
+        return 'Not provided'
+    if hasattr(value, 'hour'):
+        local = timezone.localtime(value) if timezone.is_aware(value) else value
+        return f"{local.day} {local.strftime('%B %Y')} at {local.strftime('%I:%M %p').lstrip('0')}"
+    return f"{value.day} {value.strftime('%B %Y')} at {default_time}"
+
+
+def _qualification_notification_message(opportunity):
+    opportunity_type = (opportunity.get_opportunity_type_display() or 'Not provided').strip()
+    if opportunity_type.upper() == 'EOI':
+        opportunity_type = 'EOI (Expression of Interest)'
+    event_type = _read_event_type(opportunity)
+    published_at = (
+        _parse_value_datetime(opportunity.qualification_data.get('published_at'))
+        or _parse_value_datetime(opportunity.custom_fields.get('published_at'))
+        or opportunity.created_at
+    )
+    deadline_at = (
+        _parse_value_datetime(opportunity.qualification_data.get('submission_deadline_at'))
+        or _parse_value_datetime(opportunity.custom_fields.get('submission_deadline_at'))
+        or opportunity.submission_due_date
+    )
+    owner_name = (
+        opportunity.owner.get_full_name() if opportunity.owner_id else ''
+    ) or (opportunity.owner.username if opportunity.owner_id else 'Not assigned')
+    company_name = (opportunity.client.company_name or 'Not provided').strip()
+    project_name = (opportunity.deal_name or 'Not provided').strip()
+    reference_number = (opportunity.deal_code or 'Not provided').strip()
+    submission_deadline = _render_date_or_datetime(deadline_at)
+    published = _render_date_or_datetime(published_at)
+    due_date = _render_date_or_datetime(deadline_at)
+    return (
+        f"- A new **{opportunity_type}** has been received from **{company_name}**.\n"
+        f"- Opportunity/Reference Number: **{reference_number}**\n"
+        f"- Project Name: **{project_name}**\n"
+        f"- **Submission Deadline:** **{submission_deadline}**\n"
+        f"- **Owner:** {owner_name}\n"
+        f"- **Event Type:** {event_type}\n"
+        f"- **Published:** {published}\n"
+        f"- **Due Date:** {due_date}"
+    )
+
+
+def _notify_sales_qualification(opportunity, actor, special_note=''):
+    recipients = _sales_notification_recipients(actor)
+    if not recipients:
+        return
+    message = _qualification_notification_message(opportunity)
+    if special_note:
+        message += f'\n- **Special Note:** {special_note}'
+    NotificationService.bulk_notify(
+        recipients,
+        title='New opportunity qualification received',
+        message=message,
+        category='APPROVAL',
+        priority='NORMAL',
+        action_label='Open opportunity',
+        action_url=f'/sales/opportunities?record={opportunity.pk}',
+        metadata={
+            'module': 'sales',
+            'department': 'sales',
+            'event_type': 'qualification_submitted',
+            'action_type': 'sales_qualification_review',
+            'popup_required': True,
+            'persistent_until_action': True,
+            'opportunity_id': str(opportunity.pk),
+            'deal_code': opportunity.deal_code,
+            'special_note': special_note,
+        },
+    )
+
+
+def submit_qualification(opportunity, actor, special_note=''):
     if opportunity.stage != 'lead':
         raise ValidationError({'stage': 'Only a lead can be submitted for qualification.'})
+    note = str(special_note or '').strip()
+    if len(note) > 1000:
+        raise ValidationError({'special_note': 'Special note must be 1000 characters or fewer.'})
     missing = []
     for value, field in [
         (opportunity.scope_type, 'scope_type'),
         (opportunity.submission_due_date, 'submission_due_date'),
-        (opportunity.expected_close_date, 'expected_close_date'),
-        (opportunity.estimated_value, 'estimated_value'),
-        (opportunity.currency, 'currency'),
         (opportunity.owner_id, 'owner'),
     ]:
         _require(value, field, missing)
+    has_required_attachment = OpportunityWorkspaceUpload.objects.filter(
+        workspace__opportunity=opportunity,
+        status='ready',
+    ).exists()
+    if not has_required_attachment:
+        missing.append('required_attachment')
     if missing:
         raise ValidationError({'missing_fields': missing})
     if opportunity.framework_id:
@@ -73,15 +194,24 @@ def submit_qualification(opportunity, actor):
     opportunity.stage = 'qualified'
     opportunity.stage_entered_at = timezone.now()
     opportunity.save()
-    _audit(opportunity, actor, 'qualification_submitted', from_stage=old, to_stage=opportunity.stage)
+    _audit(
+        opportunity,
+        actor,
+        'qualification_submitted',
+        from_stage=old,
+        to_stage=opportunity.stage,
+        reason=note,
+        data={'special_note': note} if note else {},
+    )
+    _notify_sales_qualification(opportunity, actor, note)
     return opportunity
 
 
 @transaction.atomic
 def record_bid_decision(opportunity, actor, decision, reason=''):
     opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
-    from apps.rbac.approval_eligibility import require_configured_approval
-    require_configured_approval(actor, 'sales_opportunities', opportunity, 'bid_decision')
+    from .bid_decision_access import require_bid_decision_access
+    decision_authority = require_bid_decision_access(actor, opportunity)
     if opportunity.stage != 'qualified':
         raise ValidationError({'stage': 'Bid decision is available only for a qualified opportunity.'})
     if decision not in {'bid', 'conditional_bid', 'no_bid'}:
@@ -92,7 +222,7 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
         raise ValidationError({'detail': 'Complete the estimated value and currency before a bid decision.'})
     approval_value = Decimal(str(getattr(settings, 'SALES_MANAGEMENT_APPROVAL_VALUE', 5000000)))
     requires_management = opportunity.risk_level in {'high', 'critical'} or opportunity.estimated_value >= approval_value
-    if requires_management and actor.id == opportunity.owner_id:
+    if decision_authority == 'configured_route' and requires_management and actor.id == opportunity.owner_id:
         raise ValidationError({
             'approver': 'A high-risk or high-value bid decision requires independent management approval.',
         })
@@ -106,7 +236,48 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
     opportunity.save()
     _audit(
         opportunity, actor, 'bid_decision', from_stage=old, to_stage=opportunity.stage,
-        reason=reason, data={'decision': decision},
+        reason=reason, data={'decision': decision, 'decision_authority': decision_authority},
+    )
+    return opportunity
+
+
+@transaction.atomic
+def record_ceo_decision(opportunity, actor, decision, reason=''):
+    opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
+    from apps.rbac.approval_eligibility import approval_access, has_business_position
+    if not approval_access(actor, 'sales_opportunities'):
+        raise PermissionDenied('Your current access does not permit CEO opportunity decisions.')
+    if not has_business_position(actor, ('ceo',)):
+        raise PermissionDenied('Only the CEO can record this lifecycle decision.')
+    if opportunity.stage != 'proposal' or opportunity.bid_decision not in {'bid', 'conditional_bid'}:
+        raise ValidationError({'stage': 'CEO decision is available only after a Bid or Conditional Bid enters proposal stage.'})
+    value = str(decision or '').strip().lower()
+    if value in {'go', 'approved', 'approve', 'yes'}:
+        approved = True
+    elif value in {'no_go', 'nogo', 'rejected', 'reject', 'no'}:
+        approved = False
+    else:
+        raise ValidationError({'decision': 'Use go or no_go.'})
+    note = str(reason or '').strip()
+    if not approved and not note:
+        raise ValidationError({'reason': 'A reason is required when CEO marks no_go.'})
+    old_stage = opportunity.stage
+    if not approved:
+        opportunity.bid_decision = 'no_bid'
+        opportunity.bid_decision_reason = note
+        opportunity.bid_decided_by = actor
+        opportunity.bid_decided_at = timezone.now()
+        opportunity.stage = 'no_bid'
+        opportunity.stage_entered_at = timezone.now()
+    opportunity.save()
+    _audit(
+        opportunity,
+        actor,
+        'ceo_gate_decision',
+        from_stage=old_stage,
+        to_stage=opportunity.stage,
+        reason=note,
+        data={'decision': 'approved' if approved else 'rejected'},
     )
     return opportunity
 
@@ -309,6 +480,7 @@ def convert_to_project(opportunity_id, actor, *, project_code, project_name=None
         currency=opportunity.currency,
         scope_type=opportunity.scope_type,
         client_name=opportunity.client.company_name,
+        client=opportunity.client,
         location=opportunity.location,
         tags=opportunity.tags,
         custom_fields={

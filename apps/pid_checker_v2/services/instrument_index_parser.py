@@ -31,14 +31,32 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Soft-coded config ────────────────────────────────────────────────
-# Column aliases — case-insensitive substring match against the header text.
+
+def _normalize_header_text(s: Any) -> str:
+    """Loosen header-cell comparisons so real-world formatting noise
+    (periods, extra/missing spaces, spacing around '&') doesn't block a
+    match that's semantically the same field — e.g. 'TAG NO.', 'TAG NO'
+    and 'Tag No' all normalize to 'tag no'; 'P & ID' and 'P&ID' both
+    normalize to 'p&id'. '&' itself is kept (meaningful for P&ID) — only
+    the whitespace around it collapses.
+    """
+    s = str(s or '').strip().lower()
+    if not s:
+        return ''
+    s = re.sub(r'\s*&\s*', '&', s)
+    s = re.sub(r'[^a-z0-9&]+', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+# Column aliases — case-insensitive substring match against the header text
+# (compared via _normalize_header_text — see _NORMALIZED_* below).
 # Some columns live on the PRIMARY header row, some on the SECONDARY row.
 PRIMARY_COL_ALIASES: dict[str, tuple[str, ...]] = {
-    'sno':             ('sl.no', 'sl. no', 's.no', 's. no', 'sno', 'sr.no'),
-    'tag':             ('tag number', 'tag no', 'instrument tag'),
-    'instrument_type': ('instrument type', 'type of instrument'),
-    'pid_no':          ('pid number', 'p&id number', 'p&id no', 'pid no'),
-    'eqpt_no':         ('eqpt number', 'equipment number', 'eqpt no'),
+    'sno':             ('sl.no', 'sl. no', 's.no', 's. no', 'sno', 'sr.no', 'item no'),
+    'tag':             ('tag number', 'tag no', 'instrument tag', 'tag#', 'tag'),
+    'instrument_type': ('instrument type', 'type of instrument', 'inst type', 'inst. type', 'type'),
+    'pid_no':          ('pid number', 'p&id number', 'p&id no', 'pid no', 'p&id'),
+    'eqpt_no':         ('eqpt number', 'equipment number', 'eqpt no', 'equip no', 'equip. no'),
     'ex_class':        ('ex class', 'ex. class', 'ex-class', 'ex classification'),
     'datasheet_no':    ('datasheet no', 'data sheet no', 'ds no'),
     'hookup_dwg_no':   ('hook up dwg', 'hookup dwg', 'hook-up dwg'),
@@ -75,11 +93,30 @@ SECONDARY_KEYS = frozenset({
     'loop_dwg_no', 'location_layout_no', 'model',
 })
 
-# Tokens used to detect the primary header row.
+# Tokens used to detect the primary header row (compared via
+# _normalize_header_text, so punctuation/spacing variants like 'TAG NO.',
+# 'TAG#' or 'EX-CLASS' still count).
 REQUIRED_HEADER_TOKENS = (
-    'tag number', 'instrument type', 'datasheet', 'ex class', 'eqpt number',
+    'tag number', 'tag no', 'instrument type', 'inst type', 'datasheet',
+    'ex class', 'eqpt number', 'eqpt no',
 )
 MIN_HEADER_MATCHES = 2
+
+# Pre-normalized lookups, built once at import time so the alias strings
+# above (some of which contain punctuation, e.g. 'rev.') compare correctly
+# against the now-normalized header-cell text (see _lower / _normalize_
+# header_text) — both sides must go through the same normalization.
+_NORMALIZED_PRIMARY_COL_ALIASES = {
+    key: tuple(_normalize_header_text(a) for a in aliases)
+    for key, aliases in PRIMARY_COL_ALIASES.items()
+}
+_NORMALIZED_SECONDARY_COL_ALIASES = {
+    key: tuple(_normalize_header_text(a) for a in aliases)
+    for key, aliases in SECONDARY_COL_ALIASES.items()
+}
+_NORMALIZED_RANGE_GROUP_INSTRUMENT = tuple(_normalize_header_text(t) for t in RANGE_GROUP_INSTRUMENT)
+_NORMALIZED_RANGE_GROUP_CALIBRATION = tuple(_normalize_header_text(t) for t in RANGE_GROUP_CALIBRATION)
+_NORMALIZED_REQUIRED_HEADER_TOKENS = tuple(_normalize_header_text(t) for t in REQUIRED_HEADER_TOKENS)
 
 # How far down to scan for the header before giving up
 MAX_HEADER_SCAN_ROWS = 30
@@ -228,8 +265,10 @@ def _detect_header_row(all_rows: list[tuple]) -> Optional[int]:
         for cell in all_rows[i]:
             if cell is None:
                 continue
-            txt = str(cell).strip().lower()
-            for token in REQUIRED_HEADER_TOKENS:
+            txt = _lower(cell)
+            if not txt:
+                continue
+            for token in _NORMALIZED_REQUIRED_HEADER_TOKENS:
                 if token in txt:
                     matches += 1
                     break
@@ -249,14 +288,14 @@ def _map_columns(primary: tuple, secondary: tuple) -> dict[str, int]:
         s_txt = _lower(secondary[idx] if idx < len(secondary) else None)
         combined = f'{p_txt} {s_txt}'.strip()
 
-        for key, aliases in PRIMARY_COL_ALIASES.items():
+        for key, aliases in _NORMALIZED_PRIMARY_COL_ALIASES.items():
             if key in columns:
                 continue
             if any(alias in p_txt for alias in aliases):
                 columns[key] = idx
                 break
 
-        for key, aliases in SECONDARY_COL_ALIASES.items():
+        for key, aliases in _NORMALIZED_SECONDARY_COL_ALIASES.items():
             if key in columns:
                 continue
             if any(alias in s_txt for alias in aliases):
@@ -264,9 +303,9 @@ def _map_columns(primary: tuple, secondary: tuple) -> dict[str, int]:
                 break
 
     # Second pass — range group triples (primary header spans 3 sub-header cells: Min | Max | Unit)
-    _map_range_group(primary, secondary, RANGE_GROUP_INSTRUMENT, columns,
+    _map_range_group(primary, secondary, _NORMALIZED_RANGE_GROUP_INSTRUMENT, columns,
                      ('range_min', 'range_max', 'range_unit'))
-    _map_range_group(primary, secondary, RANGE_GROUP_CALIBRATION, columns,
+    _map_range_group(primary, secondary, _NORMALIZED_RANGE_GROUP_CALIBRATION, columns,
                      ('cal_min', 'cal_max', 'cal_unit'))
     return columns
 
@@ -310,9 +349,14 @@ def _map_range_group(primary: tuple, secondary: tuple, group_tokens: tuple[str, 
 
 
 def _lower(v: Any) -> str:
-    if v is None:
-        return ''
-    return str(v).strip().lower()
+    """Header-cell comparison helper — normalizes away punctuation/spacing
+    noise (periods, extra/missing spaces, spacing around '&') so real-world
+    variants like 'TAG NO.', 'TAG#' or 'EX-CLASS' still match their alias.
+    Despite the name (kept to avoid touching every call site), this does
+    more than lowercase — see _normalize_header_text() near the top of the
+    file for the actual normalization.
+    """
+    return _normalize_header_text(v)
 
 
 def _is_blank_row(row: tuple) -> bool:

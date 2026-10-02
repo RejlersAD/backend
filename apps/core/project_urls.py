@@ -9,6 +9,10 @@ from apps.core.project_views import (
     ProjectMilestoneViewSet,
     SmartProjectCollectionViewSet
 )
+from .shared_record_views import (
+    SharedRecordQueueView, SharedRecordDetailView, SharedRecordCandidatesView,
+    SharedRecordLinkView, SharedRecordTargetsView,
+)
 
 router = DefaultRouter()
 router.register(r'tasks', ProjectTaskViewSet, basename='project-task')
@@ -17,5 +21,10 @@ router.register(r'smart-projects', SmartProjectCollectionViewSet, basename='smar
 router.register(r'', ProjectViewSet, basename='project')
 
 urlpatterns = [
+    path('shared-records/', SharedRecordQueueView.as_view()),
+    path('shared-record-targets/', SharedRecordTargetsView.as_view()),
+    path('shared-records/<str:source_type>/<str:source_id>/', SharedRecordDetailView.as_view()),
+    path('shared-records/<str:source_type>/<str:source_id>/candidates/', SharedRecordCandidatesView.as_view()),
+    path('shared-records/<str:source_type>/<str:source_id>/link/', SharedRecordLinkView.as_view()),
     path('', include(router.urls)),
 ]

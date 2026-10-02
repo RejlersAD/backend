@@ -22,12 +22,18 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 # ─── Soft-coded config ────────────────────────────────────────────────
-# Column aliases — case-insensitive substring match against the header row.
+# Column aliases — case-insensitive substring match against the header row
+# (compared after _normalize_header_text() on both sides — see below, so
+# punctuation/spacing differences like "EQPT.TAG" vs "EQPT TAG" vs
+# "Eqpt. Tag" or "P & ID" vs "P&ID" all match the same alias).
 COL_ALIASES = {
-    'sno':             ['s.no', 's. no', 'sno', 'sr.no'],
+    'sno':             ['s.no', 's. no', 'sno', 'sr.no', 'sl.no', 'item no'],
     'rev':             ['rev'],
-    'tag':             ['eqpt. tag', 'eqpt tag', 'equipment tag', 'tag no'],
-    'description':     ['description', 'service'],
+    'tag':             ['eqpt. tag', 'eqpt tag', 'equipment tag', 'equip. tag', 'equip tag',
+                        'eq. tag', 'eq tag', 'tag no', 'tag number', 'tag #', 'equipment no',
+                        'equipment number'],
+    'description':     ['description', 'desc.', 'desc', 'service', 'item description',
+                        'equipment description', 'service description'],
     'design_flow':     ['design flowrate', 'design duty', 'volume'],
     'op_pressure':     ['oper. press', 'operating press', 'op. press'],
     'op_temp':         ['oper. temp', 'operating temp', 'op. temp'],
@@ -40,7 +46,7 @@ COL_ALIASES = {
     'dim_length':      ['length', 'height', 'length tl'],
     'dim_diameter':    ['diameter', 'width'],
     'motor_rating':    ['motor rating', 'motor'],
-    'pid_no':          ['p&id no', 'p&id', 'pid no'],
+    'pid_no':          ['p&id no', 'p&id', 'pid no', 'pid#', 'p&id number'],
     'qty':             ['qty', 'quantity'],
     'phase':           ['phase'],
     'remarks':         ['remarks', 'notes'],
@@ -54,9 +60,39 @@ COL_ALIASES = {
     'trim':              ['trim', 'trim material', 'valve trim'],
 }
 
+
+def _normalize_header_text(s: Any) -> str:
+    """Loosen header-cell comparisons so real-world formatting noise
+    (periods, extra/missing spaces, spacing around '&') doesn't block a
+    match that's semantically the same field — e.g. 'EQPT.TAG', 'EQPT TAG'
+    and 'Eqpt. Tag' all normalize to 'eqpt tag'; 'P & ID' and 'P&ID' both
+    normalize to 'p&id'. '&' itself is kept (meaningful for P&ID) — only
+    the whitespace around it collapses.
+    """
+    s = str(s or '').strip().lower()
+    if not s:
+        return ''
+    s = re.sub(r'\s*&\s*', '&', s)         # "p & id" -> "p&id"
+    s = re.sub(r'[^a-z0-9&]+', ' ', s)     # any other punctuation -> space
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+# Pre-normalized alias lookup, built once at import time from COL_ALIASES /
+# REQUIRED_HEADER_TOKENS above so the hot header-scan loop doesn't
+# re-normalize the same literal strings on every cell.
+_NORMALIZED_COL_ALIASES = {
+    key: [_normalize_header_text(a) for a in aliases]
+    for key, aliases in COL_ALIASES.items()
+}
+
 # When looking for the header row, at least this many of these
-# distinctive field names must appear.
-REQUIRED_HEADER_TOKENS = ('eqpt. tag', 'equipment tag', 'description', 'moc', 'p&id')
+# distinctive field names must appear (compared via _normalize_header_text,
+# so e.g. 'DESC' / 'EQUIP TAG' / 'P & ID' all still count).
+REQUIRED_HEADER_TOKENS = (
+    'eqpt. tag', 'eqpt tag', 'equip tag', 'equipment tag', 'equipment no',
+    'description', 'desc', 'moc', 'p&id',
+)
+_NORMALIZED_REQUIRED_HEADER_TOKENS = tuple(_normalize_header_text(t) for t in REQUIRED_HEADER_TOKENS)
 MIN_HEADER_MATCHES = 2
 
 # How far down to scan for the header before giving up
@@ -171,8 +207,10 @@ def _detect_header_row(all_rows: list[tuple]) -> Optional[int]:
         for cell in all_rows[i]:
             if cell is None:
                 continue
-            txt = str(cell).strip().lower()
-            for token in REQUIRED_HEADER_TOKENS:
+            txt = _normalize_header_text(cell)
+            if not txt:
+                continue
+            for token in _NORMALIZED_REQUIRED_HEADER_TOKENS:
                 if token in txt:
                     matches += 1
                     break
@@ -195,18 +233,18 @@ def _map_columns(header_row: tuple, sub_header_row: tuple) -> dict[str, int]:
     # last seen non-blank header cell across the row.
     last_group_header = ''
     for idx, cell in enumerate(header_row):
-        if cell is not None and str(cell).strip():
-            last_group_header = str(cell).strip().lower()
+        if cell is not None and _normalize_header_text(cell):
+            last_group_header = _normalize_header_text(cell)
             header_txt = last_group_header
         else:
             header_txt = last_group_header
         sub_txt = ''
         if idx < len(sub_header_row) and sub_header_row[idx] is not None:
-            sub_txt = str(sub_header_row[idx]).strip().lower()
+            sub_txt = _normalize_header_text(sub_header_row[idx])
         if not header_txt and not sub_txt:
             continue
         combined = f'{header_txt} {sub_txt}'.strip()
-        for key, aliases in COL_ALIASES.items():
+        for key, aliases in _NORMALIZED_COL_ALIASES.items():
             if key in columns:
                 continue  # already mapped, keep first hit
             for alias in aliases:

@@ -1,6 +1,7 @@
 """Reviewed source labels/signers; never a RADAI approval assignment or decision."""
 
 from copy import deepcopy
+import re
 
 from django.utils import timezone
 from rest_framework.exceptions import APIException
@@ -30,7 +31,7 @@ class SourceApprovalReviewConflict(APIException):
 
 
 def empty_source_approval_review():
-    return {'approval_labels': {}, 'additional_approver': None}
+    return {'approval_labels': {}, 'additional_approvers': []}
 
 
 def _text(value, label, limit):
@@ -43,7 +44,7 @@ def _text(value, label, limit):
 
 
 def normalize_source_approval_review(value):
-    if not isinstance(value, dict) or set(value) - {'approval_labels', 'additional_approver', 'approver_notes'}:
+    if not isinstance(value, dict) or set(value) - {'approval_labels', 'additional_approver', 'additional_approvers', 'approver_notes'}:
         raise SourceApprovalReviewError('Source signatory review contains unsupported fields.')
     labels = value.get('approval_labels', {})
     if not isinstance(labels, dict) or set(labels) - LABEL_ROLES:
@@ -54,11 +55,25 @@ def normalize_source_approval_review(value):
         if label:
             normalized_labels[role] = label
 
-    additional = value.get('additional_approver')
-    normalized_additional = None
-    if additional is not None:
-        if not isinstance(additional, dict) or set(additional) - {'name', 'approval_label', 'signature_verified', 'special_note'}:
+    if 'additional_approvers' in value and 'additional_approver' in value:
+        raise SourceApprovalReviewError('Use either additional_approvers or the legacy additional_approver field, not both.')
+    legacy = 'additional_approvers' not in value
+    rows = value.get('additional_approvers', [])
+    if legacy and value.get('additional_approver') is not None:
+        rows = [value['additional_approver']]
+    if not isinstance(rows, list):
+        raise SourceApprovalReviewError('Additional approvers must be a list.')
+    normalized_additional, identities = [], set()
+    for additional in rows:
+        allowed = {'name', 'approval_label', 'signature_verified', 'special_note'} | ({'id'} if not legacy else set())
+        if not isinstance(additional, dict) or set(additional) - allowed:
             raise SourceApprovalReviewError('Additional approver contains unsupported fields.')
+        identity = 'legacy-additional' if legacy else additional.get('id')
+        if not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', identity):
+            raise SourceApprovalReviewError('Each additional approver needs a stable ID of at most 80 letters, numbers, hyphens or underscores.')
+        if identity in identities:
+            raise SourceApprovalReviewError('Additional approver IDs must be unique.')
+        identities.add(identity)
         name = _text(additional.get('name', ''), 'Additional approver name', 200)
         label = _text(additional.get('approval_label', ''), 'Additional approver label', 20)
         note = _text(additional.get('special_note', ''), 'Additional approver special note', 2000)
@@ -70,15 +85,16 @@ def normalize_source_approval_review(value):
                 raise SourceApprovalReviewError('Enter the additional approver name before recording its label or signature.')
             if verified is REVIEW_UNSET:
                 raise SourceApprovalReviewError('Additional signature verification must be an explicit Boolean.')
-            normalized_additional = {'name': name, 'approval_label': label, 'signature_verified': verified}
+            normalized_row = {'id': identity, 'name': name, 'approval_label': label, 'signature_verified': verified}
             if note:
-                normalized_additional['special_note'] = note
+                normalized_row['special_note'] = note
+            normalized_additional.append(normalized_row)
     notes = value.get('approver_notes', {})
     if not isinstance(notes, dict) or set(notes) - LABEL_ROLES:
         raise SourceApprovalReviewError('Source approver notes must use only pm, moe, mop and vp.')
     notes = {role: text for role, note in notes.items()
              if (text := _text(note, 'Source approver special note', 2000))}
-    result = {'approval_labels': normalized_labels, 'additional_approver': normalized_additional}
+    result = {'approval_labels': normalized_labels, 'additional_approvers': normalized_additional}
     if notes:
         result['approver_notes'] = notes
     return result
@@ -112,13 +128,13 @@ def _same_source(metadata, envelope, digest):
 
 
 def review_for_approver_names(review, names=None):
-    projected = deepcopy(review)
+    projected = normalize_source_approval_review(review)
     for role, name in (names or {}).items():
         if role in LABEL_ROLES and is_richa_name(name):
             projected['approval_labels'][role] = '0'
-    additional = projected.get('additional_approver')
-    if additional and is_richa_name(additional.get('name')):
-        additional['approval_label'] = '0'
+    for additional in projected['additional_approvers']:
+        if is_richa_name(additional.get('name')):
+            additional['approval_label'] = '0'
     return projected
 
 
@@ -159,12 +175,13 @@ def prepare_source_approval_review(metadata, digest, actor, review=REVIEW_UNSET,
                 desired['approval_labels'].get(role, '') != current['approval_labels'].get(role, '')
             ) and not desired.get('approver_notes', {}).get(role):
                 raise SourceApprovalReviewError('Enter a Special note explaining the unknown approver Level correction.')
-    previous_additional = current.get('additional_approver')
-    next_additional = desired.get('additional_approver')
-    if previous_additional and next_additional and any(
-        previous_additional.get(key, '') != next_additional.get(key, '') for key in ('name', 'approval_label')
-    ) and not next_additional.get('special_note'):
-        raise SourceApprovalReviewError('Enter a Special note explaining the Additional approver name or Level correction.')
+    previous_additional = {row['id']: row for row in current['additional_approvers']}
+    for next_additional in desired['additional_approvers']:
+        previous_row = previous_additional.get(next_additional['id'])
+        if previous_row and any(
+            previous_row.get(key, '') != next_additional.get(key, '') for key in ('name', 'approval_label')
+        ) and not next_additional.get('special_note'):
+            raise SourceApprovalReviewError('Enter a Special note explaining the Additional approver name or Level correction.')
     if same_source and desired == current:
         return desired, deepcopy(envelope)
     if envelope is None and desired == current:

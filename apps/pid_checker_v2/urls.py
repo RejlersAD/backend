@@ -10,6 +10,10 @@ from .views import (
     LegendSheetActivateView,
     LegendSheetDefaultTemplateView,
     LegendPackUploadView,
+    LegendLookupAddView,
+    LegendLookupEditView,
+    LegendLookupDeleteView,
+    LegendLookupSectionsView,
     ValidateLineTagsView,
     LineListUploadView,
     LineListDetailView,
@@ -50,6 +54,10 @@ LEGENDS_DETAIL_PATH = 'legends/<uuid:legend_id>/'
 LEGENDS_ACTIVATE_PATH = 'legends/<uuid:legend_id>/activate/'
 LEGENDS_DEFAULT_TEMPLATE_PATH = 'legends/default-template/'
 LEGENDS_PACK_UPLOAD_PATH = 'legends/pack-upload/'
+LEGENDS_LOOKUP_ADD_PATH = 'legends/add-lookup/'
+LEGENDS_LOOKUP_EDIT_PATH = 'legends/edit-lookup/'
+LEGENDS_LOOKUP_DELETE_PATH = 'legends/delete-lookup/'
+LEGENDS_LOOKUP_SECTIONS_PATH = 'legends/lookup-sections/'
 LINE_LISTS_LIST_PATH = 'line-lists/'
 LINE_LISTS_DETAIL_PATH = 'line-lists/<uuid:line_list_id>/'
 LINE_LISTS_ACTIVATE_PATH = 'line-lists/<uuid:line_list_id>/activate/'
@@ -85,11 +93,19 @@ urlpatterns = [
          name='extractions-list'),
     path(EXTRACTIONS_DETAIL_PATH, ExtractionDetailView.as_view(),
          name='extractions-detail'),
-    # Legend Sheets — default-template must be BEFORE the UUID pattern
+    # Legend Sheets — default-template/lookup routes must be BEFORE the UUID pattern
     path(LEGENDS_DEFAULT_TEMPLATE_PATH, LegendSheetDefaultTemplateView.as_view(),
          name='legends-default-template'),
     path(LEGENDS_PACK_UPLOAD_PATH, LegendPackUploadView.as_view(),
          name='legends-pack-upload'),
+    path(LEGENDS_LOOKUP_ADD_PATH, LegendLookupAddView.as_view(),
+         name='legends-lookup-add'),
+    path(LEGENDS_LOOKUP_EDIT_PATH, LegendLookupEditView.as_view(),
+         name='legends-lookup-edit'),
+    path(LEGENDS_LOOKUP_DELETE_PATH, LegendLookupDeleteView.as_view(),
+         name='legends-lookup-delete'),
+    path(LEGENDS_LOOKUP_SECTIONS_PATH, LegendLookupSectionsView.as_view(),
+         name='legends-lookup-sections'),
     path(LEGENDS_LIST_PATH, LegendSheetListCreateView.as_view(),
          name='legends-list'),
     path(LEGENDS_ACTIVATE_PATH, LegendSheetActivateView.as_view(),

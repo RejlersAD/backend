@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from apps.hr_core.services import EmployeeService
 from apps.payroll_engine.models import PayrollEmployee
 from apps.payroll_engine.serializers import PayrollEmployeeSerializer
-from apps.rbac.models import Organization, UserProfile
+from apps.rbac.models import Module, Organization, Role, RoleModule, UserProfile, UserRole
 from apps.rbac.serializers import UserProfileListSerializer, UserProfileSerializer
 from apps.rbac.views import UserProfileViewSet
 
@@ -198,3 +198,51 @@ class EmployeeProfileSyncTests(TestCase):
         self.assertEqual(identity['login_account_id'], self.user.pk)
         self.assertEqual(identity['employee_uuid'], str(self.employee.pk))
         self.assertEqual(identity['employee_number'], self.employee.employee_number)
+
+    def test_employee_list_is_org_scoped_without_hr_module_access(self):
+        other_org = Organization.objects.create(name='Other Org', code='OTH')
+        other_user = User.objects.create_user(
+            username='other.user',
+            email='other.user@example.com',
+        )
+        other_profile = UserProfile.objects.create(
+            user=other_user,
+            organization=other_org,
+            employee_id='9999',
+        )
+
+        admin_role = Role.objects.create(name='Admin Scoped', code='admin_scoped', level=2)
+        UserRole.objects.create(user_profile=self.profile, role=admin_role)
+
+        view = UserProfileViewSet()
+        view.action = 'list'
+        view.request = SimpleNamespace(user=self.user, query_params={})
+
+        visible_ids = set(view.get_queryset().values_list('id', flat=True))
+        self.assertIn(self.profile.id, visible_ids)
+        self.assertNotIn(other_profile.id, visible_ids)
+
+    def test_employee_list_is_global_for_hr_management_module_access(self):
+        other_org = Organization.objects.create(name='Global Org', code='GLB')
+        other_user = User.objects.create_user(
+            username='global.user',
+            email='global.user@example.com',
+        )
+        other_profile = UserProfile.objects.create(
+            user=other_user,
+            organization=other_org,
+            employee_id='8888',
+        )
+
+        hr_role = Role.objects.create(name='HR Global', code='hr_global', level=3)
+        hr_module = Module.objects.create(name='Human Resources', code='hr_management')
+        RoleModule.objects.create(role=hr_role, module=hr_module)
+        UserRole.objects.create(user_profile=self.profile, role=hr_role)
+
+        view = UserProfileViewSet()
+        view.action = 'list'
+        view.request = SimpleNamespace(user=self.user, query_params={})
+
+        visible_ids = set(view.get_queryset().values_list('id', flat=True))
+        self.assertIn(self.profile.id, visible_ids)
+        self.assertIn(other_profile.id, visible_ids)

@@ -90,6 +90,30 @@ class ProjectSerializer(serializers.ModelSerializer):
     is_overdue = serializers.BooleanField(read_only=True)
     budget_utilization = serializers.FloatField(read_only=True)
     team_size = serializers.IntegerField(read_only=True)
+    client_id = serializers.CharField(write_only=True, required=False, max_length=80)
+    client_identity = serializers.SerializerMethodField()
+
+    def get_client_identity(self, obj):
+        from .shared_record_targets import visible_payload
+        request = self.context.get('request')
+        return visible_payload(getattr(request, 'user', None), 'client', obj.client)
+
+    def validate(self, attrs):
+        from .shared_record_targets import require_target, validate_project_client
+        request = self.context.get('request')
+        if 'client' in self.initial_data or 'client_identity' in self.initial_data:
+            raise serializers.ValidationError({'client_id': 'Use the client selector when creating a project.'})
+        identifier = attrs.pop('client_id', None)
+        if identifier is not None:
+            if self.instance:
+                raise serializers.ValidationError({'client_id': 'Review existing client links in Shared records.'})
+            client = require_target(getattr(request, 'user', None), 'client', identifier)
+            validate_project_client(Project(owner=attrs.get('owner') or request.user), client)
+            attrs['client'] = client
+            attrs.setdefault('client_name', client.company_name)
+        if self.instance and self.instance.client_id and 'client_name' in attrs and attrs['client_name'] != self.instance.client_name:
+            raise serializers.ValidationError({'client_name': 'The recorded client label is retained after linking.'})
+        return super().validate(attrs)
 
     def validate_owner_id(self, owner):
         if self.instance is not None:
@@ -113,7 +137,7 @@ class ProjectSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'code', 'description', 'status', 'priority', 'progress',
             'start_date', 'end_date', 'owner', 'owner_id', 'team_members_data',
-            'budget', 'spent', 'client_name', 'location', 'tags', 'custom_fields',
+            'budget', 'spent', 'client_name', 'client_id', 'client_identity', 'location', 'tags', 'custom_fields',
             # Project Dashboard fields — added in migration 0002
             'contract_value', 'currency', 'scope_type',
             'tasks_summary', 'milestones_summary', 'is_overdue', 'budget_utilization',
@@ -149,13 +173,19 @@ class ProjectListSerializer(serializers.ModelSerializer):
     portfolio = serializers.SerializerMethodField()
     team_size = serializers.SerializerMethodField()
     is_overdue = serializers.BooleanField(read_only=True)
+    client_identity = serializers.SerializerMethodField()
+
+    def get_client_identity(self, obj):
+        from .shared_record_targets import visible_payload
+        request = self.context.get('request')
+        return visible_payload(getattr(request, 'user', None), 'client', obj.client)
 
     class Meta:
         model = Project
         fields = [
             'id', 'name', 'code', 'status', 'priority', 'progress',
             'start_date', 'end_date', 'owner_id', 'owner_name', 'team_size',
-            'client_name', 'creator_name', 'portfolio',
+            'client_name', 'client_identity', 'creator_name', 'portfolio',
             'is_overdue', 'created_at', 'updated_at',
         ]
 

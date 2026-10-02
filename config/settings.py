@@ -5,10 +5,35 @@ Aligned with centralized environment configuration (9-3-26 commit).
 """
 
 import os
+import sys
 from pathlib import Path
 from urllib.parse import quote
 from decouple import config
 import dj_database_url
+
+# BUG FIX: real, confirmed server-startup crash on Windows — several
+# modules loaded during Django startup (this file included, further
+# below, plus various apps' own startup-time print()/logger.info() calls
+# used as visible "[X] [OK] registered" banners) contain emoji/unicode
+# characters. Windows' default console codepage (cp1252, sometimes
+# cp437) can't encode most of those, and a plain `print()` to a cp1252
+# console raises UnicodeEncodeError, which crashes the ENTIRE process —
+# not just skips that one line. This is Django's first-loaded module
+# (every entry point — manage.py, wsgi.py, asgi.py, celery.py — imports
+# it before anything else), so reconfiguring stdout/stderr to UTF-8 HERE,
+# before any of this file's own prints run, protects every one of those
+# entry points and every app's startup banner at once, instead of
+# hand-fixing each emoji individually across the codebase (a real scan
+# found 378 such print() calls — not something to chase one at a time).
+# reconfigure() is Python 3.7+; errors='replace' means even a genuinely
+# unencodable character degrades to a visible '?' instead of crashing.
+# A misconfigured/redirected stream without reconfigure() (rare, e.g.
+# some CI log capture) is not fatal to fix — never let this block startup.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -208,6 +233,7 @@ INSTALLED_APPS = [
     'apps.non_teff_metadata',     # Non-TEFF Metadata Extractor — multi-format document metadata extraction
     'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
     'apps.instrument_io_workflow',  # Instrument IO List Workflow — CRS-style multi-revision IO List doc handling
+    'apps.valve_mto',            # Valve MTO — server-side persistence for the Piping Valve MTO workspace
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.project_organizer',    # Project Organizer — shared, cross-tool project registry (additive)
     'apps.valve_standards',      # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
@@ -688,6 +714,28 @@ SALES_EMAIL_INTAKE_WEBHOOK_KEY = config(
 # Automatic readers require both deployment opt-in and a separately authorized
 # application mailbox. No scheduled source import is enabled by a migration.
 SALES_MAILBOX_SYNC_ENABLED = config('SALES_MAILBOX_SYNC_ENABLED', default=False, cast=bool)
+
+# Temporary, user-authorized bid decisions by Opportunity module readers when
+# no business route exists. A configured route always takes precedence.
+SALES_BID_DECISION_RBAC_FALLBACK_ENABLED = config(
+    'SALES_BID_DECISION_RBAC_FALLBACK_ENABLED', default=True, cast=bool,
+)
+
+# Separate Sales document-writer authority; never borrow Finance/mailbox credentials.
+# Destination must be an existing Opportunities container, explicitly verified
+# by its stable drive/item IDs and complete decoded SharePoint web path.
+SALES_WORKSPACE_ENABLED = config('SALES_WORKSPACE_ENABLED', default=False, cast=bool)
+SALES_WORKSPACE_TENANT_ID = config('SALES_WORKSPACE_TENANT_ID', default='')
+SALES_WORKSPACE_CLIENT_ID = config('SALES_WORKSPACE_CLIENT_ID', default='')
+SALES_WORKSPACE_CLIENT_SECRET = config('SALES_WORKSPACE_CLIENT_SECRET', default='')
+SALES_WORKSPACE_HOSTNAME = config('SALES_WORKSPACE_HOSTNAME', default='')
+SALES_WORKSPACE_DRIVE_ID = config('SALES_WORKSPACE_DRIVE_ID', default='')
+SALES_WORKSPACE_ROOT_ITEM_ID = config('SALES_WORKSPACE_ROOT_ITEM_ID', default='')
+SALES_WORKSPACE_ROOT_PATH = config('SALES_WORKSPACE_ROOT_PATH', default='')
+# Zero removes the Sales application cap; ingress, time and storage limits remain.
+SALES_WORKSPACE_MAX_UPLOAD_BYTES = config('SALES_WORKSPACE_MAX_UPLOAD_BYTES', default=0, cast=int)
+SALES_WORKSPACE_MAX_DOWNLOAD_BYTES = config('SALES_WORKSPACE_MAX_DOWNLOAD_BYTES', default=0, cast=int)
+SALES_ATTACHMENT_ROOT = config('SALES_ATTACHMENT_ROOT', default='')
 SALES_MAILBOX_SYNC_INTERVAL_SECONDS = config('SALES_MAILBOX_SYNC_INTERVAL_SECONDS', default=60, cast=int)
 SALES_MAILBOX_SYNC_MAX_STEPS = config('SALES_MAILBOX_SYNC_MAX_STEPS', default=30, cast=int)
 SALES_MAILBOX_SYNC_WORK_SECONDS = config('SALES_MAILBOX_SYNC_WORK_SECONDS', default=60, cast=int)
@@ -1178,6 +1226,17 @@ CELERY_BEAT_SCHEDULE.update(mailbox_sync_beat_schedule(
     enabled=SALES_MAILBOX_SYNC_ENABLED,
     interval_seconds=SALES_MAILBOX_SYNC_INTERVAL_SECONDS,
 ))
+if SALES_WORKSPACE_ENABLED:
+    CELERY_BEAT_SCHEDULE['sales-opportunity-workspaces'] = {
+        'task': 'apps.sales.tasks.dispatch_opportunity_workspaces',
+        'schedule': 60.0, 'options': {'expires': 60},
+    }
+
+# Private RADAI documents do not require SharePoint workspace activation.
+CELERY_BEAT_SCHEDULE['sales-document-classifications'] = {
+    'task': 'apps.sales.tasks.dispatch_document_classifications',
+    'schedule': 60.0, 'options': {'expires': 60},
+}
 
 # ==============================================================================
 # End of Celery Configuration

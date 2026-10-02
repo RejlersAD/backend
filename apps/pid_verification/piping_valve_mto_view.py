@@ -2,14 +2,62 @@
 Piping Valve MTO — Async Extraction Endpoints
 =============================================
 
-Two endpoints to avoid HTTP timeouts on long extractions:
+Extraction + BYOK endpoints:
 
     POST /api/v1/pid-verification/extract-valve-mto/        (start)
-        multipart/form-data: pid_file=<PDF>
+        multipart/form-data: pid_file=<PDF>, vision_provider=<openai|claude>
+        (optional), vision_api_key=<key> (optional — see BYOK note below),
+        scan_mode=<quick|thorough> (optional — defaults to "thorough" when
+        omitted; see services.piping_valve_mto_extractor._scan_mode_params
+        for exactly what each resolves to)
         → 202 {status: "queued", job_id, ...}
 
     GET  /api/v1/pid-verification/extract-valve-mto/<job_id>/   (poll)
         → live job snapshot (progress, partial rows, final result)
+
+Long-running extractions (Thorough Scan's 2x2-tile/2-pass design can mean
+25+ minutes end-to-end on a dense multi-page PDF): extract_valve_mto_view
+below has NO execution timeout of its own to raise — confirmed by reading
+it end to end. It stages the upload, calls start_job() (which spawns an
+independent daemon thread and returns a job_id immediately — see
+services.valve_mto_job_store.start_job/_run_in_thread), and responds 202
+without ever blocking on the extraction itself. The background thread
+then runs for exactly as long as its Vision batches take, with no
+timeout/kill-switch cutting it off early. The real per-call ceiling that
+WAS too tight for Thorough Scan is services.piping_valve_mto_extractor's
+own VISION_TIMEOUT_SECS (raised 90s -> 300s) and max_tokens (raised to
+40000) — see that module's own comments on both.
+
+    POST /api/v1/pid-verification/extract-valve-mto/test-key/
+        ({provider, api_key}) — connectivity check for a BYOK key before
+        the user commits to an actual extraction run.
+
+BYOK: vision_provider/vision_api_key are both OPTIONAL. When a key is
+given, that exact key is used for the requested provider (OpenAI or
+Claude) — never silently substituted for the admin-managed key. When
+omitted, extraction falls back to the admin-managed OpenAI credential
+exactly as it always has (see
+services.piping_valve_mto_extractor._resolve_vision_credential for the
+full precedence). There is no admin-managed fallback for Claude.
+
+Legend Sheet integration: NOT handled by any endpoint in this file.
+Legend sheets are managed entirely through the EXISTING, shared
+LegendSheetsModal (frontend) / apps.pid_checker_v2 legend system
+(PidCheckerV2LegendSheet, sections 'valve'/'piping'/'line_list'/
+'scope_symbols'/'limit_line') — the same one P&ID Verification V1/V2
+already use. extract_valve_mto_view below passes request.user.pk into
+start_job purely so services.piping_valve_mto_extractor can look up
+THIS user's own active legend sheets for those sections at extraction
+time (see that module's _build_legend_context) — no new legend
+upload/list/detail endpoints exist or are needed here.
+
+CORRECTION: an earlier version of this file reused
+apps.pid_verification's OWN PIDVLegendSheet model/AI-extraction
+pipeline (a completely different, unstructured, AI-Vision-extracted
+legend system with no "Valve" section) — that was the wrong system and
+has been removed. apps.pid_checker_v2's structured, regex-rule legend
+system (with per-section activation) is the correct one, per the
+existing LegendSheetsModal component.
 """
 from __future__ import annotations
 
@@ -21,6 +69,7 @@ from django.http import JsonResponse
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from .services.valve_mto_job_store import JobStore, start_job
 
@@ -82,8 +131,20 @@ def extract_valve_mto_view(request):
             status=500,
         )
 
+    vision_provider = (request.data.get('vision_provider') or '').strip() or None
+    vision_api_key  = (request.data.get('vision_api_key') or '').strip() or None
+    # Defaults to 'thorough' when not provided at all — same default
+    # services.piping_valve_mto_extractor._scan_mode_params itself falls
+    # back to, so this is belt-and-suspenders rather than the only place
+    # the default is enforced; kept explicit here too so it's visible
+    # right where the request is parsed, not just buried in the extractor.
+    scan_mode = (request.data.get('scan_mode') or '').strip().lower() or 'thorough'
+
     try:
-        job_id = start_job(tmp_path, upload.name)
+        job_id = start_job(
+            tmp_path, upload.name, vision_provider=vision_provider, vision_api_key=vision_api_key,
+            user_id=request.user.pk, scan_mode=scan_mode,
+        )
     except Exception as exc:
         logger.exception('Failed to start extraction job: %s', exc)
         try:
@@ -118,3 +179,21 @@ def extract_valve_mto_status_view(request, job_id: str):
             status=404,
         )
     return JsonResponse({'job_id': job_id, **snap}, status=200)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def test_valve_mto_api_key_view(request):
+    """BYOK connectivity check — mirrors
+    apps.instrument_io_workflow.views.vision_test_key_view's contract
+    ({provider, api_key} -> {valid, message}), reimplemented independently
+    here (piping_valve_mto_extractor.test_api_key) per this codebase's
+    established per-app isolation convention for BYOK vision features —
+    intentionally does NOT silently test an admin-managed key instead of
+    the one the user just typed (see that function's own docstring)."""
+    from .services.piping_valve_mto_extractor import test_api_key
+
+    provider = request.data.get('provider')
+    api_key  = request.data.get('api_key')
+    valid, message = test_api_key(provider, api_key)
+    return Response({'valid': valid, 'message': message})

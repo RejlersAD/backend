@@ -1011,7 +1011,56 @@ class PIDVAICheckRun(models.Model):
             models.Index(fields=['run_id']),
             models.Index(fields=['project', 'status']),
         ]
-    
+
     def __str__(self):
         return f'AI Check Run {self.run_id} [{self.status}] - {self.project.project_name}'
+
+
+class PIDVTagIndex(models.Model):
+    """
+    One row per tag OCCURRENCE (a tag appearing on a specific page), not
+    one row per unique tag — the same tag on 3 pages is 3 rows here. Feeds
+    apps.pid_verification_v2.services.cross_reference:
+    group_multi_page_tags() reads these rows to find tags appearing on 2+
+    distinct pages.
+
+    Field names/types/Meta here intentionally match migration 0006
+    (0006_pidvtagindex.py) exactly — that migration already existed before
+    this model was written; this is the model catching up to it, not the
+    other way around. Confirmed via `makemigrations --check`: 0 drift.
+    """
+    page_number = models.PositiveSmallIntegerField(
+        help_text='page_index of the source PIDVDrawing',
+    )
+    tag = models.CharField(
+        max_length=255, db_index=True,
+        help_text="normalize_tag()'d form — the matching key",
+    )
+    raw_tag = models.CharField(
+        max_length=255,
+        help_text='Original as-extracted tag text',
+    )
+    tag_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('line', 'Line'),
+            ('equipment', 'Equipment'),
+            ('instrument', 'Instrument'),
+            ('valve', 'Valve'),
+        ],
+    )
+    document = models.ForeignKey(
+        PIDVDocument, on_delete=models.CASCADE, related_name='tag_index',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'pidv2_tag_index'
+        indexes = [
+            models.Index(fields=['document', 'tag'], name='pidv2_tag_i_documen_86acd5_idx'),
+            models.Index(fields=['document', 'page_number'], name='pidv2_tag_i_documen_d1d0fd_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.tag} (p{self.page_number}) — {self.document_id}'
 

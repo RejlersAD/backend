@@ -35,6 +35,11 @@ class Project(models.Model):
     ]
 
     project_id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    enterprise_project = models.ForeignKey(
+        'core.Project', on_delete=models.PROTECT, null=True, blank=True,
+        db_constraint=False, related_name='organizer_workspaces',
+        help_text='Reviewed enterprise identity; original organizer labels remain unchanged.',
+    )
     name         = models.CharField(max_length=255)
     code         = models.CharField(max_length=64, blank=True, db_index=True)
     client       = models.CharField(max_length=128, blank=True)

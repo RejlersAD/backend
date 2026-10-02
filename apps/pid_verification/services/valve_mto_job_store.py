@@ -39,6 +39,17 @@ logger = logging.getLogger(__name__)
 
 # ─── CONFIG (soft-coded) ─────────────────────────────────────────────────
 CACHE_PREFIX     = 'valve_mto:job:'
+# CHECKED (not changed) for Thorough Scan's 25+ minute extractions: both
+# TTLs already comfortably exceed the requested 2h (7200s) floor — 6h and
+# 24h respectively — so lowering either to exactly 7200 would be a
+# REGRESSION (less retention than today), not the fix it looks like at
+# first glance. Confirmed there's no real mid-run expiry risk either way:
+# every heartbeat tick (HEARTBEAT_INTERVAL_SECS, 20s) calls
+# JobStore.heartbeat() -> _persist(), which re-issues cache.set(...,
+# timeout=CACHE_TTL) and rewrites the disk file — both TTLs are
+# continuously refreshed while a job is actively running, not a single
+# fixed deadline from job start, so a running job's snapshot cannot
+# expire out from under it regardless of how long extraction takes.
 CACHE_TTL        = 60 * 60 * 6                    # 6 h fast-path TTL
 DISK_TTL         = 60 * 60 * 24                   # 24 h disk retention
 DEFAULT_KIND     = 'valve_mto'
@@ -212,7 +223,11 @@ def _heartbeat_loop(job_id: str, stop_event: threading.Event) -> None:
             return
 
 
-def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
+def _run_in_thread(
+    job_id: str, pdf_path: str, filename: str,
+    vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
+    user_id=None, scan_mode: Optional[str] = None,
+) -> None:
     """Execute extraction; clean up the temp file when done."""
     # Late import — keeps this module importable without the heavy deps.
     from .piping_valve_mto_extractor import extract_valve_mto_streaming
@@ -236,6 +251,10 @@ def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
             on_partial=lambda rows, meta: JobStore.update(
                 job_id, rows=rows, project_meta=meta,
             ),
+            vision_provider=vision_provider,
+            vision_api_key=vision_api_key,
+            user_id=user_id,
+            scan_mode=scan_mode,
         )
         # Soft-coded: extractor flips status to 'error' when every batch fails
         # with a fatal OpenAI error (e.g. insufficient_quota). Propagate the
@@ -274,12 +293,33 @@ def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
             pass
 
 
-def start_job(pdf_path: str, filename: str) -> str:
-    """Create a job snapshot in cache+disk and start a daemon thread."""
+def start_job(
+    pdf_path: str, filename: str,
+    vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
+    user_id=None, scan_mode: Optional[str] = None,
+) -> str:
+    """Create a job snapshot in cache+disk and start a daemon thread.
+
+    vision_provider/vision_api_key: BYOK passthrough — see
+    piping_valve_mto_extractor._resolve_vision_credential's own docstring
+    for the exact precedence. Both default to None (existing behaviour:
+    admin-managed OpenAI key, or nothing) so no existing caller breaks.
+
+    user_id: whoever started this extraction — used to look up their own
+    uploaded Legend Sheets (see piping_valve_mto_extractor's
+    _build_legend_context) so the Vision prompt can be grounded in the
+    user's own legend data. None (default) means no legend context is
+    injected, same as before this feature existed.
+
+    scan_mode: 'quick' or 'thorough' passthrough — see
+    piping_valve_mto_extractor._scan_mode_params's own docstring. None
+    (default) resolves to 'thorough' there, matching
+    piping_valve_mto_view.py's own default for an omitted scan_mode.
+    """
     job_id = JobStore.create({'filename': filename})
     th = threading.Thread(
         target=_run_in_thread,
-        args=(job_id, pdf_path, filename),
+        args=(job_id, pdf_path, filename, vision_provider, vision_api_key, user_id, scan_mode),
         name=f'valve-mto-{job_id[:8]}',
         daemon=True,
     )

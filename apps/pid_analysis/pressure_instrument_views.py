@@ -51,9 +51,9 @@ if not USE_V3_ANALYZER and not USE_V2_ANALYZER:
     try:
         from .pressure_instrument_service import PressureInstrumentAnalyzer
         USE_ORIGINAL_ANALYZER = True
-        logger.warning("[PressureInstrument] ⚠️ Using original Vision-only analyzer (fallback)")
+        logger.warning("[PressureInstrument] WARNING: Using original Vision-only analyzer (fallback)")
     except ImportError as e:
-        logger.error(f"[PressureInstrument] ❌ No analyzer available: {e}")
+        logger.error(f"[PressureInstrument] ERROR: No analyzer available: {e}")
 
 # Soft-coded configuration
 PRESSURE_INSTRUMENT_CONFIG = {

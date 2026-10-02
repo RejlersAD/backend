@@ -186,6 +186,17 @@ def self_organization_changes(profile, data):
             and str(data[key] or '') != str(value or '')]
 
 
+def configured_approval_routes():
+    """Read deployment policy; malformed configuration is not an absent route."""
+    routes = getattr(settings, 'RADAI_BUSINESS_APPROVAL_ROUTES', None)
+    if routes is None:
+        try:
+            routes = json.loads(os.environ.get('RADAI_BUSINESS_APPROVAL_ROUTES', '{}'))
+        except (TypeError, ValueError):
+            return None
+    return routes if isinstance(routes, dict) else None
+
+
 def require_configured_approval(user, module, obj, operation):
     """Older single-step modules need an explicit business route before use.
 
@@ -193,12 +204,7 @@ def require_configured_approval(user, module, obj, operation):
     Example key: ``electrical_datasheet.ElectricalDatasheet.approve``.
     No policy means no decision, including for administrators.
     """
-    routes = getattr(settings, 'RADAI_BUSINESS_APPROVAL_ROUTES', None)
-    if routes is None:
-        try:
-            routes = json.loads(os.environ.get('RADAI_BUSINESS_APPROVAL_ROUTES', '{}'))
-        except (TypeError, ValueError):
-            routes = {}
+    routes = configured_approval_routes()
     key = f'{module}.{type(obj).__name__}.{operation}'
     route = routes.get(key) if isinstance(routes, dict) else None
     if not isinstance(route, dict) or not route.get('positions') or not route.get('pending_states'):

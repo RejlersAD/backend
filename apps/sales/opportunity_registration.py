@@ -74,4 +74,6 @@ def create_registered_opportunity(*, actor, validated_data):
     deal = Deal.objects.create(**values)
     if team_members:
         deal.team_members.set(team_members)
+    from .opportunity_workspace import register_workspace
+    register_workspace(deal, actor)
     return deal

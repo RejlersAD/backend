@@ -89,3 +89,25 @@ class ReceivablesSourceRow(models.Model):
         ordering = ['row_number']
         constraints = [models.UniqueConstraint(fields=['snapshot', 'row_number'],
                                                 name='finance_ar_source_row_unique')]
+
+
+class ReceivablesSourceIdentity(models.Model):
+    """Reviewed RADAI identity beside an immutable, version-specific source row.
+
+    Mapping a row does not edit SharePoint, recalculate its values or associate
+    it with an operational invoice. A new publication has new unmapped rows.
+    """
+
+    source_row = models.OneToOneField(
+        ReceivablesSourceRow, on_delete=models.PROTECT, related_name='canonical_identity',
+    )
+    canonical_project = models.ForeignKey(
+        'core.Project', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='receivables_source_references',
+    )
+    canonical_client = models.ForeignKey(
+        'sales.Client', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='receivables_source_references',
+    )
+    canonical_identity_basis = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)

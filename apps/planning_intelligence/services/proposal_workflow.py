@@ -55,7 +55,7 @@ def _cancel_pending_tasks(proposal, task_type=None):
 
 @transaction.atomic
 def submit_for_review(proposal_id, actor, *, reviewer_id, due_date=None, comments=''):
-    proposal = TechnicalProposal.objects.select_for_update().select_related('project').get(pk=proposal_id)
+    proposal = TechnicalProposal.objects.select_for_update(of=('self',)).select_related('project').get(pk=proposal_id)
     if proposal.status != 'draft':
         raise ValidationError('Only a draft proposal can be submitted for review.')
     if not can_write_project(actor, proposal.project):
@@ -313,7 +313,7 @@ def approver_decision(proposal_id, actor, *, decision, comments=''):
 
 @transaction.atomic
 def issue_proposal(proposal_id, actor):
-    proposal = TechnicalProposal.objects.select_for_update().select_related('project').get(pk=proposal_id)
+    proposal = TechnicalProposal.objects.select_for_update(of=('self',)).select_related('project').get(pk=proposal_id)
     if proposal.status != 'approved':
         raise ValidationError('Only an approved proposal can be issued.')
     if not can_approve_proposal(actor, proposal.project):
@@ -351,7 +351,7 @@ def issue_proposal(proposal_id, actor):
 
 @transaction.atomic
 def reopen_rejected(proposal_id, actor, *, comments=''):
-    proposal = TechnicalProposal.objects.select_for_update().select_related('project').get(pk=proposal_id)
+    proposal = TechnicalProposal.objects.select_for_update(of=('self',)).select_related('project').get(pk=proposal_id)
     if proposal.status != 'rejected' or not can_write_project(actor, proposal.project):
         raise PermissionDenied('You cannot reopen this rejected proposal.')
     _cancel_pending_tasks(proposal)
