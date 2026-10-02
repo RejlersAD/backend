@@ -1870,6 +1870,76 @@ class TestApiKeyView(APIView):
         return Response({'valid': valid, 'message': message}, status=status.HTTP_200_OK)
 
 
+class RadAIChatView(APIView):
+    """POST a question + page context + BYOK provider/key; receive a grounded
+    answer about the data currently on screen (extracted rows, uploaded
+    document, active project).
+
+    This is the backend for the global RADAI Chat widget. The user's BYOK key
+    arrives per-request and is used only for this call — never persisted.
+    Context is a soft-coded JSON payload the frontend assembles from the
+    current page's state; the service caps its size so chat stays cheap.
+
+    Body:
+      question   (str, required)  the user's message
+      provider   (str)            'openai' | 'claude' (default 'claude')
+      api_key    (str)            BYOK key (optional if platform key managed)
+      model      (str, optional)  override the default chat model
+      context    (object)         { page, project, document, columns, rows,
+                                    row_count, summary, notes }
+      history    (array)          prior [{role, content}] turns for continuity
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        from .services.radai_chat import (
+            answer_question, ChatConfigurationError, SUPPORTED_PROVIDERS as CHAT_PROVIDERS,
+        )
+
+        question = str(request.data.get('question') or '').strip()
+        if not question:
+            return Response({'error': 'question is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        provider = (request.data.get('provider') or 'claude').lower()
+        api_key = (request.data.get('api_key') or '').strip()
+        model = (request.data.get('model') or '').strip() or None
+        context = request.data.get('context') or {}
+        history = request.data.get('history') or []
+
+        if provider not in CHAT_PROVIDERS:
+            return Response({'error': f"provider must be one of {CHAT_PROVIDERS}"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(context, dict):
+            return Response({'error': 'context must be an object'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(history, list):
+            history = []
+
+        try:
+            result = answer_question(
+                question=question,
+                context=context,
+                provider=provider,
+                api_key=api_key,
+                history=history,
+                model=model,
+            )
+        except ChatConfigurationError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('[RadAIChat] failed')
+            # Surface the provider's diagnostic (allowlisted, no keys/bodies)
+            # so the user sees the real cause — e.g. "model unavailable" or
+            # "authentication failed" — instead of a generic 502.
+            detail = str(exc) or ''
+            safe = detail[:300] if detail else 'The assistant could not answer right now. Check your AI key and try again.'
+            return Response({'error': safe}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class IdentifySymbolsView(APIView):
     """POST a P&ID document id + BYOK; receive a best-guess list of legend
     symbols the Vision model can identify on the drawing, compared against
