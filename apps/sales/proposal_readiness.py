@@ -7,6 +7,7 @@ from django.core.paginator import EmptyPage, Paginator
 from django.db.models import Exists, OuterRef, Q
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
+from apps.notifications.models import Notification
 from apps.rbac.action_policy import module_action_allowed
 from .email_permissions import visible_email_clients
 from .models import Quote
@@ -38,11 +39,31 @@ def client_permits_proposal_preparation(client):
     return bool(client and client.status in PROPOSAL_CLIENT_STATUSES and client.new_proposals_permitted)
 
 
-def _creation_blocker(deal, *, can_create, client_visible):
+def _internal_notification_acted(opportunity):
+    return Notification.objects.filter(
+        is_read=True,
+        metadata__module='sales',
+        metadata__event_type='qualification_submitted',
+        metadata__opportunity_id=str(opportunity.pk),
+    ).exists()
+
+
+def _ceo_gate_approved(opportunity):
+    return opportunity.audit_events.filter(
+        event_type='ceo_gate_decision',
+        data__decision='approved',
+    ).exists()
+
+
+def _creation_blocker(deal, *, can_create, client_visible, internal_notified, ceo_approved):
     if not can_create:
         return 'access', 'Proposal create access is required to start a draft.'
     if deal.stage != 'proposal' or deal.bid_decision not in GO_DECISIONS:
         return 'deal', 'A recorded Bid or Conditional Bid in the Proposal stage is required.'
+    if not internal_notified:
+        return 'workflow', 'A Sales team member must act on the internal qualification notification before proposal drafting.'
+    if not ceo_approved:
+        return 'workflow', 'CEO go-ahead is required before preparing a draft proposal.'
     if not client_visible:
         return 'client', 'The inherited client is unavailable with your current Sales access.'
     if not client_permits_proposal_preparation(deal.client):
@@ -70,7 +91,15 @@ def require_proposal_creation(actor, deal, client=None):
         raise ValidationError({'client': 'Proposal client must match its opportunity.'})
     client_visible = (module_action_allowed(current, 'sales_clients', 'read')
                       and visible_email_clients(current).filter(pk=opportunity.client_id).exists())
-    field, reason = _creation_blocker(opportunity, can_create=True, client_visible=client_visible)
+    internal_notified = _internal_notification_acted(opportunity)
+    ceo_approved = _ceo_gate_approved(opportunity)
+    field, reason = _creation_blocker(
+        opportunity,
+        can_create=True,
+        client_visible=client_visible,
+        internal_notified=internal_notified,
+        ceo_approved=ceo_approved,
+    )
     if reason:
         raise ValidationError({field: reason})
     return current, opportunity, opportunity.client
@@ -125,10 +154,23 @@ def preparation_opportunities(actor, params):
     rows = list(result_page.object_list)
     visible_client_ids = set(clients.filter(pk__in={row.client_id for row in rows}).values_list('pk', flat=True)) if client_read else set()
     can_create = module_action_allowed(current, 'sales_proposals', 'create')
+    row_ids = [str(row.pk) for row in rows]
+    internal_acted = set(Notification.objects.filter(
+        is_read=True,
+        metadata__module='sales',
+        metadata__event_type='qualification_submitted',
+        metadata__opportunity_id__in=row_ids,
+    ).values_list('metadata__opportunity_id', flat=True).distinct())
     results = []
     for deal in rows:
         client_visible = deal.client_id in visible_client_ids
-        _, reason = _creation_blocker(deal, can_create=can_create, client_visible=client_visible)
+        _, reason = _creation_blocker(
+            deal,
+            can_create=can_create,
+            client_visible=client_visible,
+            internal_notified=str(deal.pk) in internal_acted,
+            ceo_approved=_ceo_gate_approved(deal),
+        )
         results.append({
             'id': str(deal.pk), 'deal_code': deal.deal_code, 'deal_name': deal.deal_name,
             'client': str(deal.client_id) if client_visible else None,
