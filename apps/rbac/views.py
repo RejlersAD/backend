@@ -720,6 +720,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     # Use custom pagination for flexible page sizes
     pagination_class = FlexiblePageNumberPagination
+
+    # HR employee-directory access should be global, matching Super Admin
+    # visibility for /rbac/users/ list/retrieve in HR surfaces.
+    HR_GLOBAL_DIRECTORY_MODULES = {'hr_management'}
     
     def get_permissions(self):
         """
@@ -837,7 +841,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         # Super admin sees all
         try:
             profile = user.rbac_profile
-            if not profile.roles.filter(code='super_admin', is_active=True).exists():
+            has_super_admin = profile.roles.filter(code='super_admin', is_active=True).exists()
+            has_global_hr_scope = any(
+                profile.has_module_access(module_code)
+                for module_code in self.HR_GLOBAL_DIRECTORY_MODULES
+            )
+            if not has_super_admin and not has_global_hr_scope:
                 # Other admins see only their organization
                 queryset = queryset.filter(organization=profile.organization)
         except UserProfile.DoesNotExist:
