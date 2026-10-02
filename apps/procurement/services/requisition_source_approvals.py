@@ -185,24 +185,28 @@ def edit_requisition_source_approval(requisition_id, actor, payload):
         raise SourceApprovalConflict('An internal approval workflow already exists. Refresh the recommendation and reconcile the source evidence before replacing it.')
 
     evidence = metadata.setdefault('signed_approval_evidence', {})
-    evidence.setdefault('reviewed_approver_names', {})[role] = name
+    role_rows = [item for item in rows if approval_role(item.get('role_key') or item.get('role', '')) == role]
+    if len(role_rows) == 1:
+        evidence.setdefault('reviewed_approver_names', {})[role] = name
     if confirmed:
-        for key in ('signatures', 'manual_signature_overrides'):
-            evidence.setdefault(key, {})[role] = True
-        evidence.setdefault('signature_sources', {})[role] = 'manual'
+        if len(role_rows) == 1:
+            for key in ('signatures', 'manual_signature_overrides'):
+                evidence.setdefault(key, {})[role] = True
+            evidence.setdefault('signature_sources', {})[role] = 'manual'
     verification['source_approval_rows'] = rows
     verification['signed_off'] = complete
     metadata['signed_document_verification'] = verification
-    previous_review = source_approval_review_from_metadata(metadata, digest)
-    desired_review = deepcopy(previous_review)
-    if 'approval_label' in row:
-        if row['approval_label']:
-            desired_review['approval_labels'][role] = row['approval_label']
-        else:
-            desired_review['approval_labels'].pop(role, None)
-    desired_review.setdefault('approver_notes', {})[role] = note
-    _, review_envelope = prepare_source_approval_review(metadata, digest, actor, desired_review, previous_review)
-    evidence[REVIEW_KEY] = review_envelope
+    if len(role_rows) == 1:
+        previous_review = source_approval_review_from_metadata(metadata, digest)
+        desired_review = deepcopy(previous_review)
+        if 'approval_label' in row:
+            if row['approval_label']:
+                desired_review['approval_labels'][role] = row['approval_label']
+            else:
+                desired_review['approval_labels'].pop(role, None)
+        desired_review.setdefault('approver_notes', {})[role] = note
+        _, review_envelope = prepare_source_approval_review(metadata, digest, actor, desired_review, previous_review)
+        evidence[REVIEW_KEY] = review_envelope
     now = timezone.now()
     metadata.setdefault('source_approval_reviews', []).append({
         'document_sha256': digest, 'row_index': index, 'role': row.get('role'),
