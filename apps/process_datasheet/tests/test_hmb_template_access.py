@@ -1,14 +1,17 @@
+import tempfile
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.project_organizer.models import Project
 from apps.process_datasheet.hmb_extractor_view import (
+    archive_hmb_stream_consolidator_export_view,
     list_hmb_master_templates_view,
     analyze_hmb_master_template_view,
+    download_hmb_stream_consolidator_archive_view,
     execute_hmb_case_preview_view,
     preview_hmb_case_files_view,
     retrieve_hmb_master_template_view,
@@ -361,3 +364,115 @@ class HMBUploadStorageTests(TestCase):
             request = self.factory.get('/output-template/')
             force_authenticate(request, user=stranger)
             self.assertEqual(hmb_output_template_view(request, self.project.pk).status_code, 403)
+
+
+class HMBConsolidatorArchiveTests(TestCase):
+    def setUp(self):
+        users = get_user_model().objects
+        self.owner = users.create_user(
+            username='hmb-consolidator-owner',
+            email='hmb-consolidator-owner@example.test',
+            password='test',
+        )
+        self.outsider = users.create_user(
+            username='hmb-consolidator-outsider',
+            email='hmb-consolidator-outsider@example.test',
+            password='test',
+        )
+        self.project = Project.objects.create(
+            name='Consolidator archive project',
+            created_by=self.owner,
+        )
+        self.factory = APIRequestFactory()
+
+    def _request(self, method, path, user, data=None, format=None):
+        request = getattr(self.factory, method)(path, data or {}, format=format)
+        force_authenticate(request, user=user)
+        return request
+
+    def test_local_archive_round_trip_is_retained_and_downloadable(self):
+        workbook_content = b'comparison-workbook-content'
+
+        with tempfile.TemporaryDirectory() as directory, override_settings(
+            BASE_DIR=directory,
+            USE_S3=False,
+            DEBUG=True,
+        ):
+            upload = SimpleUploadedFile(
+                'HMB_Comparison.xlsx',
+                workbook_content,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+            save_request = self._request(
+                'post',
+                '/archive/',
+                self.owner,
+                {
+                    'archive_file': upload,
+                    'project_id': str(self.project.project_id),
+                    'filename': 'HMB_Comparison.xlsx',
+                    'case_count': '3',
+                    'included_stream_count': '780',
+                    'edited_value_count': '2',
+                },
+                format='multipart',
+            )
+
+            saved = archive_hmb_stream_consolidator_export_view(save_request)
+
+            self.assertEqual(saved.status_code, 201)
+            source = HMBSourceUpload.objects.get(pk=saved.data['archive']['id'])
+            self.assertEqual(source.upload_kind, HMBSourceUpload.KIND_OUTPUT_TEMPLATE)
+            self.assertTrue(source.storage_key)
+            self.assertEqual(source.metadata['storage_backend'], 'local')
+
+            list_request = self._request(
+                'get',
+                '/archive/',
+                self.owner,
+                {'project_id': str(self.project.project_id)},
+            )
+            history = archive_hmb_stream_consolidator_export_view(list_request)
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(history.data['count'], 1)
+
+            download_request = self._request('get', '/download/', self.owner)
+            downloaded = download_hmb_stream_consolidator_archive_view(
+                download_request,
+                source.id,
+            )
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.content, workbook_content)
+
+            denied_request = self._request('get', '/download/', self.outsider)
+            denied = download_hmb_stream_consolidator_archive_view(
+                denied_request,
+                source.id,
+            )
+            self.assertEqual(denied.status_code, 403)
+
+    def test_history_hides_legacy_records_without_retained_content(self):
+        HMBSourceUpload.objects.create(
+            project=self.project,
+            uploaded_by=self.owner,
+            upload_kind=HMBSourceUpload.KIND_CASE_FILE,
+            original_filename='Unavailable.xlsx',
+            storage_key='',
+            file_sha256='a' * 64,
+            metadata={
+                'source_tool': 'hmb_stream_table_consolidator',
+                'export_kind': 'comparison_workbook',
+            },
+        )
+        request = self._request(
+            'get',
+            '/archive/',
+            self.owner,
+            {'project_id': str(self.project.project_id)},
+        )
+
+        response = archive_hmb_stream_consolidator_export_view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['results'], [])

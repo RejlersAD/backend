@@ -44,10 +44,10 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         self.assertNotEqual(second.data['id'], first.data['id'])
         self.assertEqual((second.data['version'], second.data['document_name']), ('2', 'Scope.pdf'))
         listing = self.api.get(self.url + 'folders/proposal/files/', {'storage': 'radai'})
-        self.assertEqual(listing.data['item_count'], 1)
-        self.assertEqual(listing.data['files'][0]['id'], second.data['id'])
+        self.assertEqual(listing.data['item_count'], 2)
+        self.assertEqual([row['id'] for row in listing.data['files'][:2]], [second.data['id'], first.data['id']])
         state = self.api.get(self.url).data['radai_storage']
-        self.assertEqual(next(row['item_count'] for row in state['folders'] if row['key'] == 'proposal'), 1)
+        self.assertEqual(next(row['item_count'] for row in state['folders'] if row['key'] == 'proposal'), 2)
         history = self.api.get(self.file_url(first) + 'versions/').data['versions']
         self.assertEqual([(row['id'], row['is_current']) for row in history], [('2', True), ('1', False)])
         self.assertEqual(history[0]['file_id'], second.data['id'])
@@ -195,6 +195,26 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         second = self.version(first)
         self.assertEqual(second.status_code, 201, second.data)
         self.assertEqual(second.data['document_id'], first.data['document_id'])
+
+    def test_delete_head_promotes_previous_and_upload_reuses_document_as_new_version(self):
+        first = self.upload()
+        second = self.version(first, content=b'v2 content')
+        self.assertEqual(second.status_code, 201, second.data)
+        removed = self.api.delete(self.file_url(second))
+        self.assertEqual(removed.status_code, 200, removed.data)
+        self.assertEqual(removed.data['deleted_id'], second.data['id'])
+        self.assertEqual(removed.data['current']['id'], first.data['id'])
+
+        listing = self.api.get(self.url + 'folders/proposal/files/', {'storage': 'radai'})
+        self.assertEqual([row['id'] for row in listing.data['files']], [first.data['id']])
+
+        reupload = self.upload(content=b'v3 from upload', request_id=uuid4(), name='Scope.pdf')
+        self.assertEqual(reupload.status_code, 201, reupload.data)
+        self.assertEqual(reupload.data['version'], '3')
+        self.assertEqual(reupload.data['document_id'], first.data['document_id'])
+
+        history = self.api.get(self.file_url(first) + 'versions/').data['versions']
+        self.assertEqual([row['id'] for row in history], ['3', '1'])
 
 
 @override_settings(**CONFIG)
