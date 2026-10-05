@@ -738,10 +738,14 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             return Response(list_private_files(self.get_object(), request.user, folder_key, request.query_params.get('cursor')))
         return Response(list_workspace_files(self.get_object(), request.user, folder_key, request.query_params.get('cursor')))
 
-    @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)')
+    @action(detail=True, methods=['get', 'delete'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)')
     def workspace_file(self, request, pk=None, folder_key=None, file_id=None):
-        from .opportunity_workspace import workspace_file_details
-        return Response(workspace_file_details(self.get_object(), request.user, folder_key, file_id),
+        from .opportunity_workspace import delete_workspace_file, workspace_file_details
+        opportunity = self.get_object()
+        if request.method == 'DELETE':
+            return Response(delete_workspace_file(opportunity, request.user, folder_key, file_id),
+                            headers={'Cache-Control': 'no-store, private'})
+        return Response(workspace_file_details(opportunity, request.user, folder_key, file_id),
                         headers={'Cache-Control': 'no-store, private'})
 
     @action(detail=True, methods=['get'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/versions')
