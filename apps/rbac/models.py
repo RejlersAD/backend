@@ -402,6 +402,7 @@ class UserProfile(TimeStampedModel):
             return True
 
         from apps.rbac.service_catalogue import is_sales_department
+        module_code = str(permission_code or '').split('.', 1)[0]
         if is_sales_department(self.department) and module_code.startswith('sales_'):
             return Module.objects.filter(code=module_code, is_active=True).exists()
         from apps.rbac.models import UserRole
