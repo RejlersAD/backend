@@ -78,13 +78,14 @@ class VFRegistrationAPITests(TestCase):
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(response.data['deal_code'], 'Q-102101')
 
-    def test_missing_commercial_details_block_qualification(self):
+    def test_missing_commercial_details_warn_but_allow_qualification(self):
         created = self.save()
         response = self.client.post(f"/api/v1/sales/deals/{created.data['id']}/submit-qualification/", {}, format='json')
-        self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('estimated_value', response.data['missing_fields'])
-        self.assertIn('currency', response.data['missing_fields'])
-        self.assertEqual(Deal.objects.get().stage, 'lead')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(Deal.objects.get().stage, 'qualified')
+        warnings = {warning['field'] for warning in response.data['warnings']}
+        self.assertIn('scope_type', warnings)
+        self.assertIn('required_attachment', warnings)
 
     def test_unknown_value_is_not_reported_as_zero_pipeline(self):
         self.assertEqual(self.save().status_code, 201)
