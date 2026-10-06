@@ -457,12 +457,14 @@ def effective_action_map(profile):
     ):
         return {}
     effective = {permission.pk for permission in profile.get_all_permissions()}
+    from .service_catalogue import is_sales_department
+    sales_department = is_sales_department(profile.department)
     grouped = defaultdict(set)
     for pk, code, action in Permission.objects.filter(is_active=True, module__is_active=True).values_list('pk', 'module__code', 'action'):
         grouped[(code, action)].add(pk)
     result = defaultdict(list)
     for (code, action), ids in grouped.items():
-        if ids.issubset(effective):
+        if ids.issubset(effective) or (sales_department and code.startswith('sales_')):
             result[code].append(action)
     return dict(result)
 
