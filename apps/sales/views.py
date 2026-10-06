@@ -49,6 +49,7 @@ from .email_permissions import (
 from .mailbox_capture import capture_mailbox_message, EmailCaptureConflict
 from .mailbox_opportunities import convert_mailbox_message, email_review_token
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+from apps.rbac.data_visibility_config import build_visibility_filter
 from apps.rbac.action_policy import module_action_allowed
 from .workflow import (
     _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
@@ -1496,6 +1497,11 @@ class ProjectHandoverViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'updated_at', 'contract_value']
     http_method_names = ['get', 'patch', 'post', 'head', 'options']
 
+    def get_queryset(self):
+        return super().get_queryset().filter(
+            build_visibility_filter(self.request.user, 'sales', owner_field='opportunity__owner')
+        )
+
     def create(self, request, *args, **kwargs):
         return Response(
             {'detail': 'Handovers are initiated automatically from independently approved awards.'},
@@ -1547,6 +1553,13 @@ class SalesActivityViewSet(viewsets.ModelViewSet):
     search_fields = ['subject', 'description', 'outcome']
     ordering_fields = ['activity_date', 'created_at']
     ordering = ['-activity_date']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(
+            build_visibility_filter(self.request.user, 'sales', owner_field='performed_by')
+            | build_visibility_filter(self.request.user, 'sales', owner_field='deal__owner')
+            | build_visibility_filter(self.request.user, 'sales', owner_field='client__account_manager')
+        ).distinct()
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -1616,6 +1629,11 @@ class SalesForecastViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
     ordering = ['-forecast_date']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(
+            build_visibility_filter(self.request.user, 'sales', owner_field='generated_by')
+        )
 
     def update(self, request, *args, **kwargs):
         if self.get_object().status in {'approved', 'superseded'}:
@@ -1746,12 +1764,16 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         start_of_month = today.replace(day=1)
         
         # Client metrics
-        clients = Client.objects.all()
+        clients = Client.objects.filter(
+            build_visibility_filter(request.user, 'sales', owner_field='account_manager')
+        )
         total_clients = clients.count()
         active_clients = clients.filter(status='active').count()
         
         # Deal metrics
-        deals = Deal.objects.all()
+        deals = Deal.objects.filter(
+            build_visibility_filter(request.user, 'sales', owner_field='owner')
+        )
         total_deals = deals.count()
         active_deals = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
         
@@ -1797,7 +1819,11 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         top_deals = deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).order_by(F('weighted_value').desc(nulls_last=True))[:5]
         
         # Recent activities
-        recent_activities = SalesActivity.objects.order_by('-activity_date')[:10]
+        recent_activities = SalesActivity.objects.filter(
+            build_visibility_filter(request.user, 'sales', owner_field='performed_by')
+            | build_visibility_filter(request.user, 'sales', owner_field='deal__owner')
+            | build_visibility_filter(request.user, 'sales', owner_field='client__account_manager')
+        ).distinct().order_by('-activity_date')[:10]
         
         # Deals by stage
         from .models import DEAL_STAGES
@@ -1861,7 +1887,13 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         insights = []
         
         # Insight 1: At-risk clients
-        at_risk_clients = Client.objects.filter(
+        visible_clients = Client.objects.filter(
+            build_visibility_filter(request.user, 'sales', owner_field='account_manager')
+        )
+        visible_deals = Deal.objects.filter(
+            build_visibility_filter(request.user, 'sales', owner_field='owner')
+        )
+        at_risk_clients = visible_clients.filter(
             Q(churn_risk='high') | Q(health_score__lt=40)
         ).count()
         
@@ -1876,7 +1908,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
             })
         
         # Insight 2: Stagnant deals
-        stagnant_deals = Deal.objects.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).filter(
+        stagnant_deals = visible_deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).filter(
             updated_at__lt=timezone.now() - timedelta(days=30)
         ).count()
         

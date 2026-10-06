@@ -108,6 +108,15 @@ DATA_VISIBILITY_CONFIG = {
         'owner_field': 'created_by',
         'description': 'Procurement team sees all procurement records',
     },
+
+    # Sales records are shared across Sales department members. Ownership is
+    # retained for attribution; reassignment remains a separate write policy.
+    'sales': {
+        'strategy': VisibilityStrategy.MODULE_TEAM,
+        'module_code': 'sales',
+        'owner_field': 'owner',
+        'description': 'Sales department members with Sales access see shared Sales records',
+    },
     
     # DesignIQ Module
     'designiq': {
@@ -213,6 +222,12 @@ def user_has_module_access(user, module_code: str) -> bool:
         
         # Get all modules user has access to
         user_modules = profile.get_all_modules()
+        if module_code == 'sales':
+            from apps.rbac.service_catalogue import is_sales_department
+            return is_sales_department(profile.department) and any(
+                module.code == 'sales' or module.code.startswith('sales_')
+                for module in user_modules
+            )
         return any(module.code == module_code for module in user_modules)
     except Exception:
         return False
@@ -231,6 +246,12 @@ def get_users_with_module_access(module_code: str) -> List:
     try:
         from apps.rbac.models import UserProfile, Module
         
+        if module_code == 'sales':
+            from apps.rbac.service_catalogue import is_sales_department
+            profiles = UserProfile.objects.filter(is_deleted=False).only('user_id', 'department')
+            return [profile.user_id for profile in profiles
+                    if is_sales_department(profile.department) and user_has_module_access(profile.user, 'sales')]
+
         # Get the module
         module = Module.objects.filter(code=module_code, is_active=True).first()
         if not module:
