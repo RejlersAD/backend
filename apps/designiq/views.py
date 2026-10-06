@@ -2688,17 +2688,26 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             # ------------------------------------------------------------------
             # Archive the source P&ID (and legend sheet) to the project's S3
             # archive — soft-coded layout in s3_utils.py, fail-safe.
+            #
+            # NOTE: the upload is read into memory ONCE here and the BYTES are
+            # archived (put_object) instead of the file object (upload_fileobj).
+            # boto3's upload_fileobj closes the passed file object on success,
+            # which previously crashed the temp-file write below with
+            # "ValueError: seek of closed file" whenever archiving was enabled.
+            # The same bytes are reused for the temp file, so the upload stream
+            # is never touched twice.
             # ------------------------------------------------------------------
+            pid_bytes = None
             try:
                 pid_file.seek(0)
+                pid_bytes = pid_file.read()
                 _arc = s3_storage.archive_artifact(
-                    'pid_document', pid_file.name, pid_file,
+                    'pid_document', pid_file.name, pid_bytes,
                     content_type='application/pdf', project=project_label,
                     metadata={'original-filename': pid_file.name},
                 )
                 if _arc.get('success'):
                     logger.info(f"📦 P&ID archived: {_arc['s3_key']}")
-                pid_file.seek(0)  # reset for the temp-file write below
             except Exception as _arc_err:
                 logger.warning(f"📦 P&ID archive skipped: {_arc_err}")
 
@@ -2707,8 +2716,12 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             # ------------------------------------------------------------------
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                for chunk in pid_file.chunks():
-                    tmp_file.write(chunk)
+                if pid_bytes is not None:
+                    tmp_file.write(pid_bytes)
+                else:
+                    pid_file.seek(0)
+                    for chunk in pid_file.chunks():
+                        tmp_file.write(chunk)
                 tmp_path = tmp_file.name
 
             # Save legend file if provided
@@ -2722,11 +2735,12 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                         leg_tmp.write(chunk)
                     legend_tmp_path = leg_tmp.name
                 logger.info(f"📋 Legend file: {legend_file.name}")
-                # Archive legend sheet to S3 as well (fail-safe)
+                # Archive legend sheet to S3 as well (fail-safe, bytes —
+                # upload_fileobj would close the file object; see note above)
                 try:
                     legend_file.seek(0)
                     s3_storage.archive_artifact(
-                        'legend', legend_file.name, legend_file,
+                        'legend', legend_file.name, legend_file.read(),
                         content_type='application/pdf', project=project_label,
                     )
                 except Exception:
