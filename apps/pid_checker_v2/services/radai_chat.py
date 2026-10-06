@@ -139,9 +139,12 @@ def answer_question(
         raise ChatConfigurationError(
             f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
 
-    # BYOK: prefer the caller-supplied key; fall back to a managed key if the
-    # platform admin configured one (provider_api_key handles the resolution).
-    resolved_key = api_key if (api_key and api_key.strip()) else provider_api_key(provider)
+    # BYOK: the caller-supplied key takes ABSOLUTE precedence.  Do NOT route it
+    # through lazy_provider_client/resolve_provider_credential as a "fallback" —
+    # when a managed credential exists it would WIN over the user's own key,
+    # so a broken managed key rejects every BYOK chat with a misleading 401.
+    byok_key = api_key if (api_key and api_key.strip()) else None
+    resolved_key = byok_key or provider_api_key(provider)
     if not resolved_key or not str(resolved_key).strip():
         raise ChatConfigurationError(
             "An AI API key is required. Add your Claude or OpenAI key (BYOK) to chat.")
@@ -155,9 +158,13 @@ def answer_question(
 
     if provider == 'openai':
         import openai
-        client = lazy_provider_client('openai', openai.OpenAI,
-                                      api_key=lambda: resolved_key,
-                                      timeout=CHAT_REQUEST_TIMEOUT_S)
+        if byok_key:
+            # User's own key — direct client, registry bypassed by design.
+            client = openai.OpenAI(api_key=byok_key, timeout=CHAT_REQUEST_TIMEOUT_S)
+        else:
+            client = lazy_provider_client('openai', openai.OpenAI,
+                                          api_key=lambda: resolved_key,
+                                          timeout=CHAT_REQUEST_TIMEOUT_S)
         resp = client.chat.completions.create(
             model=resolved_model,
             max_tokens=MAX_ANSWER_TOKENS,
@@ -167,9 +174,13 @@ def answer_question(
         in_t, out_t = read_openai_usage(resp)
     else:
         import anthropic
-        client = lazy_provider_client('anthropic', anthropic.Anthropic,
-                                      api_key=lambda: resolved_key,
-                                      timeout=CHAT_REQUEST_TIMEOUT_S)
+        if byok_key:
+            # User's own key — direct client, registry bypassed by design.
+            client = anthropic.Anthropic(api_key=byok_key, timeout=CHAT_REQUEST_TIMEOUT_S)
+        else:
+            client = lazy_provider_client('anthropic', anthropic.Anthropic,
+                                          api_key=lambda: resolved_key,
+                                          timeout=CHAT_REQUEST_TIMEOUT_S)
         resp = client.messages.create(
             model=resolved_model,
             max_tokens=MAX_ANSWER_TOKENS,
