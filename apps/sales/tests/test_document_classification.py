@@ -16,7 +16,9 @@ from apps.sales.document_classification import (
     get_document_classification, retry_document_classification, run_document_classification,
     save_document_classification,
 )
-from apps.sales.document_classification_content import extract_document_text, rule_suggestion, type_catalog
+from apps.sales.document_classification_content import (
+    extract_document_text, intelligence_tags, rule_suggestion, type_catalog,
+)
 from apps.sales.models import OpportunityAuditEvent, OpportunityWorkspaceUpload
 from apps.sales.tests.test_private_attachments import PrivateFixtures
 from apps.sales.tests.test_opportunity_workspace import CONFIG
@@ -51,6 +53,19 @@ class DocumentExtractionTests(SimpleTestCase):
         self.assertEqual(rule_suggestion('Technical Proposal Commercial Proposal.docx', '')[0], 'unclassified')
         self.assertEqual(rule_suggestion('document.msg', 'From: someone@example.test\nTo: sales@example.test')[0], 'unclassified')
         self.assertEqual(len(type_catalog()), 27)
+
+    def test_folder_safe_tags_confidence_and_content_folder_recommendation(self):
+        tags, confidence, recommended, reasoning = intelligence_tags(
+            'internal', 'review.txt', 'Technical Proposal for client review', 'technical_proposal',
+            [{'source': 'content', 'rule': 'technical_proposal', 'matched_text': 'Technical Proposal'}], 'rule')
+        self.assertEqual(tags, [])
+        self.assertEqual((confidence, recommended), (95, 'proposal'))
+        self.assertIn('content evidence', reasoning)
+
+        tags, confidence, recommended, _ = intelligence_tags(
+            'tender', 'Client_RFP_BOQ.pdf', '', 'unclassified', [], 'unclassified')
+        self.assertEqual(tags, ['RFP', 'BOQ'])
+        self.assertEqual((confidence, recommended), (60, ''))
 
     def archive(self, name, content):
         stream = BytesIO()
@@ -133,6 +148,12 @@ class DocumentClassificationTests(PrivateFixtures, TestCase):
         result = classification_projection(upload, self.actor)
         self.assertEqual((result['document_type'], result['origin'], result['ai_status']),
                          ('technical_proposal', 'rule', 'not_needed'))
+        intelligence = result['intelligence']
+        self.assertEqual((intelligence['documentType'], intelligence['confidence']), ('Technical Proposal', 95))
+        self.assertEqual(intelligence['folder'], upload.folder_key)
+        self.assertIn(f'opportunity_id:{self.opportunity.pk}', intelligence['tags'])
+        self.assertIn('client_name:', ' '.join(intelligence['tags']))
+        self.assertIn(self.opportunity.deal_name, intelligence['searchKeywords'])
         self.provider.assert_not_called()
         self.assertFalse(run_document_classification(run.pk)['processed'])
         self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='document_classification_finished').count(), 1)

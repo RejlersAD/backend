@@ -2,6 +2,7 @@
 import uuid
 
 from django.conf import settings
+from django.core.validators import MaxValueValidator
 from django.db import models
 
 
@@ -35,9 +36,18 @@ class OpportunityDocumentClassificationRun(models.Model):
     provider = models.CharField(max_length=30, blank=True)
     model = models.CharField(max_length=200, blank=True)
     extraction_code = models.CharField(max_length=50, blank=True)
-    engine_version = models.CharField(max_length=50, default='document_classification_v1')
+    tags = models.JSONField(default=list)
+    confidence = models.PositiveSmallIntegerField(default=0, validators=[MaxValueValidator(100)])
+    recommended_folder = models.CharField(max_length=30, blank=True)
+    reasoning = models.CharField(max_length=500, blank=True)
+    search_keywords = models.JSONField(default=list)
+    engine_version = models.CharField(max_length=50, default='document_classification_v2')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(
+            check=models.Q(confidence__lte=100), name='sales_doc_classification_confidence_range')]
 
 
 class OpportunityDocumentClassificationCommand(models.Model):

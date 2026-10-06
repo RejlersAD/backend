@@ -6,7 +6,6 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.core.project_models import Project, ProjectMember
@@ -51,103 +50,44 @@ def _require(value, field, missing):
         missing.append(field)
 
 
-def _sales_notification_recipients(actor):
-    profiles = UserProfile.objects.filter(
-        is_deleted=False,
-        user__is_active=True,
-        roles__is_active=True,
-        roles__modules__code='sales',
-        roles__modules__is_active=True,
-    ).select_related('user').distinct()
-    recipients = [profile.user for profile in profiles if profile.user_id != actor.id]
-    return recipients
-
-
-def _read_event_type(opportunity):
-    value = (
-        opportunity.qualification_data.get('event_type')
-        or opportunity.custom_fields.get('event_type')
-        or opportunity.qualification_data.get('request_type')
-        or opportunity.custom_fields.get('request_type')
-        or ''
-    )
-    if value:
-        return str(value).strip()
-    return (opportunity.get_opportunity_type_display() or 'Not provided').strip()
-
-
-def _parse_value_datetime(value):
-    if not value:
-        return None
-    if isinstance(value, str):
-        parsed = parse_datetime(value)
-        return parsed if parsed is not None else None
-    if hasattr(value, 'hour'):
-        return value
-    return None
-
-
-def _render_date_or_datetime(value, *, default_time='12:00 PM'):
-    # Preserve known timestamps; date-only values are rendered with a policy default time.
-    if value is None:
-        return 'Not provided'
-    if hasattr(value, 'hour'):
-        local = timezone.localtime(value) if timezone.is_aware(value) else value
-        return f"{local.day} {local.strftime('%B %Y')} at {local.strftime('%I:%M %p').lstrip('0')}"
-    return f"{value.day} {value.strftime('%B %Y')} at {default_time}"
-
-
-def _qualification_notification_message(opportunity):
-    opportunity_type = (opportunity.get_opportunity_type_display() or 'Not provided').strip()
-    if opportunity_type.upper() == 'EOI':
-        opportunity_type = 'EOI (Expression of Interest)'
-    event_type = _read_event_type(opportunity)
-    published_at = (
-        _parse_value_datetime(opportunity.qualification_data.get('published_at'))
-        or _parse_value_datetime(opportunity.custom_fields.get('published_at'))
-        or opportunity.created_at
-    )
-    deadline_at = (
-        _parse_value_datetime(opportunity.qualification_data.get('submission_deadline_at'))
-        or _parse_value_datetime(opportunity.custom_fields.get('submission_deadline_at'))
-        or opportunity.submission_due_date
-    )
-    owner_name = (
-        opportunity.owner.get_full_name() if opportunity.owner_id else ''
-    ) or (opportunity.owner.username if opportunity.owner_id else 'Not assigned')
-    company_name = (opportunity.client.company_name or 'Not provided').strip()
-    project_name = (opportunity.deal_name or 'Not provided').strip()
-    reference_number = (opportunity.deal_code or 'Not provided').strip()
-    submission_deadline = _render_date_or_datetime(deadline_at)
-    published = _render_date_or_datetime(published_at)
-    due_date = _render_date_or_datetime(deadline_at)
-    return (
-        f"- A new **{opportunity_type}** has been received from **{company_name}**.\n"
-        f"- Opportunity/Reference Number: **{reference_number}**\n"
-        f"- Project Name: **{project_name}**\n"
-        f"- **Submission Deadline:** **{submission_deadline}**\n"
-        f"- **Owner:** {owner_name}\n"
-        f"- **Event Type:** {event_type}\n"
-        f"- **Published:** {published}\n"
-        f"- **Due Date:** {due_date}"
-    )
+def _sales_notification_recipients(opportunity):
+    """Resolve explicit opportunity assignments, not every Sales module user."""
+    recipients = {
+        user.pk: user
+        for user in opportunity.team_members.filter(is_active=True)
+    }
+    if opportunity.owner_id and opportunity.owner.is_active:
+        recipients[opportunity.owner_id] = opportunity.owner
+        owner_profile = UserProfile.objects.filter(
+            user_id=opportunity.owner_id,
+            is_deleted=False,
+            status='active',
+        ).select_related('manager__user').first()
+        manager_profile = owner_profile.manager if owner_profile else None
+        if (
+            manager_profile
+            and not manager_profile.is_deleted
+            and manager_profile.status == 'active'
+            and manager_profile.user.is_active
+        ):
+            recipients[manager_profile.user_id] = manager_profile.user
+    return list(recipients.values())
 
 
 def _notify_sales_qualification(opportunity, actor, special_note=''):
-    recipients = _sales_notification_recipients(actor)
+    recipients = _sales_notification_recipients(opportunity)
     if not recipients:
-        return
-    message = _qualification_notification_message(opportunity)
-    if special_note:
-        message += f'\n- **Special Note:** {special_note}'
-    NotificationService.bulk_notify(
+        return []
+    notifications = NotificationService.bulk_notify(
         recipients,
-        title='New opportunity qualification received',
-        message=message,
-        category='APPROVAL',
+        title='New Opportunity Submitted',
+        message=f'Opportunity {opportunity.deal_name} has been submitted for Internal Sales Review.',
+        category='INFO',
         priority='NORMAL',
-        action_label='Open opportunity',
+        action_label='Open Opportunity Record',
         action_url=f'/sales/opportunities?record={opportunity.pk}',
+        sender=actor,
+        force_in_app=True,
         metadata={
             'module': 'sales',
             'department': 'sales',
@@ -160,8 +100,14 @@ def _notify_sales_qualification(opportunity, actor, special_note=''):
             'special_note': special_note,
         },
     )
+    if len(notifications) != len(recipients):
+        raise ValidationError({
+            'notification': 'The opportunity could not be submitted because reviewer notifications were not saved.',
+        })
+    return notifications
 
 
+@transaction.atomic
 def submit_qualification(opportunity, actor, special_note=''):
     if opportunity.stage != 'lead':
         raise ValidationError({'stage': 'Only a lead can be submitted for qualification.'})
@@ -170,17 +116,25 @@ def submit_qualification(opportunity, actor, special_note=''):
         raise ValidationError({'special_note': 'Special note must be 1000 characters or fewer.'})
     missing = []
     for value, field in [
-        (opportunity.scope_type, 'scope_type'),
         (opportunity.submission_due_date, 'submission_due_date'),
         (opportunity.owner_id, 'owner'),
     ]:
         _require(value, field, missing)
+    warnings = []
+    if not opportunity.scope_type:
+        warnings.append({
+            'field': 'scope_type',
+            'message': 'Scope type has not been provided. You may continue with the submission.',
+        })
     has_required_attachment = OpportunityWorkspaceUpload.objects.filter(
         workspace__opportunity=opportunity,
         status='ready',
     ).exists()
     if not has_required_attachment:
-        missing.append('required_attachment')
+        warnings.append({
+            'field': 'required_attachment',
+            'message': 'No attachment has been provided. You may continue with the submission.',
+        })
     if missing:
         raise ValidationError({'missing_fields': missing})
     if opportunity.framework_id:
@@ -204,6 +158,7 @@ def submit_qualification(opportunity, actor, special_note=''):
         data={'special_note': note} if note else {},
     )
     _notify_sales_qualification(opportunity, actor, note)
+    opportunity.submission_warnings = warnings
     return opportunity
 
 
