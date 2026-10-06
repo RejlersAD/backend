@@ -2,3 +2,4 @@
 *.sh text eol=lf
 railway_start.sh text eol=lf
 post_deploy.sh text eol=lf
+*.safetensors filter=lfs diff=lfs merge=lfs -text

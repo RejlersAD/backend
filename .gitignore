@@ -432,6 +432,10 @@ apps/finance/data/invoice_performance_summary.json
 !docs/SALES_VF_REGISTRATION.md
 !docs/SALES_OPPORTUNITY_REGISTER_EXPORT.md
 
+# Local runtime noise — never commit.
+logs/
+_tmp_*.py
+
 # Opportunity workspace transport contract and synthetic regression coverage.
 !apps/sales/tests/test_opportunity_workspace.py
 !apps/sales/tests/test_workspace_documents.py
@@ -465,3 +469,8 @@ apps/finance/data/invoice_performance_summary.json
 !apps/sales/tests/test_folder_tags_postgresql.py
 !docs/SALES_BID_PREPARATION.md
 !docs/BID_PREPARATION_MIGRATION_VERIFICATION.md
+>>>>>>> origin/main
+
+# Legend model training intermediates (runtime needs only data/*/export)
+ai/legend_models/data/_extracted/
+ai/legend_models/data/_router/

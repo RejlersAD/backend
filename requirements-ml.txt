@@ -7,3 +7,13 @@
 # easyocr  
 # opencv-python
 # mlflow
+
+# ─── line_tagger runtime (P&ID line-list ML fallback) ─────────────────────
+# Installed ONLY in the development image when ENABLE_ML_FEATURES=true.
+# The production stage never installs these: prod keeps regex-only extraction
+# unless you deliberately extend the production stage with a requirements-ml
+# install. torch must be the CPU wheel to avoid multi-GB CUDA downloads.
+torch>=2.1.0
+transformers>=4.40.0
+tokenizers>=0.15.0
+numpy>=1.24

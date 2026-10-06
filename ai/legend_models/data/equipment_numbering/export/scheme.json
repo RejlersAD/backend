@@ -1,0 +1,56 @@
+{
+  "example": "XX-XXX-XX",
+  "separator": "-",
+  "segments": [
+    {
+      "placeholder": "XX",
+      "meaning": "ITEM SYMBOLS",
+      "field_key": "item_symbols",
+      "codes": {
+        "B": "BLOWER",
+        "C": "COMPRESSOR/BLOWER",
+        "CP": "CALIBRATION POT",
+        "D": "DRYER",
+        "E": "EXCHANGER/COOLER/REBOILER/RECLAIMER",
+        "F": "FILTER",
+        "FL": "FLARE",
+        "FV": "FILTER VESSEL",
+        "H": "HEATER",
+        "HD": "HEADER",
+        "M": "MOTOR",
+        "MG": "GENERATOR",
+        "MX": "MIXER",
+        "N": "NITROGEN GENERATOR",
+        "P": "PUMP",
+        "PX": "PACKAGE",
+        "S": "COMPRESSOR STAGE",
+        "SG": "SIGHT GLASS",
+        "T": "TANK, PIT",
+        "TR": "TRANSFORMER",
+        "V": "VESSEL, DRUM, COLUMN",
+        "W": "WELL",
+        "WM": "WATER MAKER"
+      }
+    },
+    {
+      "placeholder": "XXX",
+      "meaning": "ITEM NUMBER",
+      "field_key": "item_number",
+      "codes": {}
+    },
+    {
+      "placeholder": "XX",
+      "meaning": "SITE SYMBOLS",
+      "field_key": "site_symbols",
+      "codes": {
+        "CF": "CFP",
+        "HF": "HAIL FIELD/HAIL SITE TERMINAL",
+        "IF": "MUBARRAZ ISLAND",
+        "AA,BA,BB,BD,BF,CA,CD,BC": "EACH PRODUCTION PLATFORM, JACKETS"
+      }
+    }
+  ],
+  "unmapped_sections": [
+    "EQUIPMENT SEQUENCE NUMBER."
+  ]
+}

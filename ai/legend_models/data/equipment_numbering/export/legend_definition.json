@@ -1,0 +1,55 @@
+{
+  "separator": "-",
+  "fields": [
+    {
+      "key": "item_symbols",
+      "label": "ITEM SYMBOLS",
+      "regex": "[A-Z0-9][A-Z0-9]",
+      "lookup": {
+        "B": "BLOWER",
+        "C": "COMPRESSOR/BLOWER",
+        "CP": "CALIBRATION POT",
+        "D": "DRYER",
+        "E": "EXCHANGER/COOLER/REBOILER/RECLAIMER",
+        "F": "FILTER",
+        "FL": "FLARE",
+        "FV": "FILTER VESSEL",
+        "H": "HEATER",
+        "HD": "HEADER",
+        "M": "MOTOR",
+        "MG": "GENERATOR",
+        "MX": "MIXER",
+        "N": "NITROGEN GENERATOR",
+        "P": "PUMP",
+        "PX": "PACKAGE",
+        "S": "COMPRESSOR STAGE",
+        "SG": "SIGHT GLASS",
+        "T": "TANK, PIT",
+        "TR": "TRANSFORMER",
+        "V": "VESSEL, DRUM, COLUMN",
+        "W": "WELL",
+        "WM": "WATER MAKER"
+      },
+      "optional": false
+    },
+    {
+      "key": "item_number",
+      "label": "ITEM NUMBER",
+      "regex": "[A-Z0-9][A-Z0-9][A-Z0-9]",
+      "lookup": {},
+      "optional": false
+    },
+    {
+      "key": "site_symbols",
+      "label": "SITE SYMBOLS",
+      "regex": "[A-Z0-9][A-Z0-9]",
+      "lookup": {
+        "CF": "CFP",
+        "HF": "HAIL FIELD/HAIL SITE TERMINAL",
+        "IF": "MUBARRAZ ISLAND",
+        "AA,BA,BB,BD,BF,CA,CD,BC": "EACH PRODUCTION PLATFORM, JACKETS"
+      },
+      "optional": false
+    }
+  ]
+}
