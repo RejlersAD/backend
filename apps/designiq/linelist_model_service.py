@@ -47,9 +47,18 @@ def _load_model():
         _loaded = False
         return _loaded
     try:
-        root = str(Path(__file__).resolve().parents[3])  # backend/apps/designiq → repo root
-        if root not in sys.path:
-            sys.path.insert(0, root)
+        # The ai/ package lives at the repo root.  Candidate roots (first hit wins):
+        #   local dev  : <workspace>/   — docker-compose mounts ./ai at /ai, so the
+        #                container filesystem root ('/') exposes /ai/legend_models
+        #   production : /app           — Railway's `COPY . .` ships ai/legend_models
+        #                (tracked in this repo) at /app/ai/legend_models
+        _here = Path(__file__).resolve()
+        _candidates = [_here.parents[3], _here.parents[2]]
+        for root in _candidates:
+            if (Path(str(root)) / 'ai' / 'legend_models' / 'infer.py').exists():
+                if str(root) not in sys.path:
+                    sys.path.insert(0, str(root))
+                break
         from ai.legend_models.infer import LegendOrchestrator  # noqa: PLC0415
         _loaded = LegendOrchestrator().load(LINELIST_MODEL_KEY)
         logger.info('[linelist_model] loaded champion model for key %r', LINELIST_MODEL_KEY)
