@@ -6,6 +6,7 @@ Supports: Onshore, Offshore, ADNOC, Industrial/Project line-number formats
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import re
+import os
 import fitz  # PyMuPDF
 from PIL import Image
 import io
@@ -223,8 +224,12 @@ OCR_EASYOCR_TILE_MAX_DIM = 3000   # tile renders whose side exceeds this
 #   (~150 MB peak) — lower this on memory-constrained hosts.
 #   1 = sequential (legacy behaviour).  FROM-TO phases always run
 #   sequentially in the main loop; workers return text + line items only.
+#   ENV OVERRIDE (soft-coded): set OCR_PAGE_PARALLEL_WORKERS=1 (or 2) on
+#   memory-constrained hosts — e.g. Railway containers — where 4 parallel
+#   300-DPI renders (~600 MB peak) can OOM-kill the worker and silently
+#   wedge the extraction task.
 # ---------------------------------------------------------------------------
-OCR_PAGE_PARALLEL_WORKERS = 4
+OCR_PAGE_PARALLEL_WORKERS = int(os.environ.get('OCR_PAGE_PARALLEL_WORKERS', '4'))
 
 # ---------------------------------------------------------------------------
 # Tesseract PSM modes — soft-coded.
