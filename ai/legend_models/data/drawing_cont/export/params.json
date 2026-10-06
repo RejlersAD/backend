@@ -1,0 +1,14 @@
+{
+  "image_size": 32,
+  "augmentations": [
+    "orig",
+    "flip_h",
+    "rot_p10",
+    "rot_m10"
+  ],
+  "classifier": "knn",
+  "knn_k": 3,
+  "knn_weights": "distance",
+  "distance": "cosine",
+  "eval_fraction": 0.3
+}

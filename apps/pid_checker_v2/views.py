@@ -2138,6 +2138,66 @@ class RadAIChatView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
+class RadAIChatArchiveView(APIView):
+    """POST a RADAI Assistant conversation transcript → archived to the
+    project's S3 archive (soft-coded layout in designiq/s3_utils.py).
+
+    The assistant is intentionally stateless server-side (history lives in
+    the browser tab); this endpoint is how conversations get persisted —
+    the frontend widget calls it fire-and-forget after each completed
+    exchange.  Fail-safe: returns 200 with archived=False when S3 is not
+    configured, so the chat UI never errors because of archiving.
+
+    Body:
+      session_id (str, required)  stable per-tab conversation id
+      messages   (array)          [{role, content, ts}]
+      project    (str)            project code/name (archive folder)
+      page       (str)            page the chat was on
+      document   (object)         uploaded document meta (optional)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        import json as _json
+        from django.utils import timezone
+        from apps.designiq.s3_utils import s3_storage
+
+        session_id = str(request.data.get('session_id') or '').strip()
+        if not session_id:
+            return Response({'error': 'session_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        messages = request.data.get('messages') or []
+        if not isinstance(messages, list):
+            return Response({'error': 'messages must be an array'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        transcript = {
+            'session_id': session_id,
+            'project': request.data.get('project') or '',
+            'page': request.data.get('page') or '',
+            'document': request.data.get('document') or None,
+            'user': getattr(request.user, 'email', '') or str(request.user),
+            'archived_at': timezone.now().isoformat(),
+            'message_count': len(messages),
+            'messages': [
+                {'role': str(m.get('role') or ''), 'content': str(m.get('content') or ''),
+                 'ts': m.get('ts')}
+                for m in messages if isinstance(m, dict)
+            ],
+        }
+        arc = s3_storage.archive_artifact(
+            'assistant',
+            f"{session_id}.json",
+            _json.dumps(transcript, default=str, ensure_ascii=False).encode('utf-8'),
+            content_type='application/json',
+            project=transcript['project'],
+            metadata={'session-id': session_id, 'page': transcript['page']},
+        )
+        return Response({'archived': bool(arc.get('success')),
+                         's3_key': arc.get('s3_key')}, status=status.HTTP_200_OK)
+
+
 class IdentifySymbolsView(APIView):
     """POST a P&ID document id + BYOK; receive a best-guess list of legend
     symbols the Vision model can identify on the drawing, compared against

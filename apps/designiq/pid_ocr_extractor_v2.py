@@ -1,4 +1,4 @@
-"""
+﻿"""
 P&ID OCR Extractor V2 - Multi-Engine + AI Intelligence
 Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
 Supports: Onshore, Offshore, ADNOC, Industrial/Project line-number formats
@@ -42,6 +42,93 @@ ADNOC_SEQ_MIN_DIGITS  = 3   # was 4 (hard-coded); accepts 3-digit sequences
 ADNOC_PIPECLASS_MIN_LEN = 2  # was 3 (hard-coded); accepts 2-char pipe classes
 
 # ---------------------------------------------------------------------------
+# Truncated-sequence guard — soft-coded.
+# OCR occasionally clips the last digit of a sequence number (e.g. the tag
+# 1"-SG-AC3N-8702 is also read as 1"-SG-AC3N-870).  When two extracted lines
+# are identical except that one's sequence is a strict PREFIX of the other's,
+# the shorter one is an OCR truncation artefact and is dropped.
+# ---------------------------------------------------------------------------
+DROP_TRUNCATED_SEQ_DUPLICATES = True
+
+# ---------------------------------------------------------------------------
+# OCR-variant duplicate suppression — soft-coded.
+# Running several OCR modes/rotations means the same physical tag is often
+# read twice: once cleanly and once garbled (6"-FL-AC6N-8115 + 6"-FL-ACEN-8115,
+# 20"-PL-DC3N-8106 + 20"-PL-DC35N-8106).  These rules only ever fire when
+# two entries describe the SAME line identity (same size + sequence), so a
+# genuinely unique line can never be suppressed:
+#
+# VARIANT_DEDUP_ENABLED       : master switch.
+# PIPECLASS_DEDUP_SHAPE       : when duplicate entries (same size+fluid+seq)
+#                               disagree on pipe class, keep the class matching
+#                               this shape if EXACTLY one matches.
+#                               Default: letters, exactly one digit group of
+#                               length 1, optional trailing letters (AC3N, AC6N,
+#                               AC3, CI…).  Tune per project class convention.
+# FLUID_TRUSTED_MIN_COUNT     : when duplicate entries (same size+class+seq)
+#                               disagree on fluid code, keep the fluid seen at
+#                               least N times among the page's other lines if
+#                               exactly one qualifies (SG trusted over SC).
+# ---------------------------------------------------------------------------
+VARIANT_DEDUP_ENABLED = True
+PIPECLASS_DEDUP_SHAPE = r'^[A-Z]+\d[A-Z]*$'
+FLUID_TRUSTED_MIN_COUNT = 2
+
+# ---------------------------------------------------------------------------
+# LINE LIST (Phase 2 / polyolefins) format — soft-coded, derived from the
+# project legend sheet (LEGEND_PHASE2.xlsx, sheet "Line Number").
+#
+#   SIZE - UNIT - FLUID - SERIAL - PIPING_CLASS - COATING (- STREAM)?
+#   e.g.  12 - 10 - PL - A1234 - A1B2C3D - IN
+#
+#   size     : nominal pipe size in inches (fractions allowed, e.g. 3/4)
+#   unit     : unit / system number
+#   fluid    : line designation code — vocabulary extracted from the legend
+#              (BA, BD, CL, SG, PL, CO2, CHWS, …) — used as a soft validator
+#   serial   : shape A#### — letter + 4 alnum; FIRST character is the AREA
+#   class    : piping service class, 7 alphanumeric chars
+#   coating  : 2-char coating / insulation / tracing / jacketing code
+#   stream   : optional 4-char stream suffix (polyolefins only)
+#
+# (Segment order verified against the legend's ASCII tree diagram: AXXXX is
+# the serial — 'A' marks the area character — and XXXXXXX is the class.)
+#
+# Tune any segment constraint here without touching the regex code.
+# fluid_vocabulary_strict=False only LOGS unknown codes (OCR may garble a
+# valid code); set True to hard-reject codes not found in the legend.
+# ---------------------------------------------------------------------------
+LINELIST_FORMAT = {
+    'unit_max_len': 3,
+    'fluid_max_len': 4,
+    'serial_pattern': r'^[A-Z][A-Z0-9]{4}$',   # A#### — first char = area
+    'class_pattern': r'^[A-Z0-9]{7}$',         # XXXXXXX — 7 alnum
+    'coating_optional': True,
+    'stream_optional': True,
+    'fluid_vocabulary_strict': False,
+    # Line designation codes from LEGEND_PHASE2.xlsx ("Line Number" sheet)
+    'fluid_vocabulary': {
+        # Flare and blow down
+        'BA', 'BD', 'CL', 'CG', 'HF', 'LF', 'WL', 'WG', 'JW', 'MW',
+        # Gases
+        'AA', 'AT', 'VA', 'CO2', 'FG', 'HN', 'IA', 'NG', 'NR', 'NT',
+        'OG', 'PN', 'UA', 'UN', 'VG', 'RHN',
+        # Steam and condensate
+        'DS', 'HC', 'HS', 'KS', 'LC', 'MC', 'MS',
+        # Water streams
+        'AW', 'BW', 'CW', 'DW', 'FW', 'GWS', 'GWR', 'CHWS', 'CHWR',
+        'PEW', 'SWS', 'SWR', 'PW', 'TW', 'UW', 'WW',
+        # Oil and chemical
+        'CH', 'FC', 'FD', 'HO', 'LO', 'PO', 'SC',
+        # Process
+        'AP', 'ET', 'CM', 'CO', 'CT', 'CRG', 'DI', 'DO', 'HE', 'HX',
+        'HY', 'LA', 'MO', 'NP', 'PE', 'PG', 'P', 'PL', 'PP', 'PR',
+        'RE', 'RG', 'SF', 'SL', 'TA', 'SA',
+        # Sewers
+        'AY', 'CY', 'NY', 'SY', 'WY', 'VZ',
+    },
+}
+
+# ---------------------------------------------------------------------------
 # General format strategy — controls how results from all sub-formats are
 # combined when format_type='general'.
 #
@@ -69,6 +156,108 @@ GENERAL_STRATEGY = 'merge'   # 'merge' | 'winner'
 # Remove angles that slow processing without adding lines on your drawings.
 # ---------------------------------------------------------------------------
 OCR_ROTATION_ANGLES = [0, 90, 270]
+
+# ---------------------------------------------------------------------------
+# OCR image pre-processing — soft-coded.
+#
+# OCR_CONVERT_TO_GRAYSCALE : if True, the rendered page is flattened to PIL
+#   mode 'L' before OCR.  Tesseract performs its own adaptive binarisation
+#   internally, and empirical testing on P&ID drawings shows the PIL grayscale
+#   flatten DESTROYS fine glyph detail: straight inch-marks (") come back as
+#   curly quotes (?) and lightly-drawn vertical tags disappear entirely.
+#   Default False — feed Tesseract the RGB render.
+#
+# OCR_RENDER_SCALE : PyMuPDF matrix scale used when rasterising a PDF page for
+#   OCR (2.5 × 72 dpi ≈ 180 DPI).  Raise towards 4.0 (~300 DPI) for drawings
+#   with very small tag fonts, at roughly 2.5× the OCR time.
+# ---------------------------------------------------------------------------
+# OCR_IMAGE_MODES : colour modes OCR runs on, results merged.  Tesseract's
+#   internal binarisation treats the RGB render and a PIL grayscale flatten
+#   DIFFERENTLY on thin CAD stroke fonts — each mode cleanly reads tags the
+#   other mangles (empirical on ADNOC P&ID: grayscale-only 24/26, RGB-only
+#   24/26, union 25/26 line tags).  Trim to ('L',) to halve OCR time.
+OCR_IMAGE_MODES = ('L', 'RGB')
+
+# OCR_RENDER_DPI : rasterisation density for the OCR path (scale = DPI/72).
+#   180 DPI is enough for bold title-block text but P&ID line tags are small
+#   light-stroke glyphs — empirical recall on dense ADNOC P&IDs:
+#   180 DPI ≈ 23/26 tags, 300 DPI ≈ 25/26 tags.  Default 300.
+# OCR_TILE_MAX_DIM / OCR_TILE_SIZE / OCR_TILE_OVERLAP : when a rendered page
+#   side exceeds OCR_TILE_MAX_DIM pixels, Tesseract runs on overlapping tiles
+#   instead of the full page (Tesseract layout analysis slows down and drops
+#   sparse labels on extremely large images; tile boundaries can also clip
+#   tags, which is why full-page is preferred up to a generous limit).
+#   Tiles overlap so tags crossing a tile boundary are still captured whole.
+OCR_RENDER_DPI = 300
+OCR_TILE_MAX_DIM = 16000
+OCR_TILE_SIZE = 2200
+OCR_TILE_OVERLAP = 500
+
+# ---------------------------------------------------------------------------
+# EasyOCR on large renders — soft-coded.
+# EasyOCR's text detector internally downsizes images to ~2560 px
+# (canvas_size), which shrinks small P&ID line tags into unreadable smudges
+# on large drawings.  Running it on overlapping tiles keeps tag glyphs at
+# full resolution.  EasyOCR complements Tesseract on thin CAD stroke fonts
+# (it reads tags Tesseract mangles, e.g. sizes fused with flow arrows), but
+# on CPU each tile takes seconds — disable or raise the threshold to save
+# time on simpler drawings.
+#
+# NOTE: EasyOCR is SLOW on CPU (measured ~45-60 s per 2200-3000 px tile, i.e.
+# ~1-2 hours for a full A0 P&ID at 300 DPI across 3 rotations).  It is
+# therefore DISABLED by default — enable it on GPU hosts or for offline/batch
+# extraction where its superior reading of thin stroke fonts and arrow-fused
+# tags (e.g. 20"-PL-DC3N-8106, which Tesseract mangles) is worth the time.
+# ---------------------------------------------------------------------------
+OCR_EASYOCR_ENABLED = False       # master switch (engine must also be installed)
+OCR_EASYOCR_TILE_MAX_DIM = 3000   # tile renders whose side exceeds this
+
+# ---------------------------------------------------------------------------
+# Parallel page processing — soft-coded.
+# OCR_PAGE_PARALLEL_WORKERS : multi-page documents run the expensive
+#   text-capture + regex stage (PHASE 1/1b/2) through a thread pool of this
+#   size.  Tesseract executes as SUBPROCESSES, so threads give real
+#   parallelism — 4 workers ≈ 4× throughput, bringing a dense/scanned
+#   20-page P&ID to ~50-60 min (fits the 100-min task budget) instead of
+#   ~3.5 h sequential.  Each worker holds one 300-DPI page render
+#   (~150 MB peak) — lower this on memory-constrained hosts.
+#   1 = sequential (legacy behaviour).  FROM-TO phases always run
+#   sequentially in the main loop; workers return text + line items only.
+# ---------------------------------------------------------------------------
+OCR_PAGE_PARALLEL_WORKERS = 4
+
+# ---------------------------------------------------------------------------
+# Tesseract PSM modes — soft-coded.
+#
+# OCR_TESSERACT_PSMS          : page-segmentation modes run on the unrotated
+#                               page.  PSM 6 = uniform block (fast, accurate
+#                               for dense areas), PSM 11 = sparse text (finds
+#                               isolated labels anywhere).
+# OCR_TESSERACT_PSMS_ROTATED  : PSM modes run at EACH non-zero rotation in
+#                               OCR_ROTATION_ANGLES.  Vertical pipe tags are
+#                               scattered sparsely across the drawing, so the
+#                               sparse mode matters just as much at 90°/270°
+#                               as the block mode — running PSM 6 only (the
+#                               old behaviour) silently drops vertical tags
+#                               that sit far from other text.
+# Reduce either tuple to cut OCR time on drawings with known orientations.
+# ---------------------------------------------------------------------------
+OCR_TESSERACT_PSMS = (6, 11)
+OCR_TESSERACT_PSMS_ROTATED = (6, 11)
+
+# ---------------------------------------------------------------------------
+# OCR separator / quote normalisation — soft-coded character set.
+# Tesseract frequently emits typographic (curly) quotes and dashes instead of
+# the ASCII inch-mark / hyphen used in line numbers, e.g. 4?-SG-AC3N-8111.
+# Every character listed here is normalised to '-' before regex parsing.
+# NOTE: '/' is deliberately NOT in this list — it is handled separately so
+# fractional pipe sizes (3/4") survive normalisation.
+# ---------------------------------------------------------------------------
+OCR_SEPARATOR_CHARS = (
+    '=', '~', '—', '–', '―', '─', '|', '°', '″', '_',
+    '”', '“', '’', '‘', '`', '´', '′',
+    "'", '"',
+)
 
 # ---------------------------------------------------------------------------
 # Soft-coded industrial format — all configurable without touching regex code.
@@ -217,9 +406,43 @@ try:
 except ImportError as e:
     GEOMETRIC_DETECTOR_AVAILABLE = False
     logger = logging.getLogger(__name__)
-    logger.warning(f"⚠️ GeometricFromToDetector not available: {e}")
+    logger.warning(f"?? GeometricFromToDetector not available: {e}")
 
 logger = logging.getLogger(__name__)
+
+
+def _ocr_image_regions(img, max_dim: int = None) -> List:
+    """
+    Split a large page render into overlapping tiles for OCR.
+
+    Tesseract's layout analysis degrades on extremely large images (sparse
+    labels get dropped) and EasyOCR's detector downsizes large inputs to its
+    internal canvas, shrinking small tags.  When either side exceeds
+    `max_dim` (default OCR_TILE_MAX_DIM) the image is cut into OCR_TILE_SIZE
+    tiles with OCR_TILE_OVERLAP pixels of overlap so tags crossing a tile
+    boundary are still captured whole.  Smaller images are returned as a
+    single full-page region.
+    """
+    if max_dim is None:
+        max_dim = OCR_TILE_MAX_DIM
+    w, h = img.size
+    if max(w, h) <= max_dim:
+        return [img]
+
+    def _starts(length: int) -> List[int]:
+        if length <= OCR_TILE_SIZE:
+            return [0]
+        step = max(OCR_TILE_SIZE - OCR_TILE_OVERLAP, 1)
+        starts = list(range(0, length - OCR_TILE_SIZE + 1, step))
+        if starts[-1] != length - OCR_TILE_SIZE:
+            starts.append(length - OCR_TILE_SIZE)  # always cover the far edge
+        return starts
+
+    return [
+        img.crop((x, y, min(x + OCR_TILE_SIZE, w), min(y + OCR_TILE_SIZE, h)))
+        for y in _starts(h)
+        for x in _starts(w)
+    ]
 
 
 class PIDLineExtractorV2:
@@ -254,7 +477,7 @@ class PIDLineExtractorV2:
         if engines_available:
             logger.info(f"✅ P&ID Extractor V2 ready with: {', '.join(engines_available)}")
         else:
-            logger.warning("⚠️ P&ID Extractor V2 initialized with NO OCR engines - extraction quality will be limited")
+            logger.warning("?? P&ID Extractor V2 initialized with NO OCR engines - extraction quality will be limited")
         self._init_geometric_detector()
     
     def _init_geometric_detector(self):
@@ -269,11 +492,11 @@ class PIDLineExtractorV2:
                 )
                 logger.info("✅ Geometric FROM-TO Detector initialized")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize geometric detector: {e}")
+                logger.warning(f"?? Failed to initialize geometric detector: {e}")
                 self.geometric_detector = None
         else:
             self.geometric_detector = None
-            logger.info("ℹ️ Geometric detector not available (missing dependencies)")
+            logger.info("?? Geometric detector not available (missing dependencies)")
     
     def _extract_pdf_embedded_text(self, page) -> str:
         """
@@ -429,13 +652,13 @@ class PIDLineExtractorV2:
             thread.join(timeout=timeout_seconds)
             
             if thread.is_alive():
-                logger.warning(f"⏱️ {engine_name} initialization timeout after {timeout_seconds}s - skipping (will use other engines)")
+                logger.warning(f"?? {engine_name} initialization timeout after {timeout_seconds}s - skipping (will use other engines)")
                 return False
             elif result['success']:
                 logger.info(f"✅ {engine_name} initialized")
                 return True
             else:
-                logger.warning(f"⚠️ {engine_name} not available: {result['error']}")
+                logger.warning(f"?? {engine_name} not available: {result['error']}")
                 return False
         
         # Initialize EasyOCR with 60-second timeout
@@ -444,10 +667,13 @@ class PIDLineExtractorV2:
                 import easyocr
                 self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
             except ImportError as e:
-                logger.warning(f"⚠️ EasyOCR not installed: {e}")
+                logger.warning(f"?? EasyOCR not installed: {e}")
                 raise
         
-        init_with_timeout(init_easyocr, 60, "EasyOCR")
+        if OCR_EASYOCR_ENABLED:
+            init_with_timeout(init_easyocr, 60, "EasyOCR")
+        else:
+            logger.info("  ?? EasyOCR disabled (OCR_EASYOCR_ENABLED=False) â€” skipping init")
         
         # Initialize PaddleOCR with 90-second timeout
         def init_paddleocr():
@@ -461,7 +687,7 @@ class PIDLineExtractorV2:
                     ocr_version='PP-OCRv4'  # Use v4 (faster, smaller models)
                 )
             except ImportError as e:
-                logger.warning(f"⚠️ PaddleOCR not installed: {e}")
+                logger.warning(f"?? PaddleOCR not installed: {e}")
                 raise
         
         init_with_timeout(init_paddleocr, 90, "PaddleOCR")
@@ -473,9 +699,9 @@ class PIDLineExtractorV2:
                 self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (openai_key))
                 logger.info("✅ OpenAI initialized")
             else:
-                logger.warning("⚠️ OPENAI_API_KEY not configured")
+                logger.warning("?? OPENAI_API_KEY not configured")
         except Exception as e:
-            logger.warning(f"⚠️ OpenAI not available: {e}")
+            logger.warning(f"?? OpenAI not available: {e}")
     
     def extract_all_text_from_image(self, img: Image.Image) -> Dict[str, str]:
         """
@@ -487,71 +713,80 @@ class PIDLineExtractorV2:
         # 1. Tesseract OCR - Multiple PSM modes to detect vertical text
         if PYTESSERACT_AVAILABLE and pytesseract:
             try:
-                # PSM 6: Assume uniform block of text (horizontal) — most reliable base
-                tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
-
-                # PSM 11: Sparse text — finds isolated labels anywhere on page
-                try:
-                    tesseract_sparse = pytesseract.image_to_string(img, config='--psm 11')
-                    if tesseract_sparse and len(tesseract_sparse.strip()) > 10:
-                        tesseract_text += ' ' + tesseract_sparse
-                        logger.info(f"  🔍 Tesseract sparse text: +{len(tesseract_sparse)} characters")
-                except Exception:
-                    pass
-
-                # ----------------------------------------------------------------
-                # Multi-rotation pass — OCR_ROTATION_ANGLES (soft-coded constant).
-                # P&ID pipe line tags are written at all angles (horizontal,
-                # top-to-bottom, bottom-to-top).  Running Tesseract PSM 6 on
-                # a PIL-rotated copy of the image converts vertical text to
-                # horizontal, which Tesseract reads with near-perfect accuracy.
-                # ----------------------------------------------------------------
-                for _angle in OCR_ROTATION_ANGLES:
-                    if _angle == 0:
-                        continue  # already processed above
-                    try:
-                        _rotated_img = img.rotate(_angle, expand=True)
-                        _rot_text = pytesseract.image_to_string(_rotated_img, config='--psm 6')
-                        if _rot_text and len(_rot_text.strip()) > 10:
-                            tesseract_text += ' ' + _rot_text
+                # Unified pass: for EVERY image mode (OCR_IMAGE_MODES) and EVERY
+                # angle in OCR_ROTATION_ANGLES (soft-coded) run the configured
+                # PSM modes on the full page or — for extremely large renders —
+                # on overlapping tiles (OCR_TILE_* constants).
+                # - P&ID pipe line tags are written at all angles and sit
+                #   sparsely on the drawing, so the sparse PSM runs at every
+                #   rotation, not just 0° — otherwise vertical tags far from
+                #   other text are lost.
+                # - Grayscale and RGB binarise thin CAD stroke fonts
+                #   differently; merging both modes recovers tags each one
+                #   mangles on its own.
+                tesseract_text = ''
+                for _mode in OCR_IMAGE_MODES:
+                    _mode_img = img.convert('L') if _mode == 'L' else img
+                    for _angle in OCR_ROTATION_ANGLES:
+                        try:
+                            _base = _mode_img.rotate(_angle, expand=True) if _angle != 0 else _mode_img
+                            _psms = OCR_TESSERACT_PSMS if _angle == 0 else OCR_TESSERACT_PSMS_ROTATED
+                            _regions = _ocr_image_regions(_base)
+                            for _region in _regions:
+                                for _psm in _psms:
+                                    try:
+                                        _t = pytesseract.image_to_string(_region, config=f'--psm {_psm}')
+                                        if _t and len(_t.strip()) > 10:
+                                            tesseract_text += ' ' + _t
+                                    except Exception:
+                                        pass
                             logger.info(
-                                f"  📐 Tesseract {_angle}° rotation: "
-                                f"+{len(_rot_text)} chars"
+                                f"  ?? Tesseract {_mode} {_angle}Â° pass: {len(_regions)} region(s) "
+                                f"× PSM {list(_psms)} — {len(tesseract_text)} chars so far"
                             )
-                    except Exception as _re:
-                        logger.debug(f"  ⚠️ Tesseract {_angle}° rotation failed: {_re}")
+                        except Exception as _re:
+                            logger.debug(f"  ?? Tesseract {_mode} {_angle}Â° rotation failed: {_re}")
 
                 results['tesseract'] = tesseract_text
                 logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined all angles)")
             except Exception as e:
-                logger.warning(f"  ⚠️ Tesseract failed: {e}")
+                logger.warning(f"  ?? Tesseract failed: {e}")
         else:
-            logger.warning(f"  ⚠️ Pytesseract not available, skipping Tesseract OCR")
+            logger.warning(f"  ?? Pytesseract not available, skipping Tesseract OCR")
         
         # 2. EasyOCR - Run at all OCR_ROTATION_ANGLES (same strategy as Tesseract)
-        if self.easyocr_reader:
+        if self.easyocr_reader and OCR_EASYOCR_ENABLED:
             try:
                 easyocr_text = ""
                 for _angle in OCR_ROTATION_ANGLES:
                     _ocr_img = img.rotate(_angle, expand=True) if _angle != 0 else img
-                    _img_array = np.array(_ocr_img)
-                    _result = self.easyocr_reader.readtext(
-                        _img_array,
-                        detail=0,
-                        paragraph=False
-                    )
-                    _angle_text = ' '.join(_result)
+                    # Tile large renders so the detector keeps small tags at
+                    # full resolution (soft-coded OCR_EASYOCR_TILE_MAX_DIM).
+                    _regions = _ocr_image_regions(_ocr_img, OCR_EASYOCR_TILE_MAX_DIM)
+                    _angle_texts = []
+                    for _region in _regions:
+                        try:
+                            _result = self.easyocr_reader.readtext(
+                                np.array(_region),
+                                detail=0,
+                                paragraph=False
+                            )
+                            if _result:
+                                _angle_texts.extend(_result)
+                        except Exception:
+                            pass
+                    _angle_text = ' '.join(_angle_texts)
                     if _angle_text.strip():
                         easyocr_text += ' ' + _angle_text
                         if _angle != 0:
                             logger.info(
-                                f"  📐 EasyOCR {_angle}° rotation: "
+                                f"  ?? EasyOCR {_angle}Â° rotation: "
                                 f"+{len(_angle_text)} chars"
                             )
                 results['easyocr'] = easyocr_text.strip()
                 logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters (all angles)")
             except Exception as e:
-                logger.warning(f"  ⚠️ EasyOCR failed: {e}")
+                logger.warning(f"  ?? EasyOCR failed: {e}")
         
         # 3. PaddleOCR — run at every OCR_ROTATION_ANGLES for parity with
         # Tesseract/EasyOCR.  PaddleOCR has its own detector but is weakest on
@@ -580,20 +815,20 @@ class PIDLineExtractorV2:
                             paddle_texts.extend(_angle_texts)
                             if _angle != 0:
                                 logger.info(
-                                    f"  📐 PaddleOCR {_angle}° rotation: "
+                                    f"  ?? PaddleOCR {_angle}Â° rotation: "
                                     f"+{len(_angle_texts)} tokens"
                                 )
                     except Exception as _pe:
-                        logger.debug(f"  ⚠️ PaddleOCR {_angle}° rotation failed: {_pe}")
+                        logger.debug(f"  ?? PaddleOCR {_angle}Â° rotation failed: {_pe}")
 
                 if paddle_texts:
                     paddle_text = ' '.join(paddle_texts)
                     results['paddleocr'] = paddle_text
                     logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters (all angles)")
                 else:
-                    logger.warning(f"  ⚠️ PaddleOCR: No text extracted")
+                    logger.warning(f"  ?? PaddleOCR: No text extracted")
             except Exception as e:
-                logger.warning(f"  ⚠️ PaddleOCR failed: {e}")
+                logger.warning(f"  ?? PaddleOCR failed: {e}")
                 import traceback
                 logger.debug(f"PaddleOCR traceback: {traceback.format_exc()}")
         
@@ -624,14 +859,14 @@ class PIDLineExtractorV2:
         combined = '\n\n'.join(combined_parts)
         
         total_chars = sum(len(t) for t in ocr_results.values())
-        logger.info(f"  📝 Combined: {total_chars} total characters from {len(ocr_results)} engines")
-        logger.info(f"  📝 Final text length: {len(combined)} characters")
+        logger.info(f"  ?? Combined: {total_chars} total characters from {len(ocr_results)} engines")
+        logger.info(f"  ?? Final text length: {len(combined)} characters")
         
         return combined
     
     def extract_spatial_data(self, img: Image.Image) -> List[Dict]:
         """
-        📍 Extract spatial/position data from PaddleOCR for FROM-TO detection
+        ?? Extract spatial/position data from PaddleOCR for FROM-TO detection
         
         Returns list of text items with bounding boxes and positions:
         [{'text': str, 'bbox': list, 'center_x': float, 'center_y': float, 'confidence': float}]
@@ -639,7 +874,7 @@ class PIDLineExtractorV2:
         spatial_data = []
         
         if not self.paddleocr_reader:
-            logger.warning("  ⚠️ PaddleOCR not available for spatial extraction")
+            logger.warning("  ?? PaddleOCR not available for spatial extraction")
             return spatial_data
         
         try:
@@ -672,10 +907,80 @@ class PIDLineExtractorV2:
                                     'confidence': confidence
                                 })
         except Exception as e:
-            logger.warning(f"  ⚠️ Spatial data extraction failed: {e}")
+            logger.warning(f"  ?? Spatial data extraction failed: {e}")
         
         return spatial_data
     
+    def _dedupe_variant_lines(self, lines: List[Dict]) -> List[Dict]:
+        """
+        Conservative OCR-variant duplicate suppression (soft-coded, see
+        VARIANT_DEDUP_ENABLED / PIPECLASS_DEDUP_SHAPE / FLUID_TRUSTED_MIN_COUNT).
+
+        Multiple OCR modes/rotations often read the same physical tag twice —
+        once cleanly, once garbled.  Only fires when entries share the same
+        line identity (size + sequence), so unique lines are never removed.
+        """
+        if not VARIANT_DEDUP_ENABLED or not lines:
+            return lines
+
+        drop = set()
+
+        # Pass 1 — same size+fluid+seq, disagreeing pipe class: keep the class
+        # matching PIPECLASS_DEDUP_SHAPE when exactly one candidate matches.
+        groups: Dict[tuple, List[int]] = {}
+        for i, it in enumerate(lines):
+            key = (
+                it.get('size', '').upper(),
+                it.get('fluid_code', '').upper(),
+                it.get('sequence_no', ''),
+            )
+            groups.setdefault(key, []).append(i)
+        for idxs in groups.values():
+            classes = {lines[i].get('pipr_class', '').upper() for i in idxs}
+            if len(classes) <= 1:
+                continue
+            shaped = [
+                i for i in idxs
+                if re.match(PIPECLASS_DEDUP_SHAPE, lines[i].get('pipr_class', '').upper())
+            ]
+            if len(shaped) == 1:
+                drop.update(i for i in idxs if i != shaped[0])
+
+        # Pass 2 — same size+class+seq, disagreeing fluid code: keep the fluid
+        # trusted elsewhere on the page (count >= FLUID_TRUSTED_MIN_COUNT) when
+        # exactly one candidate qualifies.
+        fluid_counts: Dict[str, int] = {}
+        for it in lines:
+            f = it.get('fluid_code', '').upper()
+            fluid_counts[f] = fluid_counts.get(f, 0) + 1
+        groups = {}
+        for i, it in enumerate(lines):
+            if i in drop:
+                continue
+            key = (
+                it.get('size', '').upper(),
+                it.get('pipr_class', '').upper(),
+                it.get('sequence_no', ''),
+            )
+            groups.setdefault(key, []).append(i)
+        for idxs in groups.values():
+            fluids = {lines[i].get('fluid_code', '').upper() for i in idxs}
+            if len(fluids) <= 1:
+                continue
+            trusted = [
+                i for i in idxs
+                if fluid_counts.get(lines[i].get('fluid_code', '').upper(), 0) >= FLUID_TRUSTED_MIN_COUNT
+            ]
+            if len(trusted) == 1:
+                drop.update(i for i in idxs if i != trusted[0])
+
+        if drop:
+            logger.info(
+                f"  🧹 Dropped {len(drop)} OCR-variant duplicate(s): "
+                f"{[lines[i]['line_number'] for i in sorted(drop)]}"
+            )
+        return [it for i, it in enumerate(lines) if i not in drop]
+
     def parse_with_regex(self, extracted_text: str, page_num: int, include_area: bool = False, format_type: str = 'onshore') -> List[Dict]:
         """
         🎯 RELIABLE REGEX-BASED APPROACH:
@@ -705,10 +1010,24 @@ class PIDLineExtractorV2:
         # We normalise once here so every downstream branch sees clean text.
         # ------------------------------------------------------------------
         normalized_text = extracted_text
-        for _ch in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', "'", '"']:
+        # Soft-coded separator set (OCR_SEPARATOR_CHARS) — includes curly
+        # quotes/dashes that Tesseract emits for the inch-mark and hyphens.
+        for _ch in OCR_SEPARATOR_CHARS:
             normalized_text = normalized_text.replace(_ch, '-')
+        # Treat '/' as a separator ONLY when it is not between two digits, so
+        # fractional pipe sizes (3/4") are preserved for the size patterns.
+        normalized_text = re.sub(r'(?<!\d)/|/(?!\d)', '-', normalized_text)
         normalized_text = re.sub(r'-{2,}', '-', normalized_text)
         normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
+        # OCR brace/bracket repair — soft-coded character class.
+        # On rotated/vertical line tags Tesseract systematically misreads the
+        # hyphen after the piping-spec segment as a brace/bracket, e.g.
+        #   6"-CG-XXX}251502-X }N  →  6"-CG-XXX-251502-X-N
+        #   B°-CG-Xxx{251502X ]n  →  8"-CG-XXXX-251502-X-N
+        # Braces/brackets never legitimately appear inside a line designation,
+        # so it is safe to fold them to '-' when they sit between two
+        # alphanumerics (optional surrounding whitespace).
+        normalized_text = re.sub(r'(?<=[A-Za-z0-9])\s*[}\]\[{]\s*(?=[A-Za-z0-9])', '-', normalized_text)
 
         # -----------------------------------------------------------------------
         # INDUSTRIAL/PROJECT FORMAT — must be checked BEFORE onshore because
@@ -723,7 +1042,7 @@ class PIDLineExtractorV2:
         #   1"-2600-FCWR-975-31210MR-V (4-letter service code)
         # -----------------------------------------------------------------------
         if format_type == 'industrial':
-            logger.info("  🔍 Using REGEX pattern matching — INDUSTRIAL/PROJECT format")
+            logger.info("  ?? Using REGEX pattern matching â€” INDUSTRIAL/PROJECT format")
             logger.info("  📋 Examples: 2\"-2600-FL-352-32070R-E, 8\"-2600-P-381-31051XR-E")
             # The piping-class ALWAYS ends with 1-2 uppercase letters (e.g. 32070R, 31051XR).
             # The end-designator (E/V/I) is optional but always present in these drawings.
@@ -808,17 +1127,97 @@ class PIDLineExtractorV2:
             logger.info(f"  🎯 INDUSTRIAL regex found {len(found_lines)} unique lines from {len(patterns)} patterns")
             return found_lines
 
+        # ------------------------------------------------------------------
+        # LINE LIST (Phase 2 / polyolefins) — self-contained branch, config
+        # from the soft-coded LINELIST_FORMAT dict (see top of file).
+        # SIZE-UNIT-FLUID-SERIAL(A####)-CLASS(XXXXXXX)-COATING(-STREAM)?
+        # ------------------------------------------------------------------
+        if format_type == 'linelist':
+            _ll = LINELIST_FORMAT
+            logger.info("  ?? Using REGEX pattern matching â€” LINE LIST (Phase 2) format")
+            logger.info("  📋 Examples: 12-10-PL-A1234-A1B2C3D-IN, 3/4-2-BA-B3102-D4E5F6G")
+
+            _sz = r'(\d{1,2}(?:/\d{1,2})?)'
+            _unit = rf'([A-Z0-9]{{1,{_ll["unit_max_len"]}}})'
+            _fluid = rf'([A-Z][A-Z0-9]{{0,{_ll["fluid_max_len"] - 1}}})'
+            _ser = r'([A-Z][A-Z0-9]{4})'   # A#### — first char = area
+            _cls = r'([A-Z0-9]{7})'        # XXXXXXX — piping service class
+            _pre = r'(?<![A-Za-z0-9])'
+            _post = r'(?![A-Za-z0-9])'
+            _coat = r'\s*-+\s*([A-Z0-9]{1,2})' if not _ll['coating_optional'] else r'(?:\s*-+\s*([A-Z0-9]{1,2}))?'
+            _stream = r'(?:\s*-+\s*([A-Z0-9]{4}))?' if _ll['stream_optional'] else r'\s*-+\s*([A-Z0-9]{4})'
+            patterns = [
+                # Pattern 1: full format (coating optional per config)
+                rf'{_pre}{_sz}"?\s*-+\s*{_unit}\s*-+\s*{_fluid}\s*-+\s*{_ser}\s*-+\s*{_cls}{_coat}{_stream}{_post}',
+                # Pattern 2: loose spacing variant (OCR noise around separators)
+                rf'{_pre}{_sz}"?\s+-+\s*{_unit}\s+-+\s*{_fluid}\s+-+\s*{_ser}\s+-+\s*{_cls}{_coat}{_stream}{_post}',
+            ]
+
+            found_lines = []
+            seen_lines = set()
+            for pattern in patterns:
+                for match in re.finditer(pattern, normalized_text, re.IGNORECASE):
+                    size_raw = match.group(1).strip()
+                    unit     = match.group(2).strip().upper()
+                    fluid    = match.group(3).strip().upper()
+                    serial   = match.group(4).strip().upper()
+                    cls      = match.group(5).strip().upper()
+                    coating  = (match.group(6) or '').strip().upper()
+                    stream   = (match.group(7) or '').strip().upper()
+
+                    # Validation against the soft-coded legend config
+                    if not unit.isalnum():
+                        continue
+                    if not re.match(_ll['serial_pattern'], serial):
+                        continue
+                    if not re.match(_ll['class_pattern'], cls):
+                        continue
+                    if _ll['fluid_vocabulary_strict'] and fluid not in _ll['fluid_vocabulary']:
+                        continue
+                    elif fluid not in _ll['fluid_vocabulary']:
+                        logger.debug(f"  ?? fluid code '{fluid}' not in legend vocabulary (kept)")
+
+                    parts = [f'{size_raw}"-{unit}-{fluid}-{serial}-{cls}']
+                    if coating:
+                        parts.append(coating)
+                    if stream:
+                        parts.append(stream)
+                    line_number = '-'.join(parts)
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+
+                    found_lines.append({
+                        'line_number':        line_number,
+                        'original_detection': match.group(0).strip(),
+                        'size':               f'{size_raw}"',
+                        'fluid_code':         fluid,      # line designation code
+                        'sequence_no':        serial,     # A#### serial
+                        'pipr_class':         cls,        # piping service class
+                        'piping_spec':        cls,
+                        'dept_deviation':     unit,       # unit / system number
+                        'insulation':         coating,    # coating/insulation code
+                        'area':               serial[0],  # first serial char = area
+                        'page':               page_num,
+                        'from_equipment':     '',
+                        'to_equipment':       '',
+                        'extraction_method':  'regex_linelist',
+                    })
+
+            logger.info(f"  🎯 LINE LIST regex found {len(found_lines)} unique lines from {len(patterns)} patterns")
+            return self._dedupe_variant_lines(found_lines)
+
         # 🔧 GENERAL FORMAT: Run ALL known formats then combine / pick winner.
         # Behaviour is controlled by the soft-coded GENERAL_STRATEGY constant:
         #   'merge'  → union of all format results, deduplicated by line_number
         #   'winner' → legacy: return only the format with the highest count
         if format_type == 'general':
             logger.info(
-                f"  🔍 GENERAL format (strategy='{GENERAL_STRATEGY}') — "
-                "running all sub-formats: industrial, onshore, offshore, adnoc, onshore+area"
+                f"  ?? GENERAL format (strategy='{GENERAL_STRATEGY}') â€” "
+                "running all sub-formats: industrial, linelist, onshore, offshore, adnoc, onshore+area"
             )
             _candidates = {}
-            for _fmt in ('industrial', 'onshore', 'offshore', 'adnoc'):
+            for _fmt in ('industrial', 'linelist', 'onshore', 'offshore', 'adnoc'):
                 _res = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type=_fmt)
                 _candidates[_fmt] = _res
             # Also try onshore WITH area code
@@ -843,6 +1242,7 @@ class PIDLineExtractorV2:
                         if key and key not in seen_merged:
                             seen_merged.add(key)
                             merged.append(item)
+                merged = self._dedupe_variant_lines(merged)
                 logger.info(
                     f"  ✅ GENERAL MERGE: {len(merged)} unique lines combined "
                     f"from all formats ({counts_str})"
@@ -858,7 +1258,7 @@ class PIDLineExtractorV2:
                 return _candidates[best_fmt]
         
         format_label = 'ADNOC' if format_type == 'adnoc' else ('OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA'))
-        logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
+        logger.info(f"  ?? Using REGEX pattern matching on OCR text ({format_label})")
         if format_type == 'adnoc':
             logger.info(f"  📋 ADNOC format: SIZE\"-FLUIDCODE-PIPECLASS-SEQUENCE")
             logger.info(f"  📋 Examples: 6\"-CD-AC3N-8256, 8\"-HO-BD2A-1023, 10\"-AG-XY1Z-9999")
@@ -869,7 +1269,7 @@ class PIDLineExtractorV2:
         # (text already normalised at top of method)
         normalized_text_spaced = normalized_text.replace('-', ' - ')
         
-        logger.info(f"  📝 Normalized text sample (first 500 chars): {normalized_text[:500]}")
+        logger.info(f"  ?? Normalized text sample (first 500 chars): {normalized_text[:500]}")
         
         # SMART FLEXIBLE REGEX PATTERNS
         # Format WITHOUT AREA: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
@@ -891,21 +1291,35 @@ class PIDLineExtractorV2:
             # Format: [1-2 digits]"[-][2-3 uppercase letters][-][alphanumeric pipe class][-][3-4 digits]
             # Uses ADNOC_SEQ_MIN_DIGITS and ADNOC_PIPECLASS_MIN_LEN soft-coded constants.
             _sq = f'{ADNOC_SEQ_MIN_DIGITS},4'  # e.g. "3,4"
+            # Size segment allows fractional pipe sizes (e.g. 3/4").  Boundaries
+            # use alphanumeric look-arounds instead of \b / whitespace anchors so
+            # tags preceded by OCR noise characters (y_1"-SG-…, |1"-FL-…) still
+            # match, while digits embedded in longer alnum tokens do not.
+            _sz = r'(\d{1,2}(?:/\d{1,2})?)'
+            _pre = r'(?<![A-Za-z0-9])'
+            _post = r'(?![A-Za-z0-9])'
             patterns = [
                 # Pattern 1: Standard ADNOC format with quote
-                rf'\b(\d{{1,2}})"\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})\b',
+                rf'{_pre}{_sz}"\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}}){_post}',
 
                 # Pattern 2: Flexible spacing
-                rf'\b(\d{{1,2}})"?\s*-+\s*([A-Z]{{2,3}})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{{{_sq}}})\b',
+                rf'{_pre}{_sz}"?\s*-+\s*([A-Z]{{2,3}})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{{{_sq}}}){_post}',
 
                 # Pattern 3: Compact format
-                rf'\b(\d{{1,2}})"-([A-Z]{{2,3}})-([A-Z0-9]+)-(\d{{{_sq}}})\b',
+                rf'{_pre}{_sz}"-([A-Z]{{2,3}})-([A-Z0-9]+)-(\d{{{_sq}}}){_post}',
 
                 # Pattern 4: With word boundaries and lookahead
-                rf'(?:^|\s)(\d{{1,2}})"?\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-)',
+                rf'(?:^|[^A-Za-z0-9]){_sz}"?\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-|[^A-Za-z0-9])',
 
                 # Pattern 5: Case insensitive for OCR errors
-                rf'(?:^|\s)(\d{{1,2}})"?\s*-\s*([A-Za-z]{{2,3}})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-)',
+                rf'(?:^|[^A-Za-z0-9]){_sz}"?\s*-\s*([A-Za-z]{{2,3}})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-|[^A-Za-z0-9])',
+
+                # Pattern 6: OCR fuses a neighbouring flow-arrow/symbol into a
+                # junk letter stuck to the size (e.g. J20"-PL-DC3N-8106).
+                # The junk letter is consumed outside the size group, and the
+                # pipe class must contain a digit so drawing/document numbers
+                # (…6-EXD-MRIZBQDA-0010) are not picked up as line tags.
+                rf'{_pre}[A-Za-z](?=\d){_sz}"?\s*-+\s*([A-Z]{{2,3}})\s*-+\s*([A-Z0-9]*\d[A-Z0-9]*)\s*-+\s*(\d{{{_sq}}}){_post}',
             ]
         elif format_type == 'offshore':
             # OFFSHORE PATTERNS: AREA-FLUIDCODE-LINESIZE-PIPECLASS-SEQUENCE-INSULATION
@@ -978,24 +1392,29 @@ class PIDLineExtractorV2:
             # Example: 2"-D-6152-033842-X-N
             #   group1=size, group2=fluid, group3=sequence(4digits),
             #   group4=piping_spec(5-6digits), group5=dept_deviation(opt), group6=insulation(opt)
+            #
+            # PHASE 2 variant (second sequence): SIZE-FLUID-PIPING_SPEC(4 alnum)-SEQUENCE(5-6 digits)
+            # Example: 3"-VG-XXXX-013461-Y-N, 2"-VG-XXXX-253461-Y-N, 6"-CG-XXXX-251502-X-N
+            #   group3 accepts [A-Z0-9]{4}; when it is NOT 4 pure digits the
+            #   sequence/spec mapping is swapped at extraction time below.
             patterns = [
                 # Pattern 1: Standard with word boundaries (most reliable)
-                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*([A-Z0-9]{3,4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
 
                 # Pattern 2: With optional quote after size
-                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*([A-Z0-9]{3,4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
 
                 # Pattern 3: More lenient spacing
-                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z0-9]{1,4})(?:\s*-+\s*([A-Z0-9]{1,2}))?)?(?:\s|$|[-,.])',
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*([A-Z0-9]{3,4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z0-9]{1,4})(?:\s*-+\s*([A-Z0-9]{1,2}))?)?(?:\s|$|[-,.])',
 
                 # Pattern 4: Compact (no spaces at all)
-                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z0-9]{1,4})(?:-([A-Z0-9]{1,2}))?)?\b',
+                r'\b(\d{1,2})-([A-Z]{1,2})-([A-Z0-9]{3,4})-(\d{5,6})(?:-([A-Z0-9]{1,4})(?:-([A-Z0-9]{1,2}))?)?\b',
 
                 # Pattern 5: With flexible separators (space or hyphen)
-                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z0-9]{1,4})(?:[\s-]+([A-Z0-9]{1,2}))?)?\b',
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+([A-Z0-9]{3,4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z0-9]{1,4})(?:[\s-]+([A-Z0-9]{1,2}))?)?\b',
 
                 # Pattern 6: Case insensitive with word boundaries
-                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z0-9]{1,4})(?:\s*-\s*([A-Za-z0-9]{1,2}))?)?(?=\s|$|-)',
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*([A-Za-z0-9]{3,4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z0-9]{1,4})(?:\s*-\s*([A-Za-z0-9]{1,2}))?)?(?=\s|$|-)',
             ]
         
         found_lines = []
@@ -1035,13 +1454,23 @@ class PIDLineExtractorV2:
                     insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
                     dept_deviation = ''
                 else:
-                    # Without area: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
-                    # Example: 2"-D-6152-033842-X-N
+                    # Without area — two schemes share SIZE-FLUID-X-Y(-DEV(-INS))? :
+                    #   Phase 1: SIZE-FLUID-SEQUENCE(4 digits)-PIPING_SPEC(5-6 digits)
+                    #            e.g. 2"-D-6152-033842-X-N
+                    #   Phase 2: SIZE-FLUID-PIPING_SPEC(4 alnum)-SEQUENCE(5-6 digits)
+                    #            e.g. 3"-VG-XXXX-013461-Y-N  →  XXXX=spec, 013461=sequence
+                    # Regex group order is identical for both; the 4-char segment
+                    # decides which scheme applies.
                     size = match.group(1).strip()
                     area = ''
                     fluid = match.group(2).strip().upper()
-                    seq = match.group(3).strip()
-                    pipr_class = match.group(4).strip()  # piping_spec (e.g. 033842)
+                    _seg3 = match.group(3).strip().upper()
+                    _seg4 = match.group(4).strip()
+                    _phase2 = not re.fullmatch(r'\d{4}', _seg3)
+                    if _phase2:
+                        pipr_class, seq = _seg3, _seg4   # Phase 2: spec first, then sequence
+                    else:
+                        seq, pipr_class = _seg3, _seg4   # Phase 1: sequence first, then spec
                     dept_deviation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
                     insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
                 
@@ -1055,7 +1484,8 @@ class PIDLineExtractorV2:
                 area = self._normalize_ocr_text(area) if area else ''
                 
                 # Smart cleaning: remove any non-alphanumeric from edges
-                size = re.sub(r'[^0-9]', '', size)
+                # ('/' is kept so fractional pipe sizes like 3/4" survive)
+                size = re.sub(r'[^0-9/]', '', size)
                 fluid = re.sub(r'[^A-Z0-9]', '', fluid)  # Keep digits for normalized 0
                 seq = re.sub(r'[^0-9]', '', seq)
                 if insulation:
@@ -1064,8 +1494,8 @@ class PIDLineExtractorV2:
                 # ADNOC FORMAT VALIDATION
                 # Uses soft-coded constants ADNOC_SEQ_MIN_DIGITS and ADNOC_PIPECLASS_MIN_LEN.
                 if format_type == 'adnoc':
-                    # 1. SIZE: Must be 1-2 digits
-                    if not size or not size.isdigit() or len(size) > 2:
+                    # 1. SIZE: 1-2 digits, optionally fractional (e.g. 3/4")
+                    if not size or not re.match(r'^\d{1,2}(/\d{1,2})?$', size):
                         rejected.append(f"Invalid ADNOC size: {size}")
                         continue
 
@@ -1151,7 +1581,10 @@ class PIDLineExtractorV2:
                         rejected.append(f"Invalid sequence: {seq}")
                         continue
                 else:
-                    if not seq or not seq.isdigit() or len(seq) != 4:
+                    # Phase 1: sequence is exactly 4 digits (2"-D-6152-033842-X-N)
+                    # Phase 2: sequence is 5-6 digits   (3"-VG-XXXX-013461-Y-N)
+                    _seq_ok_len = (len(seq) in (5, 6)) if _phase2 else (len(seq) == 4)
+                    if not seq or not seq.isdigit() or not _seq_ok_len:
                         rejected.append(f"Invalid sequence: {seq}")
                         continue
                 
@@ -1165,14 +1598,20 @@ class PIDLineExtractorV2:
                         rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
                         continue
                 else:
-                    # Without area: 5-6 digits only
-                    if not pipr_class or len(pipr_class) not in [5, 6]:
-                        rejected.append(f"Invalid pipe class: {pipr_class}")
-                        continue
-                    pipr_class = re.sub(r'[^0-9]', '', pipr_class)
-                    if not pipr_class.isdigit():
-                        rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
-                        continue
+                    # Without area — Phase 1: piping spec is 5-6 digits (033842);
+                    # Phase 2: piping spec is 3-4 alphanumerics (XXXX / XXX).
+                    if _phase2:
+                        if not pipr_class or not re.fullmatch(r'[A-Z0-9]{3,4}', pipr_class):
+                            rejected.append(f"Invalid pipe class: {pipr_class}")
+                            continue
+                    else:
+                        if not pipr_class or len(pipr_class) not in [5, 6]:
+                            rejected.append(f"Invalid pipe class: {pipr_class}")
+                            continue
+                        pipr_class = re.sub(r'[^0-9]', '', pipr_class)
+                        if not pipr_class.isdigit():
+                            rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
+                            continue
                 
                 # 6. INSULATION: Optional, must be 1-2 letters/digits if present (after O→0 normalization)
                 if insulation and len(insulation) > 2:
@@ -1201,7 +1640,12 @@ class PIDLineExtractorV2:
                 else:
                     # Without area format: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
                     # Example: 2"-D-6152-033842-X-N
-                    parts = [f"{size}-{fluid}-{seq}-{pipr_class}"]
+                    # Phase 2 keeps the drawing order: SIZE-FLUID-PIPING_SPEC-SEQUENCE(-…)
+                    # Example: 3"-VG-XXXX-013461-Y-N
+                    if _phase2:
+                        parts = [f"{size}-{fluid}-{pipr_class}-{seq}"]
+                    else:
+                        parts = [f"{size}-{fluid}-{seq}-{pipr_class}"]
                     if dept_deviation:
                         parts.append(dept_deviation)
                     if insulation:
@@ -1240,14 +1684,48 @@ class PIDLineExtractorV2:
         
         # Log summary with debugging info
         if rejected and len(rejected) <= 20:
-            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches:")
+            logger.info(f"  ?? Rejected {len(rejected)} potential matches:")
             for r in rejected[:10]:
                 logger.info(f"     - {r}")
         elif rejected:
-            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches (showing first 10):")
+            logger.info(f"  ?? Rejected {len(rejected)} potential matches (showing first 10):")
             for r in rejected[:10]:
                 logger.info(f"     - {r}")
         
+        # ------------------------------------------------------------------
+        # Truncated-sequence cleanup (soft-coded DROP_TRUNCATED_SEQ_DUPLICATES):
+        # drop entries whose sequence number is a strict prefix of another
+        # entry that is identical in size/fluid/class (OCR clipped a digit).
+        # ------------------------------------------------------------------
+        if DROP_TRUNCATED_SEQ_DUPLICATES and found_lines:
+            def _identity(it):
+                return (
+                    it.get('size', '').upper(),
+                    it.get('fluid_code', '').upper(),
+                    it.get('pipr_class', '').upper(),
+                )
+            truncated = set()
+            for i, a in enumerate(found_lines):
+                seq_a = a.get('sequence_no', '')
+                if not seq_a:
+                    continue
+                for j, b in enumerate(found_lines):
+                    if i == j:
+                        continue
+                    seq_b = b.get('sequence_no', '')
+                    if (len(seq_b) > len(seq_a) and seq_b.startswith(seq_a)
+                            and _identity(a) == _identity(b)):
+                        truncated.add(i)
+                        break
+            if truncated:
+                logger.info(
+                    f"  🧹 Dropped {len(truncated)} truncated-sequence duplicate(s): "
+                    f"{[found_lines[i]['line_number'] for i in sorted(truncated)]}"
+                )
+                found_lines = [it for i, it in enumerate(found_lines) if i not in truncated]
+
+        found_lines = self._dedupe_variant_lines(found_lines)
+
         logger.info(f"  🎯 REGEX found {len(found_lines)} unique line numbers from {len(patterns)} patterns")
         return found_lines
     
@@ -1255,7 +1733,7 @@ class PIDLineExtractorV2:
         """
         DEPRECATED: OpenAI is unreliable, use parse_with_regex instead
         """
-        logger.warning("  ⚠️ OpenAI method is deprecated, using REGEX instead")
+        logger.warning("  ?? OpenAI method is deprecated, using REGEX instead")
         return self.parse_with_regex(extracted_text, page_num)
         
         # Use full text for maximum extraction
@@ -1265,7 +1743,7 @@ class PIDLineExtractorV2:
 
 📋 **LINE FORMAT:** SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
 
-🔍 **SEARCH STRATEGY:**
+?? **SEARCH STRATEGY:**
 1. Look for patterns with ALL 4 mandatory components
 2. Accept ANY separator: hyphens, spaces, periods, underscores, or mixed
 3. Ignore extra whitespace, quotes, or OCR noise
@@ -1445,7 +1923,7 @@ Extract ALL line numbers now! 🚀"""
                     rejected.append(f"{line.get('line_number', 'N/A')} - Validation error: {e}")
             
             if rejected:
-                logger.info(f"  ⚠️ Rejected {len(rejected)} invalid extractions")
+                logger.info(f"  ?? Rejected {len(rejected)} invalid extractions")
                 for r in rejected[:5]:  # Log first 5
                     logger.info(f"    ❌ {r}")
             
@@ -1544,7 +2022,7 @@ Extract ALL line numbers now! 🚀"""
 - 10"-PG-0003-033842-X 
   → size: 10", fluid: PG, seq: 0003, pipe_class: 033842-X, insulation: ""
 
-⚠️ **CRITICAL:** 
+?? **CRITICAL:** 
 - In "031441-x", the "-x" is part of the pipe class, NOT insulation!
 - "x" is NOT a valid insulation code (valid: H, PP, N, AA, E, FP)
 - Insulation only appears if there's ANOTHER dash with valid code: "031441-x-H"
@@ -1822,9 +2300,80 @@ Example 4: "10\"-PG-0003-033842-X-H"
         for item in results:
             item.pop('pattern', None)
         
-        logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
+        logger.info(f"  ?? Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
+    def _extract_page_text_and_lines(self, pdf_path: str, page_num: int,
+                                     include_area: bool, format_type: str) -> Dict:
+        """
+        Single-page text capture + regex — the complete PHASE 1 / 1b / 2 /
+        OCR-fallback stage for ONE page.
+
+        Used by the parallel page pre-pass (OCR_PAGE_PARALLEL_WORKERS > 1) and
+        by the sequential main loop — ONE shared implementation, so parallel
+        and sequential extraction are byte-identical per page (no compromise
+        in extraction logic either way).
+
+        Opens its OWN PyMuPDF document handle because fitz documents are not
+        thread-safe.  Returns only text + line items — never the (large) page
+        render, which the main loop re-creates cheaply for FROM-TO phases.
+        """
+        doc = fitz.open(pdf_path)
+        try:
+            try:
+                ocgs = doc.get_ocgs()
+                if ocgs:
+                    for xref in ocgs.keys():
+                        doc.set_ocg(xref, True)
+            except Exception:
+                pass
+
+            page = doc[page_num]
+
+            # PHASE 1 (fast path): embedded text
+            embedded_text = self._extract_pdf_embedded_text(page)
+            use_ocr = len(embedded_text.strip()) < EMBEDDED_TEXT_MIN_CHARS
+
+            if not use_ocr:
+                combined_text = embedded_text
+            else:
+                # PHASE 1b (slow path): full OCR pipeline
+                _zoom = OCR_RENDER_DPI / 72.0
+                pix = page.get_pixmap(matrix=fitz.Matrix(_zoom, _zoom))
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                ocr_results = self.extract_all_text_from_image(img)
+                combined_text = self.combine_and_deduplicate_text(ocr_results) if ocr_results else ''
+
+            # PHASE 2: regex pattern matching
+            line_items: List[Dict] = []
+            if combined_text and len(combined_text.strip()) >= 10:
+                line_items = self.parse_with_regex(
+                    combined_text, page_num + 1,
+                    include_area=include_area, format_type=format_type,
+                )
+
+            # OCR FALLBACK: embedded text gave zero line numbers → the drawing
+            # content is image-based; run the full OCR pipeline once.
+            if not line_items and not use_ocr:
+                _zoom = OCR_RENDER_DPI / 72.0
+                pix = page.get_pixmap(matrix=fitz.Matrix(_zoom, _zoom))
+                img_fb = Image.open(io.BytesIO(pix.tobytes("png")))
+                ocr_results_fb = self.extract_all_text_from_image(img_fb)
+                if ocr_results_fb:
+                    combined_text_fb = self.combine_and_deduplicate_text(ocr_results_fb)
+                    if combined_text_fb and len(combined_text_fb) >= 10:
+                        combined_text = combined_text_fb
+                        use_ocr = True
+                        line_items = self.parse_with_regex(
+                            combined_text, page_num + 1,
+                            include_area=include_area, format_type=format_type,
+                        )
+
+            return {'combined_text': combined_text or '', 'use_ocr': use_ocr,
+                    'line_items': line_items}
+        finally:
+            doc.close()
+
     def extract_from_pdf(self, pdf_path: str, include_area: bool = False, format_type: str = 'onshore', progress_callback=None) -> List[Dict]:
         """
         🚀 INTELLIGENT AI-FIRST EXTRACTION:
@@ -1888,7 +2437,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                         doc.set_ocg(xref, True)
                     logger.info(f"  🔓 Enabled {len(ocgs)} optional content layers for full text extraction")
             except Exception as _ocg_err:
-                logger.warning(f"  ⚠️ Could not enable OCG layers: {_ocg_err}")
+                logger.warning(f"  ?? Could not enable OCG layers: {_ocg_err}")
             
             all_line_items = []
             
@@ -1898,6 +2447,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
             if format_type == 'adnoc':
                 format_msg = 'ADNOC Abu Dhabi Oil Co. Ltd (SIZE"-FLUID-PIPECLASS-SEQUENCE)'
+            elif format_type == 'linelist':
+                format_msg = 'LINE LIST Phase 2 (SIZE-UNIT-FLUID-CLASS-SERIAL-COATING)'
             elif format_type == 'industrial':
                 format_msg = 'INDUSTRIAL/PROJECT (SIZE"-UNIT-SERVICE-SEQ-PIPINGCLASS-ENDDESIG)'
             elif format_type == 'offshore':
@@ -1906,8 +2457,46 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)'
             else:
                 format_msg = 'WITHOUT AREA (SIZE-FLUID-SEQ-PIPECLASS)'
-            logger.info(f"📍 Format: {format_msg}")
-            
+            logger.info(f"?? Format: {format_msg}")
+
+            # ------------------------------------------------------------------
+            # PARALLEL PAGE PRE-PASS (soft-coded OCR_PAGE_PARALLEL_WORKERS).
+            # Tesseract runs as subprocesses, so a thread pool gives real
+            # parallelism for the expensive text-capture + regex stage.
+            # Each page uses the SAME worker method as the sequential loop —
+            # extraction logic is identical, only the scheduling changes.
+            # FROM-TO phases still run sequentially in the main loop below.
+            # ------------------------------------------------------------------
+            _page_preresults: list = []
+            if OCR_PAGE_PARALLEL_WORKERS > 1 and len(doc) > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                logger.info(
+                    f"⚡ Parallel page pre-pass: {len(doc)} pages × "
+                    f"{OCR_PAGE_PARALLEL_WORKERS} workers"
+                )
+                _page_preresults = [None] * len(doc)
+
+                def _job(pno):
+                    try:
+                        _res = self._extract_page_text_and_lines(
+                            pdf_path, pno, include_area, format_type)
+                        # live progress while the pre-pass runs (the main loop
+                        # below is fast once the pre-pass has finished)
+                        _done = sum(1 for _r in _page_preresults if _r is not None) + 1
+                        _emit(_done, len(doc), len(all_line_items), 'ocr')
+                        return pno, _res
+                    except Exception as _werr:
+                        logger.warning(
+                            f"  Parallel worker failed on page {pno + 1} "
+                            f"(will retry sequentially): {_werr}"
+                        )
+                        return pno, None
+
+                with ThreadPoolExecutor(max_workers=OCR_PAGE_PARALLEL_WORKERS) as pool:
+                    for _pno, _res in pool.map(_job, range(len(doc))):
+                        _page_preresults[_pno] = _res
+                logger.info("⚡ Parallel page pre-pass complete")
+
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 logger.info(f"\n{'='*60}")
@@ -1918,127 +2507,66 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 _emit(page_num + 1, len(doc), len(all_line_items), 'start')
 
                 # ------------------------------------------------------------------
-                # PHASE 1 (fast path): Extract embedded text directly from PDF.
-                # Vector/searchable PDFs have all text as proper text objects —
-                # no OCR needed.  This is instantaneous and handles rotated labels.
-                # SOFT-CODED threshold: EMBEDDED_TEXT_MIN_CHARS
+                # PHASE 1 + 2 (text capture + regex) — via the shared page worker
+                # (_extract_page_text_and_lines): identical logic whether the page
+                # was pre-computed by the parallel pre-pass
+                # (OCR_PAGE_PARALLEL_WORKERS > 1) or is processed here
+                # sequentially.  No compromise in extraction logic either way.
                 # ------------------------------------------------------------------
-                logger.info("🔍 PHASE 1: Embedded PDF text extraction (fast path)")
-                embedded_text = self._extract_pdf_embedded_text(page)
-                use_ocr = len(embedded_text.strip()) < EMBEDDED_TEXT_MIN_CHARS
-
-                if not use_ocr:
-                    logger.info(
-                        f"  ✅ {len(embedded_text)} chars of embedded text found — "
-                        f"skipping OCR for this page"
-                    )
-                    combined_text = embedded_text
+                _pre = _page_preresults[page_num] if _page_preresults else None
+                if _pre is None:
+                    logger.info("PHASE 1/2: text capture + regex (sequential worker)")
+                    try:
+                        _pre = self._extract_page_text_and_lines(
+                            pdf_path, page_num, include_area, format_type)
+                    except Exception as _pw_err:
+                        logger.warning(f"  Page {page_num + 1} extraction failed: {_pw_err}")
+                        continue
                 else:
-                    # ------------------------------------------------------------------
-                    # PHASE 1b (slow path): Scanned/image PDF — fall back to OCR.
-                    # High-resolution rendering (2.5x for crisp text)
-                    # ------------------------------------------------------------------
                     logger.info(
-                        f"  📷 Only {len(embedded_text.strip())} embedded chars "
-                        f"(threshold {EMBEDDED_TEXT_MIN_CHARS}) — using OCR pipeline"
+                        f"  Page {page_num + 1} pre-computed by parallel worker: "
+                        f"{len(_pre['combined_text'])} chars, "
+                        f"{len(_pre['line_items'])} line numbers"
                     )
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                    img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    img = img.convert('L')  # Grayscale for better OCR
 
-                    logger.info("🔍 PHASE 1b: Multi-Engine OCR Extraction")
-                    ocr_results = self.extract_all_text_from_image(img)
-
-                    if not ocr_results:
-                        logger.warning("  ⚠️ No text extracted from any OCR engine")
-                        continue
-
-                    combined_text = self.combine_and_deduplicate_text(ocr_results)
-
-                    if not combined_text or len(combined_text) < 10:
-                        logger.warning("  ⚠️ Combined OCR text too short, skipping page")
-                        continue
-
-                    # Make PIL image available for geometric FROM-TO below
-                    # (only needed when we actually ran OCR)
-                
-                if not combined_text or len(combined_text.strip()) < 10:
-                    logger.warning("  ⚠️ No usable text on this page — skipping")
-                    continue
-                
-                # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
-                logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
-                logger.info(f"  📝 Text sample (first 500 chars): {combined_text[:500]}")
-                line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area, format_type=format_type)
-                # Snapshot for coverage audit (set now; may be replaced below if OCR fallback runs)
+                combined_text = _pre['combined_text']
+                use_ocr = _pre['use_ocr']
+                line_items = _pre['line_items']
                 per_page_texts[page_num + 1] = combined_text
 
-                # ------------------------------------------------------------------
-                # OCR FALLBACK: When embedded text was used (fast path) but regex
-                # found zero line numbers, the drawing content is likely image-based
-                # (e.g. title block text only, while the P&ID lines are rasterised).
-                # Fall back to the full OCR pipeline for this page.
-                # Core logic (regex, validation, formats) is unchanged.
-                # ------------------------------------------------------------------
-                if not line_items and not use_ocr:
-                    logger.info(
-                        "  ⚠️ Embedded text found no line numbers — "
-                        "drawing content may be image-based. Falling back to OCR."
-                    )
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                    img_fb = Image.open(io.BytesIO(pix.tobytes("png")))
-                    img_fb = img_fb.convert('L')
-                    ocr_results_fb = self.extract_all_text_from_image(img_fb)
-                    if ocr_results_fb:
-                        combined_text_fb = self.combine_and_deduplicate_text(ocr_results_fb)
-                        if combined_text_fb and len(combined_text_fb) >= 10:
-                            logger.info(
-                                f"  📷 OCR fallback extracted {len(combined_text_fb)} chars — "
-                                "re-running regex"
-                            )
-                            logger.info(
-                                f"  📝 OCR fallback text sample (first 300 chars): "
-                                f"{combined_text_fb[:300]}"
-                            )
-                            combined_text = combined_text_fb
-                            # Refresh audit snapshot with the OCR-fallback text
-                            per_page_texts[page_num + 1] = combined_text
-                            # Mark as OCR path so FROM-TO phases have an image object
-                            use_ocr = True
-                            img = img_fb
-                            line_items = self.parse_with_regex(
-                                combined_text, page_num + 1,
-                                include_area=include_area, format_type=format_type
-                            )
-                            logger.info(
-                                f"  ✅ OCR fallback found {len(line_items)} line numbers"
-                            )
-                        else:
-                            logger.warning("  ⚠️ OCR fallback returned insufficient text")
-                    else:
-                        logger.warning("  ⚠️ OCR fallback returned no text")
+                if not combined_text or len(combined_text.strip()) < 10:
+                    logger.warning("  No usable text on this page — skipping")
+                    continue
+
 
                 if not line_items:
-                    logger.warning("  ⚠️ No line numbers found on this page")
+                    logger.warning("  ?? No line numbers found on this page")
                     continue
                 
                 # SUCCESS: Add basic line items first
                 all_line_items.extend(line_items)
                 logger.info(f"✅ PAGE {page_num + 1} BASIC EXTRACTION: {len(line_items)} line numbers extracted")
 
-                # PHASE 3A/3B/3C only make sense when we have actual image data.
-                # If we used the fast embedded-text path, we don't have an img object.
+                # PHASE 3A/3B/3C need an image object.  The page worker never
+                # returns its (large) OCR render, so rasterise here: OCR pages
+                # at full OCR resolution, fast-path pages at 1.5x.
                 if use_ocr:
-                    pass  # img is already defined from OCR path above
+                    try:
+                        _zoom_ft = OCR_RENDER_DPI / 72.0
+                        pix = page.get_pixmap(matrix=fitz.Matrix(_zoom_ft, _zoom_ft))
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    except Exception as _img_err:
+                        logger.warning(f"  ?? Could not render page for FROM-TO detection: {_img_err}")
+                        img = None
+
                 else:
-                    # Render image lazily for spatial/geometric FROM-TO (low resolution is fine)
+                    # Fast path (embedded text): low resolution is fine here
                     try:
                         pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
                         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert('L')
                     except Exception as _img_err:
-                        logger.warning(f"  ⚠️ Could not render page for FROM-TO detection: {_img_err}")
+                        logger.warning("  Could not render page for FROM-TO detection")
                         img = None
-
                 if img is None:
                     # Skip FROM-TO phases for this page
                     continue
@@ -2063,17 +2591,17 @@ Example 4: "10\"-PG-0003-033842-X-H"
                                 item['tag_y_pct'] = pos['y_pct']
                                 item['tag_position_confidence'] = pos['confidence']
                         logger.info(
-                            f"  📍 PHASE 3D: Located tag positions for "
+                            f"  ?? PHASE 3D: Located tag positions for "
                             f"{len(tag_positions)}/{len(line_items)} line numbers"
                         )
                 except Exception as _tag_pos_err:
-                    logger.warning(f"  ⚠️ PHASE 3D tag position capture failed (non-fatal): {_tag_pos_err}")
+                    logger.warning(f"  ?? PHASE 3D tag position capture failed (non-fatal): {_tag_pos_err}")
 
                 # PHASE 3A: Spatial Matching FROM-TO Detection (PRIMARY METHOD - from research paper)
                 spatial_from_to_success = False
                 try:
                     logger.info("🔬 PHASE 3A: Spatial Matching FROM-TO Detection (Research Paper Method)")
-                    logger.info("  📍 Method: Correlate text positions with line endpoints")
+                    logger.info("  ?? Method: Correlate text positions with line endpoints")
                     logger.info("  📄 Reference: 'Automated counting of P&ID using AI' (2025)")
                     
                     # Import spatial matching module
@@ -2087,20 +2615,20 @@ Example 4: "10\"-PG-0003-033842-X-H"
                     img_np = np.array(img)
                     
                     # Step 1: Detect line geometries
-                    logger.info(f"  🔍 Step 1: Detecting line geometries on page {page_num + 1}...")
+                    logger.info(f"  ?? Step 1: Detecting line geometries on page {page_num + 1}...")
                     line_geometries = spatial_detector.detect_line_geometries(img_np)
                     
                     if line_geometries and len(line_geometries) > 0:
                         logger.info(f"  ✅ Detected {len(line_geometries)} line geometries")
                         
                         # Step 2: Prepare line number data with bounding boxes
-                        logger.info(f"  🔍 Step 2: Preparing {len(line_items)} line numbers for spatial matching...")
+                        logger.info(f"  ?? Step 2: Preparing {len(line_items)} line numbers for spatial matching...")
                         
                         # Get image dimensions
                         image_height, image_width = img_np.shape[:2]
                         
                         # Step 3: Perform spatial matching
-                        logger.info(f"  🔍 Step 3: Matching text positions to line endpoints...")
+                        logger.info(f"  ?? Step 3: Matching text positions to line endpoints...")
                         spatial_from_to_map = spatial_detector.spatial_matching_from_to(
                             line_numbers=line_items,  # Already has 'bbox' from OCR
                             line_geometries=line_geometries,
@@ -2135,9 +2663,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                             if with_from_to > 0:
                                 spatial_from_to_success = True
                         else:
-                            logger.warning(f"  ⚠️ Spatial matching returned empty results")
+                            logger.warning(f"  ?? Spatial matching returned empty results")
                     else:
-                        logger.warning(f"  ⚠️ No line geometries detected, skipping spatial matching")
+                        logger.warning(f"  ?? No line geometries detected, skipping spatial matching")
                         
                 except Exception as e:
                     logger.error(f"  ❌ Spatial matching FAILED: {e}", exc_info=True)
@@ -2149,7 +2677,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                     try:
                         if self.openai_client:
                             logger.info("🧠 PHASE 3B: OpenAI Vision-Based FROM-TO Detection (Fallback)")
-                            logger.info("  📍 Method: AI Process Engineer - Visual flow analysis")
+                            logger.info("  ?? Method: AI Process Engineer - Visual flow analysis")
                             
                             # Import the new function
                             from apps.designiq.from_to_integration import determine_from_to_with_openai_vision
@@ -2157,7 +2685,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                             # Extract just the line numbers for the prompt
                             line_numbers = [item['line_number'] for item in line_items]
                             
-                            logger.info(f"  🔍 Sending {len(line_numbers)} line numbers to OpenAI Vision...")
+                            logger.info(f"  ?? Sending {len(line_numbers)} line numbers to OpenAI Vision...")
                             
                             # Call OpenAI Vision
                             vision_from_to_map = determine_from_to_with_openai_vision(
@@ -2194,9 +2722,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                                 if with_from_to > 0:
                                     vision_from_to_success = True
                             else:
-                                logger.warning(f"  ⚠️ OpenAI Vision returned empty results")
+                                logger.warning(f"  ?? OpenAI Vision returned empty results")
                         else:
-                            logger.info("  ℹ️ OpenAI client not available, skipping Vision-based detection")
+                            logger.info("  ?? OpenAI client not available, skipping Vision-based detection")
                     except Exception as e:
                         logger.error(f"  ❌ OpenAI Vision FROM-TO detection FAILED: {e}", exc_info=True)
                         logger.info(f"  → Falling back to geometric detection")
@@ -2205,12 +2733,12 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 if not spatial_from_to_success and not vision_from_to_success:
                     try:
                         logger.info("🔺 PHASE 3C: Geometric Line-Based FROM-TO Detection (Last Fallback)")
-                        logger.info("  📍 Method: OpenCV line detection + connectivity graph")
-                        logger.info("  📍 Strategy: Normalize coordinates → Detect lines → Build graph → Infer FROM-TO")
+                        logger.info("  ?? Method: OpenCV line detection + connectivity graph")
+                        logger.info("  ?? Strategy: Normalize coordinates â†’ Detect lines â†’ Build graph â†’ Infer FROM-TO")
                         
                         # Use the new geometric detector
                         if self.geometric_detector and line_items:
-                            logger.info(f"  🔍 Processing {len(line_items)} line items with geometric detection...")
+                            logger.info(f"  ?? Processing {len(line_items)} line items with geometric detection...")
                             
                             # Run geometric detection on this PDF page
                             geometric_from_to_map = self.geometric_detector.process_pdf_page(
@@ -2243,9 +2771,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                                 with_from_to = sum(1 for item in line_items if item.get('from_line') or item.get('to_line'))
                                 logger.info(f"  ✅ Geometric FROM-TO detection completed: {with_from_to}/{len(line_items)} items have FROM-TO")
                             else:
-                                logger.warning(f"  ⚠️ Geometric detection returned no results, keeping basic items")
+                                logger.warning(f"  ?? Geometric detection returned no results, keeping basic items")
                         else:
-                            logger.warning(f"  ⚠️ Geometric detector not available or no line items to process")
+                            logger.warning(f"  ?? Geometric detector not available or no line items to process")
                     except Exception as e:
                         logger.error(f"  ❌ Geometric FROM-TO detection FAILED: {e}", exc_info=True)
                         logger.error(f"  → Continuing with basic line items only")
@@ -2323,9 +2851,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                         if unique_items and '_audit' in unique_items[0]:
                             unique_items[0]['_audit']['recovered_count'] = len(recovered_items)
                 except Exception as _rec_err:
-                    logger.warning(f"⚠️ Smart recovery failed (non-fatal): {_rec_err}")
+                    logger.warning(f"?? Smart recovery failed (non-fatal): {_rec_err}")
             except Exception as _audit_err:
-                logger.warning(f"⚠️ Coverage audit failed (non-fatal): {_audit_err}")
+                logger.warning(f"?? Coverage audit failed (non-fatal): {_audit_err}")
 
             return unique_items
             
@@ -2440,7 +2968,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         if report['missed_candidates']:
             total_missed = sum(len(v) for v in report['missed_candidates'].values())
             logger.warning(
-                f"  ⚠️ {total_missed} candidate(s) on "
+                f"  ?? {total_missed} candidate(s) on "
                 f"{len(report['missed_candidates'])} page(s) were NOT matched "
                 "— they may be OCR garble or genuinely missed."
             )
@@ -2792,7 +3320,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         
         # Log OCR duplicate resolution summary
         if duplicates_detected:
-            logger.info(f"  🔍 Detected {len(duplicates_detected)} OCR-confused duplicates:")
+            logger.info(f"  ?? Detected {len(duplicates_detected)} OCR-confused duplicates:")
             for dup in duplicates_detected[:5]:  # Show first 5
                 winner = unique_map[dup['comparison_key']]['line_number']
                 logger.info(f"     '{dup['version_a']}' vs '{dup['version_b']}' → kept '{winner}'")
@@ -2930,7 +3458,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  🔑 OpenAI client available: {self.openai_client is not None}")
         
         if not self.openai_client:
-            logger.warning("  ⚠️ OpenAI not available for vision detection")
+            logger.warning("  ?? OpenAI not available for vision detection")
             return {'arrows': []}
         
         try:
@@ -2993,7 +3521,7 @@ Analyze and return JSON:"""
             )
             
             result_text = response.choices[0].message.content.strip()
-            logger.info(f"  📝 GPT-4 Vision raw response: {result_text[:500]}...")  # Log first 500 chars
+            logger.info(f"  ?? GPT-4 Vision raw response: {result_text[:500]}...")  # Log first 500 chars
             
             # Clean markdown code blocks if present
             if '```' in result_text:
@@ -3013,11 +3541,11 @@ Analyze and return JSON:"""
             return vision_data
             
         except json.JSONDecodeError as e:
-            logger.warning(f"  ⚠️ JSON decode error in vision response: {e}")
+            logger.warning(f"  ?? JSON decode error in vision response: {e}")
             logger.warning(f"  📄 Raw response was: {result_text[:1000] if 'result_text' in locals() else 'No response'}")
             return {'arrows': []}
         except Exception as e:
-            logger.warning(f"  ⚠️ Vision detection failed: {e}")
+            logger.warning(f"  ?? Vision detection failed: {e}")
             return {'arrows': []}
     
     def find_line_endpoints(self, spatial_data: List[Dict], line_number: str) -> Tuple[Optional[Dict], Optional[Dict]]:
@@ -3202,17 +3730,17 @@ Analyze and return JSON:"""
         norm_factor_x = 1000.0 / img_width
         norm_factor_y = 1000.0 / img_height
         
-        logger.info(f"  📐 Image dimensions: {img_width}x{img_height}, Norm factors: {norm_factor_x:.3f}x{norm_factor_y:.3f}")
+        logger.info(f"  ?? Image dimensions: {img_width}x{img_height}, Norm factors: {norm_factor_x:.3f}x{norm_factor_y:.3f}")
 
         # STEP 1: Extract normalized line number positions using OCR
         ocr_positions = {}  # {line_number: [(norm_x, norm_y), ...]}
         
         if self.easyocr_reader:
             try:
-                logger.info(f"  🔍 Extracting line number positions with EasyOCR...")
+                logger.info(f"  ?? Extracting line number positions with EasyOCR...")
                 easyocr_result = self.easyocr_reader.readtext(img_array, detail=1)
                 logger.info(f"  📊 EasyOCR found {len(easyocr_result)} text detections")
-                logger.info(f"  📝 Looking for {len(line_items)} line numbers: {[item['line_number'] for item in line_items[:5]]}...")
+                logger.info(f"  ?? Looking for {len(line_items)} line numbers: {[item['line_number'] for item in line_items[:5]]}...")
                 
                 for detection in easyocr_result:
                     bbox, text, conf = detection
@@ -3251,10 +3779,10 @@ Analyze and return JSON:"""
                 
                 logger.info(f"  ✅ Found positions for {len(ocr_positions)}/{len(line_items)} line numbers ({len(ocr_positions)/max(len(line_items), 1)*100:.0f}%)")
             except Exception as e:
-                logger.warning(f"  ⚠️ OCR position extraction failed: {e}")
+                logger.warning(f"  ?? OCR position extraction failed: {e}")
                 return line_items
         else:
-            logger.warning(f"  ⚠️ EasyOCR not available")
+            logger.warning(f"  ?? EasyOCR not available")
             return line_items
         
         if not ocr_positions:
@@ -3270,10 +3798,10 @@ Analyze and return JSON:"""
             avg_y = sum(p[1] for p in positions) / len(positions)
             line_centers[line_number] = (avg_x, avg_y)
         
-        logger.info(f"  📍 Normalized centers calculated for {len(line_centers)} line numbers")
+        logger.info(f"  ?? Normalized centers calculated for {len(line_centers)} line numbers")
         
         # STEP 2: Detect geometric line segments using OpenCV
-        logger.info(f"  📏 STEP 2: Detecting ALL geometric line segments in P&ID drawing...")
+        logger.info(f"  ?? STEP 2: Detecting ALL geometric line segments in P&ID drawing...")
         
         try:
             import cv2
@@ -3298,7 +3826,7 @@ Analyze and return JSON:"""
             )
             
             if lines is None or len(lines) == 0:
-                logger.warning(f"  ⚠️ No geometric lines detected")
+                logger.warning(f"  ?? No geometric lines detected")
                 return line_items
             
             logger.info(f"  ✅ Detected {len(lines)} geometric line segments")
@@ -3321,10 +3849,10 @@ Analyze and return JSON:"""
                 normalized_lines.append(norm_line)
             
         except ImportError:
-            logger.warning(f"  ⚠️ OpenCV not available, using fallback proximity method")
+            logger.warning(f"  ?? OpenCV not available, using fallback proximity method")
             return self._fallback_proximity_detection(line_items, line_centers)
         except Exception as e:
-            logger.warning(f"  ⚠️ Line detection failed: {e}, using fallback")
+            logger.warning(f"  ?? Line detection failed: {e}, using fallback")
             return self._fallback_proximity_detection(line_items, line_centers)
         
         # STEP 3: Match line numbers to geometric lines
@@ -3559,10 +4087,10 @@ Analyze and return JSON:"""
         detected_count = sum(1 for item in enhanced_items if item.get('from_line') or item.get('to_line'))
         logger.info(f"  ✅ Detected FROM/TO for {detected_count}/{len(line_items)} lines ({detected_count/len(line_items)*100:.1f}%)")
         
-        # 🛡️ FINAL GUARANTEE: Ensure ALL items have FROM-TO (use sequential as last resort)
+        # ??? FINAL GUARANTEE: Ensure ALL items have FROM-TO (use sequential as last resort)
         items_without = [item for item in enhanced_items if not item.get('from_line') and not item.get('to_line')]
         if items_without:
-            logger.warning(f"  ⚠️ {len(items_without)} items still missing FROM-TO, applying sequential guarantee...")
+            logger.warning(f"  ?? {len(items_without)} items still missing FROM-TO, applying sequential guarantee...")
             for idx, item in enumerate(enhanced_items):
                 if item.get('from_line') or item.get('to_line'):
                     continue  # Already has data
@@ -3611,10 +4139,10 @@ Analyze and return JSON:"""
                 
                 logger.info(f"  ✅ Arrow-based enhancement complete")
             else:
-                logger.info(f"  ℹ️ Skipping arrow-based enhancement (no arrows or geometric data available)")
+                logger.info(f"  ?? Skipping arrow-based enhancement (no arrows or geometric data available)")
                 
         except Exception as e:
-            logger.warning(f"  ⚠️ Arrow-based FROM-TO enhancement failed: {e}", exc_info=True)
+            logger.warning(f"  ?? Arrow-based FROM-TO enhancement failed: {e}", exc_info=True)
             # Continue with existing FROM-TO data
         
         return enhanced_items
@@ -3674,11 +4202,11 @@ Analyze and return JSON:"""
         Strategy: For each line, find the 2 closest neighbors and assign them as FROM/TO
         """
         logger.info(f"  🔄 Using AGGRESSIVE proximity fallback - WILL assign FROM-TO to all items")
-        logger.info(f"  📝 Processing {len(line_items)} line items...")
+        logger.info(f"  ?? Processing {len(line_items)} line items...")
         
         # If only 1 or 2 items, just assign sequentially
         if len(line_items) <= 1:
-            logger.info(f"  ⚠️ Only {len(line_items)} item(s), cannot determine FROM-TO")
+            logger.info(f"  ?? Only {len(line_items)} item(s), cannot determine FROM-TO")
             return line_items
         
         if len(line_items) == 2:
@@ -3724,7 +4252,7 @@ Analyze and return JSON:"""
     def _simple_proximity_fallback(self, line_items):
         """Simple proximity fallback when OCR positions cannot be extracted"""
         logger.info(f"  🔄 Using simple proximity fallback (no OCR positions)")
-        logger.info(f"  📝 Will assign basic connectivity based on line order")
+        logger.info(f"  ?? Will assign basic connectivity based on line order")
         
         # For now, just return items without FROM-TO
         # This prevents errors and keeps basic line data
@@ -3813,7 +4341,7 @@ Analyze and return JSON:"""
         
         # If many items still unmapped, use aggressive fallback for those
         if unmapped_count > 0:
-            logger.warning(f"  ⚠️ {unmapped_count} items still without FROM-TO, using sequential assignment")
+            logger.warning(f"  ?? {unmapped_count} items still without FROM-TO, using sequential assignment")
             # Apply sequential assignment to unmapped items
             unmapped_items = [item for item in enhanced_items if not item.get('from_line') and not item.get('to_line')]
             if len(unmapped_items) >= 2:
@@ -3853,7 +4381,7 @@ Analyze and return JSON:"""
         
         # Check if detector available
         if not self.from_to_detector:
-            logger.warning(f"  ⚠️ FROM-TO detector not available, skipping")
+            logger.warning(f"  ?? FROM-TO detector not available, skipping")
             return line_items
         
         # Step 1: Get image dimensions
@@ -3891,16 +4419,16 @@ Analyze and return JSON:"""
                         'confidence': conf
                     })
                 
-                logger.info(f"  📍 Extracted {len(ocr_positions)} OCR items with positions")
+                logger.info(f"  ?? Extracted {len(ocr_positions)} OCR items with positions")
             except Exception as e:
-                logger.warning(f"  ⚠️ Could not extract spatial OCR data: {e}")
+                logger.warning(f"  ?? Could not extract spatial OCR data: {e}")
                 return line_items
         else:
-            logger.warning(f"  ⚠️ EasyOCR not available for spatial extraction")
+            logger.warning(f"  ?? EasyOCR not available for spatial extraction")
             return line_items
         
         # Step 3: Detect ALL line segments in P&ID using geometric analysis
-        logger.info(f"  🔍 Detecting ALL line segments in P&ID...")
+        logger.info(f"  ?? Detecting ALL line segments in P&ID...")
         all_segments = self._detect_all_line_segments(img_array)
         logger.info(f"  ✅ Detected {len(all_segments)} line segments with unique IDs")
         
@@ -3926,7 +4454,7 @@ Analyze and return JSON:"""
                 avg_y = sum(p['y'] for p in line_positions) / len(line_positions)
                 line_position_map[line_number] = (avg_x, avg_y)
         
-        logger.info(f"  🗺️ Mapped {len(line_position_map)} line numbers to positions")
+        logger.info(f"  ??? Mapped {len(line_position_map)} line numbers to positions")
         
         # Step 5: Assign line numbers to segments using spatial proximity
         line_segments_map = self._assign_line_numbers_to_segments(
@@ -4012,7 +4540,7 @@ Analyze and return JSON:"""
         )
         
         if lines is None:
-            logger.warning(f"    ⚠️ No line segments detected")
+            logger.warning(f"    ?? No line segments detected")
             return []
         
         segments = []

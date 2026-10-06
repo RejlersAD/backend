@@ -1,0 +1,73 @@
+{
+  "example": "MRI - O 91 - 011",
+  "separator": "-",
+  "segments": [
+    {
+      "placeholder": "MRI",
+      "meaning": "AREA",
+      "field_key": "area",
+      "codes": {
+        "MRF": "MUBARRAZ FIELD",
+        "MRI": "MUBARRAZ ISLAND",
+        "ARF": "UMM AL-ANBAR FIELD",
+        "GAF": "NEWAT AL-GHAILAN FIELD",
+        "ARS": "AR SITE TERMINAL",
+        "GEN": "NOT SPECIFIED"
+      }
+    },
+    {
+      "placeholder": "O",
+      "meaning": "RESERVOIR",
+      "field_key": "reservoir",
+      "codes": {
+        "O": "NOT APPLICABLE",
+        "A": "A RES.",
+        "B": "B RES.",
+        "C": "C RES."
+      }
+    },
+    {
+      "placeholder": "91",
+      "meaning": "JACKET",
+      "field_key": "jacket",
+      "codes": {
+        "JACKET": "NAME",
+        "0": "EXEPTION",
+        "1": "CB1 TRIPOD WELL PLATFORM",
+        "91": "CA PRODUCTION PLATFORM",
+        "2": "CB2 TRIPOD WELL PLATFORM",
+        "3": "BD WELL PLATFORM",
+        "4": "BF WELL PLATFORM",
+        "5": "BB WELL PLATFORM",
+        "92": "CD PRODUCTION PLATFORM",
+        "93": "CFP LIVING QUARTER",
+        "21": "CD1 TRIPOD WELL PLATFORM",
+        "22": "CD2 TRIPOD WELL PLATFORM",
+        "23": "CD3 TRIPOD WELL PLATFORM",
+        "24": "CD4 TRIPOD WELL PLATFORM",
+        "25": "CD5 TRIPOD WELL PLATFORM",
+        "26": "CD6 TRIPOD WELL PLATFORM",
+        "27": "CD7 TRIPOD WELL PLATFORM",
+        "28": "CD8 TRIPOD WELL PLATFORM",
+        "41": "MR6 WELL PLATFORM"
+      }
+    },
+    {
+      "placeholder": "011",
+      "meaning": "SEQUENTIAL",
+      "field_key": "sequential",
+      "codes": {
+        "001 ~ 299": "OIL/GAS PRODUCTION SYSTEM",
+        "300 ~": "CHEMICAL INJECTION SYSTEM",
+        "400 ~": "DRAIN SYSTEM",
+        "500 ~": "FLARE SYSTEM",
+        "600 ~": "INSTRUMENT AIR SYSTEM",
+        "700 ~": "DIESEL STORAGE SYSTEM",
+        "800 ~": "FRESH WATER SYSTEM",
+        "900 ~": "FIRE FIGHTING SYSTEM",
+        "EXAMPLE": "MRI-0-91-011-DEM"
+      }
+    }
+  ],
+  "unmapped_sections": []
+}

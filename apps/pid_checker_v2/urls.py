@@ -40,6 +40,7 @@ from .views import (
     UsageSummaryView,
     TokenReportView,
     RadAIChatView,
+    RadAIChatArchiveView,
 )
 
 app_name = 'pid_checker_v2'
@@ -80,6 +81,7 @@ SYMBOL_IMAGE_UPLOAD_PATH = 'symbol-image/upload/'
 SYMBOL_IMAGE_DELETE_PATH = 'symbol-image/delete/'
 TEST_API_KEY_PATH = 'test-api-key/'
 CHAT_PATH = 'chat/'
+CHAT_ARCHIVE_PATH = 'chat/archive/'
 USAGE_LIST_PATH = 'usage/'
 USAGE_SUMMARY_PATH = 'usage/summary/'
 USAGE_REPORT_PATH = 'usage/report/'
@@ -163,6 +165,7 @@ urlpatterns = [
     path(TEST_API_KEY_PATH, TestApiKeyView.as_view(),
          name='test-api-key'),
     path(CHAT_PATH, RadAIChatView.as_view(), name='radai-chat'),
+    path(CHAT_ARCHIVE_PATH, RadAIChatArchiveView.as_view(), name='radai-chat-archive'),
     # Token usage / consolidated report — /usage/summary/ must precede /usage/
     path(USAGE_SUMMARY_PATH, UsageSummaryView.as_view(), name='usage-summary'),
     path(USAGE_REPORT_PATH, TokenReportView.as_view(), name='usage-report'),
