@@ -9,6 +9,15 @@ The inline custom-tag extension requires `0020_document_custom_tag` before its
 web/worker code. It adds an empty-by-default, document-wide text field without
 changing existing document types, classification runs or file versions.
 
+The intelligence-metadata extension requires `0021_document_intelligence_metadata`
+and its database confidence-range guard in `0022_document_intelligence_confidence_range`.
+Each completed run stores folder-safe tags, an integer 0-100 confidence,
+recommended folder, bounded reasoning and search keywords. The existing
+classification fields remain compatible; projections add `intelligence` with
+`documentType`, `folder`, `tags`, `confidence`, `recommendedFolder`, `reasoning`
+and `searchKeywords`. Global tags use current Opportunity/client facts. Missing
+business-unit data is represented as empty and is never inferred.
+
 ## Ownership and compatibility
 
 The six workspace categories and their custom folder tags are unchanged.
@@ -68,6 +77,13 @@ suggestions remain separate. Classification never submits, approves, awards or
 rebinds a proposal. Existing SharePoint native history remains external/read-only
 for management; new classification/version-write capabilities are for RADAI files.
 
+Intelligence tags are limited to the supplied vocabulary for the file's current
+Correspondence, Tender, Proposal, Internal, Submitted or Award folder. Exact
+rule matches score 95, validated AI suggestions 80 and folder-only possibilities
+60. Lower-confidence unsupported results require manual review. Content evidence
+may recommend a different folder when it is stronger than folder context, but
+classification never moves files automatically.
+
 `classification.custom_tag` is independent metadata, always a string (empty when
 unset). It does not change `label`, `document_type`, `origin` or badge color.
 The tag survives new file versions and later automatic results. Tag text is not
@@ -83,6 +99,20 @@ recovery. Empty-tag reversal preserves the pre-existing type, revision, audit,
 request, job and file evidence. No historical labels are inferred or backfilled.
 
 ## Durable work and recovery
+
+PostgreSQL folder-upload lookup locks only matching upload rows. Its optional
+document/head join is read for current-version selection but is not included in
+`FOR UPDATE`; this avoids locking the nullable side of that join while retaining
+serialized same-name upload/version behavior.
+
+Folder-upload retries resolve the existing request ledger before selecting a
+current same-name document. An initial upload remains an initial-upload replay;
+a folder-created revision retains its reserved predecessor and head token.
+Completed retries return the exact saved upload with HTTP 200, even after a later
+head, without creating another revision, object or completion audit. Uncertain
+attempts reconcile their original intent. Actor, folder, provider, filename and
+content identity checks still apply; explicit version commands keep their
+caller-supplied target/token/note validation.
 
 `OpportunityDocumentClassificationRun` stores exact source identity, requested
 actor, attempts, due time and lease. Celery Beat dispatches due SQL rows independently

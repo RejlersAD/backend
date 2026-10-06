@@ -81,6 +81,41 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         self.assertEqual(OpportunityWorkspaceUpload.objects.count(), 3)
         self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='workspace_file_uploaded').count(), 3)
 
+    def test_folder_upload_retries_preserve_initial_and_revision_identity_after_later_head(self):
+        initial_request, revision_request = uuid4(), uuid4()
+        first = self.upload(request_id=initial_request)
+        second = self.upload(request_id=revision_request, content=b'folder revision')
+        self.assertEqual(second.status_code, 201, second.data)
+        third = self.version(second, content=b'later explicit revision')
+        self.assertEqual(third.status_code, 201, third.data)
+        for request_id, content, original in (
+                (initial_request, b'synthetic attachment', first),
+                (revision_request, b'folder revision', second)):
+            replay = self.upload(request_id=request_id, content=content)
+            self.assertEqual(replay.status_code, 200, replay.data)
+            self.assertEqual(replay.data['id'], original.data['id'])
+            self.assertFalse(replay.data['is_current'])
+            self.assertEqual(replay.data['head_file_id'], third.data['id'])
+        self.assertEqual(OpportunityWorkspaceUpload.objects.count(), 3)
+        self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='workspace_file_uploaded').count(), 3)
+
+    def test_uncertain_folder_revision_retries_reserved_intent_without_duplicate_version(self):
+        first, request_id = self.upload(), uuid4()
+        storage, fingerprint = attachment_storage()
+        with patch('apps.sales.private_attachments._storage', return_value=(storage, fingerprint)):
+            with patch.object(storage, 'save', side_effect=OSError('Synthetic storage failure')):
+                failed = self.upload(request_id=request_id, content=b'folder revision')
+            self.assertEqual(failed.status_code, 424, failed.data)
+            attempt = OpportunityWorkspaceUpload.objects.get(request_id=request_id)
+            self.assertEqual(attempt.status, 'uncertain')
+            self.assertEqual(str(attempt.previous_upload_id), first.data['id'][6:])
+            replay = self.upload(request_id=request_id, content=b'folder revision')
+        self.assertEqual(replay.status_code, 201, replay.data)
+        self.assertEqual(replay.data['id'], 'radai-' + str(attempt.pk))
+        self.assertEqual(replay.data['version'], '2')
+        self.assertEqual(OpportunityWorkspaceUpload.objects.count(), 2)
+        self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='workspace_file_uploaded').count(), 2)
+
     def test_stale_request_does_not_store_a_new_object_or_revision(self):
         first = self.upload()
         self.version(first)
@@ -263,6 +298,28 @@ class DocumentVersionDurabilityTests(VersionFixtures, TransactionTestCase):
         finally:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT set_config('statement_timeout', %s, false)", [original])
+
+    @skipUnless(connection.vendor == 'postgresql', 'PostgreSQL nullable-join row-lock verification')
+    def test_folder_upload_can_create_and_reupload_same_name_with_document_join(self):
+        self.upload_url = self.url + 'folders/tender/upload/'
+        initial_request, revision_request = uuid4(), uuid4()
+        first = self.upload(name='Tender Scope.pdf', content=b'first tender scope', request_id=initial_request)
+        self.assertEqual(first.status_code, 201, first.data)
+
+        second = self.upload(name='Tender Scope.pdf', content=b'revised tender scope', request_id=revision_request)
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertEqual(second.data['document_id'], first.data['document_id'])
+        self.assertEqual(second.data['version'], '2')
+        for request_id, content, original in (
+                (initial_request, b'first tender scope', first),
+                (revision_request, b'revised tender scope', second)):
+            replay = self.upload(name='Tender Scope.pdf', content=content, request_id=request_id)
+            self.assertEqual(replay.status_code, 200, replay.data)
+            self.assertEqual(replay.data['id'], original.data['id'])
+            download = self.api.get(self.url + 'folders/tender/files/' + replay.data['id'] + '/download/')
+            self.assertEqual(b''.join(download.streaming_content), content)
+        self.assertEqual(OpportunityWorkspaceUpload.objects.count(), 2)
+        self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='workspace_file_uploaded').count(), 2)
 
     def test_guarded_version_endpoint_denies_missing_create_without_side_effects(self):
         first = self.upload()

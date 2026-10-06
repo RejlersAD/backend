@@ -182,6 +182,8 @@ class NotificationService:
                 send_email = send_email or prefs.enable_email
             
             # Create notification
+            force_in_app = notification_data.get('force_in_app', False)
+            send_in_app = force_in_app or prefs.enable_in_app
             notification = Notification(
                 recipient=recipient,
                 sender=notification_data.get('sender'),
@@ -191,14 +193,14 @@ class NotificationService:
                 priority=priority,
                 action_url=notification_data.get('action_url'),
                 action_label=notification_data.get('action_label'),
-                send_in_app=prefs.enable_in_app,
+                send_in_app=send_in_app,
                 send_email=send_email and prefs.enable_email,
                 send_sms=notification_data.get('send_sms', False) and prefs.enable_sms,
                 metadata=notification_data.get('metadata', {}),
                 expires_at=notification_data.get('expires_at'),
                 # An in-app notification is delivered as soon as its database
                 # row exists. Leaving it PENDING hides it from unread_count.
-                status='SENT' if prefs.enable_in_app else 'PENDING',
+                status='SENT' if send_in_app else 'PENDING',
             )
             reason = approval_assignment_issue(notification)
             if reason:

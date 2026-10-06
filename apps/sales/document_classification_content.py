@@ -53,6 +53,74 @@ PATTERNS = {
     'completion_certificate': r'(?:project\s+)?completion\s+certificate',
 }
 
+FOLDER_TAGS = {
+    'correspondence': ['Communication', 'Incoming Mail', 'Outgoing Mail', 'Client Communication', 'Email',
+                       'Letter', 'Meeting Minutes', 'Clarification', 'Technical Query', 'Commercial Query',
+                       'NDA', 'Vendor Communication', 'Official Correspondence', 'Approval Request', 'Response Letter'],
+    'tender': ['Tender', 'RFP', 'RFQ', 'ITT', 'Scope of Work', 'BOQ', 'Technical Specification',
+               'Commercial Terms', 'Tender Addendum', 'Tender Amendment', 'Bid Invitation', 'Prequalification'],
+    'proposal': ['Proposal', 'Technical Proposal', 'Commercial Proposal', 'Pricing Sheet', 'Cost Estimate',
+                 'Method Statement', 'Execution Plan', 'Resource Plan', 'CV Submission', 'Proposal Revision',
+                 'Management Proposal', 'Presentation'],
+    'internal': ['Internal', 'Confidential', 'Go-No-Go', 'Risk Assessment', 'Management Approval',
+                 'Internal Review', 'Competitor Analysis', 'Capture Plan', 'Sales Strategy', 'Resource Planning',
+                 'Business Case', 'Meeting Notes'],
+    'submitted': ['Submitted', 'Final Submission', 'Submission Package', 'Submission Receipt',
+                  'Client Acknowledgment', 'Tender Submission', 'Portal Upload', 'Bid Bond', 'Signed Submission'],
+    'award': ['Award', 'Award Letter', 'LOI', 'LOA', 'Contract', 'Purchase Order', 'Notice To Proceed',
+              'Kickoff Meeting', 'Project Handover', 'Contract Amendment', 'Customer Approval'],
+}
+
+FILENAME_TAGS = {
+    'RFP': r'\brfp\b|request[ _-]+for[ _-]+proposal', 'RFQ': r'\brfq\b|request[ _-]+for[ _-]+quotation',
+    'BOQ': r'\bboq\b|bill[ _-]+of[ _-]+quantit', 'CV Submission': r'\bcv\b|curriculum[ _-]+vitae',
+    'Pricing Sheet': r'pric(?:e|ing)', 'Commercial Proposal': r'commercial',
+    'Technical Proposal': r'technical', 'Contract': r'contract', 'Award': r'award',
+    'LOI': r'\bloi\b|letter[ _-]+of[ _-]+intent', 'LOA': r'\bloa\b|letter[ _-]+of[ _-]+award',
+    'Meeting Minutes': r'minutes|\bmom\b', 'Risk Assessment': r'\brisk\b',
+    'Management Approval': r'approval',
+}
+
+TYPE_FOLDERS = {
+    'incoming_mail': 'correspondence', 'outgoing_mail': 'correspondence',
+    'correspondence_register': 'correspondence', 'eoi': 'tender', 'rft': 'tender', 'tbs': 'tender',
+    'tcs': 'tender', 'tender_register': 'tender', 'budgetary_proposal': 'proposal',
+    'technical_proposal': 'proposal', 'commercial_proposal': 'proposal', 'bid_review': 'internal',
+    'discipline_input': 'internal', 'kom_presentation': 'proposal', 'subcontractor_quote': 'internal',
+    'costing_sheet': 'internal', 'tq': 'correspondence', 'submitted_proposal': 'submitted',
+    'submission_receipt': 'submitted', 'loa': 'award', 'contract': 'award', 'pbg': 'award',
+    'insurance': 'award', 'sales_delivery_handover': 'award', 'delivery_sales_handover': 'award',
+    'completion_certificate': 'award',
+}
+
+
+def intelligence_tags(folder_key, name, text, document_type, evidence, origin):
+    """Return bounded, folder-safe tags and explainable confidence metadata."""
+    allowed = FOLDER_TAGS.get(folder_key, [])
+    searchable = f'{PurePosixPath(name).stem.replace("_", " ").replace("-", " ")} {text[:4000]}'
+    tags = []
+    for tag in allowed:
+        exact_phrase = r'\b' + r'\s+'.join(map(re.escape, tag.split())) + r'\b'
+        alias = FILENAME_TAGS.get(tag)
+        if re.search(exact_phrase, searchable, re.I) or (alias and re.search(alias, searchable, re.I)):
+            tags.append(tag)
+    label = LABELS.get(document_type, '')
+    if label in allowed and label not in tags:
+        tags.append(label)
+    confidence = 95 if origin == 'rule' else 80 if origin == 'ai' else 60 if allowed else 0
+    recommended = ''
+    evidence_sources = {item.get('source') for item in evidence if isinstance(item, dict)}
+    inferred_folder = TYPE_FOLDERS.get(document_type, '')
+    if inferred_folder and inferred_folder != folder_key and 'content' in evidence_sources and confidence > 60:
+        recommended = inferred_folder
+    if document_type != 'unclassified':
+        reasoning = f'{label} identified from {" and ".join(sorted(evidence_sources)) or origin} evidence.'
+    elif allowed:
+        reasoning = f'No exact document type was identified; {folder_key.title()} folder context is a possible signal.'
+    else:
+        reasoning = 'No supported document type or folder context was identified; manual review is required.'
+    return tags, confidence, recommended, reasoning
+
 
 def type_catalog():
     return [{'value': value, 'label': label, 'color': COLORS[value]} for value, label in LABELS.items()]

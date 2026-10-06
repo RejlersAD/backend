@@ -307,13 +307,26 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
         require_access(_actor(actor.pk), opportunity, 'create', 'update')
         workspace, _ = OpportunityWorkspace.objects.get_or_create(opportunity=opportunity)
         OpportunityWorkspace.objects.select_for_update().get(pk=workspace.pk)
+        attempt = OpportunityWorkspaceUpload.objects.select_related('workspace', 'actor').filter(workspace=workspace, request_id=request_id).first()
+        if attempt and (attempt.provider, attempt.actor_id, attempt.folder_key, attempt.name, attempt.size, attempt.sha256) != (
+                'radai', actor.pk, key, uploaded.name, prepared['size'], digest):
+            raise WorkspaceAPIError('upload_conflict', 409)
         document = None
         if target:
             target = _file(opportunity, _actor(actor.pk), key, 'radai-' + str(target.pk), 'create', 'update')
             _identity(target)
             document = materialize_document(target)
-        elif target is None:
-            existing = current_uploads(OpportunityWorkspaceUpload.objects.select_for_update().filter(
+        elif attempt:
+            # Replay the reserved predecessor, not a head changed by this upload
+            # or by a later revision.
+            if attempt.previous_upload_id:
+                target = _file(opportunity, _actor(actor.pk), key, 'radai-' + str(attempt.previous_upload_id), 'create', 'update')
+                _identity(target)
+                document = materialize_document(target)
+                expected_token = attempt.expected_head_token
+                note = 'Reupload from folder upload'
+        else:
+            existing = current_uploads(OpportunityWorkspaceUpload.objects.select_for_update(of=('self',)).filter(
                 workspace=workspace, provider='radai', folder_key=key, normalized_name=normalized_name, status='ready',
             )).select_related('document__head_upload').order_by('-version_number', '-pk').first()
             if existing:
@@ -323,11 +336,7 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
                 expected_token = head_token(target, document)
                 if not note:
                     note = 'Reupload from folder upload'
-        attempt = OpportunityWorkspaceUpload.objects.select_related('workspace', 'actor').filter(workspace=workspace, request_id=request_id).first()
         if attempt:
-            if (attempt.provider, attempt.actor_id, attempt.folder_key, attempt.name, attempt.size, attempt.sha256) != (
-                    'radai', actor.pk, key, uploaded.name, prepared['size'], digest):
-                raise WorkspaceAPIError('upload_conflict', 409)
             if ((attempt.previous_upload_id is not None) != bool(target) or (target and (
                     attempt.document_id != document.pk or attempt.expected_head_token != expected_token or attempt.revision_note != note))):
                 raise WorkspaceAPIError('upload_conflict', 409)
