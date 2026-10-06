@@ -333,9 +333,8 @@ def get_users_with_module_access(module_code: str) -> List:
                 userrole__role__is_active=True,
                 userrole__role__rolemodule__module__in=modules,
             )
-            | Q(department__iexact='sales')
-            | Q(department__iexact='Sales & Business Development')
-            | Q(department__iexact='Sales and Business Development')
+            | Q(department__icontains='sales')
+            | Q(department__icontains='business development')
         ).distinct()
         
         return [profile.user.id for profile in profiles]
