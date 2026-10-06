@@ -400,6 +400,10 @@ class UserProfile(TimeStampedModel):
             return override.allowed
         if self.is_super_admin():
             return True
+
+        from apps.rbac.service_catalogue import is_sales_department
+        if is_sales_department(self.department) and module_code.startswith('sales_'):
+            return Module.objects.filter(code=module_code, is_active=True).exists()
         from apps.rbac.models import UserRole
         user_role_ids = UserRole.objects.filter(
             user_profile=self,
@@ -481,6 +485,12 @@ class UserProfile(TimeStampedModel):
                     rolemodule__role_id__in=user_role_ids,
                     is_active=True
                 ).distinct())
+
+                from apps.rbac.service_catalogue import is_sales_department
+                if is_sales_department(self.department):
+                    sales_modules = Module.objects.filter(code__startswith='sales_', is_active=True)
+                    existing_ids = {module.id for module in modules}
+                    modules.extend(module for module in sales_modules if module.id not in existing_ids)
 
             # Soft-coded global access modules (for all authenticated users)
             try:

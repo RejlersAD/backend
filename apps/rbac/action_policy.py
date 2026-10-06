@@ -362,12 +362,14 @@ def module_action_allowed(user, module_code, action):
         profile.locked_until and profile.locked_until > timezone.now()
     ):
         return False
+    from .service_catalogue import is_sales_department
+    sales_department = is_sales_department(profile.department)
     if not is_module_enabled(module_code) or not Module.objects.filter(code=module_code, is_active=True).exists():
         return False
     roles = list(profile.roles.filter(is_active=True).values_list('pk', 'code'))
     role_ids = [pk for pk, code in roles]
     super_admin = user.is_superuser or any(code == 'super_admin' for pk, code in roles)
-    if not super_admin and not RoleModule.objects.filter(module__code=module_code, role_id__in=role_ids).exists():
+    if not super_admin and not sales_department and not RoleModule.objects.filter(module__code=module_code, role_id__in=role_ids).exists():
         # Sales permissions are assigned as business-area services in the UI,
         # but the API routes use the individual service codes. A grant on any
         # active Sales service is therefore the user's Sales-area grant and
@@ -387,7 +389,11 @@ def module_action_allowed(user, module_code, action):
         return True
     allowed = {pk for pk, granted in overrides.items() if granted}
     allowed.update(RolePermission.objects.filter(role_id__in=role_ids, permission_id__in=definitions).values_list('permission_id', flat=True))
-    if module_code.startswith('sales_'):
+    if module_code.startswith('sales_') and sales_department:
+        allowed.update(Permission.objects.filter(
+            module__code=module_code, is_active=True, action=action,
+        ).values_list('pk', flat=True))
+    elif module_code.startswith('sales_'):
         # A fully configured Sales service grant applies consistently across
         # the Sales workspace, including opportunity creation and edits.
         sales_permissions = Permission.objects.filter(
