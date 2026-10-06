@@ -24,6 +24,55 @@ from rest_framework.response import Response
 EQ_RESULT_CACHE_TTL_S   = 14400    # 4 hours — how long results stay in Redis
 EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'  # must match tasks.py
 
+# ── Soft-coded S3 archive (project data lake) ────────────────────────────
+# Archives the uploaded P&ID, the extracted equipment JSON, the document text
+# excerpt and the legend definition — fail-safe, layout from designiq s3_utils.
+EQ_S3_ARCHIVE_ENABLED = os.environ.get('EQ_S3_ARCHIVE_ENABLED', 'true').lower() == 'true'
+
+
+def _eq_archive(kind, filename, data, project='', metadata=None):
+    """Fail-safe S3 archive for equipment-extraction artifacts (bytes only —
+    never file objects; boto3's upload_fileobj closes them)."""
+    if not EQ_S3_ARCHIVE_ENABLED:
+        return None
+    try:
+        from apps.designiq.s3_utils import s3_storage
+        result = s3_storage.archive_artifact(
+            kind, filename, data,
+            content_type=('application/pdf' if str(filename).lower().endswith('.pdf')
+                          else 'application/json' if str(filename).lower().endswith('.json')
+                          else 'text/plain'),
+            project=project, metadata=metadata or {},
+        )
+        if result.get('success'):
+            logger.info('[EquipmentList] Archived %s → %s', kind, result['s3_key'])
+        return result
+    except Exception as exc:  # noqa: BLE001 — archiving must never break extraction
+        logger.warning('[EquipmentList] Archive skipped (%s:%s): %s', kind, filename, exc)
+        return None
+
+
+def _eq_archive_legend(project: str) -> None:
+    """Archive the ACTIVE legend definition (the format used for extraction)
+    as JSON — section 'equipment_list' in the shared legend system."""
+    try:
+        from apps.pid_checker_v2.models import PidCheckerV2LegendSheet
+        legend = (PidCheckerV2LegendSheet.objects
+                  .filter(section='equipment_list', is_active=True)
+                  .order_by('-id').first())
+        if not legend:
+            return
+        payload = {
+            'name': getattr(legend, 'name', ''),
+            'section': getattr(legend, 'section', ''),
+            'definition': legend.definition,
+        }
+        _eq_archive('legend', f"legend_format_{legend.id}.json",
+                    json.dumps(payload, default=str, indent=2).encode('utf-8'),
+                    project=project)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('[EquipmentList] Legend format archive skipped: %s', exc)
+
 
 def _dispatch_eq_task(task_fn, upload_id: str, config: dict, *task_args) -> None:
     """
@@ -3530,7 +3579,15 @@ def analyze_pid_equipment(request):
 
     # Encode file bytes as base64 so they can be passed as a JSON-serialisable
     # task argument (Celery serialises args to JSON by default).
-    file_b64 = base64.b64encode(pid_file.read()).decode('ascii')
+    file_bytes = pid_file.read()
+    file_b64 = base64.b64encode(file_bytes).decode('ascii')
+
+    # ── S3 archive (fail-safe): source P&ID + active legend format ─────────
+    _project_label = (request.POST.get('project_code')
+                      or request.POST.get('project_name') or '').strip()
+    _eq_archive('pid_document', pid_file.name, file_bytes, project=_project_label,
+                metadata={'upload-id': upload_id})
+    _eq_archive_legend(_project_label)
 
     # Mark as 'processing' in cache immediately so status polls never return 404.
     cache.set(
@@ -3540,7 +3597,7 @@ def analyze_pid_equipment(request):
     )
 
     _dispatch_eq_task(run_equipment_analysis_task, upload_id, config,
-                      upload_id, file_b64, pid_file.name)
+                      upload_id, file_b64, pid_file.name, _project_label)
     logger.info('[EquipmentList] Task dispatched  upload_id=%s  file=%s', upload_id, pid_file.name)
 
     return Response(
@@ -3585,6 +3642,7 @@ def get_equipment_analysis_results(request, upload_id):
         'equipment':   entry.get('equipment', []),
         'total':       entry.get('total', 0),
         'drawing_ref': entry.get('drawing_ref', ''),
+        'document_excerpt': entry.get('document_excerpt', ''),
         'columns':     [c['label'] for c in config.get('excel_columns', []) if c['key'] != 'sl_no'],
     })
 
@@ -3714,6 +3772,18 @@ def analyze_pid_equipment_batch(request):
         for pid_file in files
     ]
 
+    # ── S3 archive (fail-safe): every source P&ID + active legend format ────
+    _project_label = (request.POST.get('project_code')
+                      or request.POST.get('project_name') or '').strip()
+    for pid_file in files:
+        for fd in files_data:
+            if fd['filename'] == pid_file.name:
+                _eq_archive('pid_document', pid_file.name,
+                            base64.b64decode(fd['b64']), project=_project_label,
+                            metadata={'upload-id': upload_id})
+                break
+    _eq_archive_legend(_project_label)
+
     cache.set(
         EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
         {'status': 'processing', 'progress': 0, 'message': f'Queued: 0 / {len(files)} files…'},
@@ -3721,7 +3791,7 @@ def analyze_pid_equipment_batch(request):
     )
 
     _dispatch_eq_task(run_equipment_batch_analysis_task, upload_id, config,
-                      upload_id, files_data)
+                      upload_id, files_data, _project_label)
     logger.info('[EquipmentList Batch] Task dispatched  upload_id=%s  files=%d', upload_id, len(files))
 
     return Response(

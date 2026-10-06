@@ -35,6 +35,7 @@ CHAT_MODELS = {
 # Context caps — keep prompts small so chat stays cheap and responsive.
 MAX_CONTEXT_ROWS      = 200     # max extracted rows forwarded
 MAX_CONTEXT_CHARS     = 20000   # hard cap on the serialized context block
+MAX_DOC_EXCERPT_CHARS = 8000    # source-document text excerpt cap (within the total)
 MAX_HISTORY_MESSAGES  = 20      # prior turns included for continuity
 MAX_ANSWER_TOKENS     = 1500    # generous but bounded replies
 CHAT_REQUEST_TIMEOUT_S = 90.0
@@ -47,6 +48,8 @@ SYSTEM_PROMPT = (
     "Rules:\n"
     "- Ground every answer in the provided CONTEXT. If the answer is not in "
     "the context, say so plainly instead of inventing values.\n"
+    "- If the context includes document_excerpt, it is raw text from the "
+    "uploaded source document — quote it directly when relevant.\n"
     "- When you reference a tag, row, or value, cite it exactly as it appears.\n"
     "- Be concise and technical. Use short bullet lists for multi-part answers.\n"
     "- If the user asks for a count, compute it from the context rows and show "
@@ -112,10 +115,14 @@ def _serialize_context(context: dict) -> str:
     rows = (context or {}).get('rows') or []
     if isinstance(rows, list) and len(rows) > MAX_CONTEXT_ROWS:
         rows = rows[:MAX_CONTEXT_ROWS]
+    # Source-document excerpt (uploaded PDF text) — lets the assistant answer
+    # from the document itself, not only the extracted rows. Soft-capped.
+    doc_excerpt = str((context or {}).get('document_excerpt') or '')[:MAX_DOC_EXCERPT_CHARS]
     slim = {
         'page':        (context or {}).get('page'),
         'project':     (context or {}).get('project'),
         'document':    (context or {}).get('document'),
+        'document_excerpt': doc_excerpt or None,
         'columns':     (context or {}).get('columns'),
         'row_count':   (context or {}).get('row_count'),
         'summary':     (context or {}).get('summary'),
