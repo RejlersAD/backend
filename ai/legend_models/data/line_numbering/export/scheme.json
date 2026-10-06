@@ -1,0 +1,73 @@
+{
+  "example": "XX-XX-XXXX-XXXX-X",
+  "separator": "-",
+  "segments": [
+    {
+      "placeholder": "XX",
+      "meaning": "PIPE SIZE",
+      "field_key": "pipe_size",
+      "codes": {}
+    },
+    {
+      "placeholder": "XX",
+      "meaning": "SERVICES IDENTIFIER",
+      "field_key": "services_identifier",
+      "codes": {
+        "AM": "AMINE LIQUID",
+        "CH": "SRP/DEAERATION/CIP CHEMICAL",
+        "CL": "OTHER CHEMICALS",
+        "CR": "CORROSION INHIBITOR",
+        "DC": "CLOSED DRAIN",
+        "DF": "DIESEL OIL",
+        "DL": "DRAIN LIQUID (OPEN)",
+        "DO": "SEA WATER SERVICES OPEN DRAIN",
+        "DR": "SOUR WATER",
+        "DW": "FRESH WATER",
+        "FG": "FUEL GAS",
+        "FL": "FLARE GAS",
+        "FW": "FIRE WATER",
+        "G": "GAS HYDROCARBON VAPOR",
+        "GL": "GLYCOL(TEG)",
+        "HC": "HYDROCARBON LIQUID",
+        "HL": "SODIUM HYPO-CHLORITE",
+        "IA": "INSTRUMENT AIR",
+        "IW": "INJECTION WATER",
+        "ME": "METHANOL",
+        "N2": "NITROGEN GAS",
+        "P": "CRUDE OIL",
+        "RW": "REJECT WATER",
+        "SG": "SOUR GAS",
+        "SW": "SEAWATER",
+        "TW": "TREATED WATER",
+        "UA": "PLANT AIR",
+        "UW": "UTILITY WATER",
+        "VG": "VENT GAS",
+        "XN": "XYLENE"
+      }
+    },
+    {
+      "placeholder": "XXXX",
+      "meaning": "LINE CLASSIFICATION",
+      "field_key": "line_classification",
+      "codes": {}
+    },
+    {
+      "placeholder": "XXXX",
+      "meaning": "LINE NUMBER",
+      "field_key": "line_number",
+      "codes": {}
+    },
+    {
+      "placeholder": "X",
+      "meaning": "INSULATION CLASS",
+      "field_key": "insulation_class",
+      "codes": {
+        "C": "COLD CONSERVATION",
+        "H": "HEAT CONSERVATION",
+        "P": "PERSONNEL  PROTECTION",
+        "T": "TRACING"
+      }
+    }
+  ],
+  "unmapped_sections": []
+}

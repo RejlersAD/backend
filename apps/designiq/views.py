@@ -72,7 +72,14 @@ def _extract_pid_no_per_page(file_path: str) -> dict:
     return page_map
 
 
-def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type, legend_file_path=None, user_id=None):
+# SOFT-CODED: maximum pages accepted per P&ID upload on the line-list flow.
+# Matches the frontend LL_UPLOAD_RULES.maxPages — keep both in sync.
+# 12 dense/scanned pages ≈ 3 parallel-worker waves ≈ 30-40 min, comfortably
+# inside the 100-minute task budget (DESIGNIQ_TASK_HARD_LIMIT).
+BASE_EXTRACTION_MAX_PAGES = 12
+
+
+def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type, legend_file_path=None, user_id=None, project=''):
     """Spawn a daemon thread that runs P&ID OCR and writes progress to /tmp/."""
     progress_file = f'/tmp/base_extraction_{task_id}.json'
 
@@ -173,6 +180,15 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
             # Columns: Original Detection, Size, Fluid Code, Fluid Description,
             #          Sequence No, Piping Spec, Piping Spec Desc, Dept Deviation,
             #          Insulation, Insulation Description, P&ID No.
+            # ── Line List ML model (legend_line_list) enrichment ───────────
+            # Soft-coded, fail-safe bridge: apps/designiq/linelist_model_service.py
+            _ll_enrich = None
+            try:
+                from apps.designiq.linelist_model_service import linelist_enricher_for
+                _ll_enrich = linelist_enricher_for(format_type)
+            except Exception as _lle:
+                logger.warning(f'[base_extract_thread] line-list model skipped: {_lle}')
+
             base_data = []
             for line in extracted_lines:
                 fluid = line.get('fluid_code', '')
@@ -180,11 +196,12 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 piping_spec = line.get('piping_spec', line.get('pipr_class', ''))
                 _pg = line.get('page')
                 _pid_no = _page_to_dwg.get(_pg, '') or _doc_dwg
+                _ll_extra = _ll_enrich(line) if _ll_enrich else {}
                 base_data.append({
                     'original_detection':  line.get('original_detection', line.get('line_number', '')),
                     'size':                line.get('size', ''),
                     'fluid_code':          fluid,
-                    'fluid_description':   service_codes.get(fluid.upper(), ''),
+                    'fluid_description':   service_codes.get(fluid.upper(), '') or _ll_extra.get('fluid_description', ''),
                     'sequence_no':         line.get('sequence_no', ''),
                     'piping_spec':         piping_spec,
                     'dept_deviation':      line.get('dept_deviation', ''),
@@ -198,6 +215,10 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                     'from_equipment':      line.get('from_equipment', ''),
                     'to_equipment':        line.get('to_equipment', ''),
                     'pid_no':              _pid_no,
+                    # Line List ML model output (empty when model unavailable)
+                    'model_valid':         _ll_extra.get('model_valid'),
+                    'model_fields':        _ll_extra.get('model_fields'),
+                    'model_scheme':        _ll_extra.get('model_scheme'),
                 })
             logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 10 columns (pid_no enriched)')
             if os.path.exists(file_path):
@@ -212,6 +233,23 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 'columns': 11,
                 'message': f'Successfully extracted {len(base_data)} lines from {filename}',
             }
+            # ── Archive the generated output to the project's S3 archive ────
+            # Soft-coded layout in s3_utils.py; fail-safe (never breaks SUCCESS)
+            try:
+                _out_payload = json.dumps({
+                    'task_id': task_id, 'source_file': filename,
+                    'format_type': format_type, 'project': project,
+                    'total_lines': len(base_data), 'data': base_data,
+                }, default=str).encode('utf-8')
+                _out_arc = s3_storage.archive_artifact(
+                    'output', f'{task_id}_line_list.json', _out_payload,
+                    content_type='application/json', project=project,
+                    metadata={'task-id': task_id, 'source-file': filename},
+                )
+                if _out_arc.get('success'):
+                    result['archive'] = {'s3_key': _out_arc['s3_key'], 's3_url': _out_arc['s3_url']}
+            except Exception as _oa_err:
+                logger.warning(f'[base_extract_thread] output archive skipped: {_oa_err}')
             _write('SUCCESS', 100, 'Extraction complete!', result=result)
             logger.info(f'[base_extract_thread] DONE task_id={task_id} lines={len(base_data)}')
             return result
@@ -2639,13 +2677,51 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.info(f"📄 File: {pid_file.name} ({pid_file.size / 1024 / 1024:.2f} MB)")
             logger.info(f"📍 Format: {format_type}, Include Area: {include_area}")
 
+            # Soft-coded project label for the S3 archive (frontend sends
+            # project_code / project_name when a project is active)
+            project_label = (
+                request.POST.get('project_code')
+                or request.POST.get('project_name')
+                or ''
+            ).strip()
+
+            # ------------------------------------------------------------------
+            # Archive the source P&ID (and legend sheet) to the project's S3
+            # archive — soft-coded layout in s3_utils.py, fail-safe.
+            #
+            # NOTE: the upload is read into memory ONCE here and the BYTES are
+            # archived (put_object) instead of the file object (upload_fileobj).
+            # boto3's upload_fileobj closes the passed file object on success,
+            # which previously crashed the temp-file write below with
+            # "ValueError: seek of closed file" whenever archiving was enabled.
+            # The same bytes are reused for the temp file, so the upload stream
+            # is never touched twice.
+            # ------------------------------------------------------------------
+            pid_bytes = None
+            try:
+                pid_file.seek(0)
+                pid_bytes = pid_file.read()
+                _arc = s3_storage.archive_artifact(
+                    'pid_document', pid_file.name, pid_bytes,
+                    content_type='application/pdf', project=project_label,
+                    metadata={'original-filename': pid_file.name},
+                )
+                if _arc.get('success'):
+                    logger.info(f"📦 P&ID archived: {_arc['s3_key']}")
+            except Exception as _arc_err:
+                logger.warning(f"📦 P&ID archive skipped: {_arc_err}")
+
             # ------------------------------------------------------------------
             # 2. Save P&ID to a temporary file (Celery worker needs a path on disk)
             # ------------------------------------------------------------------
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                for chunk in pid_file.chunks():
-                    tmp_file.write(chunk)
+                if pid_bytes is not None:
+                    tmp_file.write(pid_bytes)
+                else:
+                    pid_file.seek(0)
+                    for chunk in pid_file.chunks():
+                        tmp_file.write(chunk)
                 tmp_path = tmp_file.name
 
             # Save legend file if provided
@@ -2659,8 +2735,42 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                         leg_tmp.write(chunk)
                     legend_tmp_path = leg_tmp.name
                 logger.info(f"📋 Legend file: {legend_file.name}")
+                # Archive legend sheet to S3 as well (fail-safe, bytes —
+                # upload_fileobj would close the file object; see note above)
+                try:
+                    legend_file.seek(0)
+                    s3_storage.archive_artifact(
+                        'legend', legend_file.name, legend_file.read(),
+                        content_type='application/pdf', project=project_label,
+                    )
+                except Exception:
+                    pass
 
             logger.info(f"💾 Saved to temp file: {tmp_path}")
+
+            # ------------------------------------------------------------------
+            # 2b. Enforce the soft-coded page limit (BASE_EXTRACTION_MAX_PAGES)
+            # — reject oversized packages early with a clear message instead of
+            # burning OCR time.  Matches the frontend LL_UPLOAD_RULES card.
+            # ------------------------------------------------------------------
+            try:
+                import fitz as _fitz
+                with _fitz.open(tmp_path) as _limit_doc:
+                    _page_count = len(_limit_doc)
+                if _page_count > BASE_EXTRACTION_MAX_PAGES:
+                    logger.warning(f"📄 Rejected {pid_file.name}: {_page_count} pages > {BASE_EXTRACTION_MAX_PAGES}")
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+                    return Response(
+                        {'error': f'This PDF has {_page_count} pages — the maximum is '
+                                  f'{BASE_EXTRACTION_MAX_PAGES} pages per upload. '
+                                  'Please split the document and try again.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            except Exception as _pc_err:  # unreadable PDF → let extraction report it
+                logger.warning(f"📄 Page-count check skipped: {_pc_err}")
 
             # ------------------------------------------------------------------
             # 3. Dispatch — two modes, chosen by EAGER flag:
@@ -2693,6 +2803,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     filename=pid_file.name,
                     include_area=include_area,
                     format_type=format_type,
+                    project=project_label,
                 )
                 if task.successful():
                     return Response(task.result, status=status.HTTP_200_OK)
@@ -2722,6 +2833,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     filename=pid_file.name,
                     include_area=include_area,
                     format_type=format_type,
+                    project=project_label,
                 )
                 # CRITICAL: shutdown(wait=False) — never block even if Redis hangs
                 _tpe.shutdown(wait=False)
@@ -2743,6 +2855,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 _run_base_extraction_in_thread(
                     _task_id_str, tmp_path, pid_file.name,
                     include_area, format_type, legend_tmp_path, user_id=request.user.pk,
+                    project=project_label,
                 )
 
             # ------------------------------------------------------------------

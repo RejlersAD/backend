@@ -1,0 +1,6 @@
+{
+  "format_type": "lookup_matrix",
+  "model_version": 1,
+  "model_class": "InstrumentMatrixModel",
+  "n_first_letters": 26
+}

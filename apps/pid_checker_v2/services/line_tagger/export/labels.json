@@ -1,0 +1,17 @@
+{
+  "labels": [
+    "O",
+    "B-SIZE",
+    "I-SIZE",
+    "B-SERVICE",
+    "I-SERVICE",
+    "B-SPEC",
+    "I-SPEC",
+    "B-SERIAL",
+    "I-SERIAL",
+    "B-FROM",
+    "I-FROM",
+    "B-TO",
+    "I-TO"
+  ]
+}

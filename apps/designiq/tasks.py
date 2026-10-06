@@ -1,4 +1,4 @@
-"""
+﻿"""
 DesignIQ Celery Tasks
 Background tasks for long-running operations like P&ID OCR processing
 """
@@ -12,6 +12,7 @@ from django.conf import settings
 import logging
 import tempfile
 import os
+import json
 import PyPDF2
 from io import BytesIO
 
@@ -25,11 +26,16 @@ logger = logging.getLogger(__name__)
 # HARD limit  = worker process is SIGKILL'd (TimeLimitExceeded).
 # SOFT limit  = raises SoftTimeLimitExceeded so the task can finalise/save.
 #
-# Keep frontend POLL_MAX_ATTEMPTS × POLL_INTERVAL_MS  >=  DESIGNIQ_TASK_HARD_LIMIT
+# Keep frontend timeout_extraction_poll (environments.json) >= DESIGNIQ_TASK_HARD_LIMIT
 # or users will see a timeout while the task is still processing.
+# 100 min supports dense/scanned P&ID sets of 25+ pages at the current
+# per-page OCR budget (300 DPI, dual-mode, multi-rotation).
 # ---------------------------------------------------------------------------
-DESIGNIQ_TASK_HARD_LIMIT = 2700  # 45 minutes
-DESIGNIQ_TASK_SOFT_LIMIT = 2580  # 43 minutes
+DESIGNIQ_TASK_HARD_LIMIT = 6000  # 100 minutes
+DESIGNIQ_TASK_SOFT_LIMIT = 5820  # 97 minutes
+# Progress/result cache TTL must outlive the task hard limit, otherwise the
+# status endpoint loses sight of long-running tasks before they finish.
+DESIGNIQ_CACHE_TTL = DESIGNIQ_TASK_HARD_LIMIT + 1200  # 120 minutes
 
 
 
@@ -100,7 +106,7 @@ def extract_section_7(document_text):
                 return section_text
     
     # If no section found, return first 2000 chars as fallback
-    logger.warning("   ⚠️ Could not find Section 7, using first 2000 chars")
+    logger.warning("   ?? Could not find Section 7, using first 2000 chars")
     return document_text[:2000]
 
 
@@ -296,7 +302,7 @@ def call_openai_stress_criticality_batch(lines_data, section_7_text):
 
         api_key = provider_api_key('openai', fallback=(lambda: (config('OPENAI_API_KEY', default=None))))
         if not api_key:
-            logger.warning("⚠️ OPENAI_API_KEY not set – skipping doc-based stress criticality supplement")
+            logger.warning("?? OPENAI_API_KEY not set â€“ skipping doc-based stress criticality supplement")
             return {}
 
         client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
@@ -596,13 +602,13 @@ def process_pid_upload_async(
                         )
                         logger.info(f"   ✅ Doc AI supplement returned {len(doc_levels)} codes")
                     else:
-                        logger.warning("   ⚠️ Section 7 text too short — skipping AI supplement")
+                        logger.warning("   ?? Section 7 text too short â€” skipping AI supplement")
                 except Exception as doc_err:
                     logger.error(f"   ❌ 5th document AI supplement failed: {doc_err}")
                     logger.info("   → Using Table 7.1 result only for all lines")
                     doc_levels = {}
             else:
-                logger.info("   ⚠️ No 5th document uploaded — using Table 7.1 result only")
+                logger.info("   ?? No 5th document uploaded â€” using Table 7.1 result only")
 
             # ── MERGE: most conservative (lower L number = more critical) wins ────────
             for line_item in enriched_data:
@@ -773,7 +779,7 @@ def process_pid_upload_async(
             from django.core.files.base import ContentFile
             from .models import ProcessedPIDOutput
 
-            # 📍 P&ID Drawing Canvas — "suggested From/To" enhancement (additive).
+            # ?? P&ID Drawing Canvas â€” "suggested From/To" enhancement (additive).
             # Pop the OCR tag-position keys (added by PHASE 3D in
             # pid_ocr_extractor_v2.py) out of each row BEFORE building the Excel
             # table, so they never leak into the spreadsheet as visible columns.
@@ -852,7 +858,7 @@ def process_pid_upload_async(
             excel_file_path = output_record.excel_file.name
             logger.info(f"📥 Saved historical output: {excel_filename} (ID: {output_record.id})")
 
-            # 📍 Build "suggested From/To" anchors for the Drawing Canvas from
+            # ?? Build "suggested From/To" anchors for the Drawing Canvas from
             # the captured tag positions (PHASE 3D, best-effort). Dual-point
             # (From+To) suggestion is ONLY offered when the EXISTING/unchanged
             # flow_confidence is 'high' AND the referenced line's own tag
@@ -886,18 +892,18 @@ def process_pid_upload_async(
                         output_record.tag_positions = suggestions_map
                         output_record.save(update_fields=['tag_positions'])
                         logger.info(
-                            f"📍 Saved {len(suggestions_map)} suggested tag position(s) "
+                            f"?? Saved {len(suggestions_map)} suggested tag position(s) "
                             f"for output {output_record.id}"
                         )
             except Exception as tag_pos_save_err:
-                logger.warning(f"⚠️ Could not save suggested tag positions (non-fatal): {tag_pos_save_err}")
+                logger.warning(f"?? Could not save suggested tag positions (non-fatal): {tag_pos_save_err}")
 
         except Exception as excel_err:
             logger.error(f"❌ Could not save Excel output for history: {excel_err}", exc_info=True)
             # Don't fail the entire process if Excel save fails — the core
             # line-list extraction result still returns to the user.
 
-        # 🖼️ P&ID DRAWING CANVAS (Phase 2) — best-effort retention of the
+        # ??? P&ID DRAWING CANVAS (Phase 2) â€” best-effort retention of the
         # source PDF so the "Drawing" view can display it for From/To line
         # markup. Entirely additive/non-blocking: any failure here is only
         # logged and NEVER affects the core extraction result above.
@@ -942,14 +948,14 @@ def process_pid_upload_async(
                         f"storage immediately after save() — the upload likely failed silently."
                     )
                 else:
-                    logger.info(f"🖼️ Retained source P&ID drawing {drawing.id} ({page_count} page(s)) for output {output_record.id}")
+                    logger.info(f"??? Retained source P&ID drawing {drawing.id} ({page_count} page(s)) for output {output_record.id}")
             except Exception as drawing_err:
                 logger.error(f"❌ Could not retain source P&ID drawing: {drawing_err}", exc_info=True)
                 # Don't fail the entire process if drawing retention fails.
 
         # DEBUG: Log what we're returning
         logger.info("="*80)
-        logger.info("🔍 PREPARING TASK RESULT")
+        logger.info("?? PREPARING TASK RESULT")
         logger.info(f"   - Base extraction (extracted_lines): {len(table_data)} items")
         logger.info(f"   - Enriched data: {len(enriched_data) if enriched_data else 0} items")
         if enriched_data:
@@ -994,7 +1000,7 @@ def process_pid_upload_async(
             'result': result,
             'percent': 100,
             'status': 'Processing complete!'
-        }, timeout=3600)
+        }, timeout=DESIGNIQ_CACHE_TTL)
         
         logger.info(f"✅ [Task {task_id}] Success: {total_items} items ({len(created_items)} created, {len(updated_items)} updated)")
         update_progress(100, 100, 'Complete!')
@@ -1010,14 +1016,14 @@ def process_pid_upload_async(
             'error': error_msg,
             'percent': 0,
             'status': f'Error: {error_msg}'
-        }, timeout=3600)
+        }, timeout=DESIGNIQ_CACHE_TTL)
         
         raise
 
 
 @shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
 @tracked_user_job('designiq')
-def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore', user_id=None):
+def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore', user_id=None, project=''):
     """
     🎯 Async Celery task for Line List base extraction (P&ID only)
 
@@ -1028,7 +1034,8 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
         file_path: Absolute path to the temporary PDF file
         filename: Original uploaded filename (for logging)
         include_area: Include area code in line number format
-        format_type: 'onshore', 'offshore', 'general', or 'adnoc' (Abu Dhabi Oil Co. Ltd)
+        format_type: 'onshore', 'offshore', 'general', 'adnoc' (Abu Dhabi Oil Co. Ltd),
+            or 'linelist' (Phase 2: SIZE-UNIT-FLUID-SERIAL-CLASS-COATING)
 
     Returns:
         dict with success, total_lines, data, columns, message
@@ -1053,7 +1060,7 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
         if extra:
             progress_data.update(extra)
         self.update_state(state='PROGRESS', meta=progress_data)
-        cache.set(cache_key, progress_data, timeout=3600)
+        cache.set(cache_key, progress_data, timeout=DESIGNIQ_CACHE_TTL)
         logger.info(f"[base_extract {task_id}] {percent}% – {status_message}")
 
     # Progress band reserved for the per-page extraction loop.
@@ -1112,11 +1119,22 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
         # Column order: Original Detection, Fluid Code, Size, Sequence No, PIPR Class, Insulation, From, To
         # Note: For offshore format (AREA-FluidCode-LineSize-PipeClass-SequenceNo-Insulation),
         #       area is parsed internally but NOT exported as a separate column
+        # ── Line List ML model (legend_line_list) enrichment ────────────────
+        # Soft-coded, fail-safe bridge: apps/designiq/linelist_model_service.py
+        _ll_enrich = None
+        try:
+            from apps.designiq.linelist_model_service import linelist_enricher_for
+            _ll_enrich = linelist_enricher_for(format_type)
+        except Exception as _lle:
+            logger.warning(f'[base_extract {task_id}] line-list model skipped: {_lle}')
+
         base_data = []
         for line in extracted_lines:
+            _ll_extra = _ll_enrich(line) if _ll_enrich else {}
             base_data.append({
                 'original_detection': line.get('original_detection', line.get('line_number', '')),
                 'fluid_code': line.get('fluid_code', ''),
+                'fluid_description': _ll_extra.get('fluid_description', ''),
                 'size': line.get('size', ''),
                 'sequence_no': line.get('sequence_no', ''),
                 'pipr_class': line.get('pipr_class', ''),
@@ -1129,6 +1147,10 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
                 'to_equipment': line.get('to_equipment', ''),
                 'from': line.get('from_line', line.get('from_equipment', '')),
                 'to': line.get('to_line', line.get('to_equipment', '')),
+                # Line List ML model output (empty when model unavailable)
+                'model_valid': _ll_extra.get('model_valid'),
+                'model_fields': _ll_extra.get('model_fields'),
+                'model_scheme': _ll_extra.get('model_scheme'),
             })
         
         logger.info(f'[base_extract {task_id}] Formatted {len(base_data)} rows with 8 explicit columns (area excluded from export)')
@@ -1148,13 +1170,32 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
             'message': f'Successfully extracted {len(base_data)} lines from {filename}',
         }
 
+        # ── Archive the generated output to the project's S3 archive ────────
+        # Soft-coded layout in apps/designiq/s3_utils.py; fail-safe.
+        try:
+            from apps.designiq.s3_utils import s3_storage
+            _out_payload = json.dumps({
+                'task_id': task_id, 'source_file': filename,
+                'format_type': format_type, 'project': project,
+                'total_lines': len(base_data), 'data': base_data,
+            }, default=str).encode('utf-8')
+            _out_arc = s3_storage.archive_artifact(
+                'output', f'{task_id}_line_list.json', _out_payload,
+                content_type='application/json', project=project,
+                metadata={'task-id': task_id, 'source-file': filename},
+            )
+            if _out_arc.get('success'):
+                result['archive'] = {'s3_key': _out_arc['s3_key'], 's3_url': _out_arc['s3_url']}
+        except Exception as _oa_err:
+            logger.warning(f'[base_extract {task_id}] output archive skipped: {_oa_err}')
+
         cache.set(cache_key, {
             'task_id': task_id,
             'state': 'SUCCESS',
             'status': 'Extraction complete!',
             'percent': 100,
             'result': result,
-        }, timeout=3600)
+        }, timeout=DESIGNIQ_CACHE_TTL)
 
         logger.info(f"✅ BASE EXTRACTION COMPLETE: {len(base_data)} lines  task_id={task_id}")
         return result
@@ -1176,6 +1217,7 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
             'status': 'Extraction failed',
             'percent': 0,
             'error': error_msg,
-        }, timeout=3600)
+        }, timeout=DESIGNIQ_CACHE_TTL)
 
         raise
+
