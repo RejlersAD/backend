@@ -368,7 +368,15 @@ def module_action_allowed(user, module_code, action):
     role_ids = [pk for pk, code in roles]
     super_admin = user.is_superuser or any(code == 'super_admin' for pk, code in roles)
     if not super_admin and not RoleModule.objects.filter(module__code=module_code, role_id__in=role_ids).exists():
-        return False
+        # Sales permissions are assigned as business-area services in the UI,
+        # but the API routes use the individual service codes. A grant on any
+        # active Sales service is therefore the user's Sales-area grant and
+        # must not make the rest of Sales appear unavailable.
+        if not (module_code.startswith('sales_') and RoleModule.objects.filter(
+            module__code__startswith='sales_', module__is_active=True,
+            role_id__in=role_ids,
+        ).exists()):
+            return False
     definitions = set(Permission.objects.filter(module__code=module_code, is_active=True, action=action).values_list('pk', flat=True))
     if not definitions:
         return False
@@ -379,8 +387,18 @@ def module_action_allowed(user, module_code, action):
         return True
     allowed = {pk for pk, granted in overrides.items() if granted}
     allowed.update(RolePermission.objects.filter(role_id__in=role_ids, permission_id__in=definitions).values_list('permission_id', flat=True))
+    if module_code.startswith('sales_'):
+        # A fully configured Sales service grant applies consistently across
+        # the Sales workspace, including opportunity creation and edits.
+        sales_permissions = Permission.objects.filter(
+            module__code__startswith='sales_', module__is_active=True,
+            is_active=True, action=action,
+        ).values_list('pk', flat=True)
+        allowed.update(RolePermission.objects.filter(
+            role_id__in=role_ids, permission_id__in=sales_permissions,
+        ).values_list('permission_id', flat=True))
     # A partially selected legacy action cell is not a full module-wide grant.
-    return definitions.issubset(allowed)
+    return definitions.issubset(allowed) if module_code not in {'sales_opportunities', 'sales_proposals', 'sales_clients', 'sales_frameworks', 'sales_forecasts', 'sales_handovers', 'sales_email_intake', 'sales_overview'} else bool(allowed.intersection(definitions))
 
 
 def request_action_allowed(request, module, action):
