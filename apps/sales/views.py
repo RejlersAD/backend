@@ -924,12 +924,14 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='submit-qualification')
     def submit_qualification(self, request, pk=None):
+        opportunity = submit_qualification(
+            self.get_object(),
+            request.user,
+            special_note=request.data.get('special_note', ''),
+        )
         return self._detail_response(
-            submit_qualification(
-                self.get_object(),
-                request.user,
-                special_note=request.data.get('special_note', ''),
-            )
+            opportunity,
+            warnings=getattr(opportunity, 'submission_warnings', []),
         )
 
     @action(detail=True, methods=['post'], url_path='bid-decision')

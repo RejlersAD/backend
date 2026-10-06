@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from datetime import timedelta
 import hashlib
 import json
+from pathlib import PurePosixPath
+import re
 import unicodedata
 from uuid import UUID, uuid4
 
@@ -15,7 +17,7 @@ from .classification_models import (OpportunityDocumentClassification as Classif
                                     OpportunityDocumentClassificationRun as Run,
                                     OpportunityDocumentClassificationCommand as Command)
 from .document_classification_content import (COLORS, LABELS, SOURCE_BYTES, extract_document_text,
-                                               rule_suggestion, type_catalog)
+                                               intelligence_tags, rule_suggestion, type_catalog)
 from .email_ai_provider import analyze_document_sources, email_ai_cache_identity, email_ai_configuration
 from .opportunity_workspace import _actor, require_access, workspace_allowed
 from .workflow import _audit
@@ -60,6 +62,26 @@ def classification_projection(upload, actor=None):
     editable = bool(actor and head and workspace_allowed(actor, 'update'))
     readable = bool(actor and workspace_allowed(actor, 'export'))
     updated_at = max((row.updated_at for row in (state, run) if row), default=None)
+    opportunity = upload.workspace.opportunity
+    client = opportunity.client
+    run_tags = list(run.tags) if run else []
+    global_tags = [
+        f'opportunity_id:{opportunity.pk}', f'client_name:{client.company_name}', f'country:{client.country or ""}',
+        'business_unit:', f'service_line:{",".join(opportunity.service_categories or [])}',
+        f'stage:{opportunity.stage}',
+    ]
+    tags = list(dict.fromkeys(run_tags + global_tags))
+    search_keywords = list(dict.fromkeys((list(run.search_keywords) if run else []) + [
+        opportunity.deal_code, opportunity.deal_name, client.company_name, client.country,
+        *list(opportunity.service_categories or []), opportunity.stage, upload.folder_key,
+    ]))
+    intelligence = {
+        'documentType': LABELS.get(kind, LABELS['unclassified']), 'folder': upload.folder_key,
+        'tags': tags, 'confidence': run.confidence if run else 0,
+        'recommendedFolder': run.recommended_folder if run else '',
+        'reasoning': run.reasoning if run else 'Classification has not been processed.',
+        'searchKeywords': [value for value in search_keywords if value],
+    }
     return {
         'document_type': kind, 'label': LABELS.get(kind, LABELS['unclassified']),
         'custom_tag': state.custom_tag if state else '',
@@ -75,6 +97,7 @@ def classification_projection(upload, actor=None):
         'source_upload_id': str(upload.pk), 'source_sha256': upload.sha256,
         'updated_at': updated_at.isoformat() if updated_at else None,
         'confirmed_scope': 'document' if confirmed else None,
+        'intelligence': intelligence,
     }
 
 
@@ -307,7 +330,8 @@ def run_document_classification(run_id):
         return {'processed': False}
     run, upload, actor, opportunity = claimed
     result = {'suggested_type': 'unclassified', 'origin': 'unclassified', 'evidence': [], 'error_code': '',
-              'ai_status': 'not_needed', 'provider': '', 'model': '', 'extraction_code': ''}
+              'ai_status': 'not_needed', 'provider': '', 'model': '', 'extraction_code': '', 'tags': [],
+              'confidence': 0, 'recommended_folder': '', 'reasoning': '', 'search_keywords': []}
     provider_identity = None
     try:
         from .private_attachments import download_private_file
@@ -343,6 +367,11 @@ def run_document_classification(run_id):
                 if proposal:
                     kind, evidence = proposal
                     result.update(suggested_type=kind, origin='ai' if kind != 'unclassified' else 'unclassified', evidence=evidence)
+        tags, confidence, recommended, reasoning = intelligence_tags(
+            upload.folder_key, upload.name, text, result['suggested_type'], result['evidence'], result['origin'])
+        result.update(tags=tags, confidence=confidence, recommended_folder=recommended, reasoning=reasoning,
+                      search_keywords=list(dict.fromkeys([*tags, *re.findall(r'[A-Za-z0-9][A-Za-z0-9_-]{2,}',
+                                                                           PurePosixPath(upload.name).stem)[:20]])))
     except PermissionDenied:
         result['error_code'] = 'source_or_access_changed'
     except Exception:
@@ -357,7 +386,9 @@ def run_document_classification(run_id):
             if provider_identity and provider_identity != email_ai_cache_identity():
                 raise ClassificationConflict()
         except (PermissionDenied, ClassificationConflict):
-            result.update(suggested_type='unclassified', origin='unclassified', evidence=[], error_code='source_or_access_changed')
+            result.update(suggested_type='unclassified', origin='unclassified', evidence=[], tags=[], confidence=0,
+                          recommended_folder='', reasoning='Source or access changed; manual review is required.',
+                          search_keywords=[], error_code='source_or_access_changed')
         code = result['error_code']
         current.status = ('blocked' if code == 'source_or_access_changed' else
                           'failed' if result['ai_status'] == 'failed' or code == 'processing_unavailable' else 'completed')
