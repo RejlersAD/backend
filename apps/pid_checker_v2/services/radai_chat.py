@@ -55,6 +55,26 @@ SYSTEM_PROMPT = (
 )
 
 
+def _system_prompt(context: dict) -> str:
+    """Base system prompt + the page's soft-coded application profile.
+
+    Pages publish `domain_prompt` (verification/validation rules) and
+    `row_name` via their profile in the frontend radaiChatPages.config —
+    keeping per-application behaviour soft-coded and out of this service.
+    """
+    prompt = SYSTEM_PROMPT
+    domain = str((context or {}).get('domain_prompt') or '').strip()
+    row_name = str((context or {}).get('row_name') or '').strip()
+    if row_name:
+        prompt += f"\n- In this context, one row represents: {row_name}."
+    if domain:
+        prompt += (
+            "\n\nAPPLICATION-SPECIFIC VERIFICATION & VALIDATION RULES "
+            f"({(context or {}).get('page') or 'this page'}):\n" + domain
+        )
+    return prompt
+
+
 class ChatConfigurationError(ValueError):
     """Raised for missing/invalid BYOK provider or key."""
 
@@ -128,6 +148,7 @@ def answer_question(
 
     resolved_model = model or CHAT_MODELS[provider]
     _, messages = _build_messages(question, context, history or [])
+    system_prompt = _system_prompt(context)
 
     from .token_accounting import UsageMeter, read_openai_usage, read_claude_usage
     meter = UsageMeter(feature='radai_chat')
@@ -140,7 +161,7 @@ def answer_question(
         resp = client.chat.completions.create(
             model=resolved_model,
             max_tokens=MAX_ANSWER_TOKENS,
-            messages=[{'role': 'system', 'content': SYSTEM_PROMPT}] + messages,
+            messages=[{'role': 'system', 'content': system_prompt}] + messages,
         )
         answer = (resp.choices[0].message.content or '').strip()
         in_t, out_t = read_openai_usage(resp)
@@ -152,7 +173,7 @@ def answer_question(
         resp = client.messages.create(
             model=resolved_model,
             max_tokens=MAX_ANSWER_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
         )
         # Anthropic returns a list of content blocks
