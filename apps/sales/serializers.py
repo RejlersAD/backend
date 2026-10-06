@@ -474,11 +474,22 @@ class DealCreateSerializer(serializers.ModelSerializer):
 
     def validate_owner(self, value):
         from .opportunity_registration import visible_opportunity_owners
+        actor = self._actor()
         if value is None:
             if self.instance is not None:
                 raise serializers.ValidationError('Choose an active owner within your Sales access.')
             return value
-        if not visible_opportunity_owners(self._actor()).filter(pk=value.pk).exists():
+        if self.instance is not None and value.pk != self.instance.owner_id:
+            try:
+                profile = actor.rbac_profile
+                is_manager = profile.status == 'active' and profile.roles.filter(
+                    is_active=True, level__lte=3,
+                ).exists()
+            except Exception:
+                is_manager = False
+            if not is_manager:
+                raise serializers.ValidationError('Only Sales managers or higher may reassign opportunity ownership.')
+        if not visible_opportunity_owners(actor).filter(pk=value.pk).exists():
             raise serializers.ValidationError('Choose an active owner within your Sales access.')
         return value
 
