@@ -59,6 +59,8 @@ MESSAGES = {
     'download_too_large': 'This file exceeds the configured download limit. Open it in SharePoint.',
     'document_changed': 'The document changed while it was being read. Refresh the folder and retry.',
     'version_stale': 'A newer document version exists. Refresh its details before uploading a new version.',
+    'cannot_delete_last_version': 'At least one document version must remain. Upload a replacement version first.',
+    'delete_not_supported': 'Delete is currently supported for RADAI attachments only.',
 }
 
 
@@ -462,6 +464,13 @@ def download_workspace_file(opportunity, actor, key, file_id):
         if isinstance(exc, WorkspaceError):
             raise WorkspaceAPIError(exc.code) from None
         raise
+
+
+def delete_workspace_file(opportunity, actor, key, file_id):
+    if str(file_id).startswith('radai-'):
+        from .private_attachments import delete_private_file
+        return delete_private_file(opportunity, actor, key, file_id)
+    raise WorkspaceAPIError('delete_not_supported', 409)
 
 
 def upload_limit():

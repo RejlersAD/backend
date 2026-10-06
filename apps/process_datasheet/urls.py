@@ -19,6 +19,8 @@ from .pump_hydraulic_view import extract_pump_hydraulic_view
 from .pump_hydraulic_snapshot import PumpHydraulicSnapshotViewSet
 from .hmb_extractor_view import (
     extract_hmb_data,
+    archive_hmb_stream_consolidator_export_view,
+    download_hmb_stream_consolidator_archive_view,
     analyze_hmb_master_template_view,
     list_hmb_master_templates_view,
     retrieve_hmb_master_template_view,
@@ -60,6 +62,10 @@ urlpatterns = [
     path('datasheets/extract-pump-hydraulic/', extract_pump_hydraulic_view, name='extract-pump-hydraulic'),
     # HMB Extractor — standalone stream data extraction (additive, no P&ID coupling)
     path('datasheets/extract-hmb/', extract_hmb_data, name='extract-hmb'),
+    path('datasheets/hmb-stream-consolidator/archive/', archive_hmb_stream_consolidator_export_view, name='hmb-stream-consolidator-archive'),
+    path('datasheets/hmb-stream-consolidator/archive/<uuid:upload_id>/download/', download_hmb_stream_consolidator_archive_view, name='hmb-stream-consolidator-archive-download'),
+    path('hmb-stream-consolidator/archive/', archive_hmb_stream_consolidator_export_view, name='hmb-stream-consolidator-archive-alias'),
+    path('hmb-stream-consolidator/archive/<uuid:upload_id>/download/', download_hmb_stream_consolidator_archive_view, name='hmb-stream-consolidator-archive-download-alias'),
     path('datasheets/analyze-hmb-master-template/', analyze_hmb_master_template_view, name='analyze-hmb-master-template'),
     path('datasheets/hmb-master-templates/', list_hmb_master_templates_view, name='hmb-master-templates-list'),
     path('datasheets/hmb-master-templates/sync-streams/', sync_hmb_template_streams_view, name='hmb-master-templates-sync-streams'),

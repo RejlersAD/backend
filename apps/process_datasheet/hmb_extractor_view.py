@@ -32,7 +32,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from apps.project_organizer.models import Project
 from .models import HMBMasterTemplateProfile, HMBCaseImportBatch, HMBCaseRecord, HMBSourceUpload
-from .services.hmb_storage import HMBStorageError, delete_hmb_source, store_hmb_source
+from .services.hmb_storage import HMBStorageError, delete_hmb_source, read_hmb_source, store_hmb_source
 from .hmb_master_template_parser import (
     analyze_hmb_master_template,
     parse_hmb_case_workbook,
@@ -483,6 +483,169 @@ def extract_hmb_data(request):
             {'error': f'HMB extraction failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def archive_hmb_stream_consolidator_export_view(request):
+    """Persist a Stream Table Consolidator export workbook in RADAI private storage."""
+    if request.method == 'GET':
+        project = None
+        project_id = (request.query_params.get('project_id') or '').strip()
+        if project_id:
+            project, project_err = _get_accessible_project(request.user, project_id)
+            if project_err:
+                return project_err
+
+        queryset = HMBSourceUpload.objects.filter(
+            metadata__source_tool='hmb_stream_table_consolidator',
+            metadata__export_kind='comparison_workbook',
+        ).exclude(storage_key='')
+
+        if project:
+            queryset = queryset.filter(project=project)
+        elif not _is_admin(request.user):
+            queryset = queryset.filter(uploaded_by=request.user)
+
+        rows = queryset.select_related('project').order_by('-created_at')[:100]
+        return Response({
+            'success': True,
+            'count': rows.count(),
+            'results': [
+                {
+                    'id': str(item.id),
+                    'filename': item.original_filename,
+                    'size_bytes': item.size_bytes,
+                    'created_at': item.created_at,
+                    'project_id': str(item.project.project_id) if item.project else None,
+                    'case_count': int((item.metadata or {}).get('case_count') or 0),
+                    'included_stream_count': int((item.metadata or {}).get('included_stream_count') or 0),
+                    'edited_value_count': int((item.metadata or {}).get('edited_value_count') or 0),
+                }
+                for item in rows
+            ],
+        })
+
+    archive_file = request.FILES.get('archive_file')
+    if not archive_file:
+        return Response({'error': 'archive_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not archive_file.name.lower().endswith('.xlsx'):
+        return Response({'error': 'Archive file must be .xlsx.'}, status=status.HTTP_400_BAD_REQUEST)
+    if archive_file.size > _MASTER_TEMPLATE_MAX_SIZE_BYTES:
+        return Response({'error': 'Archive file exceeds 20MB limit.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    project = None
+    project_id = (request.data.get('project_id') or '').strip()
+    if project_id:
+        project, project_err = _get_accessible_project(request.user, project_id)
+        if project_err:
+            return project_err
+
+    filename = (request.data.get('filename') or '').strip() or archive_file.name
+    case_count = int(request.data.get('case_count') or 0)
+    included_stream_count = int(request.data.get('included_stream_count') or 0)
+    edited_value_count = int(request.data.get('edited_value_count') or 0)
+
+    temp_path = None
+    storage_result = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
+            for chunk in archive_file.chunks():
+                temp_file.write(chunk)
+            temp_path = temp_file.name
+
+        storage_result = store_hmb_source(
+            temp_path,
+            upload_kind=HMBSourceUpload.KIND_OUTPUT_TEMPLATE,
+            original_filename=filename,
+            project_id=project.project_id if project else None,
+            user_id=request.user.id,
+        )
+        if not storage_result.get('stored') or not storage_result.get('key'):
+            raise HMBStorageError('Private storage did not retain the comparison workbook.')
+
+        with transaction.atomic():
+            source_upload = HMBSourceUpload.objects.create(
+                project=project,
+                uploaded_by=request.user,
+                upload_kind=HMBSourceUpload.KIND_OUTPUT_TEMPLATE,
+                original_filename=filename,
+                storage_key=storage_result['key'],
+                file_sha256=storage_result['sha256'],
+                size_bytes=storage_result['size'],
+                content_type=storage_result['content_type'],
+                status=HMBSourceUpload.STATUS_IMPORTED,
+                imported_at=timezone.now(),
+                metadata={
+                    'storage_backend': storage_result.get('backend', 's3'),
+                    'source_tool': 'hmb_stream_table_consolidator',
+                    'export_kind': 'comparison_workbook',
+                    'case_count': max(case_count, 0),
+                    'included_stream_count': max(included_stream_count, 0),
+                    'edited_value_count': max(edited_value_count, 0),
+                    'archived_at': timezone.now().isoformat(),
+                },
+            )
+
+        return Response({
+            'success': True,
+            'message': 'Comparison workbook archived in RADAI private storage.',
+            'source_upload': _serialize_source_upload(source_upload),
+            'archive': {
+                'id': str(source_upload.id),
+                'filename': source_upload.original_filename,
+                'created_at': source_upload.created_at,
+                'project_id': str(project.project_id) if project else None,
+            },
+        }, status=status.HTTP_201_CREATED)
+    except HMBStorageError as exc:
+        logger.error('[HMB Consolidator Archive] storage failed: %s', exc, exc_info=True)
+        return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as exc:
+        if storage_result and storage_result.get('key'):
+            delete_hmb_source(storage_result['key'], storage_result.get('backend', 's3'))
+        logger.error('[HMB Consolidator Archive] failed: %s', exc, exc_info=True)
+        return Response({'error': 'Unable to archive workbook.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                logger.warning('[HMB Consolidator Archive] could not remove temporary file %s', temp_path)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_hmb_stream_consolidator_archive_view(request, upload_id):
+    """Download a previously archived Stream Table Consolidator workbook."""
+    try:
+        source_upload = HMBSourceUpload.objects.select_related('project').get(
+            pk=upload_id,
+            metadata__source_tool='hmb_stream_table_consolidator',
+            metadata__export_kind='comparison_workbook',
+        )
+    except (HMBSourceUpload.DoesNotExist, ValueError, TypeError):
+        return Response({'error': 'Saved workbook not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if source_upload.project_id:
+        _project, project_err = _get_accessible_project(request.user, str(source_upload.project.project_id))
+        if project_err:
+            return project_err
+    elif not _is_admin(request.user) and source_upload.uploaded_by_id != request.user.id:
+        return Response({'error': 'Access denied for this saved workbook.'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        content = read_hmb_source(source_upload)
+    except HMBStorageError:
+        return Response({'error': 'Saved workbook is unavailable in private storage.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    filename = source_upload.original_filename or 'HMB_Comparison.xlsx'
+    response = HttpResponse(
+        content,
+        content_type=source_upload.content_type or 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
 
 
 @api_view(['POST'])

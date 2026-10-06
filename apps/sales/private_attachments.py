@@ -10,7 +10,7 @@ from uuid import UUID
 from django.core import signing
 from django.core.files import File
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
@@ -42,9 +42,9 @@ def private_storage_projection(opportunity, actor):
         _storage()
     except WorkspaceAPIError:
         available = False
-    counts = dict(current_uploads(OpportunityWorkspaceUpload.objects.filter(
+    counts = dict(OpportunityWorkspaceUpload.objects.filter(
         workspace__opportunity=opportunity, provider='radai', status='ready',
-    )).values('folder_key').annotate(total=Count('pk')).values_list('folder_key', 'total'))
+    ).values('folder_key').annotate(total=Count('pk')).values_list('folder_key', 'total'))
     return {'status': 'ready' if available else 'unavailable',
             'message': 'RADAI attachments are stored privately.' if available else 'Private attachment storage is unavailable. Contact your administrator.',
             'can_upload': available and workspace_allowed(actor, 'create', 'update'),
@@ -139,22 +139,30 @@ def list_private_files(opportunity, actor, key, cursor=None):
     require_access(actor, opportunity)
     _folder(key)
     _, fingerprint = _storage()
-    after = None
+    after_id, after_updated = None, None
     if cursor:
         try:
             payload = signing.loads(cursor, salt='sales-private-attachments', max_age=900)
             if (payload['opportunity'], payload['folder'], payload['provider'], payload['storage']) != (
                     str(opportunity.pk), key, 'radai', fingerprint):
                 raise ValueError()
-            after = UUID(payload['after'])
+            after_id = UUID(payload['after'])
+            after_updated = timezone.datetime.fromisoformat(payload['after_updated'])
+            if timezone.is_naive(after_updated):
+                after_updated = timezone.make_aware(after_updated, timezone.get_default_timezone())
         except (signing.BadSignature, ValueError, TypeError, KeyError):
             raise WorkspaceAPIError('invalid_cursor', 400) from None
-    query = current_uploads(OpportunityWorkspaceUpload.objects.filter(workspace__opportunity=opportunity,
-                                                     provider='radai', folder_key=key, status='ready'))
+    query = OpportunityWorkspaceUpload.objects.filter(
+        workspace__opportunity=opportunity, provider='radai', folder_key=key, status='ready',
+    )
     count = query.count()
-    rows = list((query.filter(pk__gt=after) if after else query).select_related('actor', 'document__head_upload').order_by('pk')[:101])
+    if after_id and after_updated:
+        query = query.filter(Q(updated_at__lt=after_updated) | Q(updated_at=after_updated, pk__lt=after_id))
+    rows = list(query.select_related('actor', 'document__head_upload').order_by('-updated_at', '-pk')[:101])
     next_cursor = signing.dumps({'opportunity': str(opportunity.pk), 'folder': key, 'provider': 'radai',
-                                'storage': fingerprint, 'after': str(rows[99].pk)}, salt='sales-private-attachments') if len(rows) > 100 else None
+                                 'storage': fingerprint, 'after': str(rows[99].pk),
+                                 'after_updated': rows[99].updated_at.isoformat()},
+                                salt='sales-private-attachments') if len(rows) > 100 else None
     return {'folder_key': key, 'storage_provider': 'radai', 'files': [_project(row, actor) for row in rows[:100]],
             'item_count': count, 'next_cursor': next_cursor}
 
@@ -179,7 +187,48 @@ def private_file_details(opportunity, actor, key, file_id):
     attempt = _file(opportunity, actor, key, file_id)
     _identity(attempt)
     return {**_project(attempt, actor), 'can_download': workspace_allowed(actor, 'export'),
+            'can_delete': workspace_allowed(actor, 'create', 'update'),
             'max_download_bytes': None, 'max_upload_bytes': upload_limit()}
+
+
+def delete_private_file(opportunity, actor, key, file_id):
+    attempt = _file(opportunity, actor, key, file_id, 'create', 'update')
+    _identity(attempt)
+    document = resolve_document(attempt)
+    with transaction.atomic():
+        Deal.objects.select_for_update(no_key=True).get(pk=opportunity.pk)
+        require_access(_actor(actor.pk), opportunity, 'create', 'update')
+        locked = OpportunityWorkspaceUpload.objects.select_for_update().filter(
+            pk=attempt.pk, workspace__opportunity=opportunity, folder_key=key, provider='radai', status='ready',
+        ).select_related('actor', 'document__head_upload').first()
+        if not locked:
+            raise WorkspaceAPIError('attachment_missing', 404)
+        _identity(locked)
+        document = resolve_document(locked)
+        if not document:
+            raise WorkspaceAPIError('cannot_delete_last_version', 409)
+        document = type(document).objects.select_for_update().get(pk=document.pk)
+        if document.pending_upload_id:
+            raise WorkspaceAPIError('upload_in_progress', 409)
+        ready = OpportunityWorkspaceUpload.objects.select_for_update().filter(document=document, status='ready')
+        if ready.count() <= 1:
+            raise WorkspaceAPIError('cannot_delete_last_version', 409)
+        replacement = document.head_upload
+        if document.head_upload_id == locked.pk:
+            replacement = ready.exclude(pk=locked.pk).order_by('-version_number', '-pk').first()
+            document.head_upload = replacement
+            document.name = replacement.name
+            document.save(update_fields=['head_upload', 'name'])
+        locked.status = 'deleted'
+        locked.error_code = ''
+        locked.save(update_fields=['status', 'error_code', 'updated_at'])
+        _audit(opportunity, actor, 'workspace_file_deleted', data={
+            'upload_id': str(locked.pk), 'folder_key': key, 'storage_provider': 'radai',
+            'document_id': str(document.pk), 'version': locked.version_number,
+            'head_upload_id': str(document.head_upload_id),
+        })
+        current = OpportunityWorkspaceUpload.objects.select_related('actor', 'document__head_upload').get(pk=document.head_upload_id)
+    return {'deleted_id': 'radai-' + str(locked.pk), 'document_id': str(document.pk), 'current': _project(current, actor)}
 
 
 def private_file_versions(opportunity, actor, key, file_id, cursor=None):
@@ -263,6 +312,17 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
             target = _file(opportunity, _actor(actor.pk), key, 'radai-' + str(target.pk), 'create', 'update')
             _identity(target)
             document = materialize_document(target)
+        elif target is None:
+            existing = current_uploads(OpportunityWorkspaceUpload.objects.select_for_update().filter(
+                workspace=workspace, provider='radai', folder_key=key, normalized_name=normalized_name, status='ready',
+            )).select_related('document__head_upload').order_by('-version_number', '-pk').first()
+            if existing:
+                _identity(existing)
+                target = existing
+                document = materialize_document(target)
+                expected_token = head_token(target, document)
+                if not note:
+                    note = 'Reupload from folder upload'
         attempt = OpportunityWorkspaceUpload.objects.select_related('workspace', 'actor').filter(workspace=workspace, request_id=request_id).first()
         if attempt:
             if (attempt.provider, attempt.actor_id, attempt.folder_key, attempt.name, attempt.size, attempt.sha256) != (
@@ -287,7 +347,8 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
             attempt.save(update_fields=['status', 'error_code', 'updated_at'])
         else:
             if not target and OpportunityWorkspaceUpload.objects.filter(workspace=workspace, provider='radai', folder_key=key,
-                                                         normalized_name=normalized_name, version_number=1).exists():
+                                                                         normalized_name=normalized_name, version_number=1,
+                                                                         status='ready').exists():
                 raise WorkspaceAPIError('name_conflict', 409)
             mime = str(getattr(uploaded, 'content_type', '') or '')
             attempt = reserve_version(document, target, actor, uploaded, request_id, prepared, fingerprint,
