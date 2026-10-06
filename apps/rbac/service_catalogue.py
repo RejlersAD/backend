@@ -21,7 +21,7 @@ SERVICE_PARENTS = {code: parent for code, _, parent, _ in SERVICE_MODULES}
 def is_sales_department(value):
     """Return whether a profile belongs to the canonical Sales department."""
     normalized = ' '.join(str(value or '').strip().casefold().replace('&', 'and').split())
-    return normalized in {'sales', 'sales and business development', 'sales business development'}
+    return normalized == 'sales' or 'sales' in normalized or 'business development' in normalized
 
 # ModelViewSet permission checks run before queryset/action execution, including
 # all custom actions. Summary actions have their own read-only service grant.
