@@ -108,6 +108,13 @@ serialized same-name upload/version behavior.
 Folder-upload retries resolve the existing request ledger before selecting a
 current same-name document. An initial upload remains an initial-upload replay;
 a folder-created revision retains its reserved predecessor and head token.
+Casefold-equivalent names create new immutable versions rather than replacing
+earlier bytes. Version numbers increase from the highest reserved version,
+including deleted revisions, so deleting a head and uploading again never
+reuses an existing identity or violates the document/version uniqueness guard.
+PostgreSQL deletion locks the selected upload row, not its optional joined
+document/head, before separately locking the document; this keeps the delete
+and reupload path usable when that join is nullable.
 Completed retries return the exact saved upload with HTTP 200, even after a later
 head, without creating another revision, object or completion audit. Uncertain
 attempts reconcile their original intent. Actor, folder, provider, filename and

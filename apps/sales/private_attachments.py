@@ -198,7 +198,7 @@ def delete_private_file(opportunity, actor, key, file_id):
     with transaction.atomic():
         Deal.objects.select_for_update(no_key=True).get(pk=opportunity.pk)
         require_access(_actor(actor.pk), opportunity, 'create', 'update')
-        locked = OpportunityWorkspaceUpload.objects.select_for_update().filter(
+        locked = OpportunityWorkspaceUpload.objects.select_for_update(of=('self',)).filter(
             pk=attempt.pk, workspace__opportunity=opportunity, folder_key=key, provider='radai', status='ready',
         ).select_related('actor', 'document__head_upload').first()
         if not locked:

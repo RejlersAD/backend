@@ -62,11 +62,18 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         self.assertEqual(detail['head_token'], second.data['head_token'])
         self.assertEqual(OpportunityDocumentClassificationRun.objects.count(), 2)
 
-    def test_same_name_still_conflicts_until_explicit_revision_command(self):
+    def test_same_name_folder_upload_creates_revision_without_replacing_original(self):
         first = self.upload()
-        self.assertEqual(self.upload(content=b'new').status_code, 409)
-        self.assertEqual(self.version(first, name='Scope.pdf').status_code, 201)
-        self.assertEqual(self.upload(content=b'another').status_code, 409)
+        second = self.upload(content=b'new')
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertEqual(second.data['version'], '2')
+        self.assertEqual(second.data['document_id'], first.data['document_id'])
+        self.assertEqual(self.version(first, name='Scope.pdf').status_code, 409)
+        third = self.version(second, name='Scope.pdf')
+        self.assertEqual(third.status_code, 201, third.data)
+        for result, content in ((first, b'synthetic attachment'), (second, b'new'), (third, b'new revision')):
+            download = self.api.get(self.file_url(result) + 'download/')
+            self.assertEqual(b''.join(download.streaming_content), content)
 
     def test_retry_returns_same_revision_even_after_a_later_head_without_duplicate_audit(self):
         first, request_id = self.upload(), uuid4()
@@ -247,6 +254,10 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         self.assertEqual(reupload.status_code, 201, reupload.data)
         self.assertEqual(reupload.data['version'], '3')
         self.assertEqual(reupload.data['document_id'], first.data['document_id'])
+        self.assertEqual(OpportunityWorkspaceUpload.objects.get(pk=second.data['id'][6:]).status, 'deleted')
+        for result, content in ((first, b'synthetic attachment'), (reupload, b'v3 from upload')):
+            download = self.api.get(self.file_url(result) + 'download/')
+            self.assertEqual(b''.join(download.streaming_content), content)
 
         history = self.api.get(self.file_url(first) + 'versions/').data['versions']
         self.assertEqual([row['id'] for row in history], ['3', '1'])
@@ -320,6 +331,18 @@ class DocumentVersionDurabilityTests(VersionFixtures, TransactionTestCase):
             self.assertEqual(b''.join(download.streaming_content), content)
         self.assertEqual(OpportunityWorkspaceUpload.objects.count(), 2)
         self.assertEqual(OpportunityAuditEvent.objects.filter(event_type='workspace_file_uploaded').count(), 2)
+
+    @skipUnless(connection.vendor == 'postgresql', 'PostgreSQL nullable-join row-lock verification')
+    def test_delete_head_then_reupload_retains_monotonic_version_numbers(self):
+        first = self.upload()
+        second = self.version(first)
+        removed = self.api.delete(self.file_url(second))
+        self.assertEqual(removed.status_code, 200, removed.data)
+        replacement = self.upload(content=b'after deletion')
+        self.assertEqual(replacement.status_code, 201, replacement.data)
+        self.assertEqual(replacement.data['version'], '3')
+        self.assertEqual(replacement.data['document_id'], first.data['document_id'])
+        self.assertEqual(OpportunityWorkspaceUpload.objects.get(pk=second.data['id'][6:]).status, 'deleted')
 
     def test_guarded_version_endpoint_denies_missing_create_without_side_effects(self):
         first = self.upload()

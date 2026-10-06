@@ -96,11 +96,15 @@ class PrivateAttachmentTests(PrivateFixtures, TestCase):
         attempt.save(update_fields=['provider', 'actor'])
         self.assertEqual(self.upload(request_id).status_code, 409)
 
-    def test_normalized_filename_conflict_never_replaces_existing_attachment(self):
+    def test_normalized_filename_reupload_versions_without_replacing_original(self):
         first = self.upload(name='Scope.pdf')
-        self.assertEqual(self.upload(name='scope.PDF', content=b'other').status_code, 409)
-        download = self.api.get(self.file_url(first) + 'download/')
-        self.assertEqual(b''.join(download.streaming_content), b'synthetic attachment')
+        second = self.upload(name='scope.PDF', content=b'other')
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertEqual(second.data['version'], '2')
+        self.assertEqual(second.data['document_id'], first.data['document_id'])
+        for result, content in ((first, b'synthetic attachment'), (second, b'other')):
+            download = self.api.get(self.file_url(result) + 'download/')
+            self.assertEqual(b''.join(download.streaming_content), content)
 
     def test_invalid_provider_category_and_file_rejected_before_storage(self):
         self.assertEqual(self.upload(storage='external').status_code, 400)

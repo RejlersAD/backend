@@ -79,12 +79,16 @@ def reserve_version(document, target, actor, uploaded, request_id, prepared, fin
     if document.pending_upload_id:
         raise WorkspaceAPIError('upload_in_progress', 409)
     head = document.head_upload
+    latest_version = (OpportunityWorkspaceUpload.objects.filter(document=document)
+                      .order_by('-version_number').values_list('version_number', flat=True).first())
+    if latest_version is None or latest_version < head.version_number:
+        raise WorkspaceAPIError('attachment_integrity_failed')
     attempt = OpportunityWorkspaceUpload(
         workspace_id=document.workspace_id, request_id=request_id, actor=actor,
         folder_key=document.folder_key, name=uploaded.name, size=prepared['size'], sha256=prepared['sha256'],
         provider='radai', storage_encoding=prepared['storage_encoding'], stored_size=prepared['stored_size'],
         stored_sha256=prepared['stored_sha256'], storage_fingerprint=fingerprint, normalized_name=normalized_name,
-        document=document, version_number=head.version_number + 1, previous_upload=head,
+        document=document, version_number=latest_version + 1, previous_upload=head,
         revision_note=note, expected_head_token=expected_token,
     )
     return attempt
