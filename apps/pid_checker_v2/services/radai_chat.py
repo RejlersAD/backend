@@ -58,9 +58,10 @@ SYSTEM_PROMPT = (
 def _system_prompt(context: dict) -> str:
     """Base system prompt + the page's soft-coded application profile.
 
-    Pages publish `domain_prompt` (verification/validation rules) and
-    `row_name` via their profile in the frontend radaiChatPages.config —
-    keeping per-application behaviour soft-coded and out of this service.
+    Pages publish `domain_prompt` (verification/validation rules),
+    `row_name` and optionally `actions` (edit control) via their profile in
+    the frontend radaiChatPages config — keeping per-application behaviour
+    soft-coded and out of this service.
     """
     prompt = SYSTEM_PROMPT
     domain = str((context or {}).get('domain_prompt') or '').strip()
@@ -71,6 +72,32 @@ def _system_prompt(context: dict) -> str:
         prompt += (
             "\n\nAPPLICATION-SPECIFIC VERIFICATION & VALIDATION RULES "
             f"({(context or {}).get('page') or 'this page'}):\n" + domain
+        )
+
+    # Edit control — soft-coded per page profile (context['actions']).
+    # When present, the model may PROPOSE row edits as fenced JSON blocks;
+    # the user reviews/applies them in the UI (the model never edits directly).
+    actions = (context or {}).get('actions')
+    if isinstance(actions, dict) and actions.get('ops'):
+        row_key = str(actions.get('rowKey') or 'tag')
+        ops = '", "'.join(str(o) for o in actions['ops'])
+        prompt += (
+            "\n\nEDIT CONTROL — the user may ask you to change the data:\n"
+            "When (and only when) the user explicitly asks to delete a row or "
+            "change a value, answer in words AND append one fenced block per "
+            "change, exactly in this form:\n"
+            "```radai_action\n"
+            f'{{"op": "update_row", "match": {{"{row_key}": "<exact value from the row>"}}, '
+            '"set": {"<column_key>": "<new value>"}}\n'
+            "```\n"
+            "or\n"
+            "```radai_action\n"
+            f'{{"op": "delete_row", "match": {{"{row_key}": "<exact value from the row>"}}}}\n'
+            "```\n"
+            f'Allowed ops: "{ops}". Use only column keys that appear in the '
+            "context, and match rows by their exact "
+            f"'{row_key}' value. The user reviews and applies every change in "
+            "the UI — never claim a change is already done."
         )
     return prompt
 
