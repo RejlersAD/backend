@@ -157,6 +157,13 @@ GENERAL_STRATEGY = 'merge'   # 'merge' | 'winner'
 # Remove angles that slow processing without adding lines on your drawings.
 # ---------------------------------------------------------------------------
 OCR_ROTATION_ANGLES = [0, 90, 270]
+# ENV OVERRIDE (soft-coded): e.g. OCR_ROTATION_ANGLES=0,90 to skip the 270° pass.
+_angles_env = os.environ.get('OCR_ROTATION_ANGLES', '').strip()
+if _angles_env:
+    try:
+        OCR_ROTATION_ANGLES = [int(a.strip()) for a in _angles_env.split(',') if a.strip()] or OCR_ROTATION_ANGLES
+    except ValueError:
+        pass
 
 # ---------------------------------------------------------------------------
 # OCR image pre-processing — soft-coded.
@@ -178,6 +185,12 @@ OCR_ROTATION_ANGLES = [0, 90, 270]
 #   other mangles (empirical on ADNOC P&ID: grayscale-only 24/26, RGB-only
 #   24/26, union 25/26 line tags).  Trim to ('L',) to halve OCR time.
 OCR_IMAGE_MODES = ('L', 'RGB')
+# ENV OVERRIDE (soft-coded): OCR_IMAGE_MODES=L halves Tesseract passes.
+_modes_env = os.environ.get('OCR_IMAGE_MODES', '').strip()
+if _modes_env:
+    _modes_parsed = tuple(m.strip() for m in _modes_env.split(',') if m.strip() in ('L', 'RGB'))
+    if _modes_parsed:
+        OCR_IMAGE_MODES = _modes_parsed
 
 # OCR_RENDER_DPI : rasterisation density for the OCR path (scale = DPI/72).
 #   180 DPI is enough for bold title-block text but P&ID line tags are small
@@ -189,10 +202,54 @@ OCR_IMAGE_MODES = ('L', 'RGB')
 #   sparse labels on extremely large images; tile boundaries can also clip
 #   tags, which is why full-page is preferred up to a generous limit).
 #   Tiles overlap so tags crossing a tile boundary are still captured whole.
-OCR_RENDER_DPI = 300
+OCR_RENDER_DPI = int(os.environ.get('OCR_RENDER_DPI', '300'))
 OCR_TILE_MAX_DIM = 16000
 OCR_TILE_SIZE = 2200
 OCR_TILE_OVERLAP = 500
+
+# ---------------------------------------------------------------------------
+# OCR render size cap — soft-coded (env: OCR_RENDER_MAX_PIXELS).
+#
+# Rationale: an A0 P&ID (~3370×2384 pt) rendered at 300 DPI becomes a
+# ~14,000×9,900 px (~139 MP) raster.  One such RGB image is ~417 MB in
+# memory; with OCR_PAGE_PARALLEL_WORKERS=4 plus PIL rotate(expand=True)
+# copies and L/RGB mode variants, peak usage climbs into the multi-GB range.
+# On memory/CPU-constrained containers (Railway shared vCPU) this causes
+# swap thrashing / OOM retries and is the primary reason production runs
+# 4-8× slower than a local workstation on the SAME file.
+#
+# The cap scales the render zoom down so pixel_count ≤ cap.  Tag glyphs on
+# A0 drawings remain well above Tesseract's legibility floor at the capped
+# density (empirical recall: 180 DPI ≈ 23/26 tags vs 300 DPI ≈ 25/26), and
+# all FROM-TO coordinates are normalised to percentages, so downstream
+# mapping is resolution-independent.
+#
+# Default 60 MP (~8,000×7,500 px — above A0 at ~200 DPI).  Set to 0 to
+# disable the cap (legacy behaviour).
+# ---------------------------------------------------------------------------
+OCR_RENDER_MAX_PIXELS = int(os.environ.get('OCR_RENDER_MAX_PIXELS', str(60_000_000)))
+
+def _ocr_zoom_for_page(page) -> float:
+    """Render zoom for OCR/FROM-TO rasters, capped to OCR_RENDER_MAX_PIXELS.
+
+    Small pages render at full OCR_RENDER_DPI; very large drawings are
+    scaled down to bound OCR time and peak memory per page.
+    """
+    base = OCR_RENDER_DPI / 72.0
+    if OCR_RENDER_MAX_PIXELS <= 0:
+        return base
+    try:
+        px = (float(page.rect.width) * base) * (float(page.rect.height) * base)
+        if px > OCR_RENDER_MAX_PIXELS:
+            capped = base * ((OCR_RENDER_MAX_PIXELS / px) ** 0.5)
+            logger.info(
+                f"  📐 Render cap: {px/1e6:.0f} MP at {OCR_RENDER_DPI} DPI exceeds "
+                f"{OCR_RENDER_MAX_PIXELS/1e6:.0f} MP — rendering at ~{int(capped*72)} DPI"
+            )
+            return capped
+    except Exception:
+        pass
+    return base
 
 # ---------------------------------------------------------------------------
 # EasyOCR on large renders — soft-coded.
@@ -249,6 +306,15 @@ OCR_PAGE_PARALLEL_WORKERS = int(os.environ.get('OCR_PAGE_PARALLEL_WORKERS', '4')
 # ---------------------------------------------------------------------------
 OCR_TESSERACT_PSMS = (6, 11)
 OCR_TESSERACT_PSMS_ROTATED = (6, 11)
+# ENV OVERRIDE (soft-coded): e.g. OCR_TESSERACT_PSMS_ROTATED=11 to run sparse-only on rotated passes.
+for _psm_env, _psm_name in (('OCR_TESSERACT_PSMS', 'OCR_TESSERACT_PSMS'),
+                            ('OCR_TESSERACT_PSMS_ROTATED', 'OCR_TESSERACT_PSMS_ROTATED')):
+    _psm_val = os.environ.get(_psm_env, '').strip()
+    if _psm_val:
+        try:
+            globals()[_psm_name] = tuple(int(p.strip()) for p in _psm_val.split(',') if p.strip()) or globals()[_psm_name]
+        except ValueError:
+            pass
 
 # ---------------------------------------------------------------------------
 # OCR separator / quote normalisation — soft-coded character set.
@@ -2342,8 +2408,10 @@ Example 4: "10\"-PG-0003-033842-X-H"
             if not use_ocr:
                 combined_text = embedded_text
             else:
-                # PHASE 1b (slow path): full OCR pipeline
-                _zoom = OCR_RENDER_DPI / 72.0
+                # PHASE 1b (slow path): full OCR pipeline — render size capped
+                # via _ocr_zoom_for_page (OCR_RENDER_MAX_PIXELS) to bound OCR
+                # time and peak memory on very large drawings.
+                _zoom = _ocr_zoom_for_page(page)
                 pix = page.get_pixmap(matrix=fitz.Matrix(_zoom, _zoom))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_results = self.extract_all_text_from_image(img)
@@ -2360,7 +2428,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             # OCR FALLBACK: embedded text gave zero line numbers → the drawing
             # content is image-based; run the full OCR pipeline once.
             if not line_items and not use_ocr:
-                _zoom = OCR_RENDER_DPI / 72.0
+                _zoom = _ocr_zoom_for_page(page)
                 pix = page.get_pixmap(matrix=fitz.Matrix(_zoom, _zoom))
                 img_fb = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_results_fb = self.extract_all_text_from_image(img_fb)
@@ -2557,7 +2625,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # at full OCR resolution, fast-path pages at 1.5x.
                 if use_ocr:
                     try:
-                        _zoom_ft = OCR_RENDER_DPI / 72.0
+                        _zoom_ft = _ocr_zoom_for_page(page)
                         pix = page.get_pixmap(matrix=fitz.Matrix(_zoom_ft, _zoom_ft))
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
                     except Exception as _img_err:
