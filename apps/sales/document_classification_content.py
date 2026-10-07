@@ -57,9 +57,9 @@ FOLDER_TAGS = {
     'correspondence': ['Communication', 'Incoming Mail', 'Outgoing Mail', 'Client Communication', 'Email',
                        'Letter', 'Meeting Minutes', 'Clarification', 'Technical Query', 'Commercial Query',
                        'NDA', 'Vendor Communication', 'Official Correspondence', 'Approval Request', 'Response Letter'],
-    'tender': ['Tender', 'RFP', 'RFQ', 'ITT', 'Scope of Work', 'BOQ', 'Technical Specification',
+    'tender': ['Tender', 'RFP', 'RFQ', 'ITT', 'Agreement', 'BOQ', 'Technical Specification',
                'Commercial Terms', 'Tender Addendum', 'Tender Amendment', 'Bid Invitation', 'Prequalification'],
-    'proposal': ['Proposal', 'Technical Proposal', 'Commercial Proposal', 'Pricing Sheet', 'Cost Estimate',
+    'proposal': ['Proposal', 'Scope of Work','Technical Proposal', 'Commercial Proposal', 'Pricing Sheet', 'Cost Estimate',
                  'Method Statement', 'Execution Plan', 'Resource Plan', 'CV Submission', 'Proposal Revision',
                  'Management Proposal', 'Presentation'],
     'internal': ['Internal', 'Confidential', 'Go-No-Go', 'Risk Assessment', 'Management Approval',
@@ -77,7 +77,7 @@ FILENAME_TAGS = {
     'Pricing Sheet': r'pric(?:e|ing)', 'Commercial Proposal': r'commercial',
     'Technical Proposal': r'technical', 'Contract': r'contract', 'Award': r'award',
     'LOI': r'\bloi\b|letter[ _-]+of[ _-]+intent', 'LOA': r'\bloa\b|letter[ _-]+of[ _-]+award',
-    'Meeting Minutes': r'minutes|\bmom\b', 'Risk Assessment': r'\brisk\b',
+    'Meeting Minutes': r'minutes|\bmom\b', 'Agreement': r'\bagreement\b', 'Risk Assessment': r'\brisk\b',
     'Management Approval': r'approval',
 }
 
