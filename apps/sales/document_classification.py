@@ -64,7 +64,10 @@ def classification_projection(upload, actor=None):
     updated_at = max((row.updated_at for row in (state, run) if row), default=None)
     opportunity = upload.workspace.opportunity
     client = opportunity.client
-    run_tags = list(run.tags) if run else []
+    # Filename/folder signals are available immediately, before the durable
+    # worker extracts document content. Worker tags are added when available.
+    immediate_tags, _, _, _ = intelligence_tags(upload.folder_key, upload.name, '', kind, [], 'unclassified')
+    run_tags = list(dict.fromkeys(immediate_tags + (list(run.tags) if run else [])))
     global_tags = [
         f'opportunity_id:{opportunity.pk}', f'client_name:{client.company_name}', f'country:{client.country or ""}',
         'business_unit:', f'service_line:{",".join(opportunity.service_categories or [])}',
@@ -346,27 +349,12 @@ def run_document_classification(run_id):
             result['extraction_code'] = 'source_too_large'
         kind, evidence = rule_suggestion(upload.name, text)
         result.update(suggested_type=kind, origin='rule' if kind != 'unclassified' else 'unclassified', evidence=evidence)
+        # Automatic document tagging is deliberately deterministic. Folder,
+        # filename and extracted content are sufficient for the supported tag
+        # vocabulary; ambiguous files remain reviewable instead of waiting for
+        # an external AI provider or sending document content off-box.
         if kind == 'unclassified':
-            config = email_ai_configuration()
-            result.update(provider=config['provider'], model=config['model'])
-            if not config['ready']:
-                result.update(ai_status='unavailable' if config['enabled'] else 'disabled', error_code=config['error_code'])
-            elif not text:
-                result.update(ai_status='unavailable', error_code=result['extraction_code'] or 'no_readable_text')
-            else:
-                # Recheck current record/source authority immediately before external inference.
-                with _locked(upload.pk) as (current_opportunity, document, current_upload):
-                    current = Run.objects.select_for_update().get(pk=run.pk)
-                    if current.lease_token != run.lease_token or current.lease_until <= timezone.now():
-                        return {'processed': False}
-                    _authorize(current_opportunity, document, current_upload, current)
-                provider_identity = email_ai_cache_identity()
-                response, proposal = _ai_proposal(upload.name, text, upload.folder_key)
-                result.update(ai_status=response['status'], error_code=response['error_code'],
-                              provider=response['provider'], model=response['model'])
-                if proposal:
-                    kind, evidence = proposal
-                    result.update(suggested_type=kind, origin='ai' if kind != 'unclassified' else 'unclassified', evidence=evidence)
+            result.update(ai_status='disabled', error_code='ai_not_used')
         tags, confidence, recommended, reasoning = intelligence_tags(
             upload.folder_key, upload.name, text, result['suggested_type'], result['evidence'], result['origin'])
         result.update(tags=tags, confidence=confidence, recommended_folder=recommended, reasoning=reasoning,
