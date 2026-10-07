@@ -14,6 +14,7 @@ Flow (single file):
 """
 import base64
 import io
+import json
 import logging
 import re
 
@@ -37,6 +38,40 @@ EQ_RESULT_CACHE_TTL_S   = 14400    # 4 hours
 
 # Redis cache key format — must match the helper in equipment_analysis_views.py.
 EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'
+
+# Soft-coded: document text excerpt kept with the results (and served to the
+# RADAI Assistant as document_excerpt so the chat can answer from the SOURCE
+# document, not only the extracted rows). Also archived to S3 as .txt.
+EQ_DOC_EXCERPT_CHARS = 8000
+
+
+def _eq_doc_excerpt(file_bytes: bytes) -> str:
+    """Text-layer excerpt of the uploaded PDF (fast; empty for pure scans)."""
+    try:
+        import fitz
+        with fitz.open(stream=file_bytes, filetype='pdf') as doc:
+            text = '\n'.join(page.get_text() for page in doc)
+        return text[:EQ_DOC_EXCERPT_CHARS]
+    except Exception:  # noqa: BLE001 — excerpt is best-effort
+        return ''
+
+
+def _eq_archive_result(upload_id: str, result: dict, excerpt: str, project: str,
+                       source_name: str) -> None:
+    """Fail-safe S3 archive of the extraction outputs (results JSON + document
+    text excerpt) under the project archive layout (designiq s3_utils)."""
+    try:
+        from apps.pid_analysis.equipment_analysis_views import _eq_archive
+        _eq_archive('output', f'{upload_id}_equipment_list.json',
+                    json.dumps(result, default=str, indent=2).encode('utf-8'),
+                    project=project,
+                    metadata={'source': source_name})
+        if excerpt:
+            _eq_archive('output', f'{upload_id}_document_text.txt',
+                        excerpt.encode('utf-8'), project=project,
+                        metadata={'source': source_name})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('[EQTask] S3 result archive skipped upload_id=%s: %s', upload_id, exc)
 
 
 # ── Internal helpers (no external state; safe to call from Celery worker) ─────
@@ -370,7 +405,7 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
     soft_time_limit=EQ_TASK_SOFT_LIMIT_S,
     time_limit=EQ_TASK_HARD_LIMIT_S,
 )
-def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: str):
+def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: str, project: str = ''):
     """
     Async Celery task: extract equipment list from a single P&ID PDF.
     Supports both single-page and multi-page PDFs (processed page by page via
@@ -419,14 +454,23 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         _persist_to_db(equipment, upload_id, extraction_mode, drawing_ref, config)
 
         # ── Store final result in Redis cache ────────────────────────────────
+        # Document text excerpt rides with the result → served by the results
+        # endpoint → published to the RADAI Assistant (chat can quote the
+        # source document, not just the extracted rows).
+        doc_excerpt = _eq_doc_excerpt(file_bytes)
         result = {
             'status':          'completed',
             'equipment':       equipment,
             'total':           len(equipment),
             'drawing_ref':     drawing_ref,
             'extraction_mode': extraction_mode,
+            'document_excerpt': doc_excerpt,
         }
         cache.set(cache_key, result, EQ_RESULT_CACHE_TTL_S)
+
+        # ── S3 archive (fail-safe): results JSON + document text ────────────
+        _eq_archive_result(upload_id, result, doc_excerpt, project, filename)
+
         logger.info('[EQTask] Completed  upload_id=%s  items=%d  mode=%s',
                     upload_id, len(equipment), extraction_mode)
 
@@ -452,7 +496,7 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
     soft_time_limit=EQ_BATCH_SOFT_LIMIT_S,
     time_limit=EQ_BATCH_HARD_LIMIT_S,
 )
-def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
+def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list, project: str = ''):
     """
     Async Celery task: extract equipment list from multiple P&ID PDFs.
 
@@ -537,13 +581,26 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
         _set_progress(92, 'Classifying equipment types…')
         _classify_equipment_types(all_equipment, config)
 
+        # Combined document excerpt across all files (capped, soft-coded)
+        doc_excerpt = '\n\n'.join(
+            t for t in (
+                _eq_doc_excerpt(base64.b64decode(fd['b64'])) for fd in files_data
+            ) if t
+        )[:EQ_DOC_EXCERPT_CHARS]
+
         result = {
             'status':      'completed',
             'equipment':   all_equipment,
             'total':       len(all_equipment),
             'drawing_ref': ', '.join(drawing_refs),
+            'document_excerpt': doc_excerpt,
         }
         cache.set(cache_key, result, EQ_RESULT_CACHE_TTL_S)
+
+        # ── S3 archive (fail-safe): combined results JSON + document text ───
+        _eq_archive_result(upload_id, result, doc_excerpt, project,
+                           f'{n_files} files: ' + ', '.join(fd['filename'] for fd in files_data))
+
         logger.info('[EQBatchTask] Completed  upload_id=%s  total=%d  drawings=%d',
                     upload_id, len(all_equipment), len(drawing_refs))
 
