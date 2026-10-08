@@ -13,6 +13,7 @@ from .workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload, 
 from .classification_models import OpportunityDocumentClassification, OpportunityDocumentClassificationRun, OpportunityDocumentClassificationCommand  # noqa: F401
 from .proposal_review_models import ProposalReviewDocument, ProposalReviewComment, ProposalReviewCommand  # noqa: F401
 from .bid_preparation_models import BidPreparation, QuotePreparationRevision, BidPreparationCommand  # noqa: F401
+from .letter_models import SalesLetterTemplate, SalesLetter  # noqa: F401
 
 User = get_user_model()
 

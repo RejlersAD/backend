@@ -39,8 +39,10 @@ from .serializers import (
     SalesActivityDetailSerializer, SalesForecastSerializer, SalesDashboardSerializer,
     AIInsightSerializer, FrameworkAgreementSerializer, ProjectHandoverSerializer,
     SalesMailboxConnectionSerializer, SalesEmailIntakeSerializer,
+    SalesLetterSerializer, SalesLetterCreateSerializer,
 )
 from .ai_service import SalesAIService
+from .jwt_query_auth import QueryParamJWTAuthentication
 from .microsoft_graph import SalesMailboxReadError, SalesMicrosoftGraphService
 from .email_permissions import (
     can_create_email_opportunity, require_email_opportunity_access,
@@ -53,7 +55,7 @@ from apps.rbac.data_visibility_config import build_visibility_filter
 from apps.rbac.action_policy import module_action_allowed
 from .workflow import (
     _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
-    record_ceo_decision,
+    record_ceo_decision, prepare_letter,
     decide_handover, submit_award, submit_handover_for_acceptance,
     submit_qualification,
 )
@@ -698,6 +700,9 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     
     queryset = Deal.objects.select_related('client', 'owner', 'created_by').prefetch_related('team_members')
     permission_classes = [IsAuthenticated, HasModuleAccess]
+    # Header JWT stays the default; the query-param variant exists so the
+    # letter PDF preview can load inside an <iframe> (no Authorization header).
+    authentication_classes = [QueryParamJWTAuthentication]
     module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['stage', 'priority', 'client', 'owner']
@@ -961,6 +966,178 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             raise ValidationError({'detail': 'Provide the selected decision and text in the request body.'})
         result = draft_bid_justification(request.user, pk, request.data)
         return Response(result, headers={'Cache-Control': 'private, no-store'})
+
+    @action(detail=True, methods=['post'], url_path='prepare-letter')
+    def prepare_letter(self, request, pk=None):
+        serializer = SalesLetterCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        letter = prepare_letter(
+            self.get_object(),
+            request.user,
+            serializer.validated_data['letter_type'],
+            serializer.validated_data.get('custom_data', {}),
+        )
+        self._attach_letter_files(letter, request.user)
+        return Response(SalesLetterSerializer(letter, context={'request': request}).data)
+
+    def _attach_letter_files(self, letter, actor):
+        """Best-effort attach of the generated PDF+DOCX to the Correspondence folder."""
+        from .letter_attachments import attach_letter_files
+        try:
+            attach_letter_files(letter, actor)
+        except Exception as e:
+            logger.error(f"Failed to attach letter {letter.id} files to Correspondence: {e}")
+
+    @action(detail=True, methods=['get'], url_path='letters')
+    def list_letters(self, request, pk=None):
+        letters = self.get_object().letters.all()
+        return Response(SalesLetterSerializer(letters, many=True).data)
+
+    @action(detail=True, methods=['post'], url_path='letters/(?P<letter_id>[^/]+)/send')
+    def send_letter(self, request, pk=None, letter_id=None):
+        deal = self.get_object()
+        try:
+            letter = deal.letters.get(pk=letter_id)
+        except Deal.letters.RelatedObjectDoesNotExist:
+            raise ValidationError({'letter': 'Letter not found for this opportunity.'})
+        recipient = request.data.get('recipient')
+        if not recipient:
+            raise ValidationError({'recipient': 'Recipient email is required.'})
+        letter.mark_sent(recipient)
+        _audit(
+            deal, request.user, 'letter_sent',
+            reason=f'Sent {letter.get_letter_type_display()} letter to {recipient}',
+            data={'letter_id': str(letter.id), 'recipient': recipient},
+        )
+        return Response(SalesLetterSerializer(letter).data)
+
+    @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/pdf')
+    def download_letter_pdf(self, request, pk=None, letter_id=None):
+        """Download the PDF for a generated letter."""
+        deal = self.get_object()
+        try:
+            letter = deal.letters.get(pk=letter_id)
+        except Deal.letters.RelatedObjectDoesNotExist:
+            raise ValidationError({'letter': 'Letter not found for this opportunity.'})
+        
+        from .letter_pdf import get_letter_pdf_bytes
+        pdf_bytes = get_letter_pdf_bytes(letter)
+        
+        from django.http import FileResponse
+        import io
+        response = FileResponse(
+            io.BytesIO(pdf_bytes),
+            content_type='application/pdf',
+            as_attachment=True,
+            filename=f"{deal.deal_code}-{letter.letter_type}.pdf"
+        )
+        return response
+
+    @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/pdf/preview')
+    def preview_letter_pdf(self, request, pk=None, letter_id=None):
+        """Preview the PDF for a generated letter (inline display)."""
+        deal = self.get_object()
+        try:
+            letter = deal.letters.get(pk=letter_id)
+        except Deal.letters.RelatedObjectDoesNotExist:
+            raise ValidationError({'letter': 'Letter not found for this opportunity.'})
+        
+        from .letter_pdf import get_letter_pdf_bytes
+        try:
+            pdf_bytes = get_letter_pdf_bytes(letter)
+        except Exception as e:
+            logger.error(f"PDF preview generation failed for letter {letter_id}: {e}")
+            raise ValidationError({'detail': 'Failed to generate PDF preview. Please try again.'})
+        
+        from django.http import FileResponse
+        import io
+        response = FileResponse(
+            io.BytesIO(pdf_bytes),
+            content_type='application/pdf',
+            as_attachment=False,
+            filename=f"{deal.deal_code}-{letter.letter_type}.pdf"
+        )
+        # Allow iframe embedding
+        response['X-Frame-Options'] = 'SAMEORIGIN'
+        response['Content-Security-Policy'] = "frame-ancestors 'self'"
+        return response
+
+    @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/docx')
+    def download_letter_docx(self, request, pk=None, letter_id=None):
+        """Download the DOCX for a generated letter."""
+        deal = self.get_object()
+        try:
+            letter = deal.letters.get(pk=letter_id)
+        except Deal.letters.RelatedObjectDoesNotExist:
+            raise ValidationError({'letter': 'Letter not found for this opportunity.'})
+
+        from .letter_docx import get_letter_docx_bytes
+        docx_bytes = get_letter_docx_bytes(letter)
+
+        from django.http import FileResponse
+        import io
+        response = FileResponse(
+            io.BytesIO(docx_bytes),
+            content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            filename=f"{deal.deal_code}-{letter.letter_type}.docx"
+        )
+        return response
+
+    @action(detail=True, methods=['post'], url_path='letters/(?P<letter_id>[^/]+)/regenerate-pdf')
+    def regenerate_letter_pdf(self, request, pk=None, letter_id=None):
+        """Regenerate PDF+DOCX after letter content edits."""
+        deal = self.get_object()
+        try:
+            letter = deal.letters.get(pk=letter_id)
+        except Deal.letters.RelatedObjectDoesNotExist:
+            raise ValidationError({'letter': 'Letter not found for this opportunity.'})
+
+        # Update letter content if provided
+        if 'subject' in request.data:
+            letter.subject = request.data['subject']
+        if 'body' in request.data:
+            letter.body = request.data['body']
+        if 'custom_data' in request.data:
+            letter.custom_data = request.data['custom_data']
+        letter.save(update_fields=['subject', 'body', 'custom_data', 'updated_at'])
+
+        from .workflow import refresh_letter_files
+        refresh_letter_files(letter, request.user)
+
+        # Refresh from DB so serialized custom_data reflects the rev bump.
+        letter.refresh_from_db()
+        self._attach_letter_files(letter, request.user)
+        letter.refresh_from_db()
+
+        return Response(SalesLetterSerializer(letter, context={'request': request}).data)
+
+    @action(detail=True, methods=['patch'], url_path='letters/(?P<letter_id>[^/]+)')
+    def update_letter(self, request, pk=None, letter_id=None):
+        """Update letter content (subject, body, custom_data)."""
+        deal = self.get_object()
+        try:
+            letter = deal.letters.get(pk=letter_id)
+        except Deal.letters.RelatedObjectDoesNotExist:
+            raise ValidationError({'letter': 'Letter not found for this opportunity.'})
+        
+        # Update fields
+        updated_fields = []
+        if 'subject' in request.data:
+            letter.subject = request.data['subject']
+            updated_fields.append('subject')
+        if 'body' in request.data:
+            letter.body = request.data['body']
+            updated_fields.append('body')
+        if 'custom_data' in request.data:
+            letter.custom_data = request.data['custom_data']
+            updated_fields.append('custom_data')
+        
+        if updated_fields:
+            updated_fields.append('updated_at')
+            letter.save(update_fields=updated_fields)
+        
+        return Response(SalesLetterSerializer(letter).data)
 
     @action(detail=True, methods=['post'], url_path='proposal-draft-field')
     def proposal_draft_field(self, request, pk=None):

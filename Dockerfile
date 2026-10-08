@@ -32,12 +32,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     python3-dev \
     curl \
+    fontconfig \
+    fonts-dejavu-core \
+    fonts-liberation \
     && if [ "$INSTALL_PDF" = "true" ]; then \
          apt-get install -y --no-install-recommends poppler-utils; \
        fi \
     && if [ "$INSTALL_OCR" = "true" ]; then \
          apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng; \
        fi \
+    && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Layer 1: Python dependencies (cached unless requirements change)

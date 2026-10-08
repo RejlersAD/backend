@@ -272,19 +272,33 @@ class BidDecisionAccessTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assert_decided('bid', 'proposal')
 
-    def test_invalid_decision_incomplete_value_and_unqualified_stage_still_fail(self):
+    def test_invalid_decision_warns_for_missing_commercials_and_unqualified_stage_still_fails(self):
         response = self.decide(decision='invalid_bid')
         self.assertEqual(response.status_code, 400, response.data)
         self.assert_undecided()
-        for fields in ({'estimated_value': None}, {'currency': ''}, {'stage': 'lead'}):
+        for fields in ({'estimated_value': None}, {'currency': ''}):
             with self.subTest(fields=fields):
+                Deal.objects.filter(pk=self.deal.pk).update(
+                    stage='qualified', bid_decision='pending', bid_decided_by=None, bid_decided_at=None,
+                    estimated_value=Decimal('1000.00'), currency='AED',
+                )
                 Deal.objects.filter(pk=self.deal.pk).update(**fields)
                 response = self.decide()
-                self.assertEqual(response.status_code, 400, response.data)
-                self.assert_undecided(stage=fields.get('stage', 'qualified'))
-                Deal.objects.filter(pk=self.deal.pk).update(
-                    estimated_value=Decimal('1000.00'), currency='AED', stage='qualified',
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assert_decided('bid', 'proposal')
+                self.assertEqual(
+                    response.data.get('warnings'),
+                    ['Complete the estimated value and currency to support downstream proposal and award controls.'],
                 )
+                OpportunityAuditEvent.objects.filter(opportunity=self.deal).delete()
+        Deal.objects.filter(pk=self.deal.pk).update(
+            stage='lead', bid_decision='pending', bid_decided_by=None, bid_decided_at=None,
+            estimated_value=Decimal('1000.00'), currency='AED',
+        )
+        OpportunityAuditEvent.objects.filter(opportunity=self.deal).delete()
+        response = self.decide()
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assert_undecided(stage='lead')
 
     def test_repeated_decision_is_stale_and_cannot_add_another_audit(self):
         first = self.decide()
