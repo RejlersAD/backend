@@ -194,16 +194,17 @@ def _extract_electrical_tags_with_progress(pdf_bytes, api_key, provider, model, 
     # first and the job would end up reporting a confusing "No
     # electrical tags found — check PDF quality" instead of the real
     # "Invalid or missing API key" cause.
-    from apps.core.ai_consumer_clients import provider_api_key
-    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
-    # STEP 4 — debug visibility into whether resolution actually
-    # produced a usable key (admin-configured or user-supplied) BEFORE
-    # the empty check below decides pass/fail, so a real "nothing
-    # resolved" case is visible in logs rather than just inferred from
-    # the ValueError that follows.
+    # BUG FIX (reverted by explicit request): this used to call
+    # provider_api_key() here too, which can silently substitute a
+    # DB-configured admin key even when the caller already resolved
+    # (or deliberately chose) the key it wants used — api_key arriving
+    # here is already whatever _process_electrical_comparison_inner
+    # decided (see resolved_key there), so it's used as-is, with no
+    # second admin-DB lookup overriding it.
+    pass  # keep api_key as is - already resolved
     logger.info(
-        '[ElecCompareTask] API key resolved: %s',
-        'yes' if (api_key and api_key.strip()) else 'NO - EMPTY!',
+        '[ElecCompareTask] API key: %s',
+        'provided' if (api_key and api_key.strip()) else 'MISSING!',
     )
     if not (api_key and api_key.strip()):
         raise ValueError('api_key is required for Vision-based tag extraction')
@@ -489,18 +490,20 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
     provider = context.get('provider', 'claude')
     model = context.get('model')
 
-    # STEP 3/4 — resolve the admin-key fallback HERE, before the AI
-    # Vision extraction even starts, rather than only inside
-    # _extract_electrical_tags_with_progress (which still does its own
-    # resolution too, defensively — this just means that one resolves
-    # the SAME value a second time, harmless). Resolving earlier makes
-    # the "did we actually get a usable key" question answered (and
-    # logged) up front, before any page-processing setup happens at all.
-    from apps.core.ai_consumer_clients import provider_api_key
-    resolved_key = provider_api_key(provider, fallback=lambda: api_key)
+    # BUG FIX (reverted by explicit request): this used to call
+    # provider_api_key(provider, fallback=lambda: api_key) here, which
+    # — per apps.core.ai_credentials.resolve_provider_credential —
+    # returns a DB-configured admin key UNCONDITIONALLY whenever one
+    # exists and is enabled, completely ignoring the fallback (the
+    # user's own key). That meant a user who explicitly typed their
+    # own API key into the upload form could have it silently
+    # overridden by an admin-configured key instead. Whatever the user
+    # provided (or didn't) is now used directly, with no admin-DB
+    # lookup at all.
+    resolved_key = api_key.strip() if api_key else ''
     logger.info(
-        '[ElecCompareTask] API key resolved: %s',
-        'yes' if resolved_key else 'NO - EMPTY!',
+        '[ElecCompareTask] API key: %s',
+        'provided' if resolved_key else 'MISSING!',
     )
 
     pid_tags = []

@@ -15,7 +15,7 @@ import json
 import logging
 import re
 
-from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
+from apps.core.ai_consumer_clients import lazy_provider_client
 # Rendering/preprocessing is intentionally imported from THIS app's own
 # electrical_vision.py, not from apps.pid_checker_v2.services.
 # vision_extractor — the two render/preprocess pipelines were forked
@@ -799,7 +799,17 @@ def _call_electrical_vision(pdf_bytes, page_index, api_key, provider='claude', m
     Returns {'tags': [str], 'raw_text': str, 'provider': str, 'model':
     str, 'token_usage': dict}. Raises ValueError if api_key is missing —
     same fail-fast contract extract_raw_text_via_vision has."""
-    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
+    # BUG FIX (reverted by explicit request): this used to call
+    # provider_api_key() here, which — per apps.core.ai_credentials.
+    # resolve_provider_credential — returns a DB-configured admin key
+    # UNCONDITIONALLY whenever one exists and is enabled, completely
+    # ignoring the fallback (the caller's own key). That meant a user's
+    # own API key could be silently overridden by an admin-configured
+    # one at the exact point the Vision call is made, even after
+    # tasks.py stopped doing any admin-key lookup of its own. Used
+    # directly as passed in now — no admin-DB lookup anywhere in this
+    # file either.
+    pass  # use api_key as passed in directly
     if provider not in ('openai', 'claude'):
         raise ValueError(f"Unsupported provider '{provider}'. Choose one of ('openai', 'claude').")
     if not api_key or not api_key.strip():
