@@ -16,7 +16,7 @@ from apps.rbac.action_policy import module_action_allowed
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
     ProjectHandover, Quote, SalesActivity, SalesEmailIntake, SalesForecast,
-    SalesMailboxConnection,
+    SalesMailboxConnection, SalesLetter, SalesLetterTemplate,
 )
 
 User = get_user_model()
@@ -826,3 +826,87 @@ class AIInsightSerializer(serializers.Serializer):
     action_items = serializers.ListField(child=serializers.CharField())
     impact = serializers.CharField()
     related_entities = serializers.DictField()
+
+
+class SalesLetterTemplateSerializer(serializers.ModelSerializer):
+    """Serializer for letter templates (admin management)"""
+    
+    class Meta:
+        model = SalesLetterTemplate
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class SalesLetterSerializer(serializers.ModelSerializer):
+    """Serializer for generated letters"""
+    template_details = SalesLetterTemplateSerializer(source='template', read_only=True)
+    generated_by_name = serializers.CharField(source='generated_by.get_full_name', read_only=True)
+    opportunity_code = serializers.CharField(source='opportunity.deal_code', read_only=True)
+    opportunity_name = serializers.CharField(source='opportunity.deal_name', read_only=True)
+    letter_type_display = serializers.CharField(source='get_letter_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    pdf_url = serializers.SerializerMethodField()
+    pdf_preview_url = serializers.SerializerMethodField()
+    pdf_generated_at = serializers.DateTimeField(read_only=True)
+    docx_url = serializers.SerializerMethodField()
+    docx_generated_at = serializers.DateTimeField(read_only=True)
+    attachments = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalesLetter
+        fields = [
+            'id', 'opportunity', 'opportunity_code', 'opportunity_name',
+            'letter_type', 'letter_type_display', 'template', 'template_details',
+            'subject', 'body', 'generated_by', 'generated_by_name',
+            'generated_at', 'status', 'status_display',
+            'sent_to', 'sent_at', 'custom_data', 'created_at', 'updated_at',
+            'pdf_file', 'pdf_url', 'pdf_preview_url', 'pdf_generated_at',
+            'docx_file', 'docx_url', 'docx_generated_at', 'attachments',
+        ]
+        read_only_fields = ['id', 'generated_by', 'generated_at', 'created_at', 'updated_at', 'pdf_file', 'pdf_url', 'pdf_preview_url', 'pdf_generated_at', 'docx_file', 'docx_url', 'docx_generated_at']
+
+    def get_pdf_url(self, obj):
+        if obj.pdf_file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.pdf_file.url)
+            return obj.pdf_file.url
+        return None
+
+    def get_pdf_preview_url(self, obj):
+        request = self.context.get('request')
+        preview_path = f'/api/v1/sales/deals/{obj.opportunity_id}/letters/{obj.id}/pdf/preview/'
+        if request:
+            return request.build_absolute_uri(preview_path)
+        return preview_path
+
+    def get_docx_url(self, obj):
+        request = self.context.get('request')
+        docx_path = f'/api/v1/sales/deals/{obj.opportunity_id}/letters/{obj.id}/docx/'
+        if request:
+            return request.build_absolute_uri(docx_path)
+        return docx_path
+
+    def get_attachments(self, obj):
+        attachments = (obj.custom_data or {}).get('attachments') or {}
+        return {
+            'folder': attachments.get('folder', ''),
+            'version': attachments.get('version', 0),
+            'attached_at': attachments.get('attached_at', ''),
+            'files': [
+                {
+                    'kind': f.get('kind'),
+                    'name': f.get('name'),
+                    'provider': f.get('provider'),
+                    'status': f.get('status'),
+                    'web_url': (f.get('file') or {}).get('web_url'),
+                }
+                for f in attachments.get('files', [])
+            ],
+        }
+
+
+class SalesLetterCreateSerializer(serializers.Serializer):
+    """Serializer for generating a new letter"""
+    letter_type = serializers.ChoiceField(choices=SalesLetter.LETTER_TYPES)
+    custom_data = serializers.JSONField(required=False, default=dict)

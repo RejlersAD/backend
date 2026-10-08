@@ -1,5 +1,7 @@
 """Governed Sales opportunity commands and Project Control handover."""
 
+import logging
+
 from datetime import timedelta
 from decimal import Decimal
 
@@ -13,7 +15,7 @@ from apps.project_control.models import Estimate
 from apps.notifications.services import NotificationService
 from apps.rbac.models import UserProfile
 
-from .models import Deal, OpportunityAuditEvent, ProjectHandover
+from .models import Deal, OpportunityAuditEvent, ProjectHandover, SalesLetter, SalesLetterTemplate
 from .workspace_models import OpportunityWorkspaceUpload
 
 
@@ -480,3 +482,135 @@ def convert_to_project(opportunity_id, actor, *, project_code, project_name=None
         'project_id': project.id, 'project_code': project.code,
     })
     return opportunity, project, True
+
+
+def _render_letter_template(template, context):
+    """Render a Django template string with the given context."""
+    from django.template import Template, Context
+    from django.template.exceptions import TemplateSyntaxError
+    try:
+        tpl = Template(template)
+        return tpl.render(Context(context))
+    except TemplateSyntaxError as exc:
+        raise ValidationError({'template': f'Template syntax error: {exc}'})
+
+
+def _get_letter_context(opportunity, custom_data=None):
+    """Build the rendering context for letter templates."""
+    from .letter_context import build_letter_context
+    return build_letter_context(opportunity, custom_data=custom_data)
+
+
+@transaction.atomic
+def prepare_letter(opportunity, actor, letter_type, custom_data=None):
+    """
+    Generate a letter after Go/No-Go decision.
+    
+    Rules:
+    - EOI: Only when bid_decision in ('bid', 'conditional_bid')
+    - Regret Expertise: Only when bid_decision == 'no_bid'
+    - Regret Manpower: Only when bid_decision == 'no_bid'
+    """
+    # Validate opportunity state
+    if opportunity.stage not in {'proposal', 'no_bid'}:
+        raise ValidationError({'stage': 'Letter preparation is only available after bid decision.'})
+    
+    # Validate letter type against bid decision
+    bid_decision = opportunity.bid_decision
+    
+    if letter_type == 'eoi':
+        if bid_decision not in {'bid', 'conditional_bid'}:
+            raise ValidationError({'letter_type': 'EOI letter requires a Bid or Conditional Bid decision.'})
+        if opportunity.stage != 'proposal':
+            raise ValidationError({'stage': 'EOI letter requires opportunity in Proposal stage.'})
+    elif letter_type in {'regret_expertise', 'regret_manpower'}:
+        if bid_decision != 'no_bid':
+            raise ValidationError({'letter_type': 'Regret letters require a No-Bid decision.'})
+        if opportunity.stage != 'no_bid':
+            raise ValidationError({'stage': 'Regret letters require opportunity in No-Bid stage.'})
+    else:
+        raise ValidationError({'letter_type': 'Invalid letter type.'})
+    
+    # Get active template
+    try:
+        template = SalesLetterTemplate.objects.get(letter_type=letter_type, is_active=True)
+    except SalesLetterTemplate.DoesNotExist:
+        raise ValidationError({'template': f'No active template found for {letter_type}.'})
+    
+    # Build context and render; persist the computed letterhead so the editor
+    # pre-fills and later regenerations reuse edited values.
+    context = _get_letter_context(opportunity, custom_data)
+    stored_custom_data = dict(custom_data or {})
+    stored_custom_data['letterhead'] = context['letterhead']
+    subject = _render_letter_template(template.subject_template, context)
+    body = _render_letter_template(template.body_template, context)
+
+    # Create letter record
+    letter = SalesLetter.objects.create(
+        opportunity=opportunity,
+        letter_type=letter_type,
+        template=template,
+        subject=subject,
+        body=body,
+        generated_by=actor,
+        custom_data=stored_custom_data,
+    )
+
+    # Generate PDF
+    try:
+        from .letter_pdf import save_letter_pdf
+        save_letter_pdf(letter)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to generate PDF for letter {letter.id}: {e}")
+    # Generate DOCX
+    try:
+        from .letter_docx import save_letter_docx
+        save_letter_docx(letter)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to generate DOCX for letter {letter.id}: {e}")
+    _audit(
+        opportunity,
+        actor,
+        'letter_generated',
+        reason=f'Generated {letter.get_letter_type_display()} letter',
+        data={
+            'letter_id': str(letter.id),
+            'letter_type': letter_type,
+            'template_version': template.version,
+            'custom_data_keys': list(stored_custom_data.keys()),
+        },
+    )
+
+    return letter
+
+
+@transaction.atomic
+def refresh_letter_files(letter, actor, custom_data=None):
+    """Regenerate PDF+DOCX for an edited letter and bump the revision marker.
+
+    Correspondence-folder attach is performed by the caller after this
+    transaction commits.
+    """
+    if custom_data:
+        letter.custom_data = custom_data
+    letterhead = dict((letter.custom_data or {}).get('letterhead') or {})
+    letterhead['rev'] = int(letterhead.get('rev') or 0) + 1
+    letterhead['confidential'] = f"{letterhead.get('confidential_date', '')} / Rev {letterhead['rev']}"
+    letter.custom_data = {**(letter.custom_data or {}), 'letterhead': letterhead}
+    letter.save(update_fields=['custom_data', 'updated_at'])
+
+    from .letter_docx import regenerate_letter_docx
+    from .letter_pdf import regenerate_letter_pdf
+    regenerate_letter_pdf(letter)
+    regenerate_letter_docx(letter)
+
+    _audit(
+        letter.opportunity,
+        actor,
+        'letter_pdf_regenerated',
+        reason=f'Regenerated files for {letter.get_letter_type_display()} letter',
+        data={'letter_id': str(letter.id), 'rev': letterhead['rev']},
+    )
+    return letter
