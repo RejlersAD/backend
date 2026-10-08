@@ -69,8 +69,25 @@ _SEPARATOR = ELECTRICAL_TEMPLATE['definition']['separator']  # '-'
 # Python constant, made by editing legend_defaults.py and restarting the
 # server — it does NOT pick up a user's live, UI-edited electrical legend
 # automatically. Flagging this plainly rather than letting that be assumed.
+# FIX 1 — a literal, space-intolerant separator here meant a tag like
+# "285 - U - 503A" (spaces around the dashes — a real, confirmed shape
+# some drawings/Vision transcriptions produce) never matched this
+# pattern AT ALL, so it was silently lost: no valid tag, no invalid
+# entry either, nothing in any log — the regex simply never fired.
+# _FLEX_SEP tolerates optional whitespace on either side of the
+# legend's own separator, built dynamically (not a hardcoded '-') so
+# this still follows the same "single source of truth" pattern as
+# every other piece of this regex.
+_FLEX_SEP = rf'\s*{re.escape(_SEPARATOR)}\s*'
+# _SEQUENCE_REGEX's OWN internal optional-suffix separator (the '-' in
+# '(?:-[A-Za-z0-9]{1,6})?', e.g. for a two-part sequence like
+# "001-007") is a second literal, non-flexible dash — swapped here for
+# the same _FLEX_SEP so a suffix like "001 - 007" is tolerated too,
+# not just the two outer AREA-TYPE-SEQUENCE separators.
+_FLEX_SEQUENCE_REGEX = _SEQUENCE_REGEX.replace(f'(?:{_SEPARATOR}', f'(?:{_FLEX_SEP}')
+
 ELECTRICAL_TAG_PATTERN = re.compile(
-    rf'\b({_AREA_REGEX}){re.escape(_SEPARATOR)}({_TYPE_REGEX}){re.escape(_SEPARATOR)}({_SEQUENCE_REGEX})\b'
+    rf'\b({_AREA_REGEX}){_FLEX_SEP}({_TYPE_REGEX}){_FLEX_SEP}({_FLEX_SEQUENCE_REGEX})\b'
 )
 
 # A deliberately LOOSER pattern than ELECTRICAL_TAG_PATTERN — digits,
@@ -86,7 +103,7 @@ ELECTRICAL_TAG_PATTERN = re.compile(
 # _classify_tag_string) to pull out the 3 parts from a string that may
 # have stray whitespace/punctuation around an otherwise-clean tag.
 _CANDIDATE_PATTERN = re.compile(
-    rf'\b(\d+){re.escape(_SEPARATOR)}([A-Za-z]+){re.escape(_SEPARATOR)}([A-Za-z0-9-]+)\b'
+    rf'\b(\d+){_FLEX_SEP}([A-Za-z]+){_FLEX_SEP}([A-Za-z0-9]+(?:{_FLEX_SEP}[A-Za-z0-9]+)*)\b'
 )
 
 # Type code lookup from electrical legend
@@ -171,7 +188,11 @@ DO NOT extract:
 ONLY extract tags with these known electrical type codes:
 {_TYPE_CODE_LIST_PLAIN}
 
-If a tag's type code is not in this list, do NOT include it in the results."""
+If a tag's type code is not in this list, do NOT include it in the results.
+
+Tags may appear with or without spaces around hyphens. Always return tags in normalized format without spaces:
+CORRECT: 285-U-503A
+INCORRECT: 285 - U - 503A"""
 
 ELECTRICAL_VISION_USER_PROMPT = """Please extract all electrical equipment tag numbers from this Single Line Diagram.
 
@@ -417,8 +438,15 @@ def _classify_match(area: str, type_code: str, sequence: str):
     (valid_dict_or_None, invalid_dict_or_None) — both None for a
     placeholder sequence (discarded entirely, not even reported as
     invalid, since it's known noise rather than a legend violation)."""
-    type_code = type_code.upper()
-    sequence = sequence.upper()
+    # FIX 2 — normalize away any spaces the flexible separator patterns
+    # above (_FLEX_SEP/_FLEX_SEQUENCE_REGEX) tolerated around a dash,
+    # e.g. a sequence captured as "001 - 007" becomes "001-007" here —
+    # every downstream consumer (dedup via `tag` string, DB storage,
+    # the UI) expects the normalized no-space form, not whatever
+    # spacing the source drawing/Vision transcription happened to have.
+    area = re.sub(r'\s*-\s*', '-', area.strip())
+    type_code = re.sub(r'\s*-\s*', '-', type_code.strip().upper())
+    sequence = re.sub(r'\s*-\s*', '-', sequence.strip().upper())
 
     if _is_placeholder_sequence(sequence):
         return None, None
@@ -544,6 +572,16 @@ def _classify_tag_string(tag_str: str):
         return None, None
     m = _CANDIDATE_PATTERN.search(tag_str)
     if not m:
+        # FIX 4 — this is the genuinely-lost case (as opposed to the
+        # drawing-number/known-false-positive checks above, which are
+        # deliberate, expected filtering and would just be log noise):
+        # the model returned this string as a tag, but it didn't match
+        # even the loose candidate shape at all — logged so a real
+        # drop (e.g. an unusual format this pattern still doesn't
+        # tolerate) is actually visible instead of vanishing silently.
+        logger.warning(
+            '[ElecCompare] Tag-shaped text dropped (no match): %s', tag_str,
+        )
         return None, None
     return _classify_match(m.group(1), m.group(2), m.group(3))
 

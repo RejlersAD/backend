@@ -84,11 +84,46 @@ def _save_job_progress(job, update_fields):
 # AFTER the first attempt (so 2 → 3 total attempts per page);
 # _VISION_RETRY_DELAY_S is the pause between attempts.
 _VISION_RETRY_ATTEMPTS = 2
-_VISION_RETRY_DELAY_S = 2
+# Was 2s — raised to 5s so a retry after a rate-limit/overload response
+# actually gives the provider's own window time to clear instead of
+# immediately re-tripping it.
+_VISION_RETRY_DELAY_S = 5
 # Small pause after every SUCCESSFUL Vision call, so N consecutive page
 # calls don't land back-to-back with zero spacing and trip the
-# provider's own rate limiting.
-_INTER_PAGE_DELAY_S = 1
+# provider's own rate limiting. Was 1s — raised to 3s for the same
+# reason as _VISION_RETRY_DELAY_S above.
+_INTER_PAGE_DELAY_S = 3
+
+def _classify_ai_vision_error(exc) -> str:
+    """Classify an AI Vision failure into a clear, actionable reason by
+    matching known provider-error keywords in the message text.
+
+    BUG FIX: this used to classify ANY exception whose message merely
+    CONTAINED the substring 'api_key' as 'Invalid or missing API key'
+    — a rate-limit/overload error's message can easily contain that
+    substring too (providers often reference the key while describing
+    a quota/plan issue), silently mislabeling a transient rate limit as
+    a bad key and telling the user to "check your API key" when
+    nothing was wrong with it. Rate-limit/overload keywords are checked
+    FIRST so they always win over a coincidental 'api_key' mention."""
+    error_msg = str(exc)
+    error_msg_lower = error_msg.lower()
+
+    if any(word in error_msg_lower for word in
+           ['rate', '429', 'overload', 'too many', 'capacity']):
+        return 'Rate limited by AI provider. Will retry automatically.'
+    elif any(word in error_msg_lower for word in
+             ['api_key', 'authentication', 'unauthorized', '401', 'invalid key']):
+        return 'Invalid or missing API key'
+    elif 'not found' in error_msg_lower:
+        return 'AI model not found. Try different model.'
+    elif 'insufficient' in error_msg_lower:
+        # Pre-existing case (insufficient token balance) — kept here,
+        # alongside the new keyword checks above, so it isn't lost.
+        return 'Insufficient tokens. Please top up.'
+    else:
+        return error_msg
+
 
 # Stage names — must match SingleLineDiagram.jsx's STAGE_LABELS map
 # exactly, since the frontend looks up a display label by this string.
@@ -119,6 +154,28 @@ def _extract_electrical_tags_with_progress(pdf_bytes, api_key, provider, model, 
         PAGE_TYPE_LEGEND, PAGE_TYPE_SKIP,
     )
 
+    # BUG FIX: this used to fail-fast on the RAW api_key straight from
+    # the upload request, BEFORE _call_electrical_vision() ever got a
+    # chance to resolve an admin-configured key via provider_api_key()
+    # (tag_extractor.py's own _call_electrical_vision does exactly this
+    # resolution per-page — see its docstring). A user who left the API
+    # key field blank, intending to rely on the admin-configured key
+    # (exactly what the upload UI's own copy says: "Uses admin-
+    # configured key by default"), hit an immediate "api_key is
+    # required" failure here instead — even when a perfectly usable
+    # admin key was configured and would have worked fine.
+    #
+    # Fix: resolve the key the SAME way _call_electrical_vision does,
+    # once, up front — only raise if it's STILL empty after trying the
+    # admin-configured key. This also deliberately preserves the
+    # original clear, fail-fast error for the genuinely-no-key-anywhere
+    # case: resolving lazily per-page instead (i.e. just deleting this
+    # check outright) would let every page exhaust its Vision retries
+    # first and the job would end up reporting a confusing "No
+    # electrical tags found — check PDF quality" instead of the real
+    # "Invalid or missing API key" cause.
+    from apps.core.ai_consumer_clients import provider_api_key
+    api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if not (api_key and api_key.strip()):
         raise ValueError('api_key is required for Vision-based tag extraction')
 
@@ -409,14 +466,8 @@ def process_electrical_comparison(self, job_id: str, context: dict = None):
                 extraction = _extract_electrical_tags_with_progress(pdf_bytes, api_key, provider, model, job)
             except ValueError as e:
                 job.status = 'failed'
-                error_msg = str(e)
-                if 'api_key' in error_msg.lower():
-                    reason = 'Invalid or missing API key'
-                elif 'insufficient' in error_msg.lower():
-                    reason = 'Insufficient tokens. Please top up.'
-                else:
-                    reason = error_msg
-                job.error_message = f'AI Vision failed: {reason}. Please check your API key and try again.'
+                reason = _classify_ai_vision_error(e)
+                job.error_message = f'AI Vision failed: {reason}.'
                 job.save()
                 return
             except Exception as e:
@@ -425,8 +476,15 @@ def process_electrical_comparison(self, job_id: str, context: dict = None):
                 # OpenAI and fails with an SDK-specific exception here,
                 # not the ValueError branch above — this must still
                 # surface the real reason, not a generic message.
+                # FIX 1 — this used to unconditionally append "Please
+                # check your API key and try again" to ANY SDK
+                # exception here, including a rate-limit/overload one,
+                # which told the user to check a key that was never the
+                # problem. Classified the same way as the ValueError
+                # branch above now.
                 job.status = 'failed'
-                job.error_message = f'AI Vision failed: {e}. Please check your API key and try again.'
+                reason = _classify_ai_vision_error(e)
+                job.error_message = f'AI Vision failed: {reason}.'
                 job.save()
                 return
 
