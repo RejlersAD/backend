@@ -3258,14 +3258,20 @@ def _dedup_equipment_by_tag(items: list) -> list:
         if tag not in by_tag:
             by_tag[tag] = item
         else:
+            from apps.pid_analysis.equipment_metadata import _merge_metadata
             _skip_keys = {'sl_no', 'tag', 'type_label', 'area', 'drawing_ref',
                           'line_connections', 'nozzle_connections'}
             _pop_new = sum(1 for k, v in item.items()
                            if k not in _skip_keys and v and v not in ('', 'No', [], 'N/A'))
             _pop_old = sum(1 for k, v in by_tag[tag].items()
                            if k not in _skip_keys and v and v not in ('', 'No', [], 'N/A'))
-            if _pop_new > _pop_old:
-                by_tag[tag] = item
+            winner = item if _pop_new > _pop_old else by_tag[tag]
+            loser = by_tag[tag] if winner is item else item
+            if winner.get('metadata') and loser.get('metadata'):
+                winner['metadata'] = _merge_metadata(winner['metadata'], loser['metadata'])
+                from apps.pid_analysis.equipment_metadata import equipment_master_view
+                winner['equipment_master'] = equipment_master_view(winner['metadata'])
+            by_tag[tag] = winner
     result = list(by_tag.values())
     print(f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out', flush=True)
 
@@ -3279,8 +3285,9 @@ def _dedup_equipment_by_tag(items: list) -> list:
     try:
         cfg     = _load_config()
         ext_cfg = cfg.get('extraction', {})
-        if bool(ext_cfg.get('merge_sibling_unit_variants_cross_page', True)) \
-                and bool(ext_cfg.get('merge_sibling_unit_variants', True)):
+        if (not any(it.get('equipment_master') for it in result)
+                and bool(ext_cfg.get('merge_sibling_unit_variants_cross_page', True))
+                and bool(ext_cfg.get('merge_sibling_unit_variants', True))):
             _sep       = str(ext_cfg.get('sibling_merge_separator', '/'))
             _min_group = int(ext_cfg.get('sibling_merge_min_group_size', 2))
             _sibling_split_re = re.compile(

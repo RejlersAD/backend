@@ -25,7 +25,9 @@ the record requires explicit saving.
 ## Contract
 
 Existing `/api/v1/sales/deals/` endpoints remain canonical. Additive fields are
-`opportunity_type` (tender/rfq/eoi/direct_enquiry/other; historical blank allowed),
+`opportunity_type` (new registration: eio/budgetary/technical/commercial/
+techno_commercial/other; historical tender/rfq/eoi/direct_enquiry and blank
+remain valid),
 `open_date` (nullable date), and read-only `created_by`. List/detail expose
 `created_by_name`. `deal_code` is read-only. Existing `created_at` is actual
 creation time, independent of opening date.
@@ -50,6 +52,12 @@ Returns default_owner (User ID), owners [{id,name}] and opportunity_types
 [{value,label}]. Active owner choices reuse existing Sales record visibility.
 Client read authority and canonical client/owner visibility are checked on the
 server. GET does not reserve a code.
+
+The manual register displays EIO, Budgetary, Technical, Commercial,
+Techno Commerical and Others, in that order. The options API also returns
+legacy types for existing email registration and records. EIO is a separate
+type from historical EOI; existing records are not recategorized. Sales
+migration 0023 updates field choices without rewriting saved data.
 
 Manual POST accepts optional registration_request_id (UUID). Same actor, UUID
 and validated payload returns the existing accessible record (200); changed

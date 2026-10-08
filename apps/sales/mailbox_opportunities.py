@@ -26,6 +26,7 @@ from .email_opportunity_evidence import (
 )
 from .microsoft_graph import SalesMicrosoftGraphService
 from .models import OpportunityAuditEvent
+from .opportunity_registration import visible_opportunity_owners
 from .serializers import DealCreateSerializer
 
 
@@ -246,8 +247,11 @@ def convert_mailbox_message(*, connection, connection_queryset, user, data):
         identity = tender_identity(analysis_snapshot)
         if identity:
             source['email_tender_identity'] = identity
+        resolved_owner = serializer.validated_data.get('owner') or user
+        if not visible_opportunity_owners(user).filter(pk=resolved_owner.pk).exists():
+            raise serializers.ValidationError({'owner': 'Choose an active owner from the Sales Department.'})
         opportunity = serializer.save(
-            owner=serializer.validated_data.get('owner') or user,
+            owner=resolved_owner,
             open_date=serializer.validated_data.get('open_date') or email_open_date(message.get('received_at')),
             client=client, opportunity_source='client_email',
             next_action='Qualify email-originated opportunity',

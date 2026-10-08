@@ -38,6 +38,12 @@ from .equipment_analysis_views import (
     get_equipment_analysis_results,
     get_equipment_analysis_status
 )
+from .equipment_register_views import (
+    current_equipment_register,
+    equipment_register_changes,
+    import_equipment_extraction,
+    update_equipment_item,
+)
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions
 from rest_framework.response import Response
@@ -187,6 +193,20 @@ urlpatterns = [
     path('equipment/download-excel/<str:upload_id>/', download_equipment_excel, name='equipment-download-excel'),
     path('equipment/results/<str:upload_id>/', get_equipment_analysis_results, name='equipment-results'),
     path('equipment/status/<str:upload_id>/', get_equipment_analysis_status, name='equipment-status'),
+
+    # Durable Equipment Register drafts
+    path('equipment-registers/current/', current_equipment_register, name='equipment-register-current'),
+    path('equipment-registers/import-extraction/', import_equipment_extraction, name='equipment-register-import'),
+    path(
+        'equipment-registers/<uuid:register_id>/changes/',
+        equipment_register_changes,
+        name='equipment-register-changes',
+    ),
+    path(
+        'equipment-registers/<uuid:register_id>/items/<uuid:item_id>/',
+        update_equipment_item,
+        name='equipment-register-item-update',
+    ),
     
     # History endpoints
     path('history/', pid_history_overview, name='pid-history-overview'),
