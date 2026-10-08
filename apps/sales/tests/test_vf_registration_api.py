@@ -102,9 +102,27 @@ class VFRegistrationAPITests(TestCase):
         self.assertIn(self.actor.pk, [row['id'] for row in response.data['owners']])
         self.assertNotIn(inactive.pk, [row['id'] for row in response.data['owners']])
         self.assertNotIn('next_code', response.data)
+        self.assertEqual(response.data['opportunity_types'][:6], [
+            {'value': 'eio', 'label': 'EIO'},
+            {'value': 'budgetary', 'label': 'Budgetary'},
+            {'value': 'technical', 'label': 'Technical'},
+            {'value': 'commercial', 'label': 'Commercial'},
+            {'value': 'techno_commercial', 'label': 'Techno Commerical'},
+            {'value': 'other', 'label': 'Others'},
+        ])
+        self.assertIn({'value': 'eoi', 'label': 'EOI'}, response.data['opportunity_types'])
         denied = get_user_model().objects.create_user('vf-denied', email='vf-denied@example.test')
         self.client.force_authenticate(denied)
         self.assertEqual(self.client.get('/api/v1/sales/deals/registration-options/').status_code, 403)
+
+    def test_new_opportunity_types_save_and_unknown_type_is_rejected(self):
+        for value in ('eio', 'budgetary', 'technical', 'commercial', 'techno_commercial', 'other'):
+            with self.subTest(value=value):
+                response = self.save(registration_request_id=str(uuid4()), opportunity_type=value)
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual(response.data['opportunity_type'], value)
+        self.assertEqual(self.save(opportunity_type='unrecognized').status_code, 400)
+        self.assertEqual(Deal.objects.count(), 6)
 
     def test_invalid_request_uuid_does_not_allocate_number(self):
         self.assertEqual(self.save(registration_request_id='invalid').status_code, 400)

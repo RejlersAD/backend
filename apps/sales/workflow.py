@@ -173,10 +173,16 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
         raise ValidationError({'decision': 'Use bid, conditional_bid, or no_bid.'})
     if decision in {'conditional_bid', 'no_bid'} and not reason:
         raise ValidationError({'reason': 'A justification is required for this decision.'})
-    if opportunity.estimated_value is None or not opportunity.currency:
-        raise ValidationError({'detail': 'Complete the estimated value and currency before a bid decision.'})
+    # Warning only: record the Go / No-go decision and flag incomplete commercials.
+    missing_commercials = opportunity.estimated_value is None or not opportunity.currency
+    opportunity.decision_warnings = (
+        ['Complete the estimated value and currency to support downstream proposal and award controls.']
+        if missing_commercials else []
+    )
     approval_value = Decimal(str(getattr(settings, 'SALES_MANAGEMENT_APPROVAL_VALUE', 5000000)))
-    requires_management = opportunity.risk_level in {'high', 'critical'} or opportunity.estimated_value >= approval_value
+    requires_management = opportunity.risk_level in {'high', 'critical'} or (
+        opportunity.estimated_value is not None and opportunity.estimated_value >= approval_value
+    )
     if decision_authority == 'configured_route' and requires_management and actor.id == opportunity.owner_id:
         raise ValidationError({
             'approver': 'A high-risk or high-value bid decision requires independent management approval.',

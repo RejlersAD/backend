@@ -461,3 +461,188 @@ class PIDEquipmentItem(models.Model):
 
     def __str__(self):
         return f'{self.tag} ({self.drawing_ref or "no drawing"})'
+
+
+# ── Controlled Equipment Register drafts ──────────────────────────────────
+
+class EquipmentRegister(models.Model):
+    """Project-scoped business register; extraction rows remain source evidence."""
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        SUBMITTED = 'submitted', 'Submitted'
+        APPROVED = 'approved', 'Approved'
+        ARCHIVED = 'archived', 'Archived'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'project_organizer.Project', on_delete=models.PROTECT,
+        related_name='equipment_registers',
+    )
+    enterprise_project = models.ForeignKey(
+        'core.Project', on_delete=models.PROTECT, null=True, blank=True,
+        db_constraint=False, related_name='equipment_registers',
+        help_text='Reviewed canonical project identity copied from the organizer workspace.',
+    )
+    register_number = models.CharField(max_length=64)
+    name = models.CharField(max_length=255, default='Equipment List')
+    discipline = models.CharField(max_length=64, blank=True, default='')
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    current_revision = models.ForeignKey(
+        'EquipmentRevision', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='+',
+    )
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='created_equipment_registers',
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='updated_equipment_registers',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_equipment_registers'
+        ordering = ['-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['project', 'register_number'],
+                name='uniq_equipment_register_number_per_project',
+            ),
+        ]
+        indexes = [models.Index(fields=['project', 'is_active', '-updated_at'])]
+
+    def __str__(self):
+        return f'{self.register_number} — {self.name}'
+
+
+class EquipmentRevision(models.Model):
+    """Exact Equipment Register snapshot. Only draft revisions are mutable."""
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        SUBMITTED = 'submitted', 'Submitted'
+        APPROVED = 'approved', 'Approved'
+        SUPERSEDED = 'superseded', 'Superseded'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    register = models.ForeignKey(
+        EquipmentRegister, on_delete=models.PROTECT, related_name='revisions',
+    )
+    number = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    is_immutable = models.BooleanField(default=False)
+    version = models.PositiveIntegerField(default=1)
+    source_upload_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    source_files = models.JSONField(default=list, blank=True)
+    extraction_run = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='created_equipment_revisions',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_equipment_revisions'
+        ordering = ['-number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['register', 'number'], name='uniq_equipment_revision_number',
+            ),
+        ]
+        indexes = [models.Index(fields=['register', '-number'])]
+
+    def __str__(self):
+        return f'{self.register.register_number} Rev {self.number}'
+
+
+class EquipmentItem(models.Model):
+    """One editable equipment row belonging to an exact register revision."""
+
+    class ReviewState(models.TextChoices):
+        UNREVIEWED = 'unreviewed', 'Unreviewed'
+        REVIEWED = 'reviewed', 'Reviewed'
+        DISCREPANCY = 'discrepancy', 'Discrepancy'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    revision = models.ForeignKey(
+        EquipmentRevision, on_delete=models.PROTECT, related_name='items',
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    tag = models.CharField(max_length=64, db_index=True)
+    revision_label = models.CharField(max_length=32, blank=True, default='')
+    description = models.CharField(max_length=300, blank=True, default='')
+    equipment_type = models.CharField(max_length=120, blank=True, default='')
+    design_flowrate = models.CharField(max_length=100, blank=True, default='')
+    oper_pressure = models.CharField(max_length=64, blank=True, default='')
+    oper_temperature = models.CharField(max_length=64, blank=True, default='')
+    design_pressure_min = models.CharField(max_length=64, blank=True, default='')
+    design_pressure_max = models.CharField(max_length=64, blank=True, default='')
+    design_temp_min = models.CharField(max_length=64, blank=True, default='')
+    design_temp_max = models.CharField(max_length=64, blank=True, default='')
+    moc = models.CharField(max_length=120, blank=True, default='')
+    insulation = models.CharField(max_length=64, blank=True, default='')
+    dimension_length = models.CharField(max_length=64, blank=True, default='')
+    dimension_diameter = models.CharField(max_length=64, blank=True, default='')
+    motor_rating = models.CharField(max_length=64, blank=True, default='')
+    pid_no = models.CharField(max_length=300, blank=True, default='')
+    quality_required = models.CharField(max_length=64, blank=True, default='')
+    phase = models.CharField(max_length=64, blank=True, default='')
+    remarks = models.CharField(max_length=500, blank=True, default='')
+    source_locator = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(
+        default=dict, blank=True,
+        help_text='Bounded source-backed P&ID, specification, relationship, and validation metadata.',
+    )
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    review_state = models.CharField(
+        max_length=20, choices=ReviewState.choices, default=ReviewState.UNREVIEWED,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_equipment_register_items'
+        ordering = ['sort_order', 'tag']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['revision', 'tag'], name='uniq_equipment_item_tag_per_revision',
+            ),
+        ]
+        indexes = [models.Index(fields=['revision', 'tag'])]
+
+    def __str__(self):
+        return self.tag
+
+
+class EquipmentItemChange(models.Model):
+    """Append-only field evidence for import and manual draft changes."""
+
+    class Source(models.TextChoices):
+        AI = 'ai', 'AI extraction'
+        MANUAL = 'manual', 'Manual edit'
+        IMPORT = 'import', 'Import'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    item = models.ForeignKey(
+        EquipmentItem, on_delete=models.PROTECT, related_name='changes',
+    )
+    field = models.CharField(max_length=64)
+    old_value = models.JSONField(null=True, blank=True)
+    new_value = models.JSONField(null=True, blank=True)
+    source = models.CharField(max_length=20, choices=Source.choices)
+    reason = models.CharField(max_length=500, blank=True, default='')
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='equipment_item_changes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'pid_equipment_item_changes'
+        ordering = ['created_at']
+        indexes = [models.Index(fields=['item', 'created_at'])]

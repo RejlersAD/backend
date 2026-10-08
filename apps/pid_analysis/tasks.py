@@ -42,7 +42,7 @@ EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'
 # Soft-coded: document text excerpt kept with the results (and served to the
 # RADAI Assistant as document_excerpt so the chat can answer from the SOURCE
 # document, not only the extracted rows). Also archived to S3 as .txt.
-EQ_DOC_EXCERPT_CHARS = 8000
+EQ_DOC_EXCERPT_CHARS = 24000
 
 
 def _eq_doc_excerpt(file_bytes: bytes) -> str:
@@ -267,7 +267,7 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
     2. P&ID drawing mode    — iterates pages one by one when PDF has > 1 page,
        runs AI gap-fill and title-block revision per page, then cross-page dedup.
 
-    Returns: (equipment_list, drawing_ref, extraction_mode)
+    Returns: (equipment_list, drawing_ref, extraction_mode, source_text)
     Core extraction functions in equipment_analysis_views.py are unchanged.
     """
     from apps.pid_analysis.equipment_analysis_views import (
@@ -282,9 +282,52 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
         _dedup_equipment_by_tag,
         _REVISION_USE_TOPMOST,
     )
+    from apps.pid_analysis.equipment_metadata import enrich_equipment_metadata, equipment_master_view
 
+    # Master identities are per unit; a combined A/B tag would lose both units' relationships.
+    config = {**config, 'extraction': {
+        **config.get('extraction', {}), 'merge_sibling_unit_variants': False,
+    }}
     ext_cfg     = config.get('extraction', {})
     drawing_ref = filename.rsplit('.', 1)[0]
+    source_text = ''
+
+    # Lazily rendered once per file for the AI vision pass (P&ID mode only).
+    page_image_cache: list = []
+
+    def vision_page_image(page):
+        """Render (once per file) and pick this page's image for vision. Never raises."""
+        if not page_image_cache:
+            try:
+                from apps.pid_analysis.equipment_vision import render_page_images
+                page_image_cache.extend(render_page_images(file_bytes, config) or [])
+            except Exception as exc:  # noqa: BLE001 — vision must never break extraction
+                logger.warning('[EQPages] Vision page rendering failed: %s', type(exc).__name__)
+                return None
+        if not page_image_cache:
+            return None
+        if page is not None and len(page_image_cache) > 1 and 1 <= page <= len(page_image_cache):
+            return page_image_cache[page - 1]
+        return page_image_cache[0]
+
+    def attach_master(items, text, reference, page):
+        for item in items:
+            item['source_locator'] = {
+                'filename': filename, 'drawing_no': item.get('pid_no') or reference,
+                'page': page,
+            }
+        _classify_equipment_types(items, config)
+        enrich_equipment_metadata(items, text, config)
+        if extraction_mode == 'pid_drawing' and text and items:
+            try:
+                from apps.pid_analysis.equipment_vision import vision_enrich_equipment
+                image = vision_page_image(page)
+                if image:
+                    vision_enrich_equipment(items, image, text, config)
+            except Exception as exc:  # noqa: BLE001 — vision must never break extraction
+                logger.warning('[EQPages] Vision enrichment skipped: %s', type(exc).__name__)
+        for item in items:
+            item['equipment_master'] = equipment_master_view(item['metadata'])
 
     # ── Validate PDF + attempt repair if 0 pages ────────────────────────────
     # Raises ValueError (caught by caller) on unrecoverable files.
@@ -301,6 +344,11 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
     equipment       = _extract_equipment_register_rows(pid_file, config)
     extraction_mode = 'register'
 
+    if equipment is not None:
+        # Register extraction may already have used OCR internally. Keep the
+        # text-layer excerpt when available without making extraction fail.
+        source_text = _eq_doc_excerpt(file_bytes)
+
     if equipment is None:
         extraction_mode = 'pid_drawing'
         _tb_rev_enabled = bool(ext_cfg.get('titleblock_revision_enabled', True))
@@ -313,6 +361,7 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
             if set_progress:
                 set_progress(30, 'Running OCR on P&ID drawing…')
             text = _extract_text_from_pdf(pid_file, config)
+            source_text = text
 
             _coord_dwg_no = ''
             try:
@@ -339,6 +388,7 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
                 if _doc_rev:
                     for _item in equipment:
                         _item['revision'] = _doc_rev
+            attach_master(equipment, text, drawing_ref, 1)
 
         else:
             # ── Multi-page path: process each P&ID page independently ───────
@@ -347,6 +397,7 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
             )
             _all_items:        list = []
             _all_drawing_refs: list = []
+            _page_texts:       list = []
 
             for _pg in range(_page_count):
                 _pct = int(20 + _pg / _page_count * 60)
@@ -356,6 +407,8 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
 
                 pid_file.seek(0)
                 _page_text      = _extract_text_from_pdf(pid_file, config, _page_index=_pg)
+                if _page_text:
+                    _page_texts.append(_page_text)
                 _pg_drawing_ref = (
                     _extract_titleblock_dwg_no(_page_text)
                     or f'{drawing_ref}_P{_pg + 1}'
@@ -375,6 +428,7 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
                         for _item in _pg_items:
                             _item['revision'] = _pg_rev
 
+                attach_master(_pg_items, _page_text, _pg_drawing_ref, _pg + 1)
                 _all_items.extend(_pg_items)
                 if _pg_drawing_ref not in _all_drawing_refs:
                     _all_drawing_refs.append(_pg_drawing_ref)
@@ -387,12 +441,15 @@ def _process_pid_pages(file_bytes: bytes, filename: str, config: dict,
             # Dedup across pages by tag — richest extraction per tag wins
             equipment   = _dedup_equipment_by_tag(_all_items)
             drawing_ref = ', '.join(_all_drawing_refs)
+            source_text = '\n\n'.join(_page_texts)
             logger.info(
                 '[EQPages] Multi-page dedup: %d raw → %d unique items',
                 len(_all_items), len(equipment),
             )
 
-    return equipment or [], drawing_ref, extraction_mode
+    if extraction_mode == 'register':
+        attach_master(equipment, source_text, drawing_ref, None)
+    return equipment or [], drawing_ref, extraction_mode, source_text
 
 
 # ── Celery Tasks ───────────────────────────────────────────────────────────────
@@ -436,7 +493,7 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         config     = _load_config()
 
         # ── Full pipeline: register → single-page P&ID → multi-page P&ID ────
-        equipment, drawing_ref, extraction_mode = _process_pid_pages(
+        equipment, drawing_ref, extraction_mode, source_text = _process_pid_pages(
             file_bytes, filename, config, set_progress=_set_progress,
         )
 
@@ -450,6 +507,9 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         _set_progress(90, 'Classifying equipment types…')
         _classify_equipment_types(equipment, config)
 
+        # Populate bounded source-backed metadata for the register workspace.
+        doc_excerpt = (source_text or _eq_doc_excerpt(file_bytes))[:EQ_DOC_EXCERPT_CHARS]
+
         # ── Persist to DB (non-fatal) ────────────────────────────────────────
         _persist_to_db(equipment, upload_id, extraction_mode, drawing_ref, config)
 
@@ -457,7 +517,6 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         # Document text excerpt rides with the result → served by the results
         # endpoint → published to the RADAI Assistant (chat can quote the
         # source document, not just the extracted rows).
-        doc_excerpt = _eq_doc_excerpt(file_bytes)
         result = {
             'status':          'completed',
             'equipment':       equipment,
@@ -532,6 +591,7 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list, pr
         config        = _load_config()
         all_equipment: list = []
         drawing_refs:  list = []
+        source_texts:  list = []
 
         for fi, fd in enumerate(files_data, 1):
             filename   = fd['filename']
@@ -550,7 +610,7 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list, pr
             _file_progress(0, f'Starting {filename}…')
 
             try:
-                equipment, drawing_ref, _ = _process_pid_pages(
+                equipment, drawing_ref, _, source_text = _process_pid_pages(
                     file_bytes, filename, config, set_progress=_file_progress,
                 )
 
@@ -558,6 +618,12 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list, pr
                     if not item.get('sl_no'):
                         item['sl_no'] = str(idx)
                     item['drawing_ref'] = drawing_ref
+
+                # Enrich per source file to avoid associating nearby tags from
+                # another drawing with this equipment item.
+                _classify_equipment_types(equipment, config)
+                if source_text:
+                    source_texts.append(source_text)
 
                 all_equipment.extend(equipment)
                 # drawing_ref may be comma-separated for multi-page PDFs
@@ -574,6 +640,14 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list, pr
         # Cross-file deduplication (richest extraction per tag wins)
         all_equipment = _dedup_equipment_by_tag(all_equipment)
 
+        # Resolve same-upload-batch cross-P&ID references: drawing-to-drawing
+        # links and connected equipment living on another drawing in this upload.
+        try:
+            from apps.pid_analysis.equipment_metadata import resolve_batch_cross_references
+            all_equipment = resolve_batch_cross_references(all_equipment)
+        except Exception as exc:  # noqa: BLE001 — resolution must never break the batch
+            logger.warning('[EQBatchTask] Batch cross-reference resolution skipped: %s', exc)
+
         # Re-number sequentially across all drawings
         for idx, item in enumerate(all_equipment, 1):
             item['sl_no'] = idx
@@ -582,11 +656,7 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list, pr
         _classify_equipment_types(all_equipment, config)
 
         # Combined document excerpt across all files (capped, soft-coded)
-        doc_excerpt = '\n\n'.join(
-            t for t in (
-                _eq_doc_excerpt(base64.b64decode(fd['b64'])) for fd in files_data
-            ) if t
-        )[:EQ_DOC_EXCERPT_CHARS]
+        doc_excerpt = '\n\n'.join(source_texts)[:EQ_DOC_EXCERPT_CHARS]
 
         result = {
             'status':      'completed',
@@ -731,4 +801,3 @@ def run_instrument_index_task(
             II_RESULT_CACHE_TTL_S,
         )
         # Do NOT re-raise — same reasoning as the equipment task.
-

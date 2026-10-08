@@ -941,7 +941,10 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             self.get_object(), request.user,
             request.data.get('decision'), request.data.get('reason', ''),
         )
-        return self._detail_response(deal)
+        return self._detail_response(
+            deal,
+            warnings=getattr(deal, 'decision_warnings', []),
+        )
 
     @action(detail=True, methods=['post'], url_path='ceo-decision')
     def ceo_decision(self, request, pk=None):

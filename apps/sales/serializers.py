@@ -477,7 +477,7 @@ class DealCreateSerializer(serializers.ModelSerializer):
         actor = self._actor()
         if value is None:
             if self.instance is not None:
-                raise serializers.ValidationError('Choose an active owner within your Sales access.')
+                raise serializers.ValidationError('Choose an active owner from the Sales Department.')
             return value
         if self.instance is not None and value.pk != self.instance.owner_id:
             try:
@@ -490,7 +490,7 @@ class DealCreateSerializer(serializers.ModelSerializer):
             if not is_manager:
                 raise serializers.ValidationError('Only Sales managers or higher may reassign opportunity ownership.')
         if not visible_opportunity_owners(actor).filter(pk=value.pk).exists():
-            raise serializers.ValidationError('Choose an active owner within your Sales access.')
+            raise serializers.ValidationError('Choose an active owner from the Sales Department.')
         return value
 
     def validate_client(self, value):

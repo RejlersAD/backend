@@ -31,7 +31,13 @@ def _owner_filter_for_users(predicate):
 
 
 def visible_opportunity_owners(actor):
-    """Active assignees within the same owner scope as the Sales Deal list."""
+    """Active Sales Department assignees within the Sales Deal visibility scope.
+
+    The VF Register Opportunity owner dropdown lists only Sales Department
+    employees (UserProfile.department matching the canonical Sales rule:
+    contains 'sales' or 'business development'), never all employees with
+    Sales module access.
+    """
     users = get_user_model().objects.filter(is_active=True)
     if not actor or not actor.is_authenticated or not actor.is_active:
         return users.none()
@@ -42,7 +48,11 @@ def visible_opportunity_owners(actor):
         predicate = _owner_filter_for_users(predicate)
     except ValueError:
         return users.none()
-    return users.filter(predicate).distinct().order_by('first_name', 'last_name', 'pk')
+    sales_department = Q(rbac_profile__is_deleted=False) & (
+        Q(rbac_profile__department__icontains='sales')
+        | Q(rbac_profile__department__icontains='business development')
+    )
+    return users.filter(predicate).filter(sales_department).distinct().order_by('first_name', 'last_name', 'pk')
 
 
 @transaction.atomic
@@ -54,7 +64,7 @@ def create_registered_opportunity(*, actor, validated_data):
     values = dict(validated_data)
     owner = values.get('owner') or actor
     if not visible_opportunity_owners(actor).filter(pk=owner.pk).exists():
-        raise ValidationError({'owner': 'Choose an active owner within your Sales access.'})
+        raise ValidationError({'owner': 'Choose an active owner from the Sales Department.'})
     values['owner'] = owner
     values['created_by'] = actor
     # Email conversion deliberately supplies None when no source date exists.

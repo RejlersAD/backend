@@ -13,6 +13,7 @@ ROUTE_MODULES = {
     'pid/pressure-instruments/': 'process_datasheet',
     'pid/instrument-index/': 'instrument_index',
     'pid/cable-block-diagram/': 'instrument_datasheet',
+    'pid/equipment-registers/': 'pid_equipment_list',
     'pid/equipment/': 'pid_equipment_list',
     'pid/': 'pid_analysis', 'pid-export/': 'pid_analysis',
     'pid-verification/extract-valve-mto/': 'piping_pms',

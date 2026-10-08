@@ -35,6 +35,7 @@ from .email_client_resolution import (
     email_customer_intent, require_reviewed_customer_name, resolve_email_customer,
 )
 from .mailbox_opportunities import EmailReviewConflict, REVIEW_FIELDS, _reviewed_serializer, email_open_date
+from .opportunity_registration import visible_opportunity_owners
 from .email_opportunity_evidence import (
     prevent_duplicate_tender, read_saved_email_review, source_digest, tender_identity,
 )
@@ -374,8 +375,11 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             identity = tender_identity(analysis_snapshot)
             if identity:
                 payload['custom_fields']['email_tender_identity'] = identity
+            resolved_owner = opportunity_serializer.validated_data.get('owner') or request.user
+            if not visible_opportunity_owners(request.user).filter(pk=resolved_owner.pk).exists():
+                raise serializers.ValidationError({'owner': 'Choose an active owner from the Sales Department.'})
             opportunity = opportunity_serializer.save(
-                owner=opportunity_serializer.validated_data.get('owner') or request.user,
+                owner=resolved_owner,
                 open_date=opportunity_serializer.validated_data.get('open_date') or email_open_date(intake.received_at),
                 **payload,
             )

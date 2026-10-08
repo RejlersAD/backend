@@ -73,11 +73,16 @@ AWARD_STATUS_CHOICES = [
 ]
 
 OPPORTUNITY_TYPE_CHOICES = [
+    ('eio', 'EIO'),
+    ('budgetary', 'Budgetary'),
+    ('technical', 'Technical'),
+    ('commercial', 'Commercial'),
+    ('techno_commercial', 'Techno Commerical'),
+    ('other', 'Others'),
     ('tender', 'Tender'),
     ('rfq', 'RFQ'),
     ('eoi', 'EOI'),
     ('direct_enquiry', 'Direct enquiry'),
-    ('other', 'Other'),
 ]
 
 # Service Categories
