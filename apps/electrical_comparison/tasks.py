@@ -485,9 +485,23 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
     equipment_file_name = context.get('equipment_file_name') or ''
     load_list_file_path = context.get('load_list_file_path')
     load_list_file_name = context.get('load_list_file_name') or ''
-    api_key = context.get('api_key', '')
+    api_key = context.get('api_key', '') or ''
     provider = context.get('provider', 'claude')
     model = context.get('model')
+
+    # STEP 3/4 — resolve the admin-key fallback HERE, before the AI
+    # Vision extraction even starts, rather than only inside
+    # _extract_electrical_tags_with_progress (which still does its own
+    # resolution too, defensively — this just means that one resolves
+    # the SAME value a second time, harmless). Resolving earlier makes
+    # the "did we actually get a usable key" question answered (and
+    # logged) up front, before any page-processing setup happens at all.
+    from apps.core.ai_consumer_clients import provider_api_key
+    resolved_key = provider_api_key(provider, fallback=lambda: api_key)
+    logger.info(
+        '[ElecCompareTask] API key resolved: %s',
+        'yes' if resolved_key else 'NO - EMPTY!',
+    )
 
     pid_tags = []
     extraction = None
@@ -505,7 +519,7 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
             with open(pid_file_path, 'rb') as f:
                 pdf_bytes = f.read()
             try:
-                extraction = _extract_electrical_tags_with_progress(pdf_bytes, api_key, provider, model, job)
+                extraction = _extract_electrical_tags_with_progress(pdf_bytes, resolved_key, provider, model, job)
             except ValueError as e:
                 job.status = 'failed'
                 reason = _classify_ai_vision_error(e)
