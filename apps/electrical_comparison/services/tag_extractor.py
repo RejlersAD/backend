@@ -15,7 +15,6 @@ import json
 import logging
 import re
 
-from apps.core.ai_consumer_clients import lazy_provider_client
 # Rendering/preprocessing is intentionally imported from THIS app's own
 # electrical_vision.py, not from apps.pid_checker_v2.services.
 # vision_extractor — the two render/preprocess pipelines were forked
@@ -735,10 +734,21 @@ def _parse_electrical_vision_response(raw: str) -> dict:
 
 
 def _call_claude_electrical(api_key, image_b64, user_prompt, model=None, system_prompt=None):
+    # BUG FIX (real root cause, explicit request): lazy_provider_client
+    # doesn't actually use the api_key passed to it as-is — its
+    # internal _ProviderClient._invoke() calls apps.core.ai_credentials.
+    # resolve_provider_credential() on every call, which returns a
+    # DB-configured admin credential UNCONDITIONALLY whenever one
+    # exists and is enabled, completely ignoring this function's own
+    # api_key argument (the user's own key). That's the actual source
+    # of production's "The configured AI credential is unavailable."
+    # error, and it was unreachable from tag_extractor.py/tasks.py
+    # alone — lazy_provider_client lives in apps/core, untouched by
+    # anything changed so far. Bypassed completely here: build the
+    # real anthropic SDK client directly with the exact key passed in,
+    # no DB lookup of any kind.
     import anthropic
-    client = lazy_provider_client(
-        'anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S,
-    )
+    client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.messages.create(
         model=model or VISION_MODELS['claude'],
         max_tokens=VISION_MAX_TOKENS,
@@ -767,10 +777,13 @@ def _call_claude_electrical(api_key, image_b64, user_prompt, model=None, system_
 
 
 def _call_openai_electrical(api_key, image_b64, user_prompt, system_prompt=None):
+    # BUG FIX — same reasoning as _call_claude_electrical above:
+    # lazy_provider_client's DB lookup overrides this function's own
+    # api_key argument whenever an admin credential is configured.
+    # Bypassed completely — real openai SDK client built directly with
+    # the exact key passed in.
     import openai
-    client = lazy_provider_client(
-        'openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S,
-    )
+    client = openai.OpenAI(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.chat.completions.create(
         model=VISION_MODELS['openai'],
         max_tokens=VISION_MAX_TOKENS,
