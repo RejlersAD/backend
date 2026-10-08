@@ -25,19 +25,39 @@ into a separate Celery worker process) plus api_key/provider/model:
     'api_key': str, 'provider': str, 'model': str | None,
 }
 
-This module imports a few helpers from .views (_collect_comparison_rows,
-_build_panel_verification) rather than duplicating that logic — views.py
-in turn lazy-imports THIS module's task function inside its own post()
-method, so neither side imports the other at module-load time and there
-is no circular import.
+BUG FIX: this module used to lazy-import _collect_comparison_rows/
+_build_panel_verification/_build_combined_comparison FROM views.py,
+inside process_electrical_comparison()'s own function body — several
+lazy imports running BEFORE any try/except in that function. Importing
+views.py pulled in its full module-level import list (DRF views, the
+queue service, etc.); if any of that failed inside a Celery worker
+process, the whole task crashed in well under a second, before
+job.status could ever be set to 'failed' — no error saved at all, job
+left stuck at 'processing' forever, or (worse) a generic crash
+message happening to contain a substring like 'api_key' got
+mislabeled by the error classifier as "Invalid or missing API key",
+hiding the real cause entirely. Those three functions now live in
+helpers.py instead (no dependency on either this module or views.py),
+and every import this module needs is at module level below, so an
+import failure surfaces at Celery worker startup — not mid-task, with
+no error path left to report it through.
 """
 import gc
+import io
 import logging
 import os
 import time
 
 from celery import shared_task
 from django.db import connection
+
+from apps.pid_verification_v2.services.comparison_engine import compare_with_equipment_list
+from apps.electrical_comparison.models import ElectricalComparisonJob, ElectricalComparisonResult
+from apps.electrical_comparison.services.tag_extractor import resolve_equipment_type
+from apps.electrical_comparison.services.excel_parser import parse_excel_tags, extract_panel_tag_from_load_list
+from apps.electrical_comparison.helpers import (
+    _collect_comparison_rows, _build_panel_verification, _build_combined_comparison,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +196,15 @@ def _extract_electrical_tags_with_progress(pdf_bytes, api_key, provider, model, 
     # "Invalid or missing API key" cause.
     from apps.core.ai_consumer_clients import provider_api_key
     api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
+    # STEP 4 — debug visibility into whether resolution actually
+    # produced a usable key (admin-configured or user-supplied) BEFORE
+    # the empty check below decides pass/fail, so a real "nothing
+    # resolved" case is visible in logs rather than just inferred from
+    # the ValueError that follows.
+    logger.info(
+        '[ElecCompareTask] API key resolved: %s',
+        'yes' if (api_key and api_key.strip()) else 'NO - EMPTY!',
+    )
     if not (api_key and api_key.strip()):
         raise ValueError('api_key is required for Vision-based tag extraction')
 
@@ -418,17 +447,30 @@ def _cleanup_temp_file(path):
     soft_time_limit=1140,  # 19 min soft limit
 )
 def process_electrical_comparison(self, job_id: str, context: dict = None):
-    context = context or {}
-    import io
+    # STEP 3 — a true outer safety net around the ENTIRE function body,
+    # including the job lookup below (previously its own small try/
+    # except that only handled DoesNotExist — any OTHER exception
+    # there, e.g. a transient DB error, propagated completely unhandled
+    # with nothing logged and no error ever saved anywhere). Catches
+    # literally anything, logs it, makes a best-effort attempt to mark
+    # the job 'failed' with the real message, then re-raises so Celery
+    # itself still sees this task as failed (not silently swallowed).
+    try:
+        return _process_electrical_comparison_inner(job_id, context)
+    except Exception as e:
+        logger.exception('[ElecCompareTask] Fatal error job_id=%s: %s', job_id, e)
+        try:
+            job = ElectricalComparisonJob.objects.get(job_id=job_id)
+            job.status = 'failed'
+            job.error_message = f'Task failed: {str(e)}'
+            job.save()
+        except Exception:
+            pass
+        raise
 
-    from apps.pid_verification_v2.services.comparison_engine import compare_with_equipment_list
-    from .models import ElectricalComparisonJob, ElectricalComparisonResult
-    from .services.tag_extractor import resolve_equipment_type
-    from .services.excel_parser import parse_excel_tags, extract_panel_tag_from_load_list
-    # Lazy-imported from views.py (not at module top) to avoid a
-    # module-load-time circular import — views.py itself lazy-imports
-    # this task function inside UploadComparisonView.post().
-    from .views import _collect_comparison_rows, _build_panel_verification, _build_combined_comparison
+
+def _process_electrical_comparison_inner(job_id: str, context: dict = None):
+    context = context or {}
 
     logger.info('[ElecCompareTask] Starting job_id=%s', job_id)
 
