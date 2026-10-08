@@ -234,6 +234,7 @@ INSTALLED_APPS = [
     'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
     'apps.instrument_io_workflow',  # Instrument IO List Workflow — CRS-style multi-revision IO List doc handling
     'apps.valve_mto',            # Valve MTO — server-side persistence for the Piping Valve MTO workspace
+    'apps.electrical_comparison', # Electrical Comparison — P&ID electrical tag vs Equipment/Load List comparison
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.project_organizer',    # Project Organizer — shared, cross-tool project registry (additive)
     'apps.valve_standards',      # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
@@ -1716,6 +1717,19 @@ LOGGING = {
             'propagate': False,
         },
         'apps.instrument_io_workflow': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # 2026-10-07: apps.electrical_comparison had the exact same bug
+        # described above — it carries its own [ElecCompare]/
+        # [ElectricalComparison] logger.info() diagnostic logging (page
+        # skip decisions, Vision token usage, tag classification) but was
+        # only ever added to INSTALLED_APPS, never to this per-app logger
+        # list, so every one of those calls was silently discarded by the
+        # root WARNING-level logger below — confirmed live: zero matching
+        # entries in django_errors.log despite real extraction runs.
+        'apps.electrical_comparison': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
             'propagate': False,

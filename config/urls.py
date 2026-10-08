@@ -162,6 +162,7 @@ urlpatterns = [
     path('api/v1/instrument-tools/', include('apps.instrument_tools.urls')),  # Instrument Tools — IO List / Cable Block / Cable Schedule
     path('api/v1/instrument-io-workflow/', include('apps.instrument_io_workflow.urls')),  # CRS-style multi-revision IO List documents
     path('api/v1/valve-mto/', include('apps.valve_mto.urls')),  # Valve MTO — server-side project/row persistence
+    path('api/v1/electrical-comparison/', include('apps.electrical_comparison.urls')),  # Electrical Comparison — P&ID electrical tag vs Equipment/Load List comparison
     path('api/v1/marketing-analytics/', include('apps.marketing_analytics.urls')),  # GA4 Real-time
     path('api/v1/projects/', include('apps.core.project_urls')),
     path('api/v1/project-control/', include('apps.project_control.urls')),  # Project Management — cost dashboards, estimates, documents

@@ -31,6 +31,7 @@ SECTION_OTHER_SPECIALTIES = 'other_specialties'
 SECTION_INSTRUMENT_TYPICAL_LETTER = 'instrument_typical_letter'
 SECTION_DRAWING_CONT = 'drawing_cont'
 SECTION_GENERAL_INSTRUMENT = 'general_instrument'
+SECTION_ELECTRICAL = 'electrical'
 
 SECTIONS = (
     SECTION_LINE_LIST,
@@ -54,6 +55,7 @@ SECTIONS = (
     SECTION_INSTRUMENT_TYPICAL_LETTER,
     SECTION_DRAWING_CONT,
     SECTION_GENERAL_INSTRUMENT,
+    SECTION_ELECTRICAL,
 )
 
 SECTION_LABELS = {
@@ -78,6 +80,7 @@ SECTION_LABELS = {
     SECTION_INSTRUMENT_TYPICAL_LETTER: 'Instrument Typical Letter',
     SECTION_DRAWING_CONT: 'Drawing Continuations',
     SECTION_GENERAL_INSTRUMENT: 'General Instrument or Function Symbols',
+    SECTION_ELECTRICAL: 'Electrical',
 }
 
 
@@ -1084,6 +1087,99 @@ DEFAULT_TEMPLATES: dict[str, dict] = {
                         'PROGRAMMABLE LOGIC CONTROL (BEHIND PANEL)': 'PROGRAMMABLE LOGIC CONTROL (BEHIND PANEL)',
                         'COMPUTER FUNCTION (BEHIND PANEL)': 'COMPUTER FUNCTION (BEHIND PANEL)',
                     },
+                },
+            ],
+        },
+    },
+    SECTION_ELECTRICAL: {
+        'name': 'Electrical — XXX-XX-XXXX (default)',
+        'description': (
+            'Electrical equipment tag: area code, equipment type code, '
+            'and sequence number with optional letter suffix '
+            '(e.g. 285-PM-411B, 285-U-S05A).'
+        ),
+        'definition': {
+            'separator': '-',
+            # Type codes that look tag-shaped (match the type_code
+            # field's own regex below) but are NOT electrical equipment
+            # — pipe tags, vessel tags, instrument tags, and other
+            # abbreviations commonly misread off an SLD/P&ID drawing.
+            # apps.electrical_comparison.services.tag_extractor reads
+            # this list dynamically (never hardcodes it) so adding a
+            # code here via the Legend Manager UI is picked up
+            # automatically, the same way the type_code lookup already is.
+            'invalid_type_codes': [
+                'P', 'V', 'H', 'NER', 'NW', 'UM',
+                'W', 'X', 'Y', 'Z', 'FT', 'LT',
+                'PT', 'TT', 'PL', 'PP', 'VL', 'VT', 'NM',
+                'FIC', 'PIC', 'LIC', 'TIC', 'L', 'MW',
+            ],
+            # Area codes shorter than this are rejected outright (not even
+            # flagged suspicious) — e.g. a 1-digit area like '5' in
+            # '5-U-503B' is a misread fragment of a real area code, never
+            # a real area on its own. Read dynamically by tag_extractor.py.
+            'min_area_digits': 3,
+            # This project's expected/canonical area code — any extracted
+            # tag whose area does NOT match this is flagged 'suspicious'
+            # (never discarded) by tag_extractor._flag_suspicious_areas.
+            # Leave unset (omit this key) for a project with no single
+            # dominant area, in which case that function falls back to
+            # its own per-extraction majority-area detection.
+            'dominant_area': '285',
+            # Known illustrative/example sequences (legend/symbol-key
+            # placeholders) that must always be filtered, regardless of
+            # the generic all-letters/repeated-letter pattern checks in
+            # tag_extractor._is_placeholder_sequence.
+            'placeholder_sequences': ['XXXX', 'YYYY'],
+            'fields': [
+                {
+                    'key': 'area',
+                    'label': 'Area Code',
+                    'regex': r'\d{1,5}',
+                    'notes': 'Area or platform number (3 digits, e.g. 285)',
+                },
+                {
+                    'key': 'type_code',
+                    'label': 'Type Code',
+                    'regex': r'[A-Za-z]{1,4}',
+                    'notes': (
+                        'Electrical equipment type code per IEC 60617 / project legend. '
+                        'Invalid/non-electrical codes are automatically filtered: '
+                        'P(pipe), V(vessel), H(heat exchanger), FT/LT/PT/TT(instruments), '
+                        'NER/NW/UM(unknown), L/MW(unknown, commonly misread off an SLD). '
+                        'Add more codes via Excel import.'
+                    ),
+                    'lookup': {
+                        'PM': 'PUMP MOTOR',
+                        'NPM': 'NON-ESSENTIAL PUMP MOTOR',
+                        'U': 'SWITCHBOARD / MCC',
+                        'JB': 'JUNCTION BOX',
+                        'BD': 'BUS DUCT',
+                        'AB': 'ADAPTER BOX',
+                        'SB': 'GIS PANEL',
+                        'TSG': 'TEMPORARY SWITCHGEAR',
+                        'TF': 'TRANSFORMER (DELTA-DELTA CONNECTION)',
+                        'CB': 'CIRCUIT BREAKER (DRAWABLE TYPE)',
+                        'DS': 'DISCONNECTOR / ISOLATOR',
+                        'TDS': 'TWO WAY DISCONNECTOR',
+                        'GEN': 'GENERATOR',
+                        'MTR': 'MOTOR',
+                        'STD': 'STARTER (DIRECT)',
+                        'STA': 'STARTER (AUTO-TRANSFORMER)',
+                        'LDB': 'LIGHTING DISTRIBUTION BOARD',
+                        'PDB': 'POWER DISTRIBUTION BOARD',
+                        'MAN': 'MANUAL',
+                        'CP': 'CONTROL PANEL',
+                        'AC': 'AIR CONDITIONER',
+                        'RM': 'WINCH MOTOR',
+                        'GD': 'EMERGENCY GENERATOR',
+                    },
+                },
+                {
+                    'key': 'sequence',
+                    'label': 'Sequence Number',
+                    'regex': r'[A-Za-z0-9]{2,6}(?:-[A-Za-z0-9]{1,6})?',
+                    'notes': 'Sequence number with optional letter suffix (e.g. 411B, S05A, 204B)',
                 },
             ],
         },
