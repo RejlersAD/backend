@@ -11,6 +11,7 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess, IsAdmin
+from apps.rbac.action_policy import module_action_allowed
 from django.db import IntegrityError, transaction
 from django.contrib.auth import get_user_model
 from django.db.models.deletion import ProtectedError
@@ -828,7 +829,21 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         from .opportunity_workspace import delete_opportunity_with_workspace_guard
         delete_opportunity_with_workspace_guard(instance)
-    
+
+    def destroy(self, request, *args, **kwargs):
+        # Granular RBAC: deleting an opportunity requires the module's
+        # delete action (superusers and granted roles pass).
+        if not module_action_allowed(request.user, 'sales_opportunities', 'delete'):
+            raise PermissionDenied('You do not have the Sales opportunities delete permission.')
+        return super().destroy(request, *args, **kwargs)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        # Computed once per request so list rows do not repeat the RBAC lookup.
+        context['sales_can_delete'] = module_action_allowed(
+            self.request.user, 'sales_opportunities', 'delete',
+        )
+        return context
     def get_serializer_class(self):
         if self.action == 'retrieve':
             return DealDetailSerializer

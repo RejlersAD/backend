@@ -13,7 +13,7 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from apps.rbac.action_policy import module_action_allowed
 from apps.rbac.data_visibility_mixin import build_visibility_filter
 
-from .models import Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload
+from .models import Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload, ProjectHandover
 from .attachment_streams import configured_limit, prepare_upload
 from .workflow import _audit
 from .workspace_graph import (
@@ -61,6 +61,7 @@ MESSAGES = {
     'version_stale': 'A newer document version exists. Refresh its details before uploading a new version.',
     'cannot_delete_last_version': 'At least one document version must remain. Upload a replacement version first.',
     'delete_not_supported': 'Delete is currently supported for RADAI attachments only.',
+    'handover_retained': 'This opportunity has a project handover and cannot be deleted.',
 }
 
 
@@ -113,6 +114,19 @@ def delete_opportunity_with_workspace_guard(opportunity):
     if workspace and (workspace.status != 'not_configured' or _registered(workspace)
                       or workspace.uploads.exists()):
         raise WorkspaceAPIError('workspace_retained', 409)
+    if ProjectHandover.objects.filter(opportunity=opportunity).exists():
+        raise WorkspaceAPIError('handover_retained', 409)
+    # Generated letters belong to the opportunity; remove them and their files.
+    for letter in opportunity.letters.all():
+        if letter.pdf_file:
+            letter.pdf_file.delete(save=False)
+        if letter.docx_file:
+            letter.docx_file.delete(save=False)
+        letter.delete()
+    # Source email records are immutable; unlink them from the opportunity.
+    opportunity.email_intakes.update(opportunity=None)
+    # Activity history only exists for this opportunity.
+    opportunity.audit_events.all().delete()
     opportunity.delete()
 
 
