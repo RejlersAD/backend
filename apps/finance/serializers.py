@@ -141,6 +141,7 @@ class InvoiceListSerializer(serializers.ModelSerializer):
 class InvoiceDetailSerializer(serializers.ModelSerializer):
     capabilities = serializers.SerializerMethodField()
     confirmed_po_references = serializers.SerializerMethodField()
+    preview_url = serializers.SerializerMethodField()
 
     def get_confirmed_po_references(self, obj):
         from .services.purchase_order_handoff import confirmed_po_references
@@ -187,6 +188,9 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             return default_storage.exists(obj.file_path)
         except (OSError, ValueError):
             return False
+
+    def get_preview_url(self, obj):
+        return f'/api/v1/finance/invoices/{obj.id}/preview/'
     
     class Meta:
         model = Invoice
@@ -206,7 +210,8 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             'finance_reviewed_by', 'finance_reviewed_at', 'scheduled_payment_date',
             'payment_date', 'payment_reference', 'paid_amount',
             'submitted_by', 'created_at', 'updated_at', 'processed_at',
-            'approvals', 'audit_logs', 'payment_operations'
+            'approvals', 'audit_logs', 'payment_operations',
+            'preview_url'
         ]
         read_only_fields = INVOICE_SERVER_CONTROLLED_FIELDS
 

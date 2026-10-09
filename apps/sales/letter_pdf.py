@@ -79,16 +79,57 @@ def generate_letter_pdf(letter, custom_data=None):
     html_string = render_to_string(template_path, context)
 
     # Generate PDF (WeasyPrint 60+ manages fonts internally — FontConfiguration removed)
-    html = HTML(string=html_string, base_url=settings.BASE_DIR)
+    # Use logo file directory as base_url so relative file:// URIs resolve correctly
+    from .letter_defaults import get_logo_path
+    logo_path = get_logo_path()
+    base_url = logo_path.parent.as_uri() if logo_path else settings.BASE_DIR
+    html = HTML(string=html_string, base_url=base_url)
 
-    # Add custom CSS for PDF output
+    # Add custom CSS for PDF output - matches template exactly
     pdf_css = CSS(string='''
         @page {
             size: A4;
-            margin: 16mm 18mm 16mm 18mm;
+            margin: 18mm 18mm 25mm 18mm;
+        }
+        @page :first {
+            margin: 18mm 18mm 25mm 18mm;
         }
         .editable:focus { background: transparent; }
         .editable { border: none; }
+        /* Footer as running element - fixed at page bottom */
+        .letter-footer {
+            position: running(footer);
+        }
+        @page {
+            @bottom-center {
+                content: element(footer);
+                margin-bottom: 6mm;
+                font-size: 7.5pt;
+                color: #333;
+                line-height: 1.3;
+                text-align: center;
+                border-top: 1px solid #666;
+                padding-top: 3mm;
+            }
+        }
+        /* Ensure content area reserves space for footer */
+        .letter-content {
+            padding-bottom: 10mm;
+        }
+        /* Logo rendering */
+        .logo {
+            height: 38px;
+            width: auto;
+            max-width: 170px;
+        }
+        /* Compact spacing - match template exactly */
+        .letter-header { margin-bottom: 1px; }
+        .meta-table { margin-top: 1px; }
+        .meta-table td { padding: 0 0; }
+        .meta-label { width: 125px; padding-right: 8px; }
+        .subject-block { margin: 3px 0 3px 0; }
+        .letter-body p { margin: 0 0 5px 0; }
+        .signature { margin-top: 6px; }
     ''')
 
     try:

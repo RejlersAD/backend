@@ -51,6 +51,12 @@ def get_logo_path():
     if configured:
         candidates.append(Path(configured))
     base_dir = Path(getattr(settings, 'BASE_DIR', ''))
+    # Use the official Rejlers PR/PO logo as specified
+    candidates.append(base_dir.parent / 'frontend' / 'public' / 'assets' / 'procurement' / 'rejlers-pr-po-logo.png')
+    candidates.append(base_dir / 'frontend' / 'public' / 'assets' / 'procurement' / 'rejlers-pr-po-logo.png')
+    # Backend apps path (where the logo actually exists)
+    candidates.append(base_dir / 'apps' / 'procurement' / 'assets' / 'rejlers-pr-po-logo.png')
+    # Fallback to old locations
     candidates.append(base_dir.parent / 'frontend' / 'public' / 'assets' / 'images' / 'rejlers-logo.png')
     candidates.append(base_dir / 'frontend' / 'public' / 'assets' / 'images' / 'rejlers-logo.png')
     for candidate in candidates:

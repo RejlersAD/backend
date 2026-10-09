@@ -80,8 +80,8 @@ def generate_letter_docx(letter, custom_data=None):
     document = Document()
     section = document.sections[0]
     section.page_width, section.page_height = Mm(210), Mm(297)
-    section.top_margin, section.bottom_margin = Mm(20), Mm(22)
-    section.left_margin, section.right_margin = Mm(20), Mm(20)
+    section.top_margin, section.bottom_margin = Mm(18), Mm(25)
+    section.left_margin, section.right_margin = Mm(18), Mm(18)
 
     normal = document.styles['Normal']
     normal.font.name = 'Arial'
@@ -95,10 +95,12 @@ def generate_letter_docx(letter, custom_data=None):
     left = header_table.cell(0, 0)
     left.text = ''
     p = left.paragraphs[0]
+    p.paragraph_format.space_after = Pt(0)
     _add_run(p, lh['response_label'], bold=True)
     p.add_run('\t')
     _add_run(p, lh['response_code'])
     p2 = left.add_paragraph()
+    p2.paragraph_format.space_after = Pt(0)
     _add_run(p2, 'Confidential', bold=True)
     p2.add_run('\t')
     _add_run(p2, lh['confidential'])
@@ -106,12 +108,12 @@ def generate_letter_docx(letter, custom_data=None):
     right.text = ''
     logo_path = context.get('logo_path') or get_logo_path()
     if logo_path:
-        right.paragraphs[0].add_run().add_picture(str(logo_path), height=Mm(13))
+        right.paragraphs[0].add_run().add_picture(str(logo_path), height=Mm(12))
     else:
         run = _add_run(right.paragraphs[0], 'REJLERS', bold=True)
-        run.font.size = Pt(24)
+        run.font.size = Pt(22)
 
-    # Meta block.
+    # Meta block - compact spacing, left aligned at same margin.
     recipient_lines = [lh['recipient_name']]
     if lh.get('recipient_title'):
         recipient_lines.append(lh['recipient_title'])
@@ -136,46 +138,63 @@ def generate_letter_docx(letter, custom_data=None):
     ]
     for idx, (label, lines) in enumerate(rows):
         _meta_row(meta, idx, label, lines)
-        _set_cell_width(meta.cell(idx, 0), 45)
-        _set_cell_width(meta.cell(idx, 1), 125)
+        _set_cell_width(meta.cell(idx, 0), 40)
+        _set_cell_width(meta.cell(idx, 1), 130)
+        # Reduce row spacing
+        for cell in [meta.cell(idx, 0), meta.cell(idx, 1)]:
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.line_spacing = Pt(12)
 
-    # Subject.
+    # Subject - compact
     subject_p = document.add_paragraph()
-    subject_p.paragraph_format.space_before = Pt(12)
-    subject_p.paragraph_format.space_after = Pt(8)
+    subject_p.paragraph_format.space_before = Pt(3)
+    subject_p.paragraph_format.space_after = Pt(3)
     _add_run(subject_p, 'Subject: ', bold=True)
     _add_run(subject_p, context['subject'], bold=True)
     if context.get('subject_suffix'):
         suffix_p = document.add_paragraph()
-        suffix_p.paragraph_format.space_after = Pt(8)
+        suffix_p.paragraph_format.space_after = Pt(2)
         _add_run(suffix_p, context['subject_suffix'], bold=True)
 
     # Body.
     for para in split_body_paragraphs(letter.body):
         p = document.add_paragraph()
-        p.paragraph_format.space_after = Pt(8)
+        p.paragraph_format.space_after = Pt(4)
+        p.paragraph_format.line_spacing = Pt(12)
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         _add_run(p, para)
 
     # Signature block.
     signature_p = document.add_paragraph()
-    signature_p.paragraph_format.space_before = Pt(16)
+    signature_p.paragraph_format.space_before = Pt(4)
     _add_run(signature_p, lh['signature_name'], bold=True)
     for title in lh['signature_titles']:
         title_p = document.add_paragraph()
         title_p.paragraph_format.space_after = Pt(0)
+        title_p.paragraph_format.space_before = Pt(0)
         _add_run(title_p, title)
 
-    # Footer separator + company footer.
-    rule_p = document.add_paragraph()
-    rule_p.paragraph_format.space_before = Pt(24)
+    # Footer - add to document footer section for proper bottom positioning
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    footer.paragraphs[0].clear()
+    
+    # Footer separator line
+    rule_p = footer.paragraphs[0]
     _add_bottom_border(rule_p)
+    rule_p.paragraph_format.space_after = Pt(2)
+    rule_p.paragraph_format.space_before = Pt(0)
+    
     footer_lines = [lh['footer_company'], lh['footer_address'], lh['footer_contact']]
     for line in footer_lines:
-        p = document.add_paragraph()
+        p = footer.add_paragraph()
         p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.space_before = Pt(0)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = _add_run(p, line)
-        run.font.size = Pt(8)
+        run.font.size = Pt(7.5)
 
     buffer = BytesIO()
     document.save(buffer)

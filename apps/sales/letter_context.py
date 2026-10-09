@@ -47,7 +47,19 @@ def split_body_paragraphs(body):
     text = normalize_body_text(body)
     if not text:
         return []
-    return [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    # Remove leading "Dear Sir" variants and trailing "Sincerely yours" variants
+    # since these are now rendered in the template
+    filtered = []
+    for i, p in enumerate(paragraphs):
+        # Skip leading salutation
+        if i == 0 and re.match(r'^dear\s+sir', p, re.IGNORECASE):
+            continue
+        # Skip trailing complimentary close
+        if i == len(paragraphs) - 1 and re.match(r'^sincerely\s+yours', p, re.IGNORECASE):
+            continue
+        filtered.append(p)
+    return filtered
 
 
 def _client_address(client):
@@ -171,6 +183,8 @@ def build_letter_context(deal, letter=None, custom_data=None):
     logo_path = get_logo_path()
     context['logo_path'] = logo_path
     context['logo_uri'] = logo_path.as_uri() if logo_path else ''
+    # Use file path for WeasyPrint to load directly (avoids embedding large base64 in HTML)
+    context['logo_data_uri'] = logo_path.as_uri() if logo_path else ''
 
     if letter is not None:
         context.update({

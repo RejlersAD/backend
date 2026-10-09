@@ -1066,6 +1066,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         
         from django.http import FileResponse
         import io
+        from django.conf import settings
         response = FileResponse(
             io.BytesIO(pdf_bytes),
             content_type='application/pdf',
@@ -1074,7 +1075,9 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         )
         # Allow iframe embedding
         response['X-Frame-Options'] = 'SAMEORIGIN'
-        response['Content-Security-Policy'] = "frame-ancestors 'self'"
+        # Allow iframe from frontend origin
+        frontend_origin = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173')
+        response['Content-Security-Policy'] = f"frame-ancestors 'self' {frontend_origin}"
         return response
 
     @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/docx')
