@@ -1006,7 +1006,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='letters')
     def list_letters(self, request, pk=None):
         letters = self.get_object().letters.all()
-        return Response(SalesLetterSerializer(letters, many=True).data)
+        return Response(SalesLetterSerializer(letters, many=True, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='letters/(?P<letter_id>[^/]+)/send')
     def send_letter(self, request, pk=None, letter_id=None):
@@ -1024,7 +1024,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             reason=f'Sent {letter.get_letter_type_display()} letter to {recipient}',
             data={'letter_id': str(letter.id), 'recipient': recipient},
         )
-        return Response(SalesLetterSerializer(letter).data)
+        return Response(SalesLetterSerializer(letter, context={'request': request}).data)
 
     @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/pdf')
     def download_letter_pdf(self, request, pk=None, letter_id=None):
@@ -1155,7 +1155,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             updated_fields.append('updated_at')
             letter.save(update_fields=updated_fields)
         
-        return Response(SalesLetterSerializer(letter).data)
+        return Response(SalesLetterSerializer(letter, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='proposal-draft-field')
     def proposal_draft_field(self, request, pk=None):
