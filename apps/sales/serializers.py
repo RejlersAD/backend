@@ -311,7 +311,11 @@ class DealListSerializer(serializers.ModelSerializer):
     stage_display = serializers.SerializerMethodField()
     days_in_stage = serializers.SerializerMethodField()
     framework_number = serializers.CharField(source='framework.framework_number', read_only=True)
-    
+    can_delete = serializers.SerializerMethodField()
+
+    def get_can_delete(self, obj):
+        return bool(self.context.get('sales_can_delete'))
+
     class Meta:
         model = Deal
         fields = [
@@ -325,7 +329,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'framework', 'framework_number', 'client_contact', 'disciplines',
             'estimated_hours', 'delivery_office', 'opportunity_source', 'service_categories',
             'next_action', 'risk_level',
-            'opportunity_type', 'open_date', 'created_by', 'created_by_name',
+            'opportunity_type', 'open_date', 'created_by', 'created_by_name', 'can_delete',
         ]
         read_only_fields = ['id', 'deal_code', 'weighted_value', 'created_at', 'created_by']
     
@@ -378,7 +382,11 @@ class DealDetailSerializer(serializers.ModelSerializer):
     activities = serializers.SerializerMethodField()
     stage_history = serializers.SerializerMethodField()
     permitted_actions = serializers.SerializerMethodField()
-    
+    can_delete = serializers.SerializerMethodField()
+
+    def get_can_delete(self, obj):
+        return bool(self.context.get('sales_can_delete'))
+
     class Meta:
         model = Deal
         fields = '__all__'
