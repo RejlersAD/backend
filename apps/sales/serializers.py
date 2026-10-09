@@ -882,11 +882,7 @@ class SalesLetterSerializer(serializers.ModelSerializer):
         return None
 
     def get_pdf_preview_url(self, obj):
-        request = self.context.get('request')
-        preview_path = f'/api/v1/sales/deals/{obj.opportunity_id}/letters/{obj.id}/pdf/preview/'
-        if request:
-            return request.build_absolute_uri(preview_path)
-        return preview_path
+        return f'/api/v1/sales/deals/{obj.opportunity_id}/letters/{obj.id}/pdf/preview/'
 
     def get_docx_url(self, obj):
         request = self.context.get('request')
