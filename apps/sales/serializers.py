@@ -918,3 +918,10 @@ class SalesLetterCreateSerializer(serializers.Serializer):
     """Serializer for generating a new letter"""
     letter_type = serializers.ChoiceField(choices=SalesLetter.LETTER_TYPES)
     custom_data = serializers.JSONField(required=False, default=dict)
+
+
+class SalesLetterRegenerateSerializer(serializers.Serializer):
+    """Serializer for letter save/regenerate payload."""
+    subject = serializers.CharField(required=False, allow_blank=False, max_length=300)
+    body = serializers.CharField(required=False, allow_blank=False)
+    custom_data = serializers.JSONField(required=False)
