@@ -226,7 +226,9 @@
         {% endif %}
       </div>
 
-      
+      <div class="salutation">
+            Dear Sir,
+        </div>
       
       <div class="letter-content">
         <div class="letter-body">
@@ -236,7 +238,8 @@
         </div>
 
        
-        <div class="signature">           
+        <div class="signature">   
+            <div style="margin-bottom: 15px;">Sincerely yours,</div>        
           <div class="sig-name">{{ letterhead.signature_name }}</div>
           {% for title in letterhead.signature_titles %}
           <div class="sig-title">{{ title }}</div>
