@@ -56,16 +56,9 @@ def _actor(actor, *, lock=False):
 
 
 def visible_deals(actor):
-    from apps.core.shared_record_targets import organization_id
-    query = Deal.objects.filter(build_visibility_filter(user=actor, module_code='sales', owner_field='owner'))
-    if actor and not (actor.is_staff or actor.is_superuser):
-        organization = organization_id(actor)
-        if organization:
-            query = query.filter(Q(owner__rbac_profile__organization__isnull=True)
-                                 | Q(owner__rbac_profile__organization_id=organization)).filter(
-                Q(client__account_manager__rbac_profile__organization__isnull=True)
-                | Q(client__account_manager__rbac_profile__organization_id=organization))
-    return query
+    """All users with Sales module access can view all opportunities.
+    Owner/account manager/organization do NOT restrict visibility per business policy."""
+    return Deal.objects.filter(build_visibility_filter(user=actor, module_code='sales', owner_field='owner'))
 
 
 def _deal(deal_id, actor, *, write=False, lock=False):
