@@ -40,7 +40,7 @@ from .serializers import (
     SalesActivityDetailSerializer, SalesForecastSerializer, SalesDashboardSerializer,
     AIInsightSerializer, FrameworkAgreementSerializer, ProjectHandoverSerializer,
     SalesMailboxConnectionSerializer, SalesEmailIntakeSerializer,
-    SalesLetterSerializer, SalesLetterCreateSerializer,
+    SalesLetterSerializer, SalesLetterCreateSerializer, SalesLetterRegenerateSerializer,
 )
 from .ai_service import SalesAIService
 from .jwt_query_auth import QueryParamJWTAuthentication
@@ -1111,13 +1111,49 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         except Deal.letters.RelatedObjectDoesNotExist:
             raise ValidationError({'letter': 'Letter not found for this opportunity.'})
 
-        # Update letter content if provided
-        if 'subject' in request.data:
-            letter.subject = request.data['subject']
-        if 'body' in request.data:
-            letter.body = request.data['body']
-        if 'custom_data' in request.data:
-            letter.custom_data = request.data['custom_data']
+        payload = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data or {})
+        nested_custom_data = payload.get('custom_data')
+        if (
+            isinstance(nested_custom_data, dict)
+            and not any(k in payload for k in ('subject', 'body'))
+            and any(k in nested_custom_data for k in ('subject', 'body', 'custom_data'))
+        ):
+            logger.warning(
+                "SalesLetter regenerate received nested legacy payload; normalizing",
+                extra={'deal_id': str(deal.id), 'letter_id': str(letter.id)}
+            )
+            payload = {
+                **payload,
+                'subject': nested_custom_data.get('subject', payload.get('subject')),
+                'body': nested_custom_data.get('body', payload.get('body')),
+                'custom_data': nested_custom_data.get('custom_data', nested_custom_data),
+            }
+
+        logger.info(
+            "SalesLetter regenerate request payload",
+            extra={'deal_id': str(deal.id), 'letter_id': str(letter.id), 'request_data': payload}
+        )
+
+        serializer = SalesLetterRegenerateSerializer(data=payload)
+        if not serializer.is_valid():
+            logger.warning(
+                "SalesLetter regenerate validation failed",
+                extra={
+                    'deal_id': str(deal.id),
+                    'letter_id': str(letter.id),
+                    'request_data': payload,
+                    'serializer_errors': serializer.errors,
+                }
+            )
+            raise ValidationError(serializer.errors)
+
+        data = serializer.validated_data
+        if 'subject' in data:
+            letter.subject = data['subject']
+        if 'body' in data:
+            letter.body = data['body']
+        if 'custom_data' in data:
+            letter.custom_data = data['custom_data']
         letter.save(update_fields=['subject', 'body', 'custom_data', 'updated_at'])
 
         from .workflow import refresh_letter_files
