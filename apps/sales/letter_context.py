@@ -44,6 +44,8 @@ def normalize_body_text(body):
 
 def split_body_paragraphs(body):
     """Split a letter body into paragraph strings (blank-line separated)."""
+    # Editor block boundaries must remain paragraphs before tags are stripped.
+    body = re.sub(r'(?i)</\s*(p|div|li|h[1-6])\s*>', '\n\n', str(body or ''))
     text = normalize_body_text(body)
     if not text:
         return []
@@ -53,10 +55,10 @@ def split_body_paragraphs(body):
     filtered = []
     for i, p in enumerate(paragraphs):
         # Skip leading salutation
-        if i == 0 and re.match(r'^dear\s+sir', p, re.IGNORECASE):
+        if i == 0 and re.fullmatch(r'dear\s+sir\s*[,.:]?', p, re.IGNORECASE):
             continue
         # Skip trailing complimentary close
-        if i == len(paragraphs) - 1 and re.match(r'^sincerely\s+yours', p, re.IGNORECASE):
+        if i == len(paragraphs) - 1 and re.fullmatch(r'sincerely\s+yours\s*[,.:]?', p, re.IGNORECASE):
             continue
         filtered.append(p)
     return filtered
