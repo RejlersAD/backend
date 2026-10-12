@@ -157,19 +157,20 @@ def save_letter_pdf(letter, custom_data=None):
     letter.save(update_fields=['pdf_file', 'pdf_generated_at', 'updated_at'])
 
     logger.info(f"PDF generated for letter {letter.id}: {filename}")
-    return letter.pdf_file.path
+    return letter.pdf_file.name
 
 
 def regenerate_letter_pdf(letter, custom_data=None):
     """Regenerate PDF for an existing letter (after edits)."""
-    # Delete old file if exists
-    if letter.pdf_file:
+    old_name = letter.pdf_file.name if letter.pdf_file else None
+    storage = letter.pdf_file.storage
+    new_name = save_letter_pdf(letter, custom_data)
+    if old_name and old_name != new_name:
         try:
-            letter.pdf_file.delete(save=False)
-        except Exception:
-            pass
-
-    return save_letter_pdf(letter, custom_data)
+            storage.delete(old_name)
+        except Exception as exc:
+            logger.warning("Unable to remove previous PDF for letter %s: %s", letter.id, exc)
+    return new_name
 
 
 def get_letter_pdf_bytes(letter):

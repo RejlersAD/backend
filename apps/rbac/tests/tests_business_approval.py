@@ -157,6 +157,7 @@ class BusinessApprovalTests(TestCase):
         self.assertEqual(self.client.post(url, {}, format='json').status_code, 403)
 
     def test_pending_document_queue_returns_serialized_pending_items_to_designated_reviewer(self):
+        self.assertTrue(self.client.get('/api/v1/rbac/users/me/').data['can_review_profile_documents'])
         document = self.document()
         verified = self.document()
         ProfileDocument.objects.filter(pk=verified.pk).update(verification_status='verified')
@@ -180,6 +181,7 @@ class BusinessApprovalTests(TestCase):
     def test_pending_document_queue_denies_superadmin_without_designated_business_position(self):
         self.document()
         self.client.force_authenticate(self.admin)
+        self.assertFalse(self.client.get('/api/v1/rbac/users/me/').data['can_review_profile_documents'])
         response = self.client.get('/api/v1/rbac/profile-documents/pending-verification/')
         self.assertEqual(response.status_code, 403, response.data)
         self.assertIn('designated HR or Administration positions', str(response.data['detail']))
@@ -189,5 +191,6 @@ class BusinessApprovalTests(TestCase):
             UserPermissionOverride.objects.create(
                 user_profile=self.actor.rbac_profile, permission=permission, allowed=False,
             )
+        self.assertFalse(self.client.get('/api/v1/rbac/users/me/').data['can_review_profile_documents'])
         response = self.client.get('/api/v1/rbac/profile-documents/pending-verification/')
         self.assertEqual(response.status_code, 403, response.data)
