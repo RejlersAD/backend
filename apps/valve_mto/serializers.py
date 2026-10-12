@@ -24,10 +24,10 @@ class ValveMTORowSerializer(serializers.ModelSerializer):
     class Meta:
         model = ValveMTORow
         fields = [
-            'id', 'project', 'tag_number', 'valve_type', 'pms_class', 'rating', 'facing',
+            'id', 'project', 'tag_number', 'valve_type', 'pms_class', 'piping_class', 'rating', 'facing',
             'size_primary', 'size_secondary', 'size_secondary_2', 'line_number', 'line_list_ref',
-            'pid_number', 'description', 'qty_island', 'qty_field', 'qty_combined', 'unit',
-            'area', 'operational_status', 'remarks', 'tab', 'row_order',
+            'pid_number', 'description', 'qty_island', 'qty_field', 'qty_combined', 'qty_observed', 'unit',
+            'area', 'operational_status', 'remarks', 'confidence', 'location_hint', 'tab', 'row_order',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'project', 'created_at', 'updated_at']

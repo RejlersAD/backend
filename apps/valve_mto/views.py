@@ -17,12 +17,17 @@ codebase; nothing here is a shared/team resource.
 """
 from __future__ import annotations
 
+import json
+import logging
+from zipfile import BadZipFile
+
 from django.db import transaction
 from django.http import HttpResponse
 
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
 from .excel_export import export_project_to_xlsx
@@ -113,17 +118,41 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
                 {'error': "'rows' must be a list"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        for index, row in enumerate(rows_data):
+            title_validation = ValveMTORowSerializer(data={'area': row.get('area', '')}, partial=True)
+            if not title_validation.is_valid():
+                return Response(
+                    {'error': f'Row {index + 1}: AREA must contain a DRG. TITLE of at most 512 characters.',
+                     'details': title_validation.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not row.get('size_primary'):
+                from .specification_lookup import size_nb_from_line_number
+                row['size_primary'] = size_nb_from_line_number(row.get('line_number'))
+            if 'qty_observed' in row:
+                validation = ValveMTORowSerializer(
+                    data={'qty_observed': row['qty_observed']}, partial=True,
+                )
+                if not validation.is_valid():
+                    return Response(
+                        {'error': f'Row {index + 1}: observed quantity must be a non-negative whole number or null.',
+                         'details': validation.errors},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                row['qty_observed'] = validation.validated_data['qty_observed']
 
         # Explicit allowlist (not introspected from the model) so a
         # client-supplied 'id'/'project'/'created_at'/'updated_at' can
         # never override what this endpoint itself controls.
         allowed_fields = {
-            'tag_number', 'valve_type', 'pms_class', 'rating', 'facing', 'size_primary',
+            'tag_number', 'valve_type', 'pms_class', 'piping_class', 'rating', 'facing', 'size_primary',
             'size_secondary', 'size_secondary_2', 'line_number', 'line_list_ref', 'pid_number',
-            'description', 'qty_island', 'qty_field', 'qty_combined', 'unit', 'area',
-            'operational_status', 'remarks', 'tab',
+            'description', 'qty_island', 'qty_field', 'qty_combined', 'qty_observed', 'unit', 'area',
+            'operational_status', 'remarks', 'confidence', 'location_hint', 'tab',
         }
         with transaction.atomic():
+            # Serialize full-register replacements, including simultaneous autosaves.
+            project = ValveMTOProject.objects.select_for_update().get(pk=project.pk)
             project.rows.all().delete()
             ValveMTORow.objects.bulk_create([
                 ValveMTORow(
@@ -144,10 +173,10 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
             # request from the frontend to also succeed.
             if project.status != ValveMTOProject.STATUS_COMPLETED:
                 project.status = ValveMTOProject.STATUS_COMPLETED
-        project.save(update_fields=['updated_at', 'status'])
+            project.save(update_fields=['updated_at', 'status'])
+            saved_rows = ValveMTORowSerializer(project.rows.all(), many=True).data
 
-        ser = ValveMTORowSerializer(project.rows.all(), many=True)
-        return Response({'rows': ser.data, 'row_count': len(ser.data)}, status=status.HTTP_200_OK)
+        return Response({'rows': saved_rows, 'row_count': len(saved_rows)}, status=status.HTTP_200_OK)
 
     # ---- list this project's rows --------------------------------------
     @action(detail=True, methods=['get'], url_path='rows')
@@ -196,6 +225,49 @@ class ValveMTOLegendViewSet(viewsets.ModelViewSet):
     # is why that one never had this problem and nothing here was ever
     # written to unwrap `.results`.
     pagination_class = None
+    permission_action = None
+
+    @action(detail=False, methods=['post'], url_path='workbook-preview',
+            parser_classes=[MultiPartParser, FormParser], permission_action='read')
+    def workbook_preview(self, request):
+        return self._workbook(request, preview=True)
+
+    @action(detail=False, methods=['post'], url_path='workbook-import',
+            parser_classes=[MultiPartParser, FormParser], permission_action='update')
+    def workbook_import(self, request):
+        return self._workbook(request, preview=False)
+
+    def _workbook(self, request, *, preview):
+        from apps.pid_checker_v2.services.legend_workbook_importer import preview_workbook, import_workbook
+        from .models import VALVE_MTO_LEGEND_SECTIONS
+
+        upload = request.FILES.get('file')
+        if not upload or not upload.name.lower().endswith(('.xlsx', '.xlsm')):
+            return Response({'error': 'Upload an .xlsx or .xlsm legend workbook.'}, status=400)
+        if upload.size > 20 * 1024 * 1024:
+            return Response({'error': 'Legend workbook exceeds the 20 MB limit.'}, status=400)
+        try:
+            data = upload.read()
+            if preview:
+                result = preview_workbook(data, upload.name)
+                for sheet in result['sheets']:
+                    predicted = sheet['predicted_section']
+                    if predicted not in VALVE_MTO_LEGEND_SECTIONS:
+                        sheet['predicted_section'] = (
+                            'control_valve_regulator' if predicted == 'other_specialties' else 'piping'
+                        )
+                return Response(result)
+            sheet_map = json.loads(request.data.get('sheet_map', '{}'))
+            if not isinstance(sheet_map, dict):
+                raise ValueError('Worksheet mapping must be an object.')
+            return Response(import_workbook(
+                data, upload.name, user=request.user, project=None, sheet_map=sheet_map, valve_mto=True,
+            ))
+        except (ValueError, BadZipFile) as exc:
+            return Response({'error': str(exc)}, status=400)
+        except Exception:
+            logging.getLogger(__name__).exception('Valve MTO workbook import failed')
+            return Response({'error': 'Could not import the workbook. Check the server logs.'}, status=500)
 
     def get_queryset(self):
         qs = ValveMTOLegend.objects.filter(created_by=self.request.user)

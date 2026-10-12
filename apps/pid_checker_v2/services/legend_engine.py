@@ -35,6 +35,7 @@ class CompiledLegend:
     pattern: re.Pattern
     field_keys: tuple[str, ...]
     lookups: dict[str, dict[str, str]]
+    reference_sheets: tuple[dict, ...] = ()
 
     def match(self, text: str) -> dict | None:
         """Return a canonicalised tag dict if `text` matches the legend, else None."""
@@ -122,6 +123,7 @@ def compile_legend(definition: dict) -> CompiledLegend:
         pattern=pattern,
         field_keys=tuple(field_keys),
         lookups=lookups,
+        reference_sheets=tuple(definition.get('imported_sheets') or []),
     )
 
 
@@ -156,4 +158,11 @@ def build_prompt_block(compiled: CompiledLegend) -> str:
             lines.append(f"    Allowed codes for {label}:")
             for code, desc in lookup.items():
                 lines.append(f"      {code} = {desc}")
+    for sheet in compiled.reference_sheets:
+        lines.append(f'\nReference worksheet: {sheet["name"]}')
+        for row in sheet.get('rows', []):
+            if any(row):
+                lines.append(' | '.join(str(cell) for cell in row))
+        for image in sheet.get('images', []):
+            lines.append(f'Symbol reference: {image["name"]} (row {image["row"]}, column {image["column"]})')
     return '\n'.join(lines)

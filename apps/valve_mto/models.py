@@ -79,9 +79,8 @@ class ValveMTORow(models.Model):
     (valveMTO.config.js's VALVE_COLUMNS), so every field the extractor can
     populate has a real column here — nothing gets dropped on save. `tab`
     records which of the frontend's ISLAND/FIELD/COMBINED tabs this row
-    was showing under (mirrors `area` for COMBINED-derived rows) — kept
-    as its own field rather than derived, since a user can freely re-tab
-    a row in the UI independent of its `area` value.
+    was showing under. Installation allocation is independent of `area`,
+    which stores the complete source drawing title.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(ValveMTOProject, on_delete=models.CASCADE, related_name='rows')
@@ -89,6 +88,7 @@ class ValveMTORow(models.Model):
     tag_number = models.CharField(max_length=128, blank=True, default='')
     valve_type = models.CharField(max_length=128, blank=True, default='')
     pms_class = models.CharField(max_length=128, blank=True, default='')
+    piping_class = models.CharField(max_length=128, blank=True, default='')
     rating = models.CharField(max_length=64, blank=True, default='')
     size_primary = models.CharField(max_length=32, blank=True, default='')
     # BUG FIX: the frontend's local row shape (VALVE_COLUMNS) has THREE
@@ -119,10 +119,13 @@ class ValveMTORow(models.Model):
     qty_island = models.IntegerField(null=True, blank=True)
     qty_field = models.IntegerField(null=True, blank=True)
     qty_combined = models.IntegerField(null=True, blank=True)
+    qty_observed = models.PositiveIntegerField(null=True, blank=True)
     unit = models.CharField(max_length=32, blank=True, default='')
-    area = models.CharField(max_length=32, blank=True, default='')  # ISLAND / FIELD / COMBINED
+    area = models.CharField(max_length=512, blank=True, default='')  # Source DRG. TITLE
     operational_status = models.CharField(max_length=64, blank=True, default='')  # e.g. LO/LC/TSO/FBLC...
     remarks = models.TextField(blank=True, default='')
+    confidence = models.CharField(max_length=16, blank=True, default='')
+    location_hint = models.CharField(max_length=128, blank=True, default='')
     tab = models.CharField(max_length=16, blank=True, default='')  # island / field / combined
     row_order = models.IntegerField(default=0)
 

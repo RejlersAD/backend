@@ -691,6 +691,127 @@ class LegendSheetDefaultTemplateView(APIView):
         })
 
 
+class LegendWorkbookPreviewView(APIView):
+    """POST one multi-sheet .xlsx → per-sheet predicted section mapping
+    (nothing written). The Legend Manager shows this table for confirmation
+    before calling LegendWorkbookImportView.
+
+    Multipart form:
+        file  (required)  .xlsx / .xlsm workbook
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        from .services.legend_workbook_importer import preview_workbook, ACCEPTED_EXTENSIONS
+
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'error': 'file is required (multipart)'}, status=status.HTTP_400_BAD_REQUEST)
+        if not upload.name.lower().endswith(ACCEPTED_EXTENSIONS):
+            return Response({'error': 'Only .xlsx / .xlsm workbooks are accepted.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            preview = preview_workbook(upload.read(), upload.name)
+        except Exception:
+            logger.exception('[LegendWorkbook] preview failed')
+            return Response({'error': 'Could not read the workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response(preview, status=status.HTTP_200_OK)
+
+
+class LegendWorkbookImportView(APIView):
+    """POST one multi-sheet .xlsx + a confirmed sheet→section map →
+    per-section project legends + symbol images.
+
+    Multipart form:
+        file        (required)  .xlsx / .xlsm workbook
+        project_id  (required)  shared Project Organizer project UUID
+        sheet_map   (required)  JSON object {sheet_name: section_id | null}
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        import json as _json
+        from .services.legend_workbook_importer import import_workbook, ACCEPTED_EXTENSIONS
+
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'error': 'file is required (multipart)'}, status=status.HTTP_400_BAD_REQUEST)
+        if not upload.name.lower().endswith(ACCEPTED_EXTENSIONS):
+            return Response({'error': 'Only .xlsx / .xlsm workbooks are accepted.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        project = _resolve_request_project(request)
+        if project is None:
+            return Response(
+                {'error': 'project_id is required and must reference an existing project'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            sheet_map = _json.loads(request.data.get('sheet_map') or '{}')
+        except (TypeError, ValueError):
+            return Response({'error': 'sheet_map must be a JSON object {sheet: section|null}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(sheet_map, dict):
+            return Response({'error': 'sheet_map must be a JSON object {sheet: section|null}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if any(value and value not in LEGEND_SECTIONS for value in sheet_map.values()):
+            return Response({'error': 'Each worksheet must map to a valid legend section or Skip.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not any(sheet_map.values()):
+            return Response({'error': 'Map at least one worksheet to a legend section.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            summary = import_workbook(
+                upload.read(), upload.name,
+                user=request.user, project=project, sheet_map=sheet_map,
+            )
+        except Exception:
+            logger.exception('[LegendWorkbook] import failed')
+            return Response({'error': 'Legend workbook import failed on the server.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(summary, status=status.HTTP_201_CREATED)
+
+
+class LegendWorkbookExportView(APIView):
+    """GET → one formatted multi-sheet .xlsx of the in-scope legends, with
+    styled/aligned fields + code tables and the section symbol pictures
+    embedded as images (see services/legend_workbook_exporter.py).
+
+    Query params (all optional):
+        section     restrict to one legend section
+        legend_id   export a single legend
+        project_id  include the project pack legends alongside the user's own
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.http import HttpResponse
+        from .services.legend_workbook_exporter import build_legend_workbook, CONTENT_TYPE_XLSX
+
+        section = (request.query_params.get('section') or '').strip() or None
+        legend_id = (request.query_params.get('legend_id') or '').strip() or None
+        project = _resolve_request_project(request)
+        try:
+            data, filename = build_legend_workbook(
+                user=request.user, project=project,
+                section=section, legend_id=legend_id,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except Exception:
+            logger.exception('[LegendWorkbook] export failed')
+            return Response({'error': 'Legend workbook export failed on the server.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        resp = HttpResponse(data, content_type=CONTENT_TYPE_XLSX)
+        resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return resp
+
+
 class LegendPackUploadView(APIView):
     """POST a single project legend pack file → auto-split into per-section
     project legends (Phase 2 — configure once per project, all tools inherit).
@@ -2477,4 +2598,3 @@ class TokenReportView(APIView):
         resp = HttpResponse(data, content_type=content_type)
         resp['Content-Disposition'] = f'attachment; filename="{filename}"'
         return resp
-

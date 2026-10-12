@@ -10,6 +10,9 @@ from .views import (
     LegendSheetActivateView,
     LegendSheetDefaultTemplateView,
     LegendPackUploadView,
+    LegendWorkbookPreviewView,
+    LegendWorkbookImportView,
+    LegendWorkbookExportView,
     LegendLookupAddView,
     LegendLookupEditView,
     LegendLookupDeleteView,
@@ -55,6 +58,9 @@ LEGENDS_DETAIL_PATH = 'legends/<uuid:legend_id>/'
 LEGENDS_ACTIVATE_PATH = 'legends/<uuid:legend_id>/activate/'
 LEGENDS_DEFAULT_TEMPLATE_PATH = 'legends/default-template/'
 LEGENDS_PACK_UPLOAD_PATH = 'legends/pack-upload/'
+LEGENDS_WORKBOOK_PREVIEW_PATH = 'legends/workbook-preview/'
+LEGENDS_WORKBOOK_IMPORT_PATH = 'legends/workbook-import/'
+LEGENDS_WORKBOOK_EXPORT_PATH = 'legends/workbook-export/'
 LEGENDS_LOOKUP_ADD_PATH = 'legends/add-lookup/'
 LEGENDS_LOOKUP_EDIT_PATH = 'legends/edit-lookup/'
 LEGENDS_LOOKUP_DELETE_PATH = 'legends/delete-lookup/'
@@ -100,6 +106,12 @@ urlpatterns = [
          name='legends-default-template'),
     path(LEGENDS_PACK_UPLOAD_PATH, LegendPackUploadView.as_view(),
          name='legends-pack-upload'),
+    path(LEGENDS_WORKBOOK_PREVIEW_PATH, LegendWorkbookPreviewView.as_view(),
+         name='legends-workbook-preview'),
+    path(LEGENDS_WORKBOOK_IMPORT_PATH, LegendWorkbookImportView.as_view(),
+         name='legends-workbook-import'),
+    path(LEGENDS_WORKBOOK_EXPORT_PATH, LegendWorkbookExportView.as_view(),
+         name='legends-workbook-export'),
     path(LEGENDS_LOOKUP_ADD_PATH, LegendLookupAddView.as_view(),
          name='legends-lookup-add'),
     path(LEGENDS_LOOKUP_EDIT_PATH, LegendLookupEditView.as_view(),

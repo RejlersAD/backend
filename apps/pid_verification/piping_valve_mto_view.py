@@ -32,13 +32,16 @@ own VISION_TIMEOUT_SECS (raised 90s -> 300s) and max_tokens (raised to
         ({provider, api_key}) — connectivity check for a BYOK key before
         the user commits to an actual extraction run.
 
-BYOK: vision_provider/vision_api_key are both OPTIONAL. When a key is
-given, that exact key is used for the requested provider (OpenAI or
-Claude) — never silently substituted for the admin-managed key. When
-omitted, extraction falls back to the admin-managed OpenAI credential
-exactly as it always has (see
-services.piping_valve_mto_extractor._resolve_vision_credential for the
-full precedence). There is no admin-managed fallback for Claude.
+In central mode the Valve MTO page sends the provider, not an API key. Workers
+resolve OpenAI or Claude credentials from the central registry. Managed
+credentials always take priority and fail closed when unavailable.
+Legacy vision_api_key inputs/environment keys remain compatible only
+when the selected provider has no managed configuration.
+
+Explicit BYOK: vision_credential_mode=byok requires vision_api_key and
+uses that personal key independently of central configuration/disabling.
+No personal key is persisted in the job snapshot. Omitted credential mode
+is central; central mode's managed precedence remains unchanged.
 
 Legend Sheet integration: NOT handled by any endpoint in this file.
 Legend sheets are managed entirely through the EXISTING, shared
@@ -116,6 +119,24 @@ def extract_valve_mto_view(request):
             status=400,
         )
 
+    extraction_mode = (request.data.get('extraction_mode') or 'vision').strip().lower()
+    if extraction_mode not in ('local', 'vision'):
+        return JsonResponse({'status': 'error', 'message': 'Choose local or vision extraction.'}, status=400)
+    vision_provider = None
+    vision_api_key = None
+    credential_mode = 'central'
+    if extraction_mode == 'vision':
+        from .services.piping_valve_mto_extractor import SUPPORTED_PROVIDERS
+        vision_provider = (request.data.get('vision_provider') or 'openai').strip().lower() or 'openai'
+        if vision_provider not in SUPPORTED_PROVIDERS:
+            return JsonResponse({'status': 'error', 'message': 'Choose OpenAI or Claude for AI Vision extraction.'}, status=400)
+        vision_api_key = (request.data.get('vision_api_key') or '').strip() or None
+        credential_mode = (request.data.get('vision_credential_mode') or 'central').strip().lower()
+        if credential_mode not in ('central', 'byok'):
+            return JsonResponse({'status': 'error', 'message': 'Choose central credentials or BYOK.'}, status=400)
+        if credential_mode == 'byok' and not vision_api_key:
+            return JsonResponse({'status': 'error', 'message': 'Enter a personal API key for BYOK.'}, status=400)
+
     # Stage the upload to a temp file (worker thread cleans up on completion).
     try:
         tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False, prefix='valvemto_')
@@ -131,8 +152,6 @@ def extract_valve_mto_view(request):
             status=500,
         )
 
-    vision_provider = (request.data.get('vision_provider') or '').strip() or None
-    vision_api_key  = (request.data.get('vision_api_key') or '').strip() or None
     # Defaults to 'thorough' when not provided at all — same default
     # services.piping_valve_mto_extractor._scan_mode_params itself falls
     # back to, so this is belt-and-suspenders rather than the only place
@@ -144,6 +163,8 @@ def extract_valve_mto_view(request):
         job_id = start_job(
             tmp_path, upload.name, vision_provider=vision_provider, vision_api_key=vision_api_key,
             user_id=request.user.pk, scan_mode=scan_mode,
+            extraction_mode=extraction_mode,
+            credential_mode=credential_mode,
         )
     except Exception as exc:
         logger.exception('Failed to start extraction job: %s', exc)

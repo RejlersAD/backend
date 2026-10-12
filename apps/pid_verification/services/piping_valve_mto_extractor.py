@@ -10,10 +10,10 @@ Design notes
 ------------
 * Soft-coded: every threshold, regex, prompt template and model name lives
   at module level so they can be tuned without code changes.
-* Fast & cheap: text-first via PyMuPDF; Vision (GPT-4o) only runs when text
-  yields fewer than `TEXT_SUFFICIENT_CHARS` characters AND `OPENAI_API_KEY`
-  is configured. If OpenAI is unavailable the extractor still returns any
-  rows that text-regex could find (graceful degradation).
+* Text/OCR supplies context only. Physical valves must be identified by
+  Vision; provider failures never become synthetic MTO rows.
+* Survey scope is all visible valves, including existing items. Quantities
+  require engineering review before they can be used for procurement.
 * Returns the frontend's row keys directly — no mapping layer needed.
 
 Public entry point
@@ -32,10 +32,12 @@ Returned shape::
     }
 """
 from __future__ import annotations
-from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
+from apps.core.ai_consumer_clients import lazy_provider_client, personal_provider_client, provider_api_key
+from apps.core.ai_credentials import AICredentialUnavailable
 
 import base64
 import io
+import math
 import json
 import logging
 import os
@@ -47,6 +49,34 @@ logger = logging.getLogger(__name__)
 
 # ─── Soft-coded constants (env-overridable) ─────────────────────────────────────
 TEXT_SUFFICIENT_CHARS  = int(os.getenv('VALVE_MTO_TEXT_THRESHOLD', '1500'))
+
+# ─── Tesseract OCR fallback (soft-coded, env-overridable) ──────────────────────
+# Modeled on the Line List engine (apps/designiq/pid_ocr_extractor_v2.py):
+# conditional pytesseract import with graceful fallback, soft-coded PSM set,
+# PyMuPDF rasterisation. Deliberately simpler than the Line List engine —
+# rotation 0 only (no multi-angle passes), no tiling — to keep the fallback
+# fast; it exists to recover tag/line text when the PDF text layer is thin
+# (< TEXT_SUFFICIENT_CHARS) or Vision is down (e.g. OpenAI 429), not to
+# replace Vision's structured extraction.
+VALVE_MTO_OCR_ENABLED = os.getenv('VALVE_MTO_OCR_ENABLED', '1').strip().lower() not in ('0', 'false', 'no')
+VALVE_MTO_OCR_DPI     = int(os.getenv('VALVE_MTO_OCR_DPI', '300'))
+VALVE_MTO_OCR_PSMS    = (6, 11)   # PSM 6 = uniform block, PSM 11 = sparse text
+_psms_env = os.getenv('VALVE_MTO_OCR_PSMS', '').strip()
+if _psms_env:
+    try:
+        VALVE_MTO_OCR_PSMS = tuple(int(p.strip()) for p in _psms_env.split(',') if p.strip()) or (6, 11)
+    except ValueError:
+        pass
+
+# Conditional import for pytesseract (graceful fallback if not installed —
+# the extractor behaves exactly as before in that case).
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    PYTESSERACT_AVAILABLE = False
+
 # Hard cap on pages we'll process — protects against runaway docs.
 VISION_MAX_PAGES       = int(os.getenv('VALVE_MTO_VISION_MAX_PAGES', '50'))
 # How many pages to bundle into a single OpenAI call (smaller = more accurate, larger = cheaper).
@@ -79,15 +109,12 @@ VISION_TEMPERATURE     = 0.0
 # batch-failure instead.
 VISION_TIMEOUT_SECS    = float(os.getenv('VALVE_MTO_VISION_TIMEOUT', '300'))
 JPEG_QUALITY           = 80
+VISION_DETAIL_DPI      = int(os.getenv('VALVE_MTO_DETAIL_DPI', '240'))
+VISION_REGION_EDGE_PX  = int(os.getenv('VALVE_MTO_REGION_EDGE', '1568'))
+VISION_REGION_OVERLAP  = 0.08
 MAX_ROWS               = int(os.getenv('VALVE_MTO_MAX_ROWS', '2000'))
 
-# ─── BYOK (bring-your-own-key) providers ────────────────────────────────
-# Added so a user can supply their own OpenAI OR Claude key instead of
-# relying on the admin-managed one (see _resolve_vision_credential below).
-# Model names match apps.instrument_io_workflow's own VISION_MODELS
-# constant for consistency across the two BYOK-vision features in this
-# codebase — same convention, independently maintained per that app's
-# established isolation rule (no cross-app import of the constant itself).
+# Provider models remain module-specific; credentials follow central policy.
 SUPPORTED_PROVIDERS = ('openai', 'claude')
 VISION_MODELS = {
     'openai': VISION_MODEL,
@@ -101,20 +128,48 @@ TEST_CONNECTION_MAX_TOKENS = 16
 ROW_KEYS = [
     'sl_no', 'area', 'type', 'pms_class', 'piping_class', 'rating', 'size_1', 'size_2',
     'bore', 'line_number', 'line_list', 'valve_tag', 'description', 'qty_island', 'qty_field', 'unit',
-    'remarks', 'pid_number', 'facing',
+    'remarks', 'pid_number', 'facing', 'confidence', 'location_hint', 'qty_observed', 'tab',
 ]
 
-# Soft-coded list (kept small — vision model picks the closest match).
-# BUG FIX (real, confirmed root cause of "valves missing from ISLAND/FIELD
-# tabs"): 'COMBINED' used to be a THIRD accepted value here, matching the
-# prompt's own old schema hint — so a row Vision (correctly, per that old
-# instruction) tagged "COMBINED" would show in the All Valves / COMBINED
-# MTO tabs but in NEITHER ISLAND NOR FIELD (the frontend's two area-filtered
-# tabs only match those two exact values — see ValveMTO.jsx's areaFilter).
-# area is now a strict binary choice — see VISION_PROMPT_TEMPLATE's own
-# MANDATORY AREA RULES section and _default_missing_area's fallback below.
-VALID_AREAS       = ['ISLAND', 'Field']
-NUMERIC_KEYS      = {'sl_no', 'qty_island', 'qty_field', 'unit'}
+NUMERIC_KEYS      = {'sl_no', 'qty_island', 'qty_field'}
+SURVEY_SCOPE_WARNING = (
+    'This register counts all visible valves, including existing and out-of-scope items. '
+    'Review scope, classification, and quantities before using it for procurement.'
+)
+
+# ─── New prompt schema mapping (UPPER_SNAKE → canonical lowercase) ──────
+# The Borouge Unit 47 PE4&PE5 prompt (VISION_PROMPT_TEMPLATE below) returns
+# rows under sheet-level "valves" with UPPER_SNAKE keys; older cached
+# responses / fallback paths may still use the legacy lowercase "rows"
+# schema. Both are accepted; this map is the single translation point.
+UPPER_SNAKE_ROW_MAP = {
+    'SL_NO': 'sl_no', 'AREA': 'area', 'TYPE': 'type',
+    'PIPING_MATERIAL_CLASS': 'pms_class', 'PIPING_CLASS': 'piping_class',
+    'RATING_FACING': 'rating', 'FACING': 'facing',
+    'SIZE_1_NB': 'size_1', 'SIZE_2_NB': 'size_2', 'PID_NUMBER': 'pid_number',
+    'LINE_NUMBER': 'line_number', 'VALVE_TAG': 'valve_tag',
+    'DESCRIPTION': 'description', 'QTY_ISLAND': 'qty_island',
+    'QTY_FIELD': 'qty_field', 'UNIT': 'unit', 'REMARKS': 'remarks',
+    'CONFIDENCE': 'confidence', 'LOCATION_HINT': 'location_hint',
+    'BORE': 'bore', 'LINE_LIST': 'line_list',
+}
+
+# ─── Section-4 text-cleaning validators (soft-coded regexes) ────────────
+# Implemented in CODE (not only in the prompt) so a corrupted/merged value
+# can never pass through even when the model disobeys.
+DRAWING_NO_PATTERN = r'^[A-Z0-9]+(?:-[A-Z0-9]+)+-\d+[A-Z]?$'
+LINE_NO_PATTERN = r'^[\d/-]+"?(?:x[\d/-]+")?-(?=[A-Z0-9-]*[A-Z])(?:[A-Z0-9]+-){2,}[A-Z0-9]+$'
+
+# ─── CLASS → RATING lookup (soft-coded) ─────────────────────────────────
+# Intentionally blank values — the user fills ratings from the PMS/legend
+# later. Rule (see prompt §3 RATING_FACING): if rating missing and the
+# class has a table value → fill it; otherwise leave empty and append
+# 'RATING FROM PMS' to remarks. Never guess.
+CLASS_RATING_TABLE = {
+    'A0KU16': '', 'A1AU01': '', 'A2AU05': '', 'A2AU16': '', 'A2AP01': '',
+    'A2GP01': '', 'A0KP01': '', 'A0KU01': '', 'B2AP01': '', 'B2GP01': '',
+    'B2GP98': '', 'D0KP01': '', 'D2AP01': '', 'D2GP01': '', 'E0KP01': '',
+}
 
 # ─── Soft-coded line-number harvester ───────────────────────────────────
 # Multi-format regex patterns mirrored from the Line List engine
@@ -142,8 +197,6 @@ LINE_NUMBER_HARVEST_PATTERNS: List[str] = [
     r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z]{1,4}[-\s]+[A-Z0-9]{3,6}[-\s]+\d{3,6}\b',
     # SIZE"-AREA-SERVICE-SEQ-PIPECLASS-END (Borouge / Linde area-first)
     r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+\d{2,3}[-\s]+[A-Z]{1,3}[-\s]+\d{4,6}[-\s]+[A-Z0-9]{5,7}[-\s]+[A-Z]{1,2}\b',
-    # Generic hyphenated tag — broad fallback (3-6 segments, alphanumerics)
-    r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z0-9]{1,6}[-\s]+[A-Z0-9]{1,8}[-\s]+[A-Z0-9]{2,10}(?:[-\s]+[A-Z0-9]{1,10}){0,3}\b',
 ]
 _LINE_NUMBER_HARVEST_RE = [re.compile(p, re.IGNORECASE) for p in LINE_NUMBER_HARVEST_PATTERNS]
 
@@ -161,6 +214,8 @@ def _harvest_line_numbers(text: str) -> List[str]:
     """
     if not text:
         return []
+    from .local_valve_mto import LINE_CHARACTERS
+    text = text.translate(LINE_CHARACTERS)
     seen: set = set()
     out: List[str] = []
     try:
@@ -346,19 +401,23 @@ def _derive_remarks_from_tag(valve_tag: str) -> str:
 # the frontend can show a meaningful message instead of a silent zero-row
 # result. Map: substring -> human-friendly message.
 OPENAI_FATAL_ERROR_PATTERNS: List[Tuple[str, str]] = [
+    ('429',
+     'The AI provider reached a usage or rate limit (429). No valve MTO was generated. '
+     'Check quota and billing for the selected credential source, or retry after the rate limit clears.'),
     ('insufficient_quota',
-     'OpenAI account has no remaining quota. Top up the API plan or rotate '
-     'OPENAI_API_KEY, then retry the extraction.'),
+     'The selected AI account has no remaining quota. Check its API billing '
+     'or replace the key in the selected credential source, then retry.'),
     ('invalid_api_key',
-     'OPENAI_API_KEY is invalid or revoked. Update the backend env var and '
-     'restart the container.'),
+     'The selected API key is invalid or revoked. Replace it in the selected '
+     'credential source, then retry.'),
     ('error code: 401',
-     'OpenAI rejected the API key (401 Unauthorized). Check OPENAI_API_KEY.'),
+     'The selected AI provider rejected the API key (401 Unauthorized). '
+     'Check the selected credential source.'),
     ('error code: 403',
-     'OpenAI denied access to the Vision model (403). Verify the project '
-     'has access to the configured VALVE_MTO_VISION_MODEL.'),
+     'The selected AI provider denied access to the Vision model (403). '
+     'Verify this API key has access to the configured model.'),
     ('billing_hard_limit_reached',
-     'OpenAI hard billing limit reached. Raise the limit or top up credit.'),
+     'The selected AI account reached its billing limit. Raise the limit or top up credit.'),
 ]
 
 
@@ -370,441 +429,99 @@ def _classify_openai_error(exc: Exception) -> Optional[str]:
             return friendly
     return None
 
-# Prompt is intentionally explicit — every column is described including
-# accepted values so the model emits clean JSON.
+# Project-neutral schema; drawing annotations and supplied legends govern interpretation.
 VISION_PROMPT_TEMPLATE = """\
-You are a senior piping engineer extracting a VALVE MATERIAL TAKE-OFF (Valve MTO)
-from the attached drawing/datasheet pages (this batch covers pages {page_range} of a
-larger document). Return ONLY a valid JSON object — no prose.
+You are a senior piping material engineer preparing a VALVE MATERIAL TAKE-OFF (MTO) from the supplied Piping & Instrumentation Diagram (P&ID). Read the project and drawing conventions from this document and the supplied legends. Do not assume a plant, unit, project, or tag format.
 
-Schema:
-{{
-  "project_meta": {{
-    "doc_no": "<COMPANY Document No., e.g. PJ6-EXD-GEN-TX0T-0004>",
-    "doc_title": "<title, e.g. PIPING VALVES MTO>",
-    "doc_desc": "<doc description>",
-    "revision": "<numeric or alphanumeric revision>",
-    "doc_date": "<YYYY-MM-DD if visible>",
-    "project_name": "<project name if visible>"
-  }},
-  "rows": [
-    {{
-      "sl_no":       <integer>,
-      "area":        "ISLAND" | "Field",
-      "type":        "<BALL VALVE | GATE VALVE | GLOBE VALVE | CHECK VALVE | PLUG VALVE | BUTTERFLY VALVE | NEEDLE VALVE | FLOAT VALVE | DIAPHRAGM VALVE | ANGLE VALVE | CHOKE VALVE (ADJUSTABLE) | THREE-WAY VALVE | FOUR-WAY VALVE | INTEGRAL DOUBLE BLOCK AND BLEED | VALVE WITH DEAD MANS HANDLE>",
-      "pms_class":   "<piping material class — long descriptive name, e.g. 'CS A106 Gr B'>",
-      "piping_class": "<piping spec class — short code only, e.g. 'A1A', 'B1B', 'CS1A'>",
-      "rating":      "<e.g. CLASS 150 RF, CLASS 600 RTJ>",
-      "facing":      "RF" | "FF" | "RTJ" | "",
-      "size_1":      "<nominal bore in inches with double quotes, e.g. 2\\"",
-      "size_2":      "<reduced size if any, else empty string>",
-      "bore":        "FB" | "RB" | "",
-      "line_number": "<piping line number / line tag the valve sits on (NOT the drawing sheet number — see pid_number below), e.g. 6\"-P-12345-A1A-N>",
-      "line_list":   "<line-list document ref or LL row id if visible (e.g. 'LL-001', 'PJ6-LL-003'), else empty string>",
-      "pid_number":  "<the DRAWING sheet number this valve appears ON, in the DRAWING NUMBER FORMAT AD111-XXX-D-XXXXX — see CUSTOMER-CONFIRMED FORMAT REFERENCE below; NOT the same as line_number, which is the valve's own line/piping tag, not the sheet it's drawn on>",
-      "valve_tag":   "<valve tag id>",
-      "description": "<short service description>",
-      "qty_island":  <integer total in ISLAND — see MANDATORY FIELDS below for the default when not explicitly shown>,
-      "qty_field":   <integer total in FIELD — see MANDATORY FIELDS below for the default when not explicitly shown>,
-      "unit":        <integer total quantity (units) for this valve row, 0 if none>,
-      "remarks":     "<operational status codes if visible: LO, LC, CSO, CSC, TSO, FBLO, FBLC, NRV, NO, NC, FO, FC, FL, FI — comma-separated; otherwise free text>"
-    }}
-  ]
-}}
+You will receive one P&ID sheet as an image (and possibly its text layer). This call covers page(s) {page_range} of a larger document. Your job is to output ONE ROW PER PHYSICAL VALVE drawn on the sheet that is within scope. You are extracting VALVES, not text.
 
-MANDATORY AREA RULE — read this before extracting anything. "area" is
-NEVER blank and NEVER any value other than exactly "ISLAND" or "Field"
-(capitalisation matters) — there is no third option, do not write
-"COMBINED", "N/A", "Both", or leave it empty. For EVERY valve you find:
-  - Set "area" to "ISLAND" if the valve sits inside the island / process
-    plot (the main process unit boundary — typically the dense, central
-    cluster of equipment and piping on the drawing).
-  - Set "area" to "Field" if the valve sits in the field / remote /
-    off-plot piping (tie-in lines, utility stations, remote block
-    valves, anything clearly outside the main process unit boundary).
-  Determine which one by actually looking for these area indicators on
-  the drawing, in this order of reliability:
-    1. Battery limit markers/lines — a drawn boundary (often a dashed or
-       heavy line, sometimes labelled "BL", "BATTERY LIMIT", or "ISBL"/
-       "OSBL") separating the plant/island from the field. A valve on
-       the ISBL (inside battery limit) side is ISLAND; a valve on the
-       OSBL (outside battery limit) side is Field.
-    2. Explicit "ISLAND" / "FIELD" text labels or title-block/area
-       callouts printed near the valve or its enclosing zone.
-    3. Area/zone boundary lines or a legend/key on the drawing that
-       assigns named zones to Island vs Field.
-  If NONE of these indicators are visible or the valve's position is
-  genuinely ambiguous even after checking all three, DEFAULT TO
-  "ISLAND" — never leave "area" blank and never invent a third value.
-  This default exists so every row is still usable in the ISLAND/FIELD
-  breakdown even on a drawing with no explicit area markings; it is a
-  deliberate, documented fallback, not a guess to avoid.
+### 1. What counts as a valve
+Valves are GRAPHIC SYMBOLS drawn on the piping lines. They usually have NO text label. You must find them visually.
+Identify each symbol using the supplied project legend. Default interpretation if the legend is not provided:
+- GATE: two triangles tip-to-tip (bow-tie), both hollow
+- GLOBE: bow-tie with a filled dot/circle at the centre
+- BALL: bow-tie with a hollow circle at the centre
+- CHECK: bow-tie with one triangle filled, or a single triangle with flow arrow / "Z" line
+- BUTTERFLY: bow-tie or two vertical lines with a diagonal/disc line between them
+- PLUG: bow-tie with a filled rectangle/square at the centre
+- NEEDLE: small bow-tie with a "T" or needle marker
+- CONTROL VALVE: valve body with an actuator (dome/box) on top and an instrument tag bubble (e.g. PV-2590, FV-…)
+- ON/OFF / SHUTDOWN VALVE: valve with actuator and tag XV-…, SDV-…, BDV-…
+- SAFETY / RELIEF VALVE: angle-body valve with spring symbol, tag PSV-…
+- Vent / drain valves: small valve on a short branch marked "V" (vent) or "D" (drain). These ARE valves; count them.
+Do NOT count: instruments without a valve body, spectacle blinds, spacers, reducers, flanges, strainers, steam traps (ST-1), utility station boxes (STA), off-page connector arrows, line-number diamonds, revision triangles.
+If a symbol is unclear, still output the row and set TYPE = "UNIDENTIFIED" and CONFIDENCE = "LOW". Never skip a valve.
 
-MANDATORY FIELDS — "type", "size_1", and "line_number" must never be
-left as an empty string for a valve you can actually see and tag:
-  - "type": identify the valve body shape (see the "type" list in the
-    schema above, and the MANUAL/ACTUATED ON/OFF VALVE SYMBOL REFERENCE
-    below for what each one looks like) — every valve symbol has a
-    distinguishable body shape; look again at the symbol before
-    defaulting to something generic.
-  - "size_1": the nominal bore is virtually always printed beside the
-    valve tag or on the line it sits on — read it from there if it
-    isn't directly on the valve.
-  - "line_number": read the line this valve sits on (see the LINE
-    NUMBER rule below) — only leave this empty if the valve genuinely
-    has no line callout anywhere near it after checking the whole page.
-  - "qty_island" / "qty_field": when a quantity is NOT explicitly
-    written next to the valve (most single valves on a P&ID represent
-    exactly one physical valve), default the quantity for whichever
-    field matches this row's own "area" to 1 (qty_island=1 if
-    area="ISLAND", qty_field=1 if area="Field") rather than 0 — a valve
-    you found and tagged is a real, physical valve, so its default
-    count is 1, not "none". Only use an explicit larger/smaller number
-    when the drawing actually states one (e.g. a note "(TYP. OF 4)").
-  - "piping_class" (short code, e.g. "A1A", "B1B", "CS1A", "AS1A0A"):
-    this is almost always DERIVABLE even when not separately labelled
-    near the valve — it is the PIPECLASS/PIPESPEC segment already named
-    in the LINE NUMBER rule below, present in MOST of those formats, not
-    only the customer's primary PIPING LINE FORMAT:
-      * FF-DD-111XXX-XXXX-X (PIPING LINE FORMAT)         → the XXXX segment
-      * SIZE-FLUID-SEQ-PIPESPEC-DEPT-INSUL (Onshore)     → the PIPESPEC segment
-      * SIZE-UNIT-SERVICE-SEQ-PIPECLASS(-END) (Industrial) → the PIPECLASS segment
-      * AREA-FLUID-SIZE-PIPECLASS-SEQ (Offshore)         → the PIPECLASS segment
-      * SIZE-AREA-SERVICE-SEQ-PIPECLASS-END (Borouge/Linde) → the PIPECLASS segment
-    Whichever format this valve's own "line_number" actually matches,
-    read that format's own class/spec segment straight into
-    "piping_class" rather than leaving it blank — do not re-derive it
-    from a different valve's line, and do not guess if "line_number"
-    doesn't follow any format with a clear class/spec segment (the
-    General/auto-detect format has none).
-  - "pms_class" (long descriptive name, e.g. "CS A106 Gr B"): unlike
-    "piping_class" above, this is NOT safely derivable from a short code
-    alone (a short code can map to more than one real material spec) —
-    only set it from an explicit label, BOM entry, or title-block/legend
-    callout naming the actual material. Leave it empty rather than
-    expanding "piping_class" into a guessed long-form name.
-  - "valve_tag": for EVERY valve found, look specifically for a tag
-    number near the valve symbol (above, below, or attached by a leader
-    line, same places operational-status codes and remarks are found).
-    Recognise these tag formats in particular — read the WHOLE tag, not
-    just the prefix:
-      * V111XXXX              (VALVE IDENTIFICATION format — see
-                                CUSTOMER-CONFIRMED FORMAT REFERENCE below)
-      * XXX-PSV-XXXXX, XXX-SDV-XXXXX, XXX-BDV-XXXXX, XXX-MOV-XXXXX,
-        XXX-SV-XXXXX           (SPECIAL VALVE CODES format — see the same
-                                section; also sets "type" per that rule)
-    ALWAYS include the tag when visible — do not leave "valve_tag" empty
-    just because it doesn't match one of these formats exactly; any
-    legible tag counts. Only leave it empty when the valve genuinely has
-    no tag printed anywhere near it (true for many simple manual block
-    valves) — never invent one.
-  - "rating": for EVERY valve found, look for a pressure class/rating
-    printed near the valve, on its line, in a nearby valve-datasheet
-    callout, or on a flange marking — common values: 150#, 300#, 600#,
-    900#, 1500#, 2500# (ANSI/ASME classes) or PN10, PN16, PN25, PN40,
-    PN63, PN100 (DIN/PN classes). ALWAYS include it when shown on the
-    drawing, in whichever of these forms it's actually written (do not
-    convert between ANSI class and PN class). This is DIFFERENT from
-    "piping_class" above — a piping class/spec CODE (e.g. "A1A",
-    "AS1A0A") is not itself a rating and must never be copied into
-    "rating" just because no separate rating marking exists; leave
-    "rating" empty in that case rather than substituting the spec code.
-    Only a literal pressure-class value in one of the forms above counts.
-  - "facing": for EVERY valve found, look for a face-type marking near
-    the valve or its rating — the only valid values are "RF" (Raised
-    Face), "FF" (Flat Face), or "RTJ" (Ring-Type Joint). This is often
-    written right alongside "rating" (e.g. "150# RF", "CLASS 600 RTJ")
-    — if so, split it out into "facing" rather than leaving it bundled
-    inside "rating" only. Leave empty if no facing marking is visible;
-    never guess one of the three values without seeing it.
-  - "pid_number": for EVERY valve found, read the DRAWING NUMBER this
-    page/sheet itself is titled with (from the title block, NOT from
-    this valve's own line_number) — see the DRAWING NUMBER FORMAT
-    (AD111-XXX-D-XXXXX) in CUSTOMER-CONFIRMED FORMAT REFERENCE below.
-    Every valve on the SAME page shares the SAME "pid_number" (it
-    identifies the sheet, not the individual valve) — read it once per
-    page/batch and apply it to every row from that page. Leave empty
-    only if the drawing genuinely has no title-block drawing number
-    visible anywhere on the page.
-
-MANUAL/ACTUATED ON/OFF VALVE SYMBOL REFERENCE — use these body-shape
-descriptions to identify the correct "type" from the symbol actually
-drawn on the P&ID, not from context/guesswork. Match the symbol first,
-then set "type" to the corresponding name (these are the same 15 values
-listed in the "type" field of the schema above):
-  Gate Valve                       = bowtie symbol on pipe
-  Globe Valve                      = bowtie with circle on pipe
-  Ball Valve                       = circle symbol on pipe
-  Plug Valve                       = diamond symbol on pipe
-  Check Valve                      = arrow/flap symbol (one direction)
-  Butterfly Valve                  = dot inside bowtie
-  Needle Valve                     = needle/fine control symbol
-  Float Valve                      = float/ball symbol
-  Diaphragm Valve                  = curved membrane symbol
-  Angle Valve                      = 90 degree turn valve
-  Choke Valve (Adjustable)         = angle with adjustment
-  Three-Way Valve                  = T-junction valve symbol
-  Four-Way Valve                   = cross junction valve symbol
-  Integral Double Block and Bleed  = double bowtie
-  Valve with Dead Mans Handle      = handle symbol
-If a valve's drawn symbol does not clearly match one of these shapes,
-fall back to the nearest match rather than leaving "type" blank — see
-the MANDATORY FIELDS rule above.
-
-LINE SYMBOLS REFERENCE — use these line-style descriptions (weight/
-dash pattern/markings, not the valve body shapes above) to tell real
-process piping apart from instrumentation/signal lines, so a valve
-reading is only ever based on where it actually sits:
-  PROCESS LINES (extract valves on these):
-    Major Process Line        = thick solid line (main flow)
-    Secondary/Utility Line    = medium solid line
-    Minor Process Line        = thin solid line
-    Existing Line             = dashed line
-    Lines to be Deleted       = crossed/hatched line
-    Future Line               = long dash line
-    Package/Skid Boundary     = dash-dot line
-  INSTRUMENTATION/SIGNAL LINES (do NOT extract valves on these):
-    Process Instrument Line   = solid thin line
-    Pneumatic Signal          = line with X marks
-    Hydraulic Signal          = line with H marks
-    Capillary Tubing          = line with L marks
-    Electrical Signal         = dashed line
-    Mechanical Link           = line with dots
-    Software/Data Link        = line with circles
-    Electromagnetic/Sonic Signal = wave line
-    Tubing                    = line with loops
-Use this reference for five things:
-  1. IDENTIFY the correct pipe/line type a valve sits on from its
-     drawn line style, the same way the VALVE SYMBOL REFERENCE above
-     identifies a valve's own body shape.
-  2. DISTINGUISH process lines from instrument signal lines — a line's
-     style (not just its proximity to a valve symbol) determines which
-     category it belongs to; two visually similar marks (e.g. a dashed
-     Existing Line vs. a dashed Electrical Signal line) are told apart
-     by context (is it carrying process fluid between equipment, or
-     connecting an instrument bubble to a valve/transmitter?).
-  3. ONLY extract valves that sit on a PROCESS line (any of the seven
-     styles above) — this is this project's actual Valve MTO scope.
-  4. IGNORE valves/components that appear to sit only on an
-     INSTRUMENTATION/SIGNAL line (e.g. a hand switch or solenoid symbol
-     inline on a pneumatic/electrical signal line to an actuator) — do
-     not report these as "type" rows at all; they belong to the
-     instrument loop, not the piping valve take-off, even if their
-     symbol resembles one of the 15 shapes above.
-  5. VALIDATE a "line_number" reading — a line number printed beside a
-     line drawn with an instrumentation/signal style (not a process
-     style) is a strong sign the number belongs to a signal/loop tag,
-     not a piping line number; re-check before accepting it.
-If a line's style genuinely cannot be determined (faint scan, unclear
-reproduction), fall back to it being a process line rather than
-silently dropping a real, visible valve.
-
-CUSTOMER-CONFIRMED FORMAT REFERENCE — real, project-confirmed tag/line
-conventions for this customer. Treat these as ground truth alongside (not
-instead of) the general line-number formats in the "line_number" rule
-below — use whichever actually matches what's printed on the drawing.
-
-  PIPING LINE FORMAT: FF-DD-111XXX-XXXX-X
-    FF     = Fluid Code (see FLUID CODES below — use these to VALIDATE a
-             line number: if the leading segment matches one of these
-             known codes, that confirms it is a real line number, not
-             noise/an unrelated tag)
-    DD     = Line Diameter (inches)
-    111XXX = Project Identifier + Line Number
-    XXXX   = Piping Material Code
-    X      = Insulation Type (see INSULATION CODES below)
-
-  FLUID CODES (FF segment above — customer-confirmed, exhaustive list;
-  a line number's leading 1-3 letter code should match one of these):
-<<<FLUID_CODES_TABLE>>>
-  When reading a "line_number", check its leading letters against this
-  list — a match is strong confirmation the reading is correct; if the
-  leading letters DON'T match any of these AND don't match any of the
-  general line-number formats in the "line_number" rule below either,
-  look again before accepting the reading (it may be a misread digit vs.
-  letter, or a genuinely different kind of tag, not a line at all).
-
-  VALVE IDENTIFICATION: V111XXXX
-    V    = Valve
-    111  = Project Indicator (USGIF)
-    XXXX = Sequential Number (0001-9999)
-
-  DRAWING NUMBER FORMAT: AD111-XXX-D-XXXXX (the drawing's own title-block
-  number, not a line or valve tag — use it to confirm which area/platform
-  the whole sheet belongs to, which in turn applies to every valve and
-  line read off that sheet):
-    AD111 = Project Indicator (USGIF)
-    XXX   = Area Code (see AREA CODES below — either the 026-446 span or
-            the 501-550 span)
-    D     = Discipline Code (Process and P&IDs)
-    XXXXX = Drawing Number (10000-19999)
-
-  SPECIAL VALVE CODES — format XXX-CODE-XXXXX, where XXX is this
-  project's AREA CODE and XXXXX is a sequence number whose valid range
-  depends on the code itself (see each one below). XXX is valid when it
-  is one of the specific named codes in the AREA CODES list below (the
-  026-446 span and the 501-550 span both contain named codes — but not
-  every number in either span is a real code, only the ones actually
-  listed there). When a
-  valve tag contains one of these codes, set "type" from the code itself
-  (this overrides a visual best-guess from the FUNC/type list in the
-  schema above — the tag's own code is more reliable than the drawn body
-  shape alone). Use the area-code and sequence-number ranges below to
-  VALIDATE a tag reading — a tag whose XXX or XXXXX falls clearly outside
-  these ranges is worth a second look before accepting it as correct:
-    PSV = Pressure Safety Valve   — XXX-PSV-XXXXX, sequence 2002-2201
-                                     (e.g. 501-PSV-2001)
-    SDV = Shutdown Valve          — XXX-SDV-XXXXX, sequence 0001-9999
-    BDV = Blowdown Valve          — XXX-BDV-XXXXX, sequence 0001-9999
-    SV  = Solenoid Valve          — XXX-SV-XXXXX,  sequence 0001-9999
-    MOV = Motor Operated Valve    — XXX-MOV-XXXXX, sequence from 1001
-
-  INSULATION CODES (the trailing single letter in the piping line format
-  above — read it into context, it is not one of the existing schema
-  columns on its own):
-    A = Acoustic
-    C = Cold Conservation
-    F = Fire Proofing
-    H = Heat Conservation
-    P = Personnel Protection
-    T = Heat Tracing
-    E = Electrical Heat Tracing
-
-  AREA CODES (customer-confirmed, exhaustive list, two spans — 026-446
-  and 501-550) — this is the AREA segment of the Offshore line-number
-  format in the "line_number" rule below (e.g. "604-LFG-3-AC2GA0-2012" —
-  "604" is the area code; this project's actual area codes are the
-  3-digit numbers below, not 604 itself, which was only an illustrative
-  example), and also the XXX segment of the DRAWING NUMBER FORMAT above:
-    026=GENERAL AND MISCELLANEOUS
-    176=CAP GAS WELLS PLATFORM (US-58)
-    177=GAS TREATMENT PLATFORM
-    178=ABK TIE-IN PLATFORM
-    179=COLLECTOR/SEPARATOR PLATFORM
-    180=ORIGINAL CENTRAL COLLECTOR PLATFORM
-    181=NORTHERN RISER PLATFORM
-    182=EASTERN RISER PLATFORM
-    183=UMM SHAIF EXISTING ACCOMMODATION PLATFORM
-    184=POWER GENERATION PLATFORM
-    185=WATER INJECTION PLATFORM (5 MODULES)
-    186=WATER INJECTION PLATFORM (2 MODULES)
-    187=BRIDGE B1, 188=BRIDGE B2, 189=BRIDGE B3, 190=BRIDGE B4
-    191=BRIDGE B5, 192=BRIDGE B6, 193=BRIDGE B7, 194=BRIDGE B8
-    195=BRIDGE B9, 196=BRIDGE B10, 197=BRIDGE B11
-    350=EXTENSION TO GAS TREATMENT PLATFORM
-    351=FLARES 1, 2 AND TA
-    352=UMM SHAIF ADDITIONAL ACCOMMODATION
-    359=BRIDGE SUPPORT TOWER S1
-    360=BRIDGE SUPPORT TOWER S2
-    361=BRIDGE SUPPORT TOWER S3
-    391=CRESTAL GAS INJECTION TOWER US 272
-    392=CRESTAL GAS INJECTION TOWER US 290
-    414=NEW 36" MOL (SUBMARINE)
-    415=NEW 36" MOL RISER PLATFORM
-    418=BRIDGE SUPPORT TOWER S5
-    419=BRIDGE SUPPORT TOWER S4
-    420=BRIDGE B15, 421=BRIDGE B14, 423=BRIDGE B13
-    422=TAWEELAH ALPHA PLATFORM
-    427=NEW GAS TREATMENT PLATFORM
-    428=THAMAMA PILOT GAS INJECTION US 213
-    441=ARAB D GAS INJECTION TOWER US 251
-    446=ARAB D GAS INJECTION TOWER US 250
-    501=GENERAL & MISCELLANEOUS
-    502=COLLECTOR SEPARATOR PLATFORM-1 (CSP-1)
-    503=UMM SHAIF WATER DISPOSAL UNIT (UWDT)
-    504=FLARE TOWER-4 (FT-4), 505=FLARE TOWER-5 (FT-5)
-    510=BRIDGE B16, 511=BRIDGE B17, 512=BRIDGE B18, 513=BRIDGE B19
-    514=BRIDGE B20, 515=BRIDGE B21, 516=BRIDGE B22, 517=BRIDGE B23
-    520=BRIDGE SUPPORT TOWER S6, 521=BRIDGE SUPPORT TOWER S7
-    522=BRIDGE SUPPORT TOWER S8, 523=BRIDGE SUPPORT TOWER S9
-    524=BRIDGE SUPPORT TOWER S10
-    531=COMPRESSION PLATFORM-1 (CP-1)
-    532=UMM SHAIF ACCOMMODATION PLATFORM (UAP)
-    533=FLARE TOWER-6 (FT-6)
-    538=BRIDGE B55, 539=BRIDGE B56, 540=BRIDGE B57
-    547=BRIDGE SUPPORT TOWER S55, 548=BRIDGE SUPPORT TOWER S56
-  Use these area codes for three things:
-  1. VALIDATE line numbers — when a line number follows the Offshore
-     AREA-FLUID-SIZE-PIPECLASS-SEQ format, confirm its leading area
-     segment matches one of these known codes; that confirms the whole
-     reading is a genuine line number, the same way the FLUID CODES list
-     above corroborates the FLUID segment.
-  2. IDENTIFY the specific platform/structure a valve physically sits
-     on — when you can read an area code from a nearby line number or
-     from a title-block/drawing-reference callout, match it to its name
-     above (e.g. "179" = "COLLECTOR/SEPARATOR PLATFORM").
-  3. INFORM (not replace) the "area" field decision in the MANDATORY
-     AREA RULE above — this list does NOT itself state which named
-     platforms count as ISLAND vs Field (that mapping was not provided
-     and must not be guessed/invented); instead, once you know WHICH
-     named platform a valve is on via its area code, apply the SAME
-     battery-limit/ISBL-OSBL reasoning from the MANDATORY AREA RULE to
-     THAT platform — a bridge, riser platform, or tie-in platform
-     physically separate from the main process platform is a real,
-     visible signal the valve likely belongs on the Field side, while a
-     valve on the main/central platform (e.g. a collector or treatment
-     platform) likely belongs on the ISLAND side — but always let what's
-     actually drawn (battery-limit lines, explicit labels) decide over
-     an assumption based on the platform name alone.
-
-PROJECT-SPECIFIC EXTRACTION RULES — read before extracting anything:
-1. SIZE CUTOFF: only extract valves 2" NB (nominal bore) and above.
-   Read "size_1" first, then decide — a valve smaller than 2" (e.g. 3/4",
-   1", 1-1/2") must NOT be reported as a row at all, even if its tag,
-   type, and everything else about it is perfectly legible. This is a
-   real project scope limit, not a data-quality judgement call — do not
-   report a small valve with a note about its size instead of just
-   omitting it; omit it entirely. Everything else in this prompt about
-   being exhaustive ("extract EVERY valve row") means every valve AT OR
-   ABOVE this 2" cutoff, not literally every valve symbol on the page.
-2. LEGEND STANDARD: this project's legend/symbol conventions follow the
-   CSP-1 standard — when a symbol or abbreviation is ambiguous, prefer
-   the CSP-1 reading over a generic/unrelated convention.
-3. TAG NUMBERING STANDARD: tag numbering on this project follows
-   AO-ENG-D-PRO-001 — use it as the authoritative reference for how tags
-   are structured (alongside the CUSTOMER-CONFIRMED FORMAT REFERENCE
-   above, which documents that standard's actual formats) when a tag's
-   structure is otherwise unclear.
-
-Rules:
-- For "remarks": this column is CRITICAL. Inspect EVERY valve symbol and its adjacent legend annotation on the drawing very carefully — valves are often labelled with a 2-4 letter operational-status code in small text right next to the valve body (sometimes above, below, or attached by a leader line).
-  Always emit these codes when visible (comma-separated, in this exact spelling): LO (Locked Open), LC (Locked Closed), CSO (Car-Sealed Open), CSC (Car-Sealed Closed), TSO (Tight Shut-Off), FBLO (Full-Bore Locked Open), FBLC (Full-Bore Locked Closed), NRV (Non-Return Valve), NO (Normally Open), NC (Normally Closed), FO (Fail Open), FC (Fail Closed), FL (Fail Last), FI (Fail Indeterminate).
-  These codes may ALSO appear inside the valve tag itself (e.g. ``BV-LO-1234``, ``GV-08-FBLC``) — include them either way. If the legend uses the spelled-out phrase (e.g. "Locked Open"), emit the matching short code instead. Only fall back to free text when NONE of these codes apply.
-- For "line_number" (a.k.a. P&ID NUMBER): this column is ALSO CRITICAL. Extract the COMPLETE line designation for every valve row. Line numbers follow one of these standard formats — recognise ALL of them, do not skip lines simply because they look unusual:
-    * Onshore         2"-D-6152-033842-X-N            (SIZE-FLUID-SEQ-PIPESPEC-DEPT-INSUL)
-    * Industrial      2"-2600-FL-352-32070R-E         (SIZE-UNIT-SERVICE-SEQ-PIPECLASS-END)
-    * Offshore        604-LFG-3-AC2GA0-2012           (AREA-FLUID-SIZE-PIPECLASS-SEQ — see AREA CODES above for this project's real area codes)
-    * ADNOC compact   6"-CD-AC3N-8256                 (SIZE-FLUID-CLASS-SEQ)
-    * General         4"-41-SWR-64313-A2AU16-V        (auto-detect any hyphenated tag with size + alphanumerics)
-    * Borouge/Linde   1"-63-UA-149472-A1AU01-V        (SIZE-AREA-SERVICE-SEQ-PIPECLASS-END)
-  When the same valve sits on more than one line, emit a separate row per line. Never leave line_number empty if the line designation is visible anywhere on the drawing or in the text excerpt below.
-- For "line_list": if the drawing references a line-list document number (e.g. 'PJ6-LL-003', 'LL-001'), emit it verbatim; otherwise leave empty — do not invent.
-- Output only valid JSON; do not wrap in markdown fences.
-- Extract EVERY valve row 2" NB and above visible in the attached pages — do not summarise or skip (see PROJECT-SPECIFIC EXTRACTION RULES above for the size cutoff itself).
-- Use empty strings for unknown text fields and 0 for unknown numeric fields.
-- Do not invent valve tags or sizes — leave empty if uncertain.
-- Renumber sl_no starting from 1 within this batch (the server merges batches).
-- Maximum {max_rows} rows per batch.
-
-Candidate line numbers detected in the PDF text layer (validated against standard formats — every one of these IS a real line; cross-check the drawing and assign each to the correct valve row when applicable):
-{candidate_line_numbers}
-
-Project Legend Sheet data (from this user's own active legend sheets per
-section — use whichever of valve types, piping/line types, line/drawing
-formats, fluid/area codes, and valve symbol meanings it actually
-documents as AUTHORITATIVE whenever it conflicts with general
-ISA/piping convention. NOTE: this section is NOT a reliable source for
-"pms_class"/"piping_class" material-grade data specifically — it may or
-may not contain that, depending on what this user has set up; use the
-MANDATORY FIELDS rule above for those two fields instead. If this
-section says "(none uploaded)", fall back to your own general
-engineering knowledge exactly as before):
+Project Legend Sheet data (from this user's own active legend sheets per section — AUTHORITATIVE whenever it conflicts with the defaults above; if it says "(none uploaded)", fall back to the defaults):
 {legend_context}
 
-Embedded text excerpt (use as ground truth where it conflicts with the image):
+### 2. Survey scope: all visible valves, subject to review
+- Include EVERY physical valve visible on the sheet, including existing, vendor-supplied, temporary, and out-of-scope valves.
+- Do not exclude a valve merely because it is outside a scope or revision cloud.
+- Use explicit drawing scope notes and legends to flag EXISTING / NEW / VENDOR-SUPPLIED / TEMPORARY / OUT-OF-SCOPE in REMARKS only when supported by the source.
+- If scope or installation status is unclear, write "SCOPE/STATUS REQUIRES REVIEW"; never infer that an existing valve is a new purchase.
+- Quantities are observed valve counts, NOT approved procurement quantities. Flag this in warnings.
+
+### 3. Field rules
+- SL_NO: Running number on this sheet, starting at 1.
+- AREA: The complete DRG. TITLE / DRAWING TITLE from THIS sheet's bottom title block (left or right). Preserve every title line in reading order. Same title for every valve on that sheet. Never substitute ISLAND/FIELD, LOCATION, PROJECT, reference titles, or document numbers. If illegible, leave empty and request drawing-title review.
+- PID_NUMBER: The drawing number of THIS sheet, taken ONLY from its title block, using its actual project format. NEVER use reference-document numbers or off-page connector destinations. Same value for every row of the sheet.
+- LINE_NUMBER: The pipe designation connected to the valve, using the actual project format. For a branch valve, use the header it branches from only when connectivity is visible.
+- PIPING_CLASS: The short piping specification code explicitly shown on the connected line or a verified project lookup. Do not assume a fixed code format.
+- PIPING_MATERIAL_CLASS: The material-class description from an explicit drawing annotation or a verified project lookup for PIPING_CLASS. Otherwise leave empty; do not replace it with an unrelated project's class.
+- SIZE_1_NB: Valve size. Use a size label printed directly next to the valve symbol (e.g. 1", 3/4", 2") if present; otherwise the size at the start of LINE_NUMBER. Output in inches as written, e.g. 3/4", 1-1/2", 8".
+- SIZE_2_NB: Only for PSVs / reducing valves with inlet × outlet sizes (e.g. 2"x3" → SIZE_1 = 2", SIZE_2 = 3"). Otherwise leave empty.
+- RATING_FACING: If a rating is printed at the valve (e.g. 300#, 600#, 900#), use it. Otherwise use the CLASS → RATING table if provided in the legend context. If unknown, leave empty and put "RATING FROM PMS" in REMARKS. Never guess.
+- FACING: Only the explicitly shown or verified facing/end-connection code (RF, FF, RTJ, SW, BW, NPT); otherwise empty. Keep it separate from the pressure rating.
+- BORE: Full/reduced bore only when explicitly shown; otherwise empty.
+- LINE_LIST: An explicitly supplied line-list reference, not a copy of a drawing number or unrelated text. Otherwise empty.
+- TYPE: From the symbol (section 1): GATE / GLOBE / BALL / CHECK / BUTTERFLY / PLUG / NEEDLE / CONTROL / ON-OFF / PSV / UNIDENTIFIED.
+- VALVE_TAG: Only if a tag is printed for this valve (PSV-…, PV-…, XV-…, HV-…, SDV-…). Prefix with unit if shown (e.g. 47-PSV-2004). Manual valves normally have no tag. Leave empty, do NOT invent one.
+- DESCRIPTION: <TYPE> VALVE, <SIZE_1>[x<SIZE_2>], <RATING_FACING>, CLASS <PIPING_MATERIAL_CLASS>; add service purpose if obvious (VENT / DRAIN / ISOLATION / BYPASS). For PSVs use the text in the PSV table if present (e.g. "BUTANE DRYER A SAFETY VALVE").
+- TAB: "island" or "field" only when installation allocation is explicitly supported by source location/notes or an exact project mapping. AREA is the drawing title and never determines this allocation.
+- QTY_ISLAND / QTY_FIELD: 1 per physical valve in the verified TAB's column, 0 in the other. If installation allocation is unknown, leave both 0 and request quantity allocation review.
+- UNIT: "NOS"
+- REMARKS: Valve position/status text adjacent to the valve: LO (locked open), LC (locked closed), NC (normally closed), NO, CSO, CSC; plus any note that refers to this valve (quote the note number and text).
+- CONFIDENCE: HIGH / MEDIUM / LOW: how sure you are of TYPE + SIZE + CLASS together.
+- LOCATION_HINT: Grid zone of the valve on the sheet (border letters/numbers, e.g. "D-7") so a checker can find it.
+- VALVE_BBOX: The tight valve-body rectangle [x0,y0,x1,y1], each coordinate from 0 to 1000 relative to THIS drawing region, not a legend picture. This establishes its physical location; do not substitute a text-label or instrument-bubble rectangle.
+- Never allocate unknown installation scope to FIELD by default, or infer scope from words in the drawing title. Keep both allocation quantities zero.
+
+### 4. Text-cleaning rules (important)
+- Never join two separate text items into one value. A P&ID number ends after its last digit group, e.g. 47-PU-152-20112-02. Anything appended (LOW, NOTE, REV, THIS, FOR, Q1, TOHP, digits from an adjacent ref) is a different text item and must be dropped.
+- Respect this project's drawing and line formats, not formats from another project.
+- If a value is unreadable or joined to an adjacent text item, leave it empty and set CONFIDENCE = "LOW". Do not output a corrupted value.
+
+### 5. Self-check before answering
+1. Count the valve symbols inside scope on the image a second time. The number of rows must equal that count.
+2. Every row has PID_NUMBER = the title-block number.
+3. No row is an off-page connector, line label, or note.
+4. Every piping class/material value is supported by its connected line or a supplied project lookup.
+5. If the sheet has in-scope piping but you found 0 valves, re-examine. Lines almost always have at least vent/drain/isolation valves.
+
+### 6. Output
+Return ONLY valid JSON, no commentary. Populate this schema from the source, not from example defaults. If no physical valves are verified, return an empty valves array.
+{{
+  "pid_number": "",
+  "sheet_title": "",
+  "revision": "",
+  "scope_rule_applied": "ALL VISIBLE VALVES - REVIEW REQUIRED",
+  "valve_count": 1,
+  "valves": [ {{ "SL_NO": 1, "AREA": "", "TYPE": "UNIDENTIFIED", "PIPING_MATERIAL_CLASS": "", "PIPING_CLASS": "", "RATING_FACING": "", "FACING": "", "SIZE_1_NB": "", "SIZE_2_NB": "", "BORE": "", "PID_NUMBER": "", "LINE_NUMBER": "", "LINE_LIST": "", "VALVE_TAG": "", "DESCRIPTION": "", "QTY_ISLAND": 0, "QTY_FIELD": 0, "UNIT": "NOS", "REMARKS": "SCOPE/STATUS REQUIRES REVIEW", "CONFIDENCE": "LOW", "LOCATION_HINT": "", "VALVE_BBOX": null }} ],
+  "excluded": [],
+  "warnings": []
+}}
+
+Unverified line-number candidates from text/OCR. Associate one only with a visibly connected physical valve. Never turn these candidates into valve rows on their own:
+{candidate_line_numbers}
+
+Text excerpt for context (may contain OCR errors and document-reference numbers). Verify against the drawing; text alone is not evidence of a valve:
 ---
 {text_excerpt}
 ---
+
+Maximum {max_rows} rows per sheet.
+
 """
 
 # BUG FIX: the fluid code table used to be a hand-duplicated literal
@@ -880,6 +597,71 @@ def _extract_text(pdf_path: str, on_text_progress=None) -> str:
     return '\n'.join(parts)
 
 
+def _ocr_pages_text(pdf_path: str, on_progress=None) -> str:
+    """Tesseract OCR fallback — render each page via PyMuPDF at
+    ``VALVE_MTO_OCR_DPI`` and OCR the raster (rotation 0 only, PSM set from
+    ``VALVE_MTO_OCR_PSMS``). Returns combined text, '' when unavailable or
+    nothing was read. NEVER raises — a broken/missing Tesseract must leave
+    the extractor behaving exactly as if this layer didn't exist.
+    """
+    if not (VALVE_MTO_OCR_ENABLED and PYTESSERACT_AVAILABLE):
+        return ''
+    parts: List[str] = []
+    try:
+        import fitz
+        from PIL import Image
+        doc = fitz.open(pdf_path)
+        total = doc.page_count
+        zoom = VALVE_MTO_OCR_DPI / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        for i, page in enumerate(doc):
+            try:
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
+                page_txt: List[str] = []
+                for psm in VALVE_MTO_OCR_PSMS:
+                    try:
+                        t = pytesseract.image_to_string(img, config=f'--psm {psm}')
+                        if t and t.strip():
+                            page_txt.append(t)
+                    except Exception:
+                        pass
+                if page_txt:
+                    parts.append('\n'.join(page_txt))
+            except Exception:
+                pass
+            if on_progress:
+                try:
+                    on_progress(i + 1, total)
+                except Exception:
+                    pass
+        doc.close()
+        if parts:
+            logger.info('[ValveMTO] Tesseract OCR fallback read %d chars from %d page(s)',
+                        sum(len(p) for p in parts), total)
+    except Exception as exc:                           # pragma: no cover
+        logger.warning('[ValveMTO] Tesseract OCR fallback failed: %s', exc)
+    return '\n'.join(parts)
+
+
+def _maybe_ocr_text(pdf_path: str, text: str, warnings: List[str], reason: str,
+                    on_progress=None, force: bool = False) -> Tuple[str, bool]:
+    """Run the Tesseract fallback when (a) the PDF text layer is below
+    TEXT_SUFFICIENT_CHARS, or (b) ``force`` (Vision attempted but every batch
+    failed — e.g. 429 — so OCR the pages before the line-only fallback).
+    Returns (possibly-augmented text, ocr_used). Adds a warnings entry when
+    OCR actually contributed.
+    """
+    if not force and len(text or '') >= TEXT_SUFFICIENT_CHARS:
+        return text, False
+    ocr_text = _ocr_pages_text(pdf_path, on_progress=on_progress)
+    if not ocr_text.strip():
+        return text, False
+    warnings.append(f'{reason} — used Tesseract OCR fallback')
+    return ((text or '') + '\n' + ocr_text), True
+
+
+
 def _render_pages_b64(pdf_path: str, max_pages: int, dpi: int, on_render_progress=None) -> List[str]:
     """
     Render PDF pages to base64 JPEG strings.
@@ -927,6 +709,138 @@ def _render_pages_b64(pdf_path: str, max_pages: int, dpi: int, on_render_progres
     return images
 
 
+def _enhance_native_drawing(image):
+    """Darken faint neutral CAD strokes without changing coloured scope linework."""
+    import numpy as np
+    from PIL import Image
+    pixels = np.asarray(image.convert('RGB')).copy()
+    neutral = pixels.max(axis=2).astype(int) - pixels.min(axis=2).astype(int) <= 3
+    ink = neutral & (pixels.min(axis=2) < 250)
+    pixels[neutral] = 255
+    pixels[ink] = 0
+    return Image.fromarray(pixels)
+
+
+def _drawing_titles(pdf_path, max_pages):
+    import fitz
+    from .local_valve_mto import drawing_title
+    with fitz.open(pdf_path) as document:
+        return {index: drawing_title(document[index]) for index in range(min(max_pages, len(document)))}
+
+
+def _render_native_regions(pdf_path, max_pages, on_render_progress=None):
+    """Clip the original PDF before rasterization; never enlarge a low-res preview."""
+    import fitz
+    from PIL import Image
+    from .local_valve_mto import embedded_text_boxes, drawing_title
+
+    if VISION_DETAIL_DPI <= 0 or VISION_REGION_EDGE_PX < 3:
+        raise ValueError('Valve MTO detail DPI and region edge must be positive.')
+    regions = []
+    with fitz.open(pdf_path) as document:
+        for page_index, page in enumerate(document):
+            if page_index >= max_pages:
+                break
+            width, height = page.rect.width, page.rect.height
+            columns = max(1, math.ceil(width * VISION_DETAIL_DPI / 72 / VISION_REGION_EDGE_PX))
+            rows = max(1, math.ceil(height * VISION_DETAIL_DPI / 72 / VISION_REGION_EDGE_PX))
+            words = embedded_text_boxes(page)
+            sheet_title = drawing_title(page, words)
+            identifiers = {
+                item.text for item in words
+                if item.box[0] > width * 0.65 and item.box[1] > height * 0.9
+                and re.fullmatch(DRAWING_NO_PATTERN, item.text, re.IGNORECASE)
+            }
+            identifier = next(iter(identifiers)) if len(identifiers) == 1 else ''
+            for r in range(rows):
+                for c in range(columns):
+                    core = fitz.Rect(c * width / columns, r * height / rows,
+                                     (c + 1) * width / columns, (r + 1) * height / rows)
+                    margin_x, margin_y = width / columns * VISION_REGION_OVERLAP, height / rows * VISION_REGION_OVERLAP
+                    clip = fitz.Rect(max(0, core.x0 - margin_x), max(0, core.y0 - margin_y),
+                                     min(width, core.x1 + margin_x), min(height, core.y1 + margin_y))
+                    # Raster bounds round outwards at both edges.
+                    zoom = min(VISION_DETAIL_DPI / 72, (VISION_REGION_EDGE_PX - 2) / max(clip.width, clip.height))
+                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+                    image = _enhance_native_drawing(Image.frombytes('RGB', (pix.width, pix.height), pix.samples))
+                    buffer = io.BytesIO()
+                    image.save(buffer, format='JPEG', quality=95)
+                    native_text = '\n'.join(item.text for item in words if fitz.Rect(item.box).intersects(clip))
+                    regions.append({
+                        'page': page_index, 'box': tuple(clip), 'core': tuple(core),
+                        'page_size': (width, height), 'pid_number': identifier, 'sheet_title': sheet_title,
+                        'image': base64.b64encode(buffer.getvalue()).decode('ascii'),
+                        'size': image.size, 'dpi': round(zoom * 72, 1), 'text': native_text,
+                    })
+                    if on_render_progress:
+                        on_render_progress(len(regions), len(regions) + rows * columns - (r * columns + c + 1))
+    return regions
+
+
+def _region_text(region):
+    """Local rotated OCR is a region-specific hint, never a drawing overlay."""
+    if not (VALVE_MTO_OCR_ENABLED and PYTESSERACT_AVAILABLE):
+        return region['text'], False, ['Region OCR unavailable; verify text against the native drawing image.']
+    from PIL import Image
+    parts = [region['text']]
+    warnings = []
+    with Image.open(io.BytesIO(base64.b64decode(region['image']))) as image:
+        for angle in (0, 90, 180, 270):
+            view = image.rotate(angle, expand=True)
+            for psm in VALVE_MTO_OCR_PSMS:
+                try:
+                    text = pytesseract.image_to_string(view, config=f'--psm {psm}', timeout=30)
+                except (RuntimeError, pytesseract.TesseractError, pytesseract.TesseractNotFoundError) as exc:
+                    logger.warning('[ValveMTO] Region OCR page=%d angle=%d PSM=%d failed: %s',
+                                   region['page'] + 1, angle, psm, exc)
+                    warnings.append(f'Page {region["page"] + 1}: rotated region OCR failed; text evidence requires image verification.')
+                    continue
+                if text.strip():
+                    parts.append(text.strip())
+    return '\n'.join(dict.fromkeys(parts)), len(parts) > 1, warnings
+
+
+def _locate_region_rows(data, region):
+    """Keep only bodies centred in this region's core; overlap provides context."""
+    rows = data.get('valves') or data.get('rows') or []
+    if not isinstance(rows, list):
+        return data
+    kept = []
+    warnings = list(data.get('warnings') or [])
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        box = raw.get('VALVE_BBOX')
+        valid = (isinstance(box, list) and len(box) == 4
+                 and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                         and math.isfinite(v) and 0 <= v <= 1000 for v in box))
+        if valid:
+            valid = box[0] < box[2] and box[1] < box[3]
+        if valid:
+            x0, y0, x1, y1 = region['box']
+            global_box = (x0 + box[0] / 1000 * (x1 - x0), y0 + box[1] / 1000 * (y1 - y0),
+                          x0 + box[2] / 1000 * (x1 - x0), y0 + box[3] / 1000 * (y1 - y0))
+            cx, cy = (global_box[0] + global_box[2]) / 2, (global_box[1] + global_box[3]) / 2
+            left, top, right, bottom = region['core']
+            width, height = region['page_size']
+            if not (left <= cx < right or (right == width and cx == right)):
+                continue
+            if not (top <= cy < bottom or (bottom == height and cy == bottom)):
+                continue
+            raw['location_hint'] = f'Page {region["page"] + 1} [{", ".join(f"{v:.1f}" for v in global_box)}] pt'
+        else:
+            raw['CONFIDENCE'] = raw['confidence'] = 'LOW'
+            raw['REMARKS'] = _merge_remarks(str(raw.get('REMARKS') or raw.get('remarks') or ''),
+                                           'PHYSICAL LOCATION UNVERIFIED - CHECK DUPLICATE/MISSED VALVES')
+            warnings.append('Some valve bodies have no valid source bounding box; count and physical locations require review.')
+        if region['pid_number']:
+            raw['PID_NUMBER'] = raw['pid_number'] = region['pid_number']
+        if region.get('sheet_title'):
+            raw['AREA'] = raw['area'] = region['sheet_title']
+        kept.append(raw)
+    return {**data, 'sheet_title': region.get('sheet_title') or data.get('sheet_title', ''),
+            'valves': kept, 'rows': kept, 'warnings': list(dict.fromkeys(warnings))}
+
 # ─── Scan mode (Quick vs Thorough) ──────────────────────────────────────
 # Soft-coded: the frontend's scan-mode selector (ValveMTO.jsx) sends
 # 'quick' or 'thorough' with the extraction request; piping_valve_mto_
@@ -943,7 +857,10 @@ def _scan_mode_params(scan_mode: Optional[str]) -> Tuple[int, int, int]:
 
     Quick  = 1x1 tiles, 1 pass  = 1 Vision call per page (today's
              original, un-tiled behaviour — unchanged).
-    Thorough (default) = 2x2 tiles, 2 passes = 8 Vision calls per page —
+    Legacy image tiling uses 2x2 tiles and two passes.
+    Streaming thorough mode now uses adaptive native PDF regions with one
+    pass per region instead; its grid grows with physical sheet size.
+    The legacy 2x2 image grid uses 2 passes = 8 Vision calls per page —
              each tile lets Vision focus closely on a quarter of a dense
              P&ID instead of reading the whole page at once (more legible
              tag text, fewer missed valves), and the 2nd pass over each
@@ -1007,7 +924,19 @@ def _tile_image_b64(b64_jpeg: str, rows: int, cols: int, overlap_frac: float = 0
 
 
 def _coerce_row(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Force a raw dict into the canonical row schema."""
+    """Force a raw dict into the canonical row schema.
+
+    Accepts BOTH the legacy lowercase schema and the new prompt's
+    UPPER_SNAKE schema (see UPPER_SNAKE_ROW_MAP). Applies the Section-4
+    text-cleaning validators (pid/line number patterns, class cross-check)
+    and the CLASS → RATING rule without assuming a particular project.
+    """
+    # Translate UPPER_SNAKE keys first (legacy lowercase keys win if both
+    # somehow present — they were the only schema before this prompt).
+    for upper, lower in UPPER_SNAKE_ROW_MAP.items():
+        if upper in raw and lower not in raw:
+            raw[lower] = raw[upper]
+
     row: Dict[str, Any] = {}
     for k in ROW_KEYS:
         v = raw.get(k, '')
@@ -1019,39 +948,57 @@ def _coerce_row(raw: Dict[str, Any]) -> Dict[str, Any]:
         else:
             row[k] = '' if v is None else str(v).strip()
 
-    # Area normalisation (case-insensitive against VALID_AREAS) + mandatory
-    # fallback. BUG FIX: area used to stay blank (or an unrecognised value
-    # like the old prompt's "COMBINED") whenever it didn't cleanly match —
-    # a blank/unrecognised area makes a row invisible in BOTH the ISLAND
-    # and FIELD tabs (see ValveMTO.jsx's areaFilter), which was the real,
-    # confirmed root cause of "valves missing from ISLAND/FIELD tabs".
-    # Per the prompt's own MANDATORY AREA RULE, "ISLAND" is now the
-    # documented default for a genuinely ambiguous/unmarked valve — this
-    # is the code-level safety net for whenever the model doesn't comply
-    # with that instruction anyway (a prompt can never fully guarantee
-    # compliance).
-    normalized_area = ''
-    for a in VALID_AREAS:
-        if row['area'].lower() == a.lower():
-            normalized_area = a
-            break
-    row['area'] = normalized_area or 'ISLAND'
+    allocation = str(raw.get('TAB') or row['tab']).strip().lower()
+    row['tab'] = allocation if allocation in ('island', 'field', 'combined') else ''
+    if not row['area']:
+        row['confidence'] = 'LOW'
+        row['remarks'] = _merge_remarks(row['remarks'], 'DRG. TITLE NOT IDENTIFIED - VERIFY AREA')
+    if row['tab'] not in ('island', 'field'):
+        row['qty_island'] = row['qty_field'] = 0
+        row['confidence'] = 'LOW'
+        row['remarks'] = _merge_remarks(row['remarks'], 'INSTALLATION ALLOCATION UNVERIFIED - VERIFY QUANTITIES')
+    row['qty_observed'] = 1 if row['type'] or row['valve_tag'] else 0
 
-    # Quantity default: a row Vision actually found and tagged (has a
-    # type or a valve_tag — i.e. a real valve, not a synthetic line-only
-    # row from the line-number recovery pass, which has neither) is one
-    # real, physical valve by default when no explicit count is shown —
-    # 0 would make a genuinely found valve silently disappear from the
-    # Pivot Summary / quantity totals. Only the ONE quantity field
-    # matching this row's own (now always-set) area gets defaulted; the
-    # other area's quantity stays 0, since this single row only
-    # represents itself.
+    # A detected valve is one observed item, allocated only to a known area.
     if row['type'] or row['valve_tag']:
         if row['qty_island'] == 0 and row['qty_field'] == 0:
-            if row['area'] == 'ISLAND':
+            if row['tab'] == 'island':
                 row['qty_island'] = 1
-            else:
+            elif row['tab'] == 'field':
                 row['qty_field'] = 1
+
+    # ── Section-4 text-cleaning validators ──────────────────────────────
+    # Corrupted/merged values (e.g. '47-PU-152-20112-02LOW') are EMPTIED,
+    # never passed through, and confidence is dropped to LOW.
+    def _low_confidence() -> None:
+        if str(row.get('confidence') or '').upper() != 'LOW':
+            row['confidence'] = 'LOW'
+
+    if row['pid_number'] and not re.fullmatch(DRAWING_NO_PATTERN, row['pid_number'], re.IGNORECASE):
+        logger.info('[ValveMTO] Dropping corrupted pid_number %r (pattern mismatch)', row['pid_number'])
+        row['pid_number'] = ''
+        _low_confidence()
+    from .local_valve_mto import LINE_CHARACTERS
+    row['line_number'] = row['line_number'].translate(LINE_CHARACTERS)
+    if row['line_number'] and not re.fullmatch(LINE_NO_PATTERN, row['line_number'], re.IGNORECASE):
+        logger.info('[ValveMTO] Dropping corrupted line_number %r (pattern mismatch)', row['line_number'])
+        row['line_number'] = ''
+        _low_confidence()
+    if row['piping_class'] and row['line_number'] and row['piping_class'].upper() not in row['line_number'].upper().split('-'):
+        row['piping_class'] = ''
+        _low_confidence()
+
+    # ── CLASS → RATING rule ─────────────────────────────────────────────
+    # Fill rating from CLASS_RATING_TABLE when the class has a value;
+    # otherwise (unknown class or blank table value) leave rating empty and
+    # mark 'RATING FROM PMS' in remarks. Only for real valve rows — never
+    # for synthetic line-only recovery rows.
+    if (row['type'] or row['valve_tag'] or row['pms_class']) and not row['rating']:
+        table_val = CLASS_RATING_TABLE.get(row['pms_class'], '')
+        if row['pms_class'] in CLASS_RATING_TABLE and table_val:
+            row['rating'] = table_val
+        else:
+            row['remarks'] = _merge_remarks(row.get('remarks', ''), 'RATING FROM PMS')
 
     # Soft-coded Remark derivation. Vision often surfaces operational-status
     # codes (LO, LC, CSO, CSC, TSO, FBLC, FBLO, NRV, NO, NC, FO, FC, FL, FI)
@@ -1063,6 +1010,57 @@ def _coerce_row(raw: Dict[str, Any]) -> Dict[str, Any]:
     if derived:
         row['remarks'] = _merge_remarks(row.get('remarks', ''), derived)
     return row
+
+
+def _parse_vision_payload(data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[str], List[Dict[str, Any]]]:
+    """Parse ONE Vision response payload into (rows, project_meta, warnings,
+    excluded).
+
+    Supports the new sheet-level schema (pid_number / sheet_title /
+    revision / scope_rule_applied / valve_count / valves[] / excluded[] /
+    warnings[]) and falls back to the legacy rows[] + project_meta schema.
+    """
+    if not isinstance(data, dict):
+        return [], {}, [], []
+
+    rows_raw = data.get('valves') or data.get('rows') or []
+    meta = _coerce_meta(data.get('project_meta') or {})
+
+    # Sheet-level fields (new schema) → project_meta
+    if data.get('pid_number') and not meta.get('doc_no'):
+        meta['doc_no'] = str(data['pid_number']).strip()
+    if data.get('sheet_title') and not meta.get('doc_title'):
+        meta['doc_title'] = str(data['sheet_title']).strip()
+    if data.get('revision') and not meta.get('revision'):
+        meta['revision'] = str(data['revision']).strip()
+
+    warnings = [str(w) for w in (data.get('warnings') or []) if w]
+    excluded: List[Dict[str, Any]] = []
+    for ex in (data.get('excluded') or []):
+        if isinstance(ex, dict):
+            excluded.append({
+                'description': str(ex.get('description') or '').strip(),
+                'reason':      str(ex.get('reason') or '').strip(),
+            })
+        elif ex:
+            excluded.append({'description': str(ex), 'reason': ''})
+
+    rows: List[Dict[str, Any]] = []
+    if isinstance(rows_raw, list):
+        for r in rows_raw:
+            if not isinstance(r, dict):
+                continue
+            raw = dict(r)
+            if not raw.get('pid_number') and not raw.get('PID_NUMBER'):
+                raw['pid_number'] = data.get('pid_number') or meta.get('doc_no') or ''
+            if data.get('sheet_title'):
+                raw['area'] = str(data['sheet_title']).strip()
+            row = _coerce_row(raw)
+            if row['valve_tag'] or row['type']:
+                rows.append(row)
+            else:
+                warnings.append('Ignored an entry without a valve type or valve tag; line/document text is not a valve.')
+    return rows, meta, warnings, excluded
 
 
 def _coerce_meta(raw: Dict[str, Any]) -> Dict[str, str]:
@@ -1257,41 +1255,39 @@ def _build_legend_context(user_id) -> str:
     return '\n\n'.join(lines)[:LEGEND_CONTEXT_MAX_CHARS]
 
 
-def _resolve_vision_credential(vision_provider: Optional[str], vision_api_key: Optional[str]) -> Tuple[str, str]:
-    """Returns (provider, api_key), or (provider, '') if none is available.
-
-    BYOK-first: a user-supplied key always wins for whichever provider
-    they picked — never silently substituted for the admin key. Only
-    when NO user key is given does this fall back to the admin-managed
-    OpenAI credential (apps.core.ai_consumer_clients), matching the
-    extractor's pre-BYOK default behaviour exactly (so an existing
-    deployment with only an admin OpenAI key configured keeps working
-    unchanged). There is no admin-managed fallback for Claude — a user
-    who wants Claude must supply their own key.
-    """
+def _resolve_vision_credential(vision_provider: Optional[str], vision_api_key: Optional[str],
+                               credential_mode: str = 'central') -> Tuple[str, str]:
+    """Resolve the selected provider in the worker, respecting managed policy."""
     provider = (vision_provider or 'openai').strip().lower()
     if provider not in SUPPORTED_PROVIDERS:
-        provider = 'openai'
-    api_key = (vision_api_key or '').strip()
-    if api_key:
-        return provider, api_key
-    if provider == 'openai':
-        # BUG FIX (real, confirmed): the admin-managed credential registry
-        # (apps.core.ai_credentials) can raise AICredentialUnavailable not
-        # only when no key is configured (that case returns '' cleanly)
-        # but also when its OWN backing table/registry itself isn't
-        # available (e.g. a DatabaseError resolving AIProviderConfiguration
-        # — seen live in this exact environment) — an uncaught raise here
-        # would crash the whole background extraction thread instead of
-        # falling through to "no key, show the BYOK prompt", which is
-        # already this function's designed behaviour for the plain
-        # "nothing configured" case. Treat both the same way.
-        try:
-            from apps.core.ai_credentials import AICredentialUnavailable
-            return provider, provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY')))) or ''
-        except AICredentialUnavailable:
-            return provider, os.getenv('OPENAI_API_KEY') or ''
-    return provider, ''
+        raise ValueError('Choose OpenAI or Claude for AI Vision extraction.')
+    legacy_key = (vision_api_key or '').strip()
+    if credential_mode == 'byok':
+        if not legacy_key:
+            raise ValueError('Enter a personal API key for BYOK.')
+        return provider, legacy_key
+    if credential_mode != 'central':
+        raise ValueError('Choose central credentials or BYOK.')
+    return provider, provider_api_key(provider, fallback=lambda: legacy_key) or ''
+
+
+def _build_legend_reference_images(user_id) -> List[Dict[str, str]]:
+    if not user_id:
+        return []
+    from PIL import Image
+    from .local_valve_mto import _load_references
+    references = []
+    seen = set()
+    for name, pixels in _load_references(user_id):
+        image = Image.fromarray(pixels)
+        image.thumbnail((256, 256))
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=85)
+        encoded = base64.b64encode(buffer.getvalue()).decode('ascii')
+        if (name, encoded) not in seen:
+            references.append({'name': name, 'image': encoded})
+            seen.add((name, encoded))
+    return references
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
@@ -1407,7 +1403,8 @@ def _recover_truncated_rows(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs: List[str],
-                             batch_idx: Optional[int] = None) -> Dict[str, Any]:
+                             batch_idx: Optional[int] = None, credential_mode: str = 'central',
+                             legend_images: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """One Vision call for one batch of page images, for EITHER provider —
     returns the parsed {'rows': [...], 'project_meta': {...}} dict (or
     raises on any failure, which callers already handle per-batch).
@@ -1421,11 +1418,23 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
     """
     batch_label = f'batch {batch_idx}' if batch_idx is not None else 'batch'
     logger.info('[ValveMTO] %s: calling provider=%s model=%s', batch_label, provider, VISION_MODELS.get(provider, '?'))
+    if credential_mode not in ('central', 'byok'):
+        raise ValueError('Choose central credentials or BYOK.')
+    client_factory = personal_provider_client if credential_mode == 'byok' else lazy_provider_client
+    client_key = api_key if credential_mode == 'byok' else lambda: api_key
+    if legend_images:
+        prompt += (
+            '\nIMAGE ROLES: The first images are DRAWING TILES: extract physical valves only from these. '
+            'Subsequent captioned LEGEND REFERENCE images are lookup examples, never drawing valves to count. '
+            'Use their captions and shapes together with the legend text to classify source symbols. '
+            'If a source symbol does not correspond reliably, keep its type UNIDENTIFIED. '
+            'Never infer missing specifications from a generic reference shape.'
+        )
 
     if provider == 'claude':
         import anthropic
-        client = lazy_provider_client(
-            'anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS,
+        client = client_factory(
+            'anthropic', anthropic.Anthropic, api_key=client_key, timeout=VISION_TIMEOUT_SECS,
         )
         content: List[Dict[str, Any]] = [{'type': 'text', 'text': prompt}]
         for b64 in batch_imgs:
@@ -1433,6 +1442,13 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
                 'type': 'image',
                 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64},
             })
+        for reference in legend_images or []:
+            content.extend([
+                {'type': 'text', 'text': f'LEGEND REFERENCE ONLY (do not count): {reference["name"]}'},
+                {'type': 'image', 'source': {
+                    'type': 'base64', 'media_type': 'image/jpeg', 'data': reference['image'],
+                }},
+            ])
         resp = client.messages.create(
             model=VISION_MODELS['claude'],
             # BUG FIX (real, confirmed root cause of "mostly empty rows"):
@@ -1477,10 +1493,15 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
 
     # openai (default)
     from openai import OpenAI
-    client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS)
+    client = client_factory('openai', OpenAI, api_key=client_key, timeout=VISION_TIMEOUT_SECS)
     content = [{'type': 'text', 'text': prompt}]
     for b64 in batch_imgs:
         content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}})
+    for reference in legend_images or []:
+        content.extend([
+            {'type': 'text', 'text': f'LEGEND REFERENCE ONLY (do not count): {reference["name"]}'},
+            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{reference["image"]}'}},
+        ])
     resp = client.chat.completions.create(
         model=VISION_MODELS['openai'],
         temperature=VISION_TEMPERATURE,
@@ -1518,35 +1539,15 @@ def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
     try:
         if provider == 'claude':
             import anthropic
-            # TEMPORARY DIAGNOSTIC: bypassing lazy_provider_client for this
-            # one call ONLY, on purpose. That wrapper (apps.core.
-            # ai_consumer_clients._ProviderClient._invoke) catches the real
-            # Anthropic exception and immediately re-raises it as
-            # AIProviderOperationError, which intentionally throws away the
-            # provider's actual error body — by the time an exception would
-            # reach a try/except wrapped around client.messages.create()
-            # below, it's already sanitized to a generic "(400)" string
-            # either way. A raw client here is the only way to see
-            # Anthropic's real error without touching ai_consumer_clients.py
-            # (out of scope for this diagnostic). Still tests EXACTLY the
-            # key passed in, same as before. REMOVE this raw-client diagnostic
-            # once the real cause is found and fixed — restore
-            # lazy_provider_client for the final version.
-            raw_client = anthropic.Anthropic(api_key=api_key, timeout=VISION_TIMEOUT_SECS)
-            try:
-                raw_client.messages.create(
-                    model=VISION_MODELS['claude'],
-                    max_tokens=TEST_CONNECTION_MAX_TOKENS,
-                    thinking={'type': 'disabled'},
-                    messages=[{'role': 'user', 'content': 'Hi'}],
-                )
-            except Exception as e:
-                logger.error(f"[ValveMTO] Test connection raw error: {str(e)}")
-                logger.error(f"[ValveMTO] Error type: {type(e).__name__}")
-                raise  # re-raise so normal error handling continues
+            client = personal_provider_client('anthropic', anthropic.Anthropic, api_key=api_key,
+                                              timeout=20, max_retries=0)
+            client.messages.create(
+                model=VISION_MODELS['claude'], max_tokens=TEST_CONNECTION_MAX_TOKENS,
+                thinking={'type': 'disabled'}, messages=[{'role': 'user', 'content': 'Hi'}],
+            )
         else:
             from openai import OpenAI
-            client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=VISION_TIMEOUT_SECS)
+            client = personal_provider_client('openai', OpenAI, api_key=api_key, timeout=20, max_retries=0)
             client.chat.completions.create(
                 model=VISION_MODELS['openai'],
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
@@ -1623,21 +1624,13 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
             data = json.loads(raw)
         except Exception as exc:
             logger.warning('[ValveMTO] Batch %d failed: %s', batch_idx, exc)
-            return [], {}, [f'batch starting at page {batch_idx + 1} failed: {exc}']
+            return [], {}, [f'batch starting at page {batch_idx + 1} failed: {exc}'], []
 
-        rows_raw = data.get('rows') or []
-        meta_raw = data.get('project_meta') or {}
-        rows: List[Dict[str, Any]] = []
-        if isinstance(rows_raw, list):
-            for r in rows_raw:
-                if not isinstance(r, dict):
-                    continue
-                row = _coerce_row(r)
-                if row['valve_tag'] or row['description'] or row['type']:
-                    rows.append(row)
-        return rows, _coerce_meta(meta_raw), []
+        rows, meta, warns, excluded = _parse_vision_payload(data)
+        return rows, meta, warns, excluded
 
     all_rows: List[Dict[str, Any]] = []
+    all_excluded: List[Dict[str, Any]] = []
     merged_meta: Dict[str, str] = {}
     warnings: List[str] = []
 
@@ -1645,17 +1638,18 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         futures = {pool.submit(_call_one_batch, idx, imgs): idx for idx, imgs in batches}
         # Collect results in submission order so row order roughly tracks page order.
-        results_by_idx: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]] = {}
+        results_by_idx: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, str], List[str], List[Dict[str, Any]]]] = {}
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
                 results_by_idx[idx] = fut.result()
             except Exception as exc:                                            # pragma: no cover
-                results_by_idx[idx] = ([], {}, [f'batch {idx} crashed: {exc}'])
+                results_by_idx[idx] = ([], {}, [f'batch {idx} crashed: {exc}'], [])
 
     for idx in sorted(results_by_idx):
-        rows, meta, warns = results_by_idx[idx]
+        rows, meta, warns, excluded = results_by_idx[idx]
         all_rows.extend(rows)
+        all_excluded.extend(excluded)
         for k, v in meta.items():
             if v and not merged_meta.get(k):
                 merged_meta[k] = v
@@ -1685,82 +1679,21 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
     for i, r in enumerate(deduped):
         r['sl_no'] = i + 1
 
-    return {'rows': deduped, 'project_meta': merged_meta, 'warnings': warnings}
+    return {'rows': deduped, 'project_meta': merged_meta, 'warnings': warnings, 'excluded': all_excluded}
 
 
 # ─── Public API ─────────────────────────────────────────────────────────
 def extract_valve_mto(pdf_path: str) -> Dict[str, Any]:
-    pages = _page_count(pdf_path)
-    text  = _extract_text(pdf_path)
-    text_meta = _extract_meta_from_text(text)
-    warnings: List[str] = []
-
-    use_vision = len(text) < TEXT_SUFFICIENT_CHARS or True  # always on for now — drawings rarely have enough text
-    vision_result: Dict[str, Any] = {'rows': [], 'project_meta': {}, 'warnings': []}
-    if use_vision:
-        vision_result = _extract_via_vision(pdf_path, text)
-        warnings.extend(vision_result.get('warnings') or [])
-
-    rows  = vision_result['rows']
-    meta  = {**text_meta, **{k: v for k, v in vision_result['project_meta'].items() if v}}
-
-    engine = 'vision' if rows and not text_meta else (
-        'text+vision' if rows and text_meta else (
-            'text' if text_meta else 'none'
-        )
-    )
-
-    return {
-        'status': 'ok' if rows or meta else 'empty',
-        'engine': engine,
-        'page_count': pages,
-        'rows': rows,
-        'project_meta': meta,
-        'warnings': warnings,
-    }
+    return extract_valve_mto_streaming(pdf_path, scan_mode='quick')
 
 
 # ─── Streaming public API (used by the async job runner) ────────────────
 def _dedupe_and_renumber(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Collapses duplicate SIGHTINGS of the same physical valve (the same
-    valve legitimately appearing more than once in the raw Vision output
-    — e.g. seen by two overlapping Thorough-Scan tiles, or by two passes
-    over the same tile) while never merging two genuinely DIFFERENT
-    valves into one row.
+    """Deduplicate tagged sightings within a drawing and installation area.
 
-    BUG FIX (real, confirmed data-loss): the old key (area, valve_tag,
-    pms_class, size_1, rating, description, type) never included
-    "line_number" at all. For an UNTAGGED valve (valve_tag empty — true
-    for most simple manual block valves, confirmed across this
-    extractor's own real extraction runs) with no pms_class/rating/
-    description shown either (also common), the key collapsed to just
-    (area, '', '', size_1, '', '', type) — e.g. ('island', '', '', '3"',
-    '', '', 'gate valve'). TWO DIFFERENT real 3" gate valves on two
-    different lines in the same area, both untagged, would silently
-    merge into ONE row under that key. This got materially more likely
-    to actually bite once Thorough Scan (2x2 tiles, 2 passes = 8 Vision
-    calls/page) shipped — more independent sightings of the drawing mean
-    more chances two distinct untagged valves happen to share type+size.
-
-    Fix — per-tag-presence strategy:
-      * TAGGED valves (valve_tag set): dedup by (area, valve_tag) alone.
-        A tag reliably identifies ONE physical valve — the SAME tag
-        reappearing (from an overlapping tile / repeated pass) is always
-        a duplicate sighting, regardless of minor OCR disagreement on
-        its other fields between sightings.
-      * UNTAGGED valves: dedup by (area, type, size_1, line_number,
-        pms_class, rating, description) — adding "line_number" is the
-        actual fix here. Two untagged valves on DIFFERENT lines are now
-        correctly kept as separate rows (this is the real-world case
-        that was silently losing data); a genuine duplicate sighting of
-        the SAME untagged valve (same line, same type/size) still
-        collapses to one row, same as it always did, so Thorough Scan's
-        tile overlap/multi-pass design doesn't reintroduce multiplied
-        duplicate rows for the common case where a valve IS correctly
-        re-sighted. This is deliberately NOT "keep every untagged row
-        unconditionally" — that would have undone Thorough Scan's own
-        dedup entirely, multiplying genuine duplicates up to 8x instead
-        of fixing the real distinct-valve-collision bug.
+    Untagged sightings need matching physical bounds and attributes; a shared
+    line number or coarse grid reference cannot identify one physical valve.
+    Retain unlocated candidates for review rather than silently losing counts.
     """
     seen = set()
     out: List[Dict[str, Any]] = []
@@ -1768,10 +1701,15 @@ def _dedupe_and_renumber(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         area = (r.get('area') or '').lower()
         valve_tag = (r.get('valve_tag') or '').strip().lower()
         if valve_tag:
-            key = ('tagged', area, valve_tag)
+            key = ('tagged', r.get('pid_number', ''), area, valve_tag)
         else:
+            if not re.fullmatch(r'Page \d+ \[[\d., -]+\] pt', str(r.get('location_hint') or '')):
+                out.append(r)
+                continue
             key = (
                 'untagged',
+                r.get('pid_number', ''),
+                r.get('location_hint', ''),
                 area,
                 (r.get('type') or '').lower(),
                 (r.get('size_1') or '').lower(),
@@ -1798,6 +1736,8 @@ def extract_valve_mto_streaming(
     vision_api_key: Optional[str] = None,
     user_id=None,
     scan_mode: Optional[str] = None,
+    extraction_mode: str = 'vision',
+    credential_mode: str = 'central',
 ) -> Dict[str, Any]:
     """
     Same logic as `extract_valve_mto` but emits incremental progress/results
@@ -1808,14 +1748,10 @@ def extract_valve_mto_streaming(
     * `on_progress(current_batch:int, total_batches:int, rows_so_far:int)`
     * `on_partial(rows_so_far:list, project_meta_so_far:dict)`
 
-    vision_provider/vision_api_key: BYOK — see _resolve_vision_credential's
-    own docstring for the exact precedence (user key always wins for
-    whichever provider they picked; falls back to the admin-managed
-    OpenAI credential only when no user key was given at all; there is
-    no admin fallback for Claude). Both default to None so every existing
-    caller (this function had none of these params before) keeps working
-    unchanged — None resolves to the same admin-OpenAI-or-nothing
-    behaviour this function always had.
+    vision_provider/vision_api_key: see _resolve_vision_credential for the
+    selected provider's central policy. Explicit credential_mode='byok'
+    uses only the supplied personal key, without registry or environment
+    fallback. Default central mode preserves existing callers' behavior.
 
     user_id: whoever started this extraction — used by
     _build_legend_context to look up their own uploaded Legend Sheet(s)
@@ -1828,6 +1764,15 @@ def extract_valve_mto_streaming(
     (SCAN_MODE_DEFAULT), matching piping_valve_mto_view.py's own default
     for a request that doesn't specify one at all.
     """
+    if extraction_mode == 'local':
+        from .local_valve_mto import extract_local_valve_mto
+        return extract_local_valve_mto(
+            pdf_path, user_id=user_id, scan_mode=scan_mode or 'thorough',
+            on_progress=on_progress, on_partial=on_partial,
+        )
+    if extraction_mode != 'vision':
+        return {'status': 'error', 'error': 'Choose local or vision extraction.',
+                'rows': [], 'warnings': [], 'engine': 'none'}
     tile_rows, tile_cols, passes = _scan_mode_params(scan_mode)
     pages = _page_count(pdf_path)
     # Emit an immediate progress signal so the UI shows movement right after
@@ -1847,20 +1792,41 @@ def extract_valve_mto_streaming(
             if on_progress else None
         ),
     )
-    text_meta = _extract_meta_from_text(text)
-
-    provider, api_key = _resolve_vision_credential(vision_provider, vision_api_key)
     warnings: List[str] = []
 
-    if not api_key:
-        # Per the BYOK requirement: a clear, actionable message — not the
-        # old internal-sounding 'no OPENAI_API_KEY' label — regardless of
-        # WHICH provider/key path was missing (no user key AND no admin
-        # OpenAI fallback, or Claude requested with no user key at all).
-        warnings.append('Enter your OpenAI/Claude API key to extract valves from PDF.')
+    # ── Tesseract OCR fallback (thin text layer) ──────────────────────────
+    # Scanned/image PDFs yield almost no embedded text; OCR the rendered
+    # pages so the line-number harvester + regex meta parsing below still
+    # have something to work with even when Vision is down.
+    ocr_used = False
+    detailed = (scan_mode or SCAN_MODE_DEFAULT).strip().lower() != SCAN_MODE_QUICK
+    if len(text) < TEXT_SUFFICIENT_CHARS and not detailed:
+        text, ocr_used = _maybe_ocr_text(
+            pdf_path, text, warnings, 'Thin PDF text layer',
+            on_progress=(
+                (lambda cur, tot: on_progress(cur, tot, 0))
+                if on_progress else None
+            ),
+        )
+    text_meta = _extract_meta_from_text(text)
+
+    try:
+        provider, api_key = _resolve_vision_credential(vision_provider, vision_api_key, credential_mode)
+    except (AICredentialUnavailable, ValueError) as exc:
+        error = str(exc)
+        logger.warning('[ValveMTO] AI configuration unavailable: %s', error)
         return {
-            'status': 'ok' if text_meta else 'empty',
-            'engine': 'text' if text_meta else 'none',
+            'status': 'error', 'error': error, 'rows': [], 'warnings': [error],
+            'engine': 'none', 'page_count': pages, 'project_meta': text_meta,
+        }
+
+    if not api_key:
+        error = 'An administrator must configure an available AI provider before valve extraction can run.'
+        warnings.append(error)
+        return {
+            'status': 'error',
+            'error': error,
+            'engine': 'text+ocr' if ocr_used else ('text' if text_meta else 'none'),
             'page_count': pages,
             'rows': [],
             'project_meta': text_meta,
@@ -1873,10 +1839,12 @@ def extract_valve_mto_streaming(
         else:
             from openai import OpenAI  # noqa: F401
     except Exception:
-        warnings.append(f'vision skipped — {provider} package unavailable')
+        error = f'Valve extraction cannot run: the {provider} client package is unavailable.'
+        warnings.append(error)
         return {
-            'status': 'ok' if text_meta else 'empty',
-            'engine': 'text' if text_meta else 'none',
+            'status': 'error',
+            'error': error,
+            'engine': 'text+ocr' if ocr_used else ('text' if text_meta else 'none'),
             'page_count': pages,
             'rows': [],
             'project_meta': text_meta,
@@ -1885,7 +1853,18 @@ def extract_valve_mto_streaming(
 
     # Render with a per-page heartbeat so the frontend's stall timer never
     # trips during the slow PDF→JPEG phase on slim-CPU containers.
-    images = _render_pages_b64(
+    try:
+        from apps.valve_mto.specification_lookup import load_specification_lookups, enrich_specifications
+        specifications = load_specification_lookups(user_id)
+        regions = _render_native_regions(
+            pdf_path, VISION_MAX_PAGES,
+            on_render_progress=(lambda cur, tot: on_progress(cur, tot, 0)) if on_progress else None,
+        ) if detailed else []
+    except Exception as exc:
+        logger.exception('[ValveMTO] Native rendering/project specification preparation failed')
+        return {'status': 'error', 'error': f'Drawing evidence preparation failed: {exc}',
+                'rows': [], 'warnings': [str(exc)], 'engine': 'none', 'page_count': pages}
+    images = [] if detailed else _render_pages_b64(
         pdf_path,
         VISION_MAX_PAGES,
         VISION_IMAGE_DPI,
@@ -1894,7 +1873,7 @@ def extract_valve_mto_streaming(
             if on_progress else None
         ),
     )
-    if not images:
+    if not images and not regions:
         warnings.append('vision skipped — no pages rendered')
         return {
             'status': 'empty',
@@ -1914,11 +1893,32 @@ def extract_valve_mto_streaming(
     # module's practical default (VISION_BATCH_SIZE=1) even before this
     # feature existed.
     batches: List[Tuple[int, int, List[str]]] = []
+    region_by_batch = {}
+    page_titles = {}
+    for region in regions:
+        index = len(batches)
+        region_by_batch[index] = region
+        batches.append((index, region['page'], [region['image']]))
+        page_titles[region['page']] = region.get('sheet_title', '')
+    if regions:
+        title_numbers = {r['pid_number'] for r in regions if r['pid_number']}
+        if len(title_numbers) == 1:
+            text_meta['doc_no'] = next(iter(title_numbers))
+        warnings.append(
+            f'Rendered {len(regions)} native PDF detail regions at '
+            f'{min(r["dpi"] for r in regions):g}-{max(r["dpi"] for r in regions):g} DPI; '
+            'original vector detail preserved before cropping. One AI pass per region.'
+        )
     for page_idx, page_img in enumerate(images):
         tiles = _tile_image_b64(page_img, tile_rows, tile_cols)
         for tile_img in tiles:
             for _pass in range(passes):
                 batches.append((len(batches), page_idx, [tile_img]))
+    if images:
+        page_titles = _drawing_titles(pdf_path, len(images))
+    for index, title in page_titles.items():
+        if not title:
+            warnings.append(f'Page {index + 1}: DRG. TITLE could not be read; AREA requires review.')
 
     total_batches = len(batches)
     if on_progress:
@@ -1935,53 +1935,75 @@ def extract_valve_mto_streaming(
         logger.info('[ValveMTO] Harvested %d candidate line numbers from text layer', len(candidate_lines))
 
     legend_block = _build_legend_context(user_id) or '(none uploaded)'
+    try:
+        legend_images = _build_legend_reference_images(user_id)
+    except Exception:
+        logger.exception('[ValveMTO] Active legend pictures could not be read')
+        error = 'Active legend pictures could not be read. Re-import the legend workbook before retrying.'
+        return {'status': 'error', 'error': error, 'rows': [], 'warnings': [error],
+                'engine': 'none', 'page_count': pages, 'project_meta': text_meta}
+    warnings.append(
+        f'Using {len(legend_images)} active valve/regulator legend pictures as classification references.'
+        if legend_images else 'No active valve/regulator legend pictures available; symbol classification is unverified.'
+    )
     if legend_block != '(none uploaded)':
         logger.info('[ValveMTO] Injecting legend context (%d chars) for user_id=%s', len(legend_block), user_id)
 
     logger.info(
         '[ValveMTO] Streaming vision → provider=%s model=%s pages=%d scan_mode=%s '
         'tiles=%dx%d passes=%d batches=%d (parallel=%d)',
-        provider, VISION_MODELS[provider], len(images), (scan_mode or SCAN_MODE_DEFAULT),
-        tile_rows, tile_cols, passes, total_batches, VISION_PARALLEL_BATCHES,
+        provider, VISION_MODELS[provider], len({r['page'] for r in regions}) if regions else len(images), (scan_mode or SCAN_MODE_DEFAULT),
+        tile_rows, tile_cols, 1 if regions else passes, total_batches, VISION_PARALLEL_BATCHES,
     )
 
     def _call_one_batch(batch_idx: int, page_idx: int, batch_imgs: List[str]):
+        region = region_by_batch.get(batch_idx)
+        region_text, region_ocr, ocr_warnings = _region_text(region) if region else (text or '', False, [])
+        local_candidates = _harvest_line_numbers(region_text) if region else candidate_lines
+        local_candidate_block = '\n'.join(local_candidates) or '(none verified in this region)'
         prompt = VISION_PROMPT_TEMPLATE.format(
             max_rows=MAX_ROWS,
-            text_excerpt=(text or '')[:6000],
+            text_excerpt=region_text[:6000],
             page_range=f'{page_idx + 1}',
-            candidate_line_numbers=candidate_block,
+            candidate_line_numbers=local_candidate_block if region else candidate_block,
             legend_context=legend_block,
         )
+        if region:
+            prompt += (
+                '\nThis image is a native high-detail drawing region, not a whole sheet. '
+                'Return valve-body bounding boxes in normalized 0-1000 region coordinates. '
+                'Use overlap for line connectivity and context, not to invent cropped valve bodies. '
+                'Do not reconstruct labels from text fragments or proximity alone. '
+                'Manual untagged valves may legitimately have no VALVE_TAG. '
+                f'Verified title-block drawing number: {region["pid_number"] or "(not available)"}.'
+            )
+        if page_titles.get(page_idx):
+            prompt += f'\nVerified DRG. TITLE for AREA on every row: {page_titles[page_idx]}.'
         try:
-            data = _call_vision_batch_json(provider, api_key, prompt, batch_imgs, batch_idx=batch_idx)
+            data = _call_vision_batch_json(provider, api_key, prompt, batch_imgs, batch_idx=batch_idx,
+                                           credential_mode=credential_mode, legend_images=legend_images)
         except Exception as exc:
             logger.warning('[ValveMTO] Batch %d (page %d) failed: %s', batch_idx, page_idx + 1, exc)
-            # Fatal-error pattern matching (quota/auth/billing) is
-            # currently OpenAI-specific (see OPENAI_FATAL_ERROR_PATTERNS)
-            # — a Claude error just won't match any pattern and falls
-            # through to a normal (non-fatal) per-batch failure instead
-            # of an early, all-batches abort. The failure itself, and its
-            # warning message, still surface correctly either way.
             fatal = _classify_openai_error(exc)
-            return [], {}, [f'batch starting at page {page_idx + 1} failed: {exc}'], fatal
+            return [], {}, [f'batch starting at page {page_idx + 1} failed: {exc}'], fatal, [], True
 
-        rows_raw = data.get('rows') or []
-        meta_raw = data.get('project_meta') or {}
-        rows: List[Dict[str, Any]] = []
-        if isinstance(rows_raw, list):
-            for r in rows_raw:
-                if not isinstance(r, dict):
-                    continue
-                row = _coerce_row(r)
-                if row['valve_tag'] or row['description'] or row['type']:
-                    rows.append(row)
-        return rows, _coerce_meta(meta_raw), [], None
+        if region:
+            data = _locate_region_rows(data, region)
+        if page_titles.get(page_idx):
+            data['sheet_title'] = page_titles[page_idx]
+        rows, meta, warns, excluded = _parse_vision_payload(data)
+        rows = [enrich_specifications(row, specifications) for row in rows]
+        warns.extend(ocr_warnings)
+        if region_ocr:
+            warns.append('Region-specific rotated OCR supplied text hints; values still require drawing verification.')
+        return rows, meta, warns, None, excluded, False
 
     all_rows: List[Dict[str, Any]] = []
+    all_excluded: List[Dict[str, Any]] = []
     merged_meta: Dict[str, str] = dict(text_meta)  # seed with regex-derived meta
     completed = 0
     fatal_msgs: List[str] = []
+    failed_batches = 0
 
     parallelism = max(1, min(VISION_PARALLEL_BATCHES, len(batches)))
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
@@ -1989,16 +2011,19 @@ def extract_valve_mto_streaming(
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
-                rows, meta, warns, fatal = fut.result()
+                rows, meta, warns, fatal, excluded, failed = fut.result()
             except Exception as exc:                                            # pragma: no cover
-                rows, meta, warns, fatal = [], {}, [f'batch {idx} crashed: {exc}'], None
+                rows, meta, warns, fatal, excluded, failed = [], {}, [f'batch {idx} crashed: {exc}'], None, [], True
             all_rows.extend(rows)
+            all_excluded.extend(excluded)
             for k, v in meta.items():
                 if v and not merged_meta.get(k):
                     merged_meta[k] = v
             warnings.extend(warns)
             if fatal and fatal not in fatal_msgs:
                 fatal_msgs.append(fatal)
+            if failed:
+                failed_batches += 1
             completed += 1
 
             partial = _dedupe_and_renumber(list(all_rows))
@@ -2015,41 +2040,61 @@ def extract_valve_mto_streaming(
 
     final_rows = _dedupe_and_renumber(all_rows)
 
-    # ── Soft-coded line-number recovery pass ───────────────────────────────
-    # Any line number harvested from the PDF text layer that Vision DID NOT
-    # surface anywhere in its output rows is appended as a "line-only" row
-    # (sl_no, line_number, line_list populated; other fields empty). This
-    # guarantees the user sees every detected line on the PMS table — the
-    # same completeness guarantee that the dedicated Line List page offers.
-    # Disabled when VALVE_MTO_APPEND_MISSING_LINES=0.
-    if candidate_lines and os.getenv('VALVE_MTO_APPEND_MISSING_LINES', '1') == '1':
-        _norm = lambda s: re.sub(r'\s+', '', str(s or '')).upper()
-        seen_lines = {_norm(r.get('line_number')) for r in final_rows if r.get('line_number')}
-        missing = [ln for ln in candidate_lines if _norm(ln) not in seen_lines]
-        if missing:
-            logger.info(
-                '[ValveMTO] Appending %d line-only rows for line numbers Vision missed',
-                len(missing),
-            )
-            next_sl = len(final_rows) + 1
-            for ln in missing:
-                synthetic = _coerce_row({'line_number': ln, 'line_list': ln})
-                synthetic['sl_no'] = next_sl
-                next_sl += 1
-                final_rows.append(synthetic)
+    # ── Tesseract OCR fallback (Vision attempted but produced nothing — e.g.
+    # every batch failed with a 429/quota error) ───────────────────────────
+    # OCR can recover reference context, but cannot create physical valve rows.
+    ocr_used = ocr_used or any(w.startswith('Region-specific rotated OCR') for w in warnings)
+    vision_failed = not all_rows and (fatal_msgs or warnings)
+    if vision_failed and not ocr_used:
+        reason = fatal_msgs[0] if fatal_msgs else 'all Vision batches failed'
+        text, ocr_used = _maybe_ocr_text(
+            pdf_path, text, warnings, f'Vision unavailable ({reason})', force=True,
+            on_progress=(
+                (lambda cur, tot: on_progress(cur, tot, len(final_rows)))
+                if on_progress else None
+            ),
+        )
+        if ocr_used:
+            # Retain recovered context for diagnostics, never as MTO rows.
+            for k, v in _extract_meta_from_text(text).items():
+                if v and not merged_meta.get(k):
+                    merged_meta[k] = v
+            candidate_lines = _harvest_line_numbers(text or '')
+            if candidate_lines:
+                logger.info('[ValveMTO] OCR fallback harvested %d candidate line numbers', len(candidate_lines))
 
-    # If every batch failed with a fatal error and we recovered no rows,
-    # surface a clean top-level error so the frontend can display it.
+    # Harvested text is a prompt hint, never evidence of a physical valve.
     error_msg: Optional[str] = None
-    if not final_rows and fatal_msgs:
-        error_msg = fatal_msgs[0]
+    if not final_rows and failed_batches:
+        error_msg = fatal_msgs[0] if fatal_msgs else (
+            'AI extraction failed and no verified valve records were produced. '
+            'Review the extraction warnings and retry; existing register data must be preserved.'
+        )
+    if failed_batches:
+        warnings.append(f'{failed_batches} of {total_batches} AI batches failed; any returned valve register is incomplete and requires review.')
+    if final_rows:
+        warnings.append(SURVEY_SCOPE_WARNING)
+    # Surface excluded items through warnings too — the async job store only
+    # forwards rows/meta/warnings, so exclusions stay visible in the job
+    # snapshot until a dedicated field exists there.
+    for ex in all_excluded:
+        if ex.get('description'):
+            warnings.append(f"Excluded: {ex['description']} — {ex.get('reason') or 'out of scope'}")
+    # Engine label: 'text+ocr' marks that the Tesseract fallback contributed.
+    # Only verified Vision rows count as a Vision contribution.
+    if ocr_used:
+        engine = 'text+ocr+vision' if all_rows else 'text+ocr'
+    else:
+        engine = 'vision' if final_rows else ('text' if text_meta else 'none')
+    warnings = list(dict.fromkeys(warnings))
     return {
-        'status': 'error' if error_msg else ('ok' if final_rows or merged_meta else 'empty'),
-        'engine': 'vision' if final_rows else ('text' if text_meta else 'none'),
+        'status': 'error' if error_msg else ('ok' if final_rows else 'empty'),
+        'engine': engine,
         'page_count': pages,
         'rows': final_rows,
         'project_meta': merged_meta,
         'warnings': warnings,
         'error': error_msg,
         'harvested_line_numbers': candidate_lines,
+        'excluded': all_excluded,
     }

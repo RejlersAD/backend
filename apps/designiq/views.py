@@ -2887,6 +2887,106 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 'message': 'Base extraction failed',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=False, methods=['post'], url_path='submit_for_approval')
+    def submit_for_approval(self, request):
+        """
+        📋 Notify a selected engineering manager that a Line List register is
+        ready for approval — shares the workspace link for verification.
+
+        POST /api/v1/designiq/lists/submit_for_approval/
+        Fields:
+          approver_id  (required) — user id of the selected approval manager
+          register_no  (optional, default 'LL-001')
+          revision     (optional, default '03')
+          project      (optional) — project name/code for context
+          total_lines  (optional, int)
+          source_file  (optional) — originating P&ID file name
+
+        Creates an in-app (and email-enabled) notification for the approver
+        with an action link back to the Line List workspace. Fail-safe on the
+        notification subsystem itself — returns 502 only if the approver does
+        not exist or the notification could not be created at all.
+        """
+        from django.contrib.auth import get_user_model
+
+        approver_id = request.data.get('approver_id')
+        if not approver_id:
+            return Response({'error': 'approver_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        User = get_user_model()
+        try:
+            approver = User.objects.get(pk=approver_id, is_active=True)
+        except (User.DoesNotExist, ValueError, TypeError):
+            return Response({'error': 'Approver not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        register_no = request.data.get('register_no') or 'LL-001'
+        revision    = request.data.get('revision') or '03'
+        project     = (request.data.get('project') or '').strip()
+        source_file = (request.data.get('source_file') or '').strip()
+        try:
+            total_lines = int(request.data.get('total_lines') or 0)
+        except (TypeError, ValueError):
+            total_lines = 0
+
+        sender      = request.user
+        sender_name = sender.get_full_name() or sender.email
+
+        context_bits = []
+        if total_lines:
+            context_bits.append(f'{total_lines} lines')
+        if project:
+            context_bits.append(f'project {project}')
+        if source_file:
+            context_bits.append(f'from {source_file}')
+        context = f" ({', '.join(context_bits)})" if context_bits else ''
+
+        try:
+            from apps.notifications.services import NotificationService
+            NotificationService.create_notification(
+                recipient=approver,
+                sender=sender,
+                title=f'📋 Line List approval requested — {register_no} Rev {revision}',
+                message=(
+                    f'{sender_name} submitted the Line List register '
+                    f'{register_no} Rev {revision}{context} for your engineering '
+                    f'approval. Open the Line List workspace to verify and approve.'
+                ),
+                category='APPROVAL',
+                priority='HIGH',
+                force_in_app=True,
+                send_email=True,
+                action_url='/engineering/process/line-list',
+                action_label='Open Line List',
+                metadata={
+                    'kind': 'line_list_approval_request',
+                    'register_no': register_no,
+                    'revision': revision,
+                    'project': project,
+                    'total_lines': total_lines,
+                    'source_file': source_file,
+                    'requested_by_id': sender.pk,
+                },
+            )
+        except Exception as exc:
+            logger.error(f'❌ submit_for_approval notification failed: {exc}', exc_info=True)
+            return Response(
+                {'error': 'Failed to notify the approver. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        logger.info(
+            f'📋 Line List {register_no} Rev {revision} submitted for approval '
+            f'by {sender.email} → {approver.email}'
+        )
+        return Response({
+            'success': True,
+            'approver': {
+                'id': approver.pk,
+                'name': approver.get_full_name() or approver.email,
+                'email': approver.email,
+            },
+        }, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['get'], url_path='base_extraction_status/(?P<task_id>[^/.]+)')
     def base_extraction_status(self, request, task_id=None):
         """

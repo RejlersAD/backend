@@ -27,6 +27,22 @@ Rolling back migration 0013 deletes the new configuration tables and their store
 
 Consumers must bind a resolved managed credential to its official provider host and prevent unrelated ambient account/authentication settings from overriding the selected key. The shared lazy SDK clients use the resolver's matching key/metadata snapshot for this purpose.
 
+### Explicit Valve MTO BYOK exception
+
+Valve MTO has a separately selected personal BYOK mode in addition to its
+central mode. Personal mode intentionally uses the supplied OpenAI/Anthropic
+key independently of the central registry, including central provider
+disabling. Central disable therefore governs Valve MTO's central mode, not
+its explicit personal mode. There is no automatic switching between modes
+or fallback to another key. Other centrally managed consumers retain the
+resolution rules above.
+
+The personal key remains in page/worker memory and is not stored in browser
+storage, project records or job snapshots. Personal SDK operations still
+use official hosts, suppress ambient auth, sanitize failures, protect
+diagnostic logs and close clients/streams. Uploaded drawings and active
+legend references are sent only on explicit AI extraction submission.
+
 ## Administrator contract
 
 Base: `/api/v1/rbac/admin/ai-api-keys/`. Requires an active Django user, an active, unlocked, non-deleted RBAC profile, and Django superuser or an active `super_admin`, `admin` or `ict_admin` role. Existing `admin_dashboard` action permissions apply separately. `is_staff` alone is insufficient. All responses use `Cache-Control: private, no-store`.

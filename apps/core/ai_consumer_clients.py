@@ -217,16 +217,20 @@ class _Resource:
 
 
 class _ProviderClient(_Resource):
-    def __init__(self, provider, factory, fallback, options):
+    def __init__(self, provider, factory, fallback, options, personal_key=None):
         super().__init__(self)
         self._provider = _provider(provider)
         self._factory = factory
         self._fallback = fallback
         self._options = options
         self._closed = False
+        self._personal_key = personal_key
 
     def __bool__(self):
-        return not self._closed and bool(provider_api_key(self._provider, self._fallback))
+        return not self._closed and bool(
+            self._personal_key if self._personal_key is not None
+            else provider_api_key(self._provider, self._fallback)
+        )
 
     def __enter__(self):
         return self
@@ -238,21 +242,24 @@ class _ProviderClient(_Resource):
         self._closed = True
 
     def with_options(self, **options):
-        return _ProviderClient(self._provider, self._factory, self._fallback, {**self._options, **options})
+        return _ProviderClient(self._provider, self._factory, self._fallback,
+                               {**self._options, **options}, personal_key=self._personal_key)
 
     @sensitive_variables()
     def _invoke(self, path, args, kwargs):
         if self._closed:
             raise RuntimeError('The AI client has been closed.')
-        key, metadata = ai_credentials.resolve_provider_credential(
-            self._provider, fallback=lambda: _legacy_key(self._provider, self._fallback),
-        )
+        if self._personal_key is not None:
+            key, metadata = self._personal_key, {'managed': True}
+        else:
+            key, metadata = ai_credentials.resolve_provider_credential(
+                self._provider, fallback=lambda: _legacy_key(self._provider, self._fallback),
+            )
         if not key:
             raise ai_credentials.AICredentialUnavailable()
         options = {**self._options, 'api_key': key}
         if metadata['managed']:
-            # Bind central credentials to official hosts, independently of SDK
-            # environment defaults and historical consumer client options.
+            # Bind managed and explicit personal credentials to official hosts.
             options.pop('http_client', None)
             options.pop('default_headers', None)
             if self._provider == 'openai':
@@ -286,3 +293,14 @@ class _ProviderClient(_Resource):
 def lazy_provider_client(provider, factory, *, api_key=None, **options):
     """Explicit SDK-compatible proxy; no database or network work at import."""
     return _ProviderClient(provider, factory, api_key, options)
+
+
+@sensitive_variables()
+def personal_provider_client(provider, factory, *, api_key, **options):
+    """Explicit BYOK only: no registry/environment fallback, same private boundary."""
+    provider = _provider(provider)
+    if provider not in ('openai', 'anthropic'):
+        raise ValueError('Personal credentials support OpenAI or Anthropic.')
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ValueError('A personal API key is required for BYOK.')
+    return _ProviderClient(provider, factory, None, options, personal_key=api_key.strip())

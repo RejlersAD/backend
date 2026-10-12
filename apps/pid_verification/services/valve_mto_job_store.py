@@ -226,7 +226,8 @@ def _heartbeat_loop(job_id: str, stop_event: threading.Event) -> None:
 def _run_in_thread(
     job_id: str, pdf_path: str, filename: str,
     vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
-    user_id=None, scan_mode: Optional[str] = None,
+    user_id=None, scan_mode: Optional[str] = None, extraction_mode: str = 'vision',
+    credential_mode: str = 'central',
 ) -> None:
     """Execute extraction; clean up the temp file when done."""
     # Late import — keeps this module importable without the heavy deps.
@@ -255,6 +256,8 @@ def _run_in_thread(
             vision_api_key=vision_api_key,
             user_id=user_id,
             scan_mode=scan_mode,
+            extraction_mode=extraction_mode,
+            credential_mode=credential_mode,
         )
         # Soft-coded: extractor flips status to 'error' when every batch fails
         # with a fatal OpenAI error (e.g. insufficient_quota). Propagate the
@@ -296,14 +299,13 @@ def _run_in_thread(
 def start_job(
     pdf_path: str, filename: str,
     vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
-    user_id=None, scan_mode: Optional[str] = None,
+    user_id=None, scan_mode: Optional[str] = None, extraction_mode: str = 'vision',
+    credential_mode: str = 'central',
 ) -> str:
     """Create a job snapshot in cache+disk and start a daemon thread.
 
-    vision_provider/vision_api_key: BYOK passthrough — see
-    piping_valve_mto_extractor._resolve_vision_credential's own docstring
-    for the exact precedence. Both default to None (existing behaviour:
-    admin-managed OpenAI key, or nothing) so no existing caller breaks.
+    credential_mode selects central policy or explicit personal BYOK.
+    Personal keys are passed only in worker memory, never job snapshots.
 
     user_id: whoever started this extraction — used to look up their own
     uploaded Legend Sheets (see piping_valve_mto_extractor's
@@ -319,11 +321,11 @@ def start_job(
     job_id = JobStore.create({'filename': filename})
     th = threading.Thread(
         target=_run_in_thread,
-        args=(job_id, pdf_path, filename, vision_provider, vision_api_key, user_id, scan_mode),
+        args=(job_id, pdf_path, filename, vision_provider, vision_api_key, user_id, scan_mode,
+              extraction_mode, credential_mode),
         name=f'valve-mto-{job_id[:8]}',
         daemon=True,
     )
     th.start()
     logger.info('[ValveMTO] job %s started for %s', job_id, filename)
     return job_id
-

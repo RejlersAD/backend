@@ -81,6 +81,48 @@ class AIConsumerClientTests(SimpleTestCase):
             endpoint()
         self.assertEqual(len(self.instances), 1)
 
+    def test_explicit_personal_mode_is_independent_of_disabled_central_configuration(self):
+        self.resolve.return_value = ('', {'managed': True})
+        proxy = clients.personal_provider_client('openai', self.factory, api_key='personal-test-key',
+                                                 base_url='https://untrusted.example.test')
+        self.assertTrue(proxy)
+        proxy.with_options(timeout=20).chat.completions.create()
+        self.assertEqual(self.received[0]['api_key'], 'personal-test-key')
+        self.assertEqual(self.received[0]['base_url'], 'https://api.openai.com/v1')
+        self.assertEqual(self.received[0]['organization'], '')
+        self.resolve.assert_not_called()
+        self.get_key.assert_not_called()
+        self.instances[0].close.assert_called_once()
+
+    def test_personal_mode_requires_its_own_nonempty_key(self):
+        for value in ('', ' ', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                clients.personal_provider_client('openai', self.factory, api_key=value)
+        self.resolve.assert_not_called()
+        self.get_key.assert_not_called()
+        self.assertEqual(self.instances, [])
+
+    def test_personal_provider_failure_is_sanitized_and_closed(self):
+        def factory(**options):
+            client = self.factory(**options)
+            client.chat.completions.create.side_effect = RuntimeError('personal-test-key private-source')
+            return client
+        with self.assertRaises(clients.AIProviderOperationError) as error:
+            clients.personal_provider_client('openai', factory, api_key='personal-test-key').chat.completions.create()
+        self.assertNotIn('personal-test-key', str(error.exception))
+        self.assertNotIn('private-source', str(error.exception))
+        self.instances[0].close.assert_called_once()
+
+    def test_personal_stream_closes_after_consumption(self):
+        def factory(**options):
+            client = self.factory(**options)
+            client.chat.completions.create.return_value = iter([{'ok': True}])
+            return client
+        stream = clients.personal_provider_client('openai', factory, api_key='personal-test-key').chat.completions.create()
+        self.instances[0].close.assert_not_called()
+        self.assertEqual(list(stream), [{'ok': True}])
+        self.instances[0].close.assert_called_once()
+
     def test_registry_failure_does_not_invoke_legacy_client(self):
         self.resolve.side_effect = AICredentialUnavailable('registry_unavailable')
         with self.assertRaises(AICredentialUnavailable):
