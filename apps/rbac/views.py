@@ -2306,6 +2306,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     'first_name': request.user.first_name,
                     'last_name': request.user.last_name,
                     'roles': [],
+                    'can_review_profile_documents': False,
                     'organization': None,
                     'status': 'pending',
                     'message': 'RBAC profile not configured. Please contact administrator.'
@@ -2321,7 +2322,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             data = serializer.data
             if not profile_view:
                 from .action_policy import effective_action_map
+                from .approval_eligibility import can_review_profile_document
                 data['module_actions'] = effective_action_map(profile)
+                data['can_review_profile_documents'] = can_review_profile_document(request.user)
             print(f"[DEBUG /rbac/users/me/] Serialization successful")
             print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
             print(f"[DEBUG /rbac/users/me/] Phone: {data.get('phone')}, Profile Photo: {data.get('profile_photo')}")
@@ -4790,4 +4793,3 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             return Response(documents_by_type)
         except:
             return Response({})
-

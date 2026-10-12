@@ -209,16 +209,19 @@ def save_letter_docx(letter, custom_data=None):
     letter.docx_generated_at = timezone.now()
     letter.save(update_fields=['docx_file', 'docx_generated_at', 'updated_at'])
     logger.info(f"DOCX generated for letter {letter.id}: {filename}")
-    return letter.docx_file.path
+    return letter.docx_file.name
 
 
 def regenerate_letter_docx(letter, custom_data=None):
-    if letter.docx_file:
+    old_name = letter.docx_file.name if letter.docx_file else None
+    storage = letter.docx_file.storage
+    new_name = save_letter_docx(letter, custom_data)
+    if old_name and old_name != new_name:
         try:
-            letter.docx_file.delete(save=False)
-        except Exception:
-            pass
-    return save_letter_docx(letter, custom_data)
+            storage.delete(old_name)
+        except Exception as exc:
+            logger.warning("Unable to remove previous DOCX for letter %s: %s", letter.id, exc)
+    return new_name
 
 
 def get_letter_docx_bytes(letter):
