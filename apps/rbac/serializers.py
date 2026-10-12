@@ -449,6 +449,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
             | Q(employee_code__iexact=normalized)
             | Q(emp_code__iexact=normalized)
         )
+        # A master record only conflicts when it is linked to a user account.
+        # Unlinked (user=NULL) rows are legacy/import stubs and must not block
+        # assigning the ID to its rightful profile.
+        matches = matches.filter(user__isnull=False)
+        # IDs left behind on soft-deleted profiles are free for reuse.
+        matches = matches.exclude(user__rbac_profile__is_deleted=True)
         if self.instance is not None:
             matches = matches.exclude(user_id=self.instance.user_id)
         if matches.exists():

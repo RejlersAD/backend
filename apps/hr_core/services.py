@@ -49,6 +49,39 @@ class EmployeeService:
     """
 
     @staticmethod
+    def _adopt_unlinked_stub(profile) -> Optional[EmployeeMaster]:
+        """
+        Reclaim an unlinked (user=NULL) EmployeeMaster stub for this profile.
+
+        Historical imports and legacy table syncs create master rows that were
+        never linked to an auth account. When such a stub matches the profile's
+        employee ID and its email either matches or is blank, it is the same
+        person's record — link it instead of creating a duplicate.
+        """
+        code = str(profile.employee_id or '').strip()
+        if not code:
+            return None
+        stub = EmployeeMaster.objects.filter(
+            models.Q(employee_number__iexact=code)
+            | models.Q(employee_code__iexact=code)
+            | models.Q(emp_code__iexact=code),
+            user__isnull=True,
+        ).filter(
+            models.Q(email__iexact=profile.user.email)
+            | models.Q(email__isnull=True)
+            | models.Q(email='')
+        ).first()
+        if stub is None:
+            return None
+        stub.user = profile.user
+        stub.save(update_fields=['user', 'updated_at'])
+        logger.info(
+            "[EmployeeService] Adopted unlinked EmployeeMaster %s (%s) for user %s",
+            stub.pk, code, profile.user.email,
+        )
+        return stub
+
+    @staticmethod
     @transaction.atomic
     def sync_from_rbac_profile(profile, changed_fields=None) -> EmployeeMaster:
         """Mirror shared User/RBAC fields into the employee master record."""
@@ -56,6 +89,8 @@ class EmployeeService:
         sync_all = changed_fields is None
         user = profile.user
         employee = profile.canonical_employee or EmployeeMaster.objects.filter(user=user).first()
+        if employee is None:
+            employee = EmployeeService._adopt_unlinked_stub(profile)
         if employee is None:
             employee = EmployeeService.create_employee(
                 user=user,
