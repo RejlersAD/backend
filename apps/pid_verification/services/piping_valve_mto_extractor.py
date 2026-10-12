@@ -1481,12 +1481,11 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
             # same truncation risk reappears at the old cap under heavy
             # tile density.
             max_tokens=40000,
-            # Same fix as apps.instrument_io_workflow's own Claude call —
-            # claude-sonnet-5 emits extended 'thinking' content blocks by
-            # default, which can consume the whole token budget before
-            # any of the actual JSON answer is written. This task needs a
-            # direct read-and-list answer, not multi-step reasoning.
-            thinking={'type': 'disabled'},
+            # thinking is controlled via create_kwargs above: disabled for
+            # older models (claude-sonnet-5 emits 'thinking' blocks that can
+            # consume the output budget before the JSON answer is written),
+            # omitted for adaptive-thinking models like claude-opus-5-5
+            # (medium effort default) which reject the disabled setting.
             system='You are an expert piping engineer extracting a Valve Material Take-Off (MTO) table from a P&ID drawing. Return ONLY a JSON object — no prose, no markdown fences.',
             messages=[{'role': 'user', 'content': content}],
             **create_kwargs,

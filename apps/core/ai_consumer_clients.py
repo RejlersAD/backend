@@ -70,6 +70,13 @@ class AIProviderOperationError(RuntimeError):
         }.get(self.status_code, 'provider_unavailable')
         if type(error).__name__ in {'APITimeoutError', 'TimeoutError', 'ReadTimeout'}:
             self.code = 'provider_timeout'
+        # Safe diagnostics: provider error bodies never contain credentials —
+        # log type + truncated message so 400s are debuggable without keys.
+        import logging
+        logging.getLogger(__name__).warning(
+            '[AIProvider] %s failed: status=%s type=%s detail=%.300s',
+            self.code, self.status_code, type(error).__name__, str(error),
+        )
         super().__init__({
             'request_rejected': 'The AI provider rejected this request (400).',
             'authentication_failed': 'The AI provider rejected the configured credentials (401 authentication).',
