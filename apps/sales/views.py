@@ -1080,11 +1080,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             as_attachment=False,
             filename=f"{deal.deal_code}-{letter.letter_type}.pdf"
         )
-        # Allow iframe embedding
-        response['X-Frame-Options'] = 'SAMEORIGIN'
-        # Allow iframe from frontend origin
+        # This authenticated PDF is embedded by the configured frontend origin.
+        # X-Frame-Options: SAMEORIGIN would block that cross-origin iframe.
+        response.xframe_options_exempt = True
         frontend_origin = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173')
         response['Content-Security-Policy'] = f"frame-ancestors 'self' {frontend_origin}"
+        response['Cache-Control'] = 'private, no-store'
+        response['Referrer-Policy'] = 'no-referrer'
         return response
 
     @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/docx')

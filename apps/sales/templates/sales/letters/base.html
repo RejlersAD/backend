@@ -194,10 +194,10 @@
           <td class="meta-label">To:</td>
           <td>
             <strong>{{ letterhead.recipient_name }}</strong><br />
-           {{ letterhead.recipient_title }}<br />
-            {% endif %} {{ letterhead.recipient_company }}<br />
-           {{ letterhead.recipient_address
-            }}<br />{% endif %} {% if letterhead.recipient_email %}E-mail:
+            {% if letterhead.recipient_title %}{{ letterhead.recipient_title }}<br />{% endif %}
+            {{ letterhead.recipient_company }}<br />
+            {% if letterhead.recipient_address %}{{ letterhead.recipient_address }}<br />{% endif %}
+            {% if letterhead.recipient_email %}E-mail:
             <a
               href="mailto:{{ letterhead.recipient_email }}"
               style="color: #0066cc; text-decoration: underline"
