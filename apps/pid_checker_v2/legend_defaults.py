@@ -1113,6 +1113,18 @@ DEFAULT_TEMPLATES: dict[str, dict] = {
                 'W', 'X', 'Y', 'Z', 'FT', 'LT',
                 'PT', 'TT', 'PL', 'PP', 'VL', 'VT', 'NM',
                 'FIC', 'PIC', 'LIC', 'TIC', 'L', 'MW',
+                # Non-electrical equipment type codes confirmed leaking
+                # into real extraction results: DB (distribution box —
+                # piping/process, not electrical), E (exchanger),
+                # EH (electric heater — mechanical equipment, not an
+                # electrical type), F (filter), G/K/T/C/D/R/S (generic
+                # mechanical/process equipment letters), LC/LD/AT/FI/PI/
+                # TI/LI/AI (instrument loop codes), HX (heat exchanger).
+                # 'FT', 'LT', 'X', 'Y', 'Z' were already present above —
+                # not duplicated here.
+                'DB', 'E', 'EH', 'F', 'G', 'K',
+                'T', 'LC', 'LD', 'AT', 'HX', 'C',
+                'D', 'R', 'S', 'FI', 'PI', 'TI', 'LI', 'AI',
             ],
             # Area codes shorter than this are rejected outright (not even
             # flagged suspicious) — e.g. a 1-digit area like '5' in
@@ -1146,8 +1158,10 @@ DEFAULT_TEMPLATES: dict[str, dict] = {
                         'Electrical equipment type code per IEC 60617 / project legend. '
                         'Invalid/non-electrical codes are automatically filtered: '
                         'P(pipe), V(vessel), H(heat exchanger), FT/LT/PT/TT(instruments), '
-                        'NER/NW/UM(unknown), L/MW(unknown, commonly misread off an SLD). '
-                        'Add more codes via Excel import.'
+                        'NER/NW/UM(unknown), L/MW(unknown, commonly misread off an SLD), '
+                        'DB(distribution box), E(exchanger), EH(electric heater), '
+                        'F(filter), HX(heat exchanger), FI/PI/TI/LI/AI/LC/LD/AT(instrument '
+                        'loop codes). Add more codes via Excel import.'
                     ),
                     'lookup': {
                         'PM': 'PUMP MOTOR',

@@ -14,6 +14,7 @@ rather than duplicated — only the prompt and response shape differ.
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 # Rendering/preprocessing is intentionally imported from THIS app's own
 # electrical_vision.py, not from apps.pid_checker_v2.services.
@@ -26,6 +27,7 @@ import re
 from .electrical_vision import (
     _render_single_page,
     _prepare_image_b64,
+    _render_electrical_regions,
     ELECTRICAL_VISION_RENDER_DPI,
 )
 from apps.pid_checker_v2.services.vision_extractor import (
@@ -801,67 +803,158 @@ def _call_openai_electrical(api_key, image_b64, user_prompt, system_prompt=None)
     return text, inp, out
 
 
-def _call_electrical_vision(pdf_bytes, page_index, api_key, provider='claude', model=None,
-                             legend_context: str | None = None) -> dict:
-    """Render page `page_index` and ask AI Vision for electrical tags
-    using ELECTRICAL_VISION_SYSTEM_PROMPT/ELECTRICAL_VISION_USER_PROMPT —
-    with `legend_context` (this document's own legend/symbol-key page
-    text, if any was found — see _classify_page) composed into the
-    system prompt via _compose_electrical_system_prompt, so the model can
-    use it to recognise symbols without treating it as a source of tags.
-    Returns {'tags': [str], 'raw_text': str, 'provider': str, 'model':
-    str, 'token_usage': dict}. Raises ValueError if api_key is missing —
-    same fail-fast contract extract_raw_text_via_vision has."""
-    # BUG FIX (reverted by explicit request): this used to call
-    # provider_api_key() here, which — per apps.core.ai_credentials.
-    # resolve_provider_credential — returns a DB-configured admin key
-    # UNCONDITIONALLY whenever one exists and is enabled, completely
-    # ignoring the fallback (the caller's own key). That meant a user's
-    # own API key could be silently overridden by an admin-configured
-    # one at the exact point the Vision call is made, even after
-    # tasks.py stopped doing any admin-key lookup of its own. Used
-    # directly as passed in now — no admin-DB lookup anywhere in this
-    # file either.
-    pass  # use api_key as passed in directly
-    if provider not in ('openai', 'claude'):
-        raise ValueError(f"Unsupported provider '{provider}'. Choose one of ('openai', 'claude').")
-    if not api_key or not api_key.strip():
-        raise ValueError('api_key is required for Vision-based tag extraction')
+# FIX 2 — regions now run CONCURRENTLY (see _call_electrical_vision
+# below), not sequentially. With the FIX 1 cap of
+# ELECTRICAL_VISION_MAX_REGIONS_PER_PAGE=16 and this many workers,
+# worst case is 16/4 = 4 sequential "rounds" per page instead of 16 —
+# roughly a 4x wall-clock reduction, which is what actually keeps a
+# multi-page large-format document inside the Celery task's 20-minute
+# hard limit (see tasks.py's time_limit=1200). 4 is deliberately modest,
+# not maxed out further, to stay well clear of Claude/OpenAI's own
+# per-account concurrent-request rate limits when multiple PAGES'
+# region batches could realistically overlap in a busy deployment.
+ELECTRICAL_VISION_PARALLEL_REGIONS = 4
 
-    page_img = _render_single_page(pdf_bytes, page_index, dpi=ELECTRICAL_VISION_RENDER_DPI)
-    image_b64 = _prepare_image_b64(page_img, VISION_OVERVIEW_MAX_DIMENSION_PX)
-    system_prompt = _compose_electrical_system_prompt(legend_context)
 
+def _call_vision_for_region(api_key, provider, model, region_b64, region_info, system_prompt):
+    """One region's Vision call — including its OWN independent Claude
+    'model not found' → VISION_MODEL_CLAUDE_FALLBACK retry. Regions now
+    run on separate threads (ThreadPoolExecutor, see _call_electrical_
+    vision below), so this can't safely share "already switched to
+    fallback" state across them the way an earlier sequential loop did
+    — each region discovers and falls back on its own. If the primary
+    model really is unavailable, every region hits the identical error
+    and falls back independently; some duplicate "model not found"
+    attempts are an acceptable tradeoff for not needing cross-thread
+    locking on what's a rare path, not the common one.
+
+    Never raises — returns (result_dict, None) on success or
+    (None, exception) on failure, so ThreadPoolExecutor.map never has
+    to propagate a worker exception; the caller (which runs on the main
+    thread, after all workers finish) decides what an all-None result
+    means."""
+    effective_model = model or VISION_MODELS['claude']
     resolved_model = model or VISION_MODELS[provider]
     if provider == 'openai':
         fn = lambda k, b64, p: _call_openai_electrical(k, b64, p, system_prompt=system_prompt)  # noqa: E731
     else:
         fn = lambda k, b64, p: _call_claude_electrical(k, b64, p, model=model, system_prompt=system_prompt)  # noqa: E731
-    effective_model = model or VISION_MODELS['claude']
-
     try:
-        raw, inp, out = _with_retries(provider, fn, api_key, image_b64, ELECTRICAL_VISION_USER_PROMPT)
+        raw, inp, out = _with_retries(provider, fn, api_key, region_b64, ELECTRICAL_VISION_USER_PROMPT)
     except Exception as exc:  # noqa: BLE001
         if provider == 'claude' and effective_model != VISION_MODEL_CLAUDE_FALLBACK \
                 and _is_model_not_found_error(exc):
             logger.warning(
-                "[ElecCompare][Vision] model '%s' unavailable (%s) — retrying once with fallback '%s'",
-                effective_model, exc, VISION_MODEL_CLAUDE_FALLBACK,
+                "[ElecCompare][Vision] model '%s' unavailable (%s) — retrying region %s with fallback '%s'",
+                effective_model, exc, region_info, VISION_MODEL_CLAUDE_FALLBACK,
             )
             fallback_fn = lambda k, b64, p: _call_claude_electrical(  # noqa: E731
                 k, b64, p, model=VISION_MODEL_CLAUDE_FALLBACK, system_prompt=system_prompt)
-            raw, inp, out = _with_retries(provider, fallback_fn, api_key, image_b64, ELECTRICAL_VISION_USER_PROMPT)
-            resolved_model = VISION_MODEL_CLAUDE_FALLBACK
+            try:
+                raw, inp, out = _with_retries(provider, fallback_fn, api_key, region_b64, ELECTRICAL_VISION_USER_PROMPT)
+                resolved_model = VISION_MODEL_CLAUDE_FALLBACK
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning('[ElecCompare] Region %s failed even with fallback model: %s', region_info, exc2)
+                return None, exc2
         else:
-            raise
+            logger.warning('[ElecCompare] Region %s failed: %s', region_info, exc)
+            return None, exc
 
     parsed = _parse_electrical_vision_response(raw)
     return {
         'tags': parsed['tags'],
         'raw_text': parsed['raw_text'],
+        'input_tokens': inp,
+        'output_tokens': out,
+        'model': resolved_model,
+    }, None
+
+
+def _call_electrical_vision(pdf_bytes, page_index, api_key, provider='claude', model=None,
+                             legend_context: str | None = None) -> dict:
+    """Ask AI Vision for electrical tags on page `page_index`, using
+    ELECTRICAL_VISION_SYSTEM_PROMPT/ELECTRICAL_VISION_USER_PROMPT — with
+    `legend_context` (this document's own legend/symbol-key page text,
+    if any was found — see _classify_page) composed into the system
+    prompt via _compose_electrical_system_prompt, so the model can use
+    it to recognise symbols without treating it as a source of tags.
+
+    BUG FIX (region-based scanning by default): this used to render the
+    WHOLE page once at ELECTRICAL_VISION_RENDER_DPI and send ONE Vision
+    call for it — on a large-format sheet (A0/A1) at the DPI needed for
+    legible tag text, that single whole-page render could hit PyMuPDF's
+    own "Overly large image" raster-size ceiling directly. Now renders
+    the page as a grid of smaller, overlapping, native-resolution
+    regions instead (_render_electrical_regions — same technique
+    apps.pid_verification.services.piping_valve_mto_extractor uses for
+    the identical problem), capped at ELECTRICAL_VISION_MAX_REGIONS_
+    PER_PAGE regions, each sent to Vision CONCURRENTLY (up to
+    ELECTRICAL_VISION_PARALLEL_REGIONS at once, via ThreadPoolExecutor)
+    instead of one at a time — a large sheet's regions used to be
+    processed strictly sequentially, which risked exceeding the Celery
+    task's own 20-minute hard limit on a multi-page document. Every
+    region's tags are merged into one page-level result; a tag on a
+    region boundary is captured whole by the 8% overlap margin, and a
+    tag reported by more than one overlapping region is deduped by
+    plain text match.
+
+    Returns {'tags': [str], 'raw_text': str, 'provider': str, 'model':
+    str, 'token_usage': dict}. Raises ValueError if api_key is missing
+    (same fail-fast contract extract_raw_text_via_vision has), or if
+    EVERY region's Vision call failed — one bad region among several
+    good ones is logged and skipped, not fatal to the whole page."""
+    if provider not in ('openai', 'claude'):
+        raise ValueError(f"Unsupported provider '{provider}'. Choose one of ('openai', 'claude').")
+    if not api_key or not api_key.strip():
+        raise ValueError('api_key is required for Vision-based tag extraction')
+
+    system_prompt = _compose_electrical_system_prompt(legend_context)
+    regions = _render_electrical_regions(pdf_bytes, page_index)
+
+    def process_region(region_data):
+        region_b64, region_info = region_data
+        return _call_vision_for_region(api_key, provider, model, region_b64, region_info, system_prompt)
+
+    with ThreadPoolExecutor(max_workers=ELECTRICAL_VISION_PARALLEL_REGIONS) as executor:
+        results = list(executor.map(process_region, regions))
+
+    all_tags: list[str] = []
+    seen_tags: set[str] = set()
+    raw_text_parts: list[str] = []
+    total_inp = 0
+    total_out = 0
+    resolved_model = model or VISION_MODELS[provider]
+    last_exc: Exception | None = None
+    any_success = False
+
+    for result, exc in results:
+        if result is None:
+            last_exc = exc
+            continue
+        any_success = True
+        total_inp += result['input_tokens']
+        total_out += result['output_tokens']
+        resolved_model = result['model']
+        for tag in result['tags']:
+            if tag not in seen_tags:
+                seen_tags.add(tag)
+                all_tags.append(tag)
+        if result['raw_text']:
+            raw_text_parts.append(result['raw_text'])
+
+    if regions and not any_success:
+        # Every region failed — this is a total page failure (bad key,
+        # rate limit, provider outage, ...), not a one-off region quirk;
+        # must still propagate so the caller's own per-page retry/skip
+        # logic (tasks.py) sees it, same as the old single-call contract.
+        raise last_exc
+
+    return {
+        'tags': all_tags,
+        'raw_text': '\n'.join(raw_text_parts),
         'provider': provider,
         'model': resolved_model,
-        'token_usage': {'calls': 1, 'input_tokens': inp, 'output_tokens': out},
+        'token_usage': {'calls': len(regions), 'input_tokens': total_inp, 'output_tokens': total_out},
     }
 
 
