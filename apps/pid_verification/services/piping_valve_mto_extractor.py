@@ -118,8 +118,14 @@ MAX_ROWS               = int(os.getenv('VALVE_MTO_MAX_ROWS', '2000'))
 SUPPORTED_PROVIDERS = ('openai', 'claude')
 VISION_MODELS = {
     'openai': VISION_MODEL,
-    'claude': os.getenv('VALVE_MTO_CLAUDE_MODEL', 'claude-sonnet-5'),
+    'claude': os.getenv('VALVE_MTO_CLAUDE_MODEL', 'claude-opus-5-5'),
 }
+# Claude Opus 5.5 has always-on adaptive thinking (medium effort by default)
+# and rejects thinking={'type': 'disabled'} — for these models the parameter
+# must simply be omitted. Older models (e.g. claude-sonnet-5) still get
+# thinking disabled explicitly so 'thinking' blocks can't consume the output
+# budget before the JSON answer is written.
+_CLAUDE_ADAPTIVE_THINKING_MODELS = {'claude-opus-5-5'}
 TEST_CONNECTION_MAX_TOKENS = 16
 
 # Canonical row schema — must match frontend `valveMTO.config.js` VALVE_COLUMNS.
@@ -1449,8 +1455,16 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
                     'type': 'base64', 'media_type': 'image/jpeg', 'data': reference['image'],
                 }},
             ])
+        claude_model = VISION_MODELS['claude']
+        create_kwargs: Dict[str, Any] = {}
+        if claude_model in _CLAUDE_ADAPTIVE_THINKING_MODELS:
+            # Opus 5.5: adaptive thinking is always on; omitting `effort`
+            # keeps the default medium level the request was tuned for.
+            pass
+        else:
+            create_kwargs['thinking'] = {'type': 'disabled'}
         resp = client.messages.create(
-            model=VISION_MODELS['claude'],
+            model=claude_model,
             # BUG FIX (real, confirmed root cause of "mostly empty rows"):
             # was 8192 — far too low for a dense P&ID page. Confirmed live
             # via server logs: 7 of 11 batches on one real extraction all
@@ -1475,6 +1489,7 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
             thinking={'type': 'disabled'},
             system='You are an expert piping engineer extracting a Valve Material Take-Off (MTO) table from a P&ID drawing. Return ONLY a JSON object — no prose, no markdown fences.',
             messages=[{'role': 'user', 'content': content}],
+            **create_kwargs,
         )
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
         raw = ''.join(parts) or '{}'
@@ -1541,9 +1556,12 @@ def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
             import anthropic
             client = personal_provider_client('anthropic', anthropic.Anthropic, api_key=api_key,
                                               timeout=20, max_retries=0)
+            test_kwargs: Dict[str, Any] = {}
+            if VISION_MODELS['claude'] not in _CLAUDE_ADAPTIVE_THINKING_MODELS:
+                test_kwargs['thinking'] = {'type': 'disabled'}
             client.messages.create(
                 model=VISION_MODELS['claude'], max_tokens=TEST_CONNECTION_MAX_TOKENS,
-                thinking={'type': 'disabled'}, messages=[{'role': 'user', 'content': 'Hi'}],
+                messages=[{'role': 'user', 'content': 'Hi'}], **test_kwargs,
             )
         else:
             from openai import OpenAI
