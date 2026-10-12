@@ -1048,9 +1048,16 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         )
         return response
 
-    @action(detail=True, methods=['get'], url_path='letters/(?P<letter_id>[^/]+)/pdf/preview')
+    @action(detail=True, methods=['get', 'head'], url_path='letters/(?P<letter_id>[^/]+)/pdf/preview')
     def preview_letter_pdf(self, request, pk=None, letter_id=None):
         """Preview the PDF for a generated letter (inline display)."""
+        # The iframe preview URL carries ?token=<JWT>&v=<epoch>. Only those
+        # params are meaningful here; reject anything else with a field-level
+        # 400 so stray storage/cursor params cannot silently change behavior.
+        allowed_preview_params = {'token', 'access_token', 'v'}
+        unknown_preview_params = set(request.query_params) - allowed_preview_params
+        if unknown_preview_params:
+            raise ValidationError({'detail': 'Provide the letter preview request without extra query parameters.'})
         deal = self.get_object()
         try:
             letter = deal.letters.get(pk=letter_id)
