@@ -109,9 +109,30 @@ VISION_TEMPERATURE     = 0.0
 # batch-failure instead.
 VISION_TIMEOUT_SECS    = float(os.getenv('VALVE_MTO_VISION_TIMEOUT', '300'))
 JPEG_QUALITY           = 80
+# BUG FIX (reverted by explicit request): was raised 240 -> 300 for
+# better small-text legibility, but confirmed to make real extraction
+# RESULTS worse, not better — piping_class recall dropped 42 -> 23 and
+# line-number recall dropped significantly too. Root cause not fully
+# diagnosed, but likely connected to the region-count overshoot at 300
+# DPI confirmed in the same turn (the proportional cap's rounding
+# doesn't hold a strict ceiling, so 300 DPI produced MORE regions per
+# page than intended, each covering a smaller, more zoomed-in slice —
+# plausibly hurting Vision's ability to read a line number that spans
+# across a region boundary more often than at the lower DPI). Reverted
+# to 240 — the value this was actually validated against.
 VISION_DETAIL_DPI      = int(os.getenv('VALVE_MTO_DETAIL_DPI', '240'))
 VISION_REGION_EDGE_PX  = int(os.getenv('VALVE_MTO_REGION_EDGE', '1568'))
 VISION_REGION_OVERLAP  = 0.08
+# BUG FIX: the adaptive grid in _render_native_regions had no upper
+# bound — a large-format sheet (A0/A1) at VISION_DETAIL_DPI could
+# produce 40+ regions for ONE page, and each region is one Vision API
+# call. Caps the grid to at most this many regions per page, scaling
+# columns/rows down PROPORTIONALLY (never just truncating) so a huge
+# sheet still gets full coverage at a coarser grid instead of silently
+# losing whatever regions got cut off. Same technique/value as
+# apps.electrical_comparison.services.electrical_vision's own
+# ELECTRICAL_VISION_MAX_REGIONS_PER_PAGE, which this was modeled on.
+VISION_MAX_REGIONS_PER_PAGE = int(os.getenv('VALVE_MTO_MAX_REGIONS_PER_PAGE', '16'))
 MAX_ROWS               = int(os.getenv('VALVE_MTO_MAX_ROWS', '2000'))
 
 # Provider models remain module-specific; credentials follow central policy.
@@ -435,6 +456,11 @@ def _classify_openai_error(exc: Exception) -> Optional[str]:
             return friendly
     return None
 
+# FIX 3 — recovers a valve tag from the row's own DESCRIPTION text when
+# Vision left VALVE_TAG empty but still wrote the tag into its free-text
+# description (e.g. "MOTOR OPERATED VALVE MOV-2002, ...").
+_VALVE_TAG_FROM_DESCRIPTION_RE = re.compile(r'\b(MOV|LV|HV|XV|SDV|PCV|FCV|TCV|BDV|PSV)-\d{3,5}\b')
+
 # Project-neutral schema; drawing annotations and supplied legends govern interpretation.
 VISION_PROMPT_TEMPLATE = """\
 You are a senior piping material engineer preparing a VALVE MATERIAL TAKE-OFF (MTO) from the supplied Piping & Instrumentation Diagram (P&ID). Read the project and drawing conventions from this document and the supplied legends. Do not assume a plant, unit, project, or tag format.
@@ -470,19 +496,56 @@ Project Legend Sheet data (from this user's own active legend sheets per section
 
 ### 3. Field rules
 - SL_NO: Running number on this sheet, starting at 1.
-- AREA: The complete DRG. TITLE / DRAWING TITLE from THIS sheet's bottom title block (left or right). Preserve every title line in reading order. Same title for every valve on that sheet. Never substitute ISLAND/FIELD, LOCATION, PROJECT, reference titles, or document numbers. If illegible, leave empty and request drawing-title review.
+- AREA: Extract the area/unit number. Look for it in these places:
+  1. From valve tag number: PSV-1004A → area = 427 (from drawing context); tag format PREFIX-AREA-NUMBER, e.g. PSV-1004A on drawing 427 → AREA = 427.
+  2. From drawing number in title block: Drawing 427-xxx → AREA = 427.
+  3. From line number: IA-3-AS1A0A-FA-427-1003-N → AREA = 427.
+  Use the 3-digit unit/area number. Same area for all valves on the same sheet.
 - PID_NUMBER: The drawing number of THIS sheet, taken ONLY from its title block, using its actual project format. NEVER use reference-document numbers or off-page connector destinations. Same value for every row of the sheet.
-- LINE_NUMBER: The pipe designation connected to the valve, using the actual project format. For a branch valve, use the header it branches from only when connectivity is visible.
+- LINE_NUMBER: Extract complete pipe designation connected to this valve. Look for text ON the pipe line itself.
+  For instrument air lines: IA-SIZE-CLASS-...
+  For drain lines: DR-SIZE-CLASS-...
+  For process lines: SIZE-SERVICE-CLASS-...
+  If valve is on a branch, use the branch line number, not the header.
+  Extract EXACTLY as written including all dashes and suffixes (-N, -P etc.)
 - PIPING_CLASS: The short piping specification code explicitly shown on the connected line or a verified project lookup. Do not assume a fixed code format.
 - PIPING_MATERIAL_CLASS: The material-class description from an explicit drawing annotation or a verified project lookup for PIPING_CLASS. Otherwise leave empty; do not replace it with an unrelated project's class.
 - SIZE_1_NB: Valve size. Use a size label printed directly next to the valve symbol (e.g. 1", 3/4", 2") if present; otherwise the size at the start of LINE_NUMBER. Output in inches as written, e.g. 3/4", 1-1/2", 8".
 - SIZE_2_NB: Only for PSVs / reducing valves with inlet × outlet sizes (e.g. 2"x3" → SIZE_1 = 2", SIZE_2 = 3"). Otherwise leave empty.
-- RATING_FACING: If a rating is printed at the valve (e.g. 300#, 600#, 900#), use it. Otherwise use the CLASS → RATING table if provided in the legend context. If unknown, leave empty and put "RATING FROM PMS" in REMARKS. Never guess.
+- RATING_FACING: Extract pressure rating. Look for rating:
+  - Directly on valve symbol
+  - In a box or bubble near the valve
+  - Near PSV valves: look for SET PRESSURE, e.g. "130 psig", "180 psig", "1.5G3"
+  - Flange rating: 150#, 300#, 600#, 900#
+  - PN rating: PN40, PN100
+  For PSV valves the set pressure is often shown in a nearby note box.
+  If unknown leave empty, put "RATING FROM PMS" in REMARKS.
 - FACING: Only the explicitly shown or verified facing/end-connection code (RF, FF, RTJ, SW, BW, NPT); otherwise empty. Keep it separate from the pressure rating.
 - BORE: Full/reduced bore only when explicitly shown; otherwise empty.
 - LINE_LIST: An explicitly supplied line-list reference, not a copy of a drawing number or unrelated text. Otherwise empty.
 - TYPE: From the symbol (section 1): GATE / GLOBE / BALL / CHECK / BUTTERFLY / PLUG / NEEDLE / CONTROL / ON-OFF / PSV / UNIDENTIFIED.
-- VALVE_TAG: Only if a tag is printed for this valve (PSV-…, PV-…, XV-…, HV-…, SDV-…). Prefix with unit if shown (e.g. 47-PSV-2004). Manual valves normally have no tag. Leave empty, do NOT invent one.
+- VALVE_TAG: Only if a tag is printed for this valve. Common tag prefixes:
+  - MOV-XXXX (Motor Operated Valve)
+  - SDV-XXXX (Shutdown Valve)
+  - XV-XXXX (On/Off Valve)
+  - PCV-XXXX (Pressure Control Valve)
+  - FCV-XXXX (Flow Control Valve)
+  - LV-XXXX (Level Valve)
+  - HV-XXXX (Hand Valve)
+  - PSV-XXXX (Pressure Safety Valve)
+  - BDV-XXXX (Blowdown Valve)
+  - TCV-XXXX (Temperature Control Valve)
+  Look for tag labels:
+  - Directly on or next to the valve symbol
+  - Inside a bubble or box near the valve
+  - In the actuator label above the valve
+  - In description text below the valve
+  Look for tag text in these locations:
+  - Above the valve symbol (actuator area)
+  - Below the valve symbol (label area)
+  - Inside instrument bubbles connected to the valve
+  Manual valves normally have NO tag. Leave empty — do NOT invent a tag.
+  Prefix with unit if shown (e.g. 47-PSV-2004).
 - DESCRIPTION: <TYPE> VALVE, <SIZE_1>[x<SIZE_2>], <RATING_FACING>, CLASS <PIPING_MATERIAL_CLASS>; add service purpose if obvious (VENT / DRAIN / ISOLATION / BYPASS). For PSVs use the text in the PSV table if present (e.g. "BUTANE DRYER A SAFETY VALVE").
 - TAB: "island" or "field" only when installation allocation is explicitly supported by source location/notes or an exact project mapping. AREA is the drawing title and never determines this allocation.
 - QTY_ISLAND / QTY_FIELD: 1 per physical valve in the verified TAB's column, 0 in the other. If installation allocation is unknown, leave both 0 and request quantity allocation review.
@@ -750,6 +813,20 @@ def _render_native_regions(pdf_path, max_pages, on_render_progress=None):
             width, height = page.rect.width, page.rect.height
             columns = max(1, math.ceil(width * VISION_DETAIL_DPI / 72 / VISION_REGION_EDGE_PX))
             rows = max(1, math.ceil(height * VISION_DETAIL_DPI / 72 / VISION_REGION_EDGE_PX))
+            # Scale the whole grid down proportionally (never just
+            # truncate rows/columns) when it exceeds the per-page cap,
+            # so a huge sheet still gets full-page coverage at a
+            # coarser grid instead of silently losing whatever regions
+            # got cut off.
+            total_regions = columns * rows
+            if total_regions > VISION_MAX_REGIONS_PER_PAGE:
+                scale = (VISION_MAX_REGIONS_PER_PAGE / total_regions) ** 0.5
+                columns = max(1, round(columns * scale))
+                rows = max(1, round(rows * scale))
+                logger.info(
+                    '[ValveMTO] Page %d: region grid capped to %d regions (%d cols x %d rows)',
+                    page_index + 1, columns * rows, columns, rows,
+                )
             words = embedded_text_boxes(page)
             sheet_title = drawing_title(page, words)
             identifiers = {
@@ -1432,6 +1509,8 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
         prompt += (
             '\nIMAGE ROLES: The first images are DRAWING TILES: extract physical valves only from these. '
             'Subsequent captioned LEGEND REFERENCE images are lookup examples, never drawing valves to count. '
+            'LEGEND REFERENCE images include valve symbols, scope boundary markers, and limit line markers. '
+            'Use them to identify both valve types AND area boundaries (ISLAND/FIELD classification). '
             'Use their captions and shapes together with the legend text to classify source symbols. '
             'If a source symbol does not correspond reliably, keep its type UNIDENTIFIED. '
             'Never infer missing specifications from a generic reference shape.'
@@ -1721,6 +1800,29 @@ def _dedupe_and_renumber(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             key = ('tagged', r.get('pid_number', ''), area, valve_tag)
         else:
             if not re.fullmatch(r'Page \d+ \[[\d., -]+\] pt', str(r.get('location_hint') or '')):
+                # BUG FIX: unlocated rows (no valid VALVE_BBOX from
+                # Vision — see _locate_region_rows' own 'else' branch)
+                # used to bypass dedup entirely and always be kept.
+                # Harmless for a single whole-page render, but with
+                # region-based scanning the SAME untagged valve can be
+                # reported by Vision in more than one overlapping
+                # region without a usable bbox in either response,
+                # producing real duplicate rows. Deduplicated here by
+                # content instead (not geometry, since none is
+                # available) — genuinely different valves sharing a
+                # type/size but differing in description still both
+                # survive; line_number is deliberately left OUT of this
+                # key so a region that filled it in doesn't survive
+                # alongside an earlier sighting that left it empty.
+                content_key = (
+                    r.get('pid_number', ''),
+                    r.get('type', ''),
+                    str(r.get('size_1', '')),
+                    str(r.get('description', ''))[:50],
+                )
+                if content_key in seen:
+                    continue  # drop duplicate
+                seen.add(content_key)
                 out.append(r)
                 continue
             key = (
@@ -1743,6 +1845,39 @@ def _dedupe_and_renumber(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for i, r in enumerate(out):
         r['sl_no'] = i + 1
     return out
+
+
+def _match_tag_to_line_number(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """FIX 3 — post-processing: a tagged valve (MOV-2002, SDV-2001, ...)
+    whose line_number Vision left empty can sometimes be recovered from
+    a nearby row that shares the same area and size and DOES have a
+    line number — e.g. an untagged valve on the same branch, or a
+    sibling valve whose own line was read correctly. Only applied when
+    there is EXACTLY ONE distinct line_number value among the matching
+    rows — an ambiguous group (multiple different candidate lines) is
+    left alone rather than guessed. Never invents a line number from
+    scratch; only ever copies one already present on another row in
+    this same extraction."""
+    by_group: Dict[Tuple[str, str], set] = {}
+    for r in rows:
+        line_number = str(r.get('line_number') or '').strip()
+        if not line_number:
+            continue
+        key = ((r.get('area') or '').strip().lower(), str(r.get('size_1') or '').strip().lower())
+        by_group.setdefault(key, set()).add(line_number)
+
+    for r in rows:
+        valve_tag = str(r.get('valve_tag') or '').strip()
+        line_number = str(r.get('line_number') or '').strip()
+        if not valve_tag or line_number:
+            continue
+        key = ((r.get('area') or '').strip().lower(), str(r.get('size_1') or '').strip().lower())
+        candidates = by_group.get(key)
+        if candidates and len(candidates) == 1:
+            r['line_number'] = next(iter(candidates))
+            existing_remarks = r.get('remarks', '')
+            r['remarks'] = (existing_remarks + ' Line number from nearby valve').strip()
+    return rows
 
 
 def extract_valve_mto_streaming(
@@ -1872,6 +2007,7 @@ def extract_valve_mto_streaming(
     # trips during the slow PDF→JPEG phase on slim-CPU containers.
     try:
         from apps.valve_mto.specification_lookup import load_specification_lookups, enrich_specifications
+        from .local_valve_mto import _extract_class_from_line_number
         specifications = load_specification_lookups(user_id)
         regions = _render_native_regions(
             pdf_path, VISION_MAX_PAGES,
@@ -2010,6 +2146,27 @@ def extract_valve_mto_streaming(
             data['sheet_title'] = page_titles[page_idx]
         rows, meta, warns, excluded = _parse_vision_payload(data)
         rows = [enrich_specifications(row, specifications) for row in rows]
+        for row in rows:
+            if not row.get('piping_class'):
+                extracted = _extract_class_from_line_number(row.get('line_number', ''))
+                if extracted:
+                    row['piping_class'] = extracted
+                    existing_remarks = row.get('remarks', '')
+                    row['remarks'] = (
+                        existing_remarks + ' (PMS class from line number)'
+                    ).strip()
+            # FIX 3 — if Vision left valve_tag empty but wrote the same
+            # tag into its own free-text DESCRIPTION (seen happening in
+            # practice — the model recognises the tag text but doesn't
+            # always also populate the dedicated field), recover it from
+            # there instead of leaving a tagged valve looking untagged.
+            if not row.get('valve_tag'):
+                description = str(row.get('description') or '')
+                match = _VALVE_TAG_FROM_DESCRIPTION_RE.search(description.upper())
+                if match:
+                    row['valve_tag'] = match.group(0)
+                    existing_remarks = row.get('remarks', '')
+                    row['remarks'] = (existing_remarks + ' Tag from description').strip()
         warns.extend(ocr_warnings)
         if region_ocr:
             warns.append('Region-specific rotated OCR supplied text hints; values still require drawing verification.')
@@ -2056,6 +2213,19 @@ def extract_valve_mto_streaming(
                     pass
 
     final_rows = _dedupe_and_renumber(all_rows)
+    final_rows = _match_tag_to_line_number(final_rows)
+
+    # FIX (requested): rows that just had their line_number filled in by
+    # _match_tag_to_line_number() may now be able to resolve a piping_class
+    # that Vision/enrich_specifications left empty — re-run the positional
+    # line-number parser on exactly those rows.
+    for row in final_rows:
+        if not row.get('piping_class') and row.get('line_number'):
+            inferred_class = _extract_class_from_line_number(row.get('line_number', ''))
+            if inferred_class:
+                row['piping_class'] = inferred_class
+                existing_remarks = row.get('remarks', '')
+                row['remarks'] = (existing_remarks + ' (PMS class from line number)').strip()
 
     # ── Tesseract OCR fallback (Vision attempted but produced nothing — e.g.
     # every batch failed with a 429/quota error) ───────────────────────────

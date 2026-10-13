@@ -40,6 +40,52 @@ LINE_CHARACTERS = str.maketrans({
 })
 
 
+def _extract_class_from_line_number(line_number):
+    """Fallback positional parser for PIPING_CLASS, used only when
+    specification_lookup.enrich_specifications' own lookup-based match
+    found nothing (e.g. the user has no active legend entry registered
+    for this exact code yet). Handles two line-number layouts seen across
+    projects/drawings \u2014 in both, the piping class ends up at the 3rd
+    '-'-separated segment:
+
+    Format 1 \u2014 SIZE-SERVICE-CLASS-NUMBER[-P]:
+    6"-PL-DC3N-8166-P, 2"-FL-AC6N-8022, 4"-PL-DC3N-8052-P
+    tokens[0] is the size (has a digit) and tokens[1] the 2-letter
+    service code.
+
+    Format 2 \u2014 SERVICE-SIZE-CLASS-AREA-NUMBER-N:
+    IA-3"-AS1A0A-FA-1003-N, DR-2"-AS1A0A-FA-1018-N
+    tokens[0] is the 2-letter service code (no digit) and tokens[1] the
+    size.
+
+    Returns None (never raises, never guesses a class from an unrelated
+    format) whenever the line number doesn't match either shape or the
+    candidate segment doesn't look like a real class code."""
+    tokens = [t.strip() for t in str(line_number or '').upper().split('-') if t.strip()]
+    if len(tokens) < 3:
+        return None
+    if any(ch.isdigit() for ch in tokens[0]):
+        # Format 1: size first, then the 2-letter service code.
+        size_token, service_token = tokens[0], tokens[1]
+    else:
+        # Format 2/3: 2-letter service code first, then the size.
+        service_token, size_token = tokens[0], tokens[1]
+    class_candidate = tokens[2]
+    if not any(ch.isdigit() for ch in size_token):
+        return None
+    if not re.fullmatch(r'[A-Z]{2}', service_token):
+        return None
+    if not (2 <= len(class_candidate) <= 6):
+        return None
+    if not any(ch.isalpha() for ch in class_candidate):
+        return None
+    if not any(ch.isdigit() for ch in class_candidate):
+        return None
+    if class_candidate.isdigit():
+        return None
+    return class_candidate
+
+
 @dataclass(frozen=True)
 class TextBox:
     text: str
@@ -62,16 +108,30 @@ def _load_references(user_id):
     from apps.valve_mto.models import ValveMTOLegend
 
     references = []
+    # FIX 1 — scope_symbols/limit_line added alongside valve/
+    # control_valve_regulator so their own imported pictures (area-
+    # boundary markers) are loaded as references too, not just the
+    # valve/regulator symbol pictures.
     for legend in ValveMTOLegend.objects.filter(
-        created_by_id=user_id, is_active=True, section__in=('valve', 'control_valve_regulator'),
+        created_by_id=user_id, is_active=True,
+        section__in=('valve', 'control_valve_regulator', 'scope_symbols', 'limit_line'),
     ):
         for sheet in legend.definition.get('imported_sheets', []):
             if sheet['name'].lower() in ('esd valve types', 'motor & valve control types', 'typical assemblies'):
                 continue
             for picture in sheet.get('images', []):
                 name = picture['name'].upper()
-                if not re.search(r'\b(?:VALVE|REGULATOR)\b', name):
-                    continue
+                # FIX 2 — the VALVE/REGULATOR name filter only makes
+                # sense for the valve/control_valve_regulator sections
+                # (it exists to reject non-valve pictures that leaked
+                # into an imported valve-type sheet). scope_symbols/
+                # limit_line pictures are area-boundary markers, not
+                # valves, and would never contain those words — keep
+                # every picture from those two sections unfiltered.
+                if legend.section in ('valve', 'control_valve_regulator'):
+                    if not re.search(r'\b(?:VALVE|REGULATOR)\b', name):
+                        continue
+                # scope_symbols and limit_line: keep all images
                 url = picture.get('data_url', '')
                 if not url.startswith('data:image/png;base64,'):
                     continue
@@ -535,7 +595,7 @@ def extract_local_valve_mto(pdf_path, *, user_id=None, scan_mode='thorough',
                 'Local extraction needs the actual valve symbol pictures, not only text definitions.'
             )
         warnings.append(
-            f'Using {len(references)} individual valve/regulator reference pictures; '
+            f'Using {len(references)} individual valve/regulator/scope/limit reference pictures; '
             'non-valve equipment and composite assembly pictures are excluded from detection.'
         )
         from apps.valve_mto.specification_lookup import load_specification_lookups, enrich_specifications
@@ -582,6 +642,18 @@ def extract_local_valve_mto(pdf_path, *, user_id=None, scan_mode='thorough',
                     vector_network=vector_pipe_network(page, rgb.shape[:2], cv2),
                 )
                 page_rows = [enrich_specifications({**row, 'area': sheet_title}, specifications) for row in page_rows]
+                # FIX 2 — positional fallback when the legend-lookup match
+                # above found nothing (no active legend entry yet for this
+                # exact class code).
+                for row in page_rows:
+                    if not row.get('piping_class'):
+                        extracted = _extract_class_from_line_number(row.get('line_number', ''))
+                        if extracted:
+                            row['piping_class'] = extracted
+                            existing_remarks = row.get('remarks', '')
+                            row['remarks'] = (
+                                existing_remarks + ' (PMS class from line number)'
+                            ).strip()
                 rows.extend(page_rows)
                 warnings.append(f'Page {page_index + 1}: {len(page_rows)} review candidates, not a verified total valve count.')
                 logger.info('[ValveMTO local] page=%d references=%d matches=%d OCR_boxes=%d',

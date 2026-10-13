@@ -3,8 +3,9 @@ from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
 from django.db.models.fields.files import FieldFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.sales.letter_pdf import regenerate_letter_pdf
 from apps.sales.models import Client, Deal, SalesLetter, SalesLetterTemplate
@@ -25,8 +26,9 @@ class LetterRegenerationStorageTests(TestCase):
             deal_code='LETTER-STORAGE', deal_name='Letter storage test',
             client=client, owner=actor, stage='proposal', bid_decision='bid',
         )
-        template = SalesLetterTemplate.objects.create(
-            letter_type='eoi', subject_template='Test subject', body_template='Test body',
+        template, _ = SalesLetterTemplate.objects.update_or_create(
+            letter_type='eoi',
+            defaults={'subject_template': 'Test subject', 'body_template': 'Test body'},
         )
         self.actor = actor
         self.letter = SalesLetter.objects.create(
@@ -79,3 +81,28 @@ class LetterRegenerationStorageTests(TestCase):
         self.assertEqual(response.data['body'], payload['body'])
         self.assertEqual(response.data['custom_data']['letterhead']['rev'], 1)
         self.assertEqual(response.data['custom_data']['attachments']['version'], 1)
+
+    @override_settings(FRONTEND_URL='https://www.radai.ae')
+    def test_preview_contract_allows_frontend_iframe(self):
+        api = APIClient()
+        api.force_authenticate(self.actor)
+        letters_url = f'/api/v1/sales/deals/{self.letter.opportunity_id}/letters/'
+        listed = api.get(letters_url)
+        self.assertEqual(listed.status_code, 200)
+        preview_path = listed.data[0]['pdf_preview_url']
+        self.assertEqual(
+            preview_path,
+            f'/api/v1/sales/deals/{self.letter.opportunity_id}/letters/{self.letter.pk}/pdf/preview/',
+        )
+        api.force_authenticate(user=None)
+        token = AccessToken.for_user(self.actor)
+        with patch('apps.sales.letter_pdf.get_letter_pdf_bytes', return_value=b'%PDF-test'):
+            for method in (api.head, api.get):
+                response = method(preview_path, {'token': str(token), 'v': '123'})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response['Content-Type'], 'application/pdf')
+                self.assertNotIn('X-Frame-Options', response)
+                self.assertIn('https://www.radai.ae', response['Content-Security-Policy'])
+                self.assertEqual(response['Cache-Control'], 'private, no-store')
+                if method == api.get:
+                    self.assertEqual(b''.join(response.streaming_content), b'%PDF-test')
