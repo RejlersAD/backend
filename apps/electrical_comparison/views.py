@@ -284,6 +284,19 @@ def _has_active_celery_workers() -> bool:
     return active
 
 
+def _shared_temp_dir():
+    """Temp directory visible to BOTH the web process and Celery workers.
+
+    Locally these run in separate containers with private /tmp volumes —
+    a file written to /tmp by the web container does not exist for the
+    worker (Errno 2). Both containers mount the project source tree at
+    /app, so a directory under BASE_DIR is shared; on single-container
+    deployments it is simply a local directory."""
+    path = os.path.join(settings.BASE_DIR, 'tmp_uploads')
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def _save_uploaded_file_to_temp(uploaded_file):
     """Writes an uploaded file's bytes to a temp file on disk and
     returns its path. Needed because the Celery task that will actually
@@ -293,7 +306,7 @@ def _save_uploaded_file_to_temp(uploaded_file):
     Caller is responsible for deleting the temp file once the task is
     done with it (see tasks.py's own cleanup)."""
     suffix = os.path.splitext(uploaded_file.name)[1] or ''
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=_shared_temp_dir())
     try:
         for chunk in uploaded_file.chunks():
             tmp.write(chunk)
