@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict
+from django.db import transaction
 
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -96,6 +97,7 @@ def _validate_excel_file(uploaded_file, field_name: str) -> tuple[bool, str]:
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def upload_matching_workbooks(request):
     """
     Upload Match.xlsx, SPEC.xlsx, and CAT.xlsx for a project.
@@ -119,6 +121,7 @@ def upload_matching_workbooks(request):
         )
     
     project = _get_accessible_project(request, project_id)
+    SpecProject.objects.select_for_update().get(pk=project.pk)
     
     # Get files
     match_file = request.FILES.get('match_file')
@@ -165,7 +168,7 @@ def upload_matching_workbooks(request):
     if auto_parse:
         try:
             rules_count, error = parse_match_xlsx(
-                workbook_set.match_file.path,
+                workbook_set.match_file,
                 workbook_set
             )
             
@@ -186,10 +189,12 @@ def upload_matching_workbooks(request):
     # Count sheets in SPEC and CAT
     try:
         import pandas as pd
-        spec_xl = pd.ExcelFile(workbook_set.spec_file.path)
-        cat_xl = pd.ExcelFile(workbook_set.cat_file.path)
-        workbook_set.spec_sheets_count = len(spec_xl.sheet_names)
-        workbook_set.cat_sheets_count = len(cat_xl.sheet_names)
+        with workbook_set.spec_file.storage.open(workbook_set.spec_file.name, 'rb') as stream:
+            with pd.ExcelFile(stream) as workbook:
+                workbook_set.spec_sheets_count = len(workbook.sheet_names)
+        with workbook_set.cat_file.storage.open(workbook_set.cat_file.name, 'rb') as stream:
+            with pd.ExcelFile(stream) as workbook:
+                workbook_set.cat_sheets_count = len(workbook.sheet_names)
         workbook_set.save(update_fields=['spec_sheets_count', 'cat_sheets_count'])
     except Exception as e:
         logger.warning(f"[MatchingUpload] Failed to count sheets: {e}")
@@ -296,9 +301,11 @@ def matching_workbook_set_detail(request, set_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def activate_matching_workbook_set(request, set_id):
     """Activate a workbook set (deactivate others in same project)."""
     ws = _get_accessible_workbook_set(request, set_id)
+    SpecProject.objects.select_for_update().get(pk=ws.project_id)
     
     # Deactivate all sets in same project
     MatchingWorkbookSet.objects.filter(
@@ -328,7 +335,7 @@ def parse_matching_workbook(request, set_id):
         )
     
     try:
-        rules_count, error = parse_match_xlsx(ws.match_file.path, ws)
+        rules_count, error = parse_match_xlsx(ws.match_file, ws)
         
         if error:
             ws.parse_error = error
@@ -420,6 +427,9 @@ def match_component_endpoint(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
+    if not ws.is_parsed:
+        return Response({'error': 'Parse the reference mapping workbook successfully before matching.'}, status=status.HTTP_409_CONFLICT)
+
     # Get matching criteria
     pdf_component_name = request.data.get('pdf_component_name', '')
     nominal_size = request.data.get('nominal_size', '')

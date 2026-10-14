@@ -71,3 +71,16 @@ class SpecProject(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} [{self.status}] ({self.project_id})"
+
+
+class ProjectCreationRequest(models.Model):
+    """Durable user-scoped identity for retries of automatic project creation."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    request_id = models.UUIDField()
+    payload_hash = models.CharField(max_length=64)
+    project = models.ForeignKey(SpecProject, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['owner', 'request_id'], name='spec_project_creation_request_unique')]

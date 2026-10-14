@@ -30,6 +30,14 @@ from django.core.files.base import File
 logger = logging.getLogger(__name__)
 
 
+def _read_excel(source, **kwargs):
+    """Read storage-backed uploads without requiring a local filesystem path."""
+    if hasattr(source, 'storage') and getattr(source, 'name', None):
+        with source.storage.open(source.name, 'rb') as stream:
+            return pd.read_excel(stream, **kwargs)
+    return pd.read_excel(source, **kwargs)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Soft-coded matching configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,13 +223,13 @@ def parse_match_xlsx(
     Returns:
         (rules_count, error_message)
     """
-    from .matching_models import MatchingRule
+    from ..matching_models import MatchingRule
     
     cfg = COMPONENT_MATCHING_CONFIG['match_xlsx']
     
     try:
         # Read Excel file
-        df = pd.read_excel(
+        df = _read_excel(
             file_path,
             sheet_name=cfg['sheet_name'],
             header=cfg['header_row'] if cfg['header_row'] >= 0 else None,
@@ -240,6 +248,8 @@ def parse_match_xlsx(
         
         # Extract mappings
         rules_created = 0
+        if df.shape[1] <= max(pdf_col_idx, cat_col_idx):
+            return 0, 'Match workbook is missing the configured component-name columns.'
         for idx, row in df.iterrows():
             try:
                 # Get values by column index
@@ -269,7 +279,7 @@ def parse_match_xlsx(
                 logger.warning(f"[MatchParser] Failed to parse row {idx}: {e}")
                 continue
         
-        return rules_created, ''
+        return (rules_created, '') if rules_created else (0, 'Match workbook contains no usable component mappings.')
         
     except Exception as e:
         error_msg = f"Failed to parse Match.xlsx: {str(e)}"
@@ -291,7 +301,7 @@ def load_cat_sheet(
         DataFrame or None if sheet not found
     """
     try:
-        df = pd.read_excel(cat_file_path, sheet_name=sheet_name)
+        df = _read_excel(cat_file_path, sheet_name=sheet_name)
         logger.info(f"[CATLoader] Loaded sheet '{sheet_name}' with {len(df)} rows")
         return df
     except Exception as e:
@@ -313,7 +323,7 @@ def load_spec_sheet(
         DataFrame or None if sheet not found
     """
     try:
-        df = pd.read_excel(spec_file_path, sheet_name=sheet_name)
+        df = _read_excel(spec_file_path, sheet_name=sheet_name)
         logger.info(f"[SPECLoader] Loaded sheet '{sheet_name}' with {len(df)} rows")
         return df
     except Exception as e:
@@ -351,7 +361,7 @@ def match_component(
             'error': str,
         }
     """
-    from .matching_models import MatchingRule, ComponentMatchingResult
+    from ..matching_models import MatchingRule, ComponentMatchingResult
     
     result = {
         'matched': False,
@@ -360,6 +370,8 @@ def match_component(
         'match_score': 0.0,
         'match_method': '',
         'error': '',
+        'status': 'unmatched',
+        'candidate_count': 0,
     }
     
     try:
@@ -381,7 +393,7 @@ def match_component(
             result['error'] = "CAT workbook not uploaded"
             return result
         
-        cat_df = load_cat_sheet(workbook_set.cat_file.path, cat_sheet_name)
+        cat_df = load_cat_sheet(workbook_set.cat_file, cat_sheet_name)
         if cat_df is None or cat_df.empty:
             result['error'] = f"CAT sheet '{cat_sheet_name}' not found or empty"
             return result
@@ -393,12 +405,16 @@ def match_component(
         
         # Step 4: Filter CAT data by criteria
         cfg = COMPONENT_MATCHING_CONFIG['cat_xlsx']
+        if norm_material and cfg['material_grade_col'] not in cat_df.columns:
+            result['status'] = 'invalid_reference'
+            result['error'] = 'CAT sheet is missing the material column required by these matching criteria.'
+            return result
         
         matches = cat_df.copy()
         
         # Filter by size (check both Npd[1] and Npd[2])
         if norm_size:
-            size_matches = pd.Series([False] * len(matches))
+            size_matches = pd.Series(False, index=matches.index)
             for npd_col in cfg['npd_cols']:
                 if npd_col in matches.columns:
                     size_matches |= matches[npd_col].astype(str).apply(normalize_size) == norm_size
@@ -406,7 +422,7 @@ def match_component(
         
         # Filter by pressure rating (check both PressureRating[1] and PressureRating[2])
         if norm_pressure:
-            pressure_matches = pd.Series([False] * len(matches))
+            pressure_matches = pd.Series(False, index=matches.index)
             for pr_col in cfg['pressure_rating_cols']:
                 if pr_col in matches.columns:
                     pressure_matches |= matches[pr_col].astype(str).apply(normalize_pressure) == norm_pressure
@@ -415,7 +431,7 @@ def match_component(
         # Filter by material grade
         if norm_material and cfg['material_grade_col'] in matches.columns:
             matches = matches[
-                matches[cfg['material_grade_col']].astype(str).str.upper().str.contains(norm_material, na=False)
+                matches[cfg['material_grade_col']].astype(str).str.upper().str.contains(norm_material, na=False, regex=False)
             ]
         
         # Step 5: Return best match
@@ -423,11 +439,26 @@ def match_component(
             result['error'] = f"No matching component found in CAT for criteria: size={norm_size}, rating={norm_pressure}, material={norm_material}"
             return result
         
-        # Take first match (TODO: implement scoring for multiple matches)
+        matches = matches.drop_duplicates()
+        result['candidate_count'] = len(matches)
+        if len(matches) > 1:
+            result['status'] = 'ambiguous'
+            result['error'] = 'Multiple catalog candidates satisfy the supplied criteria. Review or refine the criteria.'
+            code_column = cfg['commodity_code_col']
+            result['candidate_commodity_codes'] = list(dict.fromkeys(
+                str(value).strip() for value in matches.get(code_column, pd.Series(dtype=str)).dropna()
+            ))[:20]
+            return result
         best_match = matches.iloc[0]
+
+        code = best_match.get(cfg['commodity_code_col'], '')
+        if pd.isna(code) or not str(code).strip():
+            result['error'] = 'The matching catalog row has no commodity code.'
+            return result
         
         result['matched'] = True
-        result['commodity_code'] = str(best_match.get(cfg['commodity_code_col'], ''))
+        result['status'] = 'unique_match'
+        result['commodity_code'] = str(code).strip()
         result['description'] = str(best_match.get(cfg['description_col'], catalog_name))
         result['match_score'] = 1.0  # Exact match
         result['match_method'] = 'rule-based'

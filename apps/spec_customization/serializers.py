@@ -1,5 +1,6 @@
 """Spec Customization — DRF Serializers."""
 from rest_framework import serializers
+from .services.completeness import extraction_completeness
 
 from .models import (
     PaperSpecDocument,
@@ -29,17 +30,24 @@ class PaperSpecDocumentSerializer(serializers.ModelSerializer):
 
 
 class PaperSpecExtractionJobSerializer(serializers.ModelSerializer):
+    extraction_completeness = serializers.SerializerMethodField()
+    project_id = serializers.CharField(source='document.project_id', read_only=True)
+    document_meta = PaperSpecDocumentSerializer(source='document', read_only=True)
+
+    def get_extraction_completeness(self, obj):
+        return extraction_completeness(obj)
     document_filename = serializers.CharField(source='document.original_filename', read_only=True)
     document_pages = serializers.IntegerField(source='document.total_pages', read_only=True)
 
     class Meta:
         model = PaperSpecExtractionJob
         fields = [
-            'id', 'document', 'document_filename', 'document_pages',
+            'id', 'document', 'document_meta', 'document_filename', 'document_pages', 'project_id',
             'status', 'progress_percent', 'current_phase',
             'pages_processed', 'chunks_total', 'chunks_done',
             'celery_task_id', 'error_message',
-            'created_at', 'started_at', 'completed_at',
+            'extraction_completeness',
+            'created_at', 'started_at', 'completed_at', 'saved_at', 'saved_by',
         ]
         read_only_fields = fields
 
@@ -112,12 +120,20 @@ class PaperSpecExtractionJobBriefSerializer(serializers.ModelSerializer):
     openai_prompt_tokens = serializers.SerializerMethodField()
     openai_completion_tokens = serializers.SerializerMethodField()
     cost_usd = serializers.SerializerMethodField()
+    document_id = serializers.UUIDField(source='document.id', read_only=True)
+    saved_by_name = serializers.SerializerMethodField()
+
+    def get_saved_by_name(self, obj):
+        if not obj.saved_by:
+            return ''
+        return obj.saved_by.get_full_name() or obj.saved_by.username
 
     class Meta:
         model = PaperSpecExtractionJob
         fields = [
             'id', 'status', 'progress_percent', 'current_phase',
-            'user_name', 'document_name', 'created_at', 'completed_at',
+            'user_name', 'document_name', 'document_id', 'created_at', 'completed_at',
+            'saved_at', 'saved_by', 'saved_by_name',
             'components_count', 'classes_count',
             'gemini_prompt_tokens', 'gemini_completion_tokens',
             'openai_prompt_tokens', 'openai_completion_tokens', 'cost_usd',

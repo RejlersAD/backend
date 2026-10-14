@@ -20,13 +20,18 @@ import json
 import logging
 import os
 import secrets
+import re
+from contextlib import nullcontext
+from uuid import UUID
 from typing import Any, Dict
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import OperationalError, ProgrammingError, transaction
 from django.db.models import Count, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.exceptions import PermissionDenied
@@ -79,6 +84,7 @@ from .services.presigned_upload import (
     is_presigned_upload_available,
 )
 from .tasks import extract_paper_spec
+from .services.completeness import extraction_completeness
 
 logger = logging.getLogger(__name__)
 
@@ -253,13 +259,14 @@ def _ingest_paper_spec_file(
     user_provider: str,       # BYOK provider: "openai", "claude", or ""
     user_model: str,          # BYOK model ID (provider-specific)
     request_user,
+    auto_project: bool = False,
 ):
     """Returns a DRF ``Response`` — same shape as the legacy upload view."""
     sha = _sha256_of_file(src)
     original_filename = getattr(src, 'name', 'upload')
     original_size = getattr(src, 'size', 0) or 0
 
-    if SPEC_EXTRACTION_CONFIG.get("dedupe_by_sha256", True):
+    if not auto_project and SPEC_EXTRACTION_CONFIG.get("dedupe_by_sha256", True):
         existing = (
             PaperSpecDocument.objects
             .filter(sha256_hash=sha)
@@ -293,16 +300,56 @@ def _ingest_paper_spec_file(
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    doc = PaperSpecDocument.objects.create(
-        file=normalized.file,
-        original_filename=original_filename,
-        file_size_bytes=original_size,
-        sha256_hash=sha,
-        project_id=project_id,
-        title=title,
-        document_number=document_number,
-        uploaded_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
-    )
+    with transaction.atomic() if auto_project else nullcontext():
+        if auto_project:
+            try:
+                # Serialize this user's simultaneous uploads before looking up a folder.
+                type(request_user).objects.select_for_update().get(pk=request_user.pk)
+                linked_ids = set(
+                    PaperSpecDocument.objects.filter(uploaded_by=request_user, sha256_hash=sha)
+                    .exclude(project_id__isnull=True).values_list('project_id', flat=True)
+                )
+                valid_ids = []
+                for linked_id in linked_ids:
+                    try:
+                        valid_ids.append(UUID(linked_id))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                project = SpecProject.objects.filter(
+                    project_id__in=valid_ids,
+                    created_by=request_user,
+                    metadata__creation_source='s3d_document_upload',
+                ).order_by('created_at').first()
+                if project is None:
+                    name = re.sub(r'\s+', ' ', re.sub(r'[_-]+', ' ', os.path.splitext(original_filename)[0])).strip()[:255]
+                    project = SpecProject.objects.create(
+                        created_by=request_user,
+                        name=name or 'Uploaded document',
+                        metadata={
+                            'creation_source': 's3d_document_upload',
+                            'project_name_source': 'original_filename',
+                            'original_filename': original_filename,
+                        },
+                    )
+                else:
+                    project.save(update_fields=['updated_at'])
+                project_id = str(project.project_id)
+            except (ProgrammingError, OperationalError) as exc:
+                logger.warning(
+                    "[SpecCustomization] auto_project fallback to standalone upload due to DB schema/runtime issue: %s",
+                    exc,
+                )
+                project_id = None
+        doc = PaperSpecDocument.objects.create(
+            file=normalized.file,
+            original_filename=original_filename,
+            file_size_bytes=original_size,
+            sha256_hash=sha,
+            project_id=project_id,
+            title=title,
+            document_number=document_number,
+            uploaded_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
+        )
     doc.total_pages = _page_count(doc.file)
     doc.save(update_fields=['total_pages'])
 
@@ -358,20 +405,20 @@ def _ingest_paper_spec_file(
             job.error_message = f"Extraction failed: {e}"
             job.save(update_fields=['status', 'error_message'])
     else:
-        # Normal mode: Queue task asynchronously via Celery
-        try:
-            async_result = extract_paper_spec.delay(str(job.id))
-            job.celery_task_id = async_result.id or ''
-            job.save(update_fields=['celery_task_id'])
-        except Exception as e:
-            logger.exception("[SpecExtraction] failed to queue task: %s", e)
-            # Fallback to synchronous execution
+        # The worker must only receive jobs visible to other DB connections.
+        def enqueue():
             try:
-                extract_paper_spec(str(job.id))
-            except Exception as run_err:
+                async_result = extract_paper_spec.delay(str(job.id))
+                job.celery_task_id = async_result.id or ''
+                PaperSpecExtractionJob.objects.filter(pk=job.pk).update(celery_task_id=job.celery_task_id)
+            except Exception:
+                logger.exception("[SpecExtraction] failed to queue job %s", job.id)
                 job.status = PaperSpecExtractionJob.STATUS_FAILED
-                job.error_message = f"Queue failed: {e}; inline failed: {run_err}"
-                job.save(update_fields=['status', 'error_message'])
+                job.error_message = "Extraction could not be queued. Please retry the upload."
+                PaperSpecExtractionJob.objects.filter(pk=job.pk).update(
+                    status=job.status, error_message=job.error_message,
+                )
+        transaction.on_commit(enqueue)
 
     return Response({
         "deduped": False,
@@ -394,6 +441,12 @@ def upload_paper_spec(request):
     they bubble up as generic 500 HTML responses.
     """
     project_id = request.data.get('project_id') or None
+    auto_flag = request.data.get('auto_project')
+    if auto_flag not in (None, '', '0', '1'):
+        return Response({'error': 'auto_project must be 0 or 1.'}, status=400)
+    auto_project = auto_flag == '1'
+    if auto_project and project_id:
+        return Response({'error': 'Automatic project selection cannot include project_id.'}, status=400)
     if project_id:
         _get_accessible_project(request, project_id)
 
@@ -413,6 +466,7 @@ def upload_paper_spec(request):
             user_provider=request.data.get('user_ai_provider') or '',       # BYOK provider: "openai" or "claude"
             user_model=request.data.get('user_ai_model') or '',             # BYOK model ID
             request_user=request.user,
+            auto_project=auto_project,
         )
     except Exception as e:
         logger.exception("[SpecCustomization] upload_paper_spec failed: %s", e)
@@ -506,6 +560,12 @@ def complete_paper_spec_upload(request):
     s3_key            = request.data.get('s3_key') or ''
     original_filename = request.data.get('filename') or ''
     project_id        = request.data.get('project_id') or None
+    auto_flag         = request.data.get('auto_project')
+    if auto_flag not in (None, False, True):
+        return Response({'error': 'auto_project must be a boolean.'}, status=400)
+    auto_project      = auto_flag is True
+    if auto_project and project_id:
+        return Response({'error': 'Automatic project selection cannot include project_id.'}, status=400)
     title             = request.data.get('title') or ''
     document_number   = request.data.get('document_number') or ''
     engineer_name     = request.data.get('engineer_name') or ''          # BYOK attribution
@@ -547,6 +607,7 @@ def complete_paper_spec_upload(request):
             user_provider=user_provider,      # BYOK provider: "openai" or "claude"
             user_model=user_model,            # BYOK model ID
             request_user=request.user,
+            auto_project=auto_project,
         )
     finally:
         try:
@@ -597,6 +658,31 @@ def job_detail(request, job_id):
         for c in partial[:50]
     ]
     return Response(data)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def save_job(request, job_id):
+    with transaction.atomic():
+        job = _get_accessible_job(request, job_id)
+        try:
+            project_id = UUID(job.document.project_id) if job.document.project_id else None
+        except (ValueError, TypeError, AttributeError):
+            project_id = None
+        project = SpecProject.objects.select_for_update().filter(project_id=project_id).first() if project_id else None
+        if project is None or not _can_access_project(request.user, project):
+            raise PermissionDenied('You do not have access to this project.')
+        job.refresh_from_db(fields=['status', 'saved_at', 'saved_by'])
+        if job.status != PaperSpecExtractionJob.STATUS_COMPLETED:
+            return Response({'error': 'Only completed extractions can be saved.'}, status=409)
+        if not job.piping_classes.exists():
+            return Response({'error': 'No extracted piping classes to save.'}, status=409)
+        if job.saved_at is None:
+            job.saved_at = timezone.now()
+            job.saved_by = request.user
+            job.save(update_fields=['saved_at', 'saved_by'])
+            logger.info('[SpecExtraction] Saved job %s to project %s by user %s',
+                        job.pk, project.pk, request.user.pk)
+    return Response(PaperSpecExtractionJobSerializer(job).data)
 
 
 @api_view(['POST'])
@@ -749,6 +835,8 @@ def _smartplant_response(buf, filename: str) -> HttpResponse:
 def export_smartplant_spec(request, job_id):
     """Export SmartPlant 3D SPEC workbook (rule sheets)."""
     job = _get_accessible_job(request, job_id)
+    if job.status != PaperSpecExtractionJob.STATUS_COMPLETED or extraction_completeness(job)['state'] == 'partial':
+        return Response({'error': 'A completed extraction without failed or missing chunks is required for SPEC export.'}, status=status.HTTP_409_CONFLICT)
     try:
         buf = build_spec_workbook(job)
     except Exception as e:
@@ -763,6 +851,8 @@ def export_smartplant_spec(request, job_id):
 def export_smartplant_cat(request, job_id):
     """Export SmartPlant 3D Catalog workbook (component part sheets)."""
     job = _get_accessible_job(request, job_id)
+    if job.status != PaperSpecExtractionJob.STATUS_COMPLETED or extraction_completeness(job)['state'] == 'partial':
+        return Response({'error': 'A completed extraction without failed or missing chunks is required for CAT export.'}, status=status.HTTP_409_CONFLICT)
     try:
         buf = build_cat_workbook(job)
     except Exception as e:

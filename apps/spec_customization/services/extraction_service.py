@@ -15,6 +15,7 @@ piping-class structured extraction.
 """
 from __future__ import annotations
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
+from apps.core.ai_credentials import get_provider_configuration
 
 import base64
 import io
@@ -34,6 +35,10 @@ from .advanced_validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ExtractionProviderConfigurationError(RuntimeError):
+    """Safe diagnostics for settings that retries cannot repair."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +72,7 @@ class PaperSpecExtractionService:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, user_api_key: str = "", user_provider: str = "", user_model: str = ""):
         self.config = {**SPEC_EXTRACTION_CONFIG, **(config or {})}
+        self._module_models = {name: self.config[f'{name}_model'] for name in ('gemini', 'openai', 'claude')}
         self._gemini_client = None
         self._openai_client = None
         self._claude_client = None
@@ -74,6 +80,7 @@ class PaperSpecExtractionService:
         self._openai_quota_exceeded = False
         self._claude_quota_exceeded = False
         self._ai_pages_used = 0
+        self.provider_configuration_errors = {}
         
         # BYOK (Bring Your Own Key) support
         self._user_api_key = (user_api_key or "").strip()
@@ -89,6 +96,25 @@ class PaperSpecExtractionService:
         self._claude_completion_tokens = 0
 
     # ── Lazy client init ────────────────────────────────────────────────
+    def _configured_engines(self):
+        """Read current saved defaults; retain legacy routing until centrally managed."""
+        configurations = [get_provider_configuration(provider) for provider in ('gemini', 'openai', 'anthropic')]
+        if not any(item['managed'] for item in configurations):
+            return list(self.config['ai_engines'])
+        engines = ['pymupdf_text']
+        for item in configurations:
+            if not item['ready']:
+                continue
+            name = 'claude' if item['provider'] == 'anthropic' else item['provider']
+            engines.append(f'{name}_vision')
+            self.config[f'{name}_model'] = item['model'] or self._module_models[name]
+        if len(engines) == 1:
+            raise ExtractionProviderConfigurationError(
+                'Structured extraction is unavailable. Configure and enable a default saved credential '
+                'in Admin → AI API Keys (/admin/ai-api-keys), then retry.'
+            )
+        return [*engines, 'tesseract']
+
     def _get_gemini(self):
         if self._gemini_quota_exceeded:
             return None
@@ -98,6 +124,7 @@ class PaperSpecExtractionService:
             from google import genai  # type: ignore
             api_key = provider_api_key('gemini', fallback=(lambda: (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))))
             if not api_key:
+                self.provider_configuration_errors['Gemini'] = 'credential_missing'
                 logger.info("[SpecExtraction] GEMINI_API_KEY not set — Gemini disabled")
                 return None
             self._gemini_client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
@@ -121,6 +148,7 @@ class PaperSpecExtractionService:
             else:
                 api_key = provider_api_key('openai', fallback=(lambda: (os.environ.get("OPENAI_API_KEY"))))
                 if not api_key:
+                    self.provider_configuration_errors['OpenAI'] = 'credential_missing'
                     logger.info("[SpecExtraction] OPENAI_API_KEY not set — OpenAI disabled")
                     return None
             self._openai_client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key))
@@ -144,6 +172,7 @@ class PaperSpecExtractionService:
             else:
                 api_key = provider_api_key('anthropic', fallback=(lambda: (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY"))))
                 if not api_key:
+                    self.provider_configuration_errors['Claude'] = 'credential_missing'
                     logger.info("[SpecExtraction] ANTHROPIC_API_KEY not set — Claude disabled")
                     return None
             self._claude_client = lazy_provider_client('anthropic', Anthropic, api_key=lambda: (api_key))
@@ -175,6 +204,98 @@ class PaperSpecExtractionService:
             end = min(start + size - 1, total_pages - 1)
             out.append((start, end))
         return out
+
+    def extract_appendix_a_summary(self, pdf_path: str) -> Dict[str, Any]:
+        """Locate Appendix-A ahead of the chunk waterfall and retain source-page evidence."""
+        import fitz
+
+        heading = re.compile(self.config["appendix_a_summary_regex"], re.IGNORECASE)
+        table_header = re.compile(self.config["appendix_table_header_regex"], re.IGNORECASE)
+        code_pattern = re.compile(self.config["appendix_class_code_regex"], re.IGNORECASE)
+        with fitz.open(pdf_path) as doc:
+            # Printed page 29 may differ from the PDF index by cover pages.
+            nearby = list(range(max(0, 28 - 6), min(doc.page_count, 28 + 7)))
+            nearby_set = set(nearby)
+            candidates = nearby + [i for i in range(doc.page_count) if i not in nearby_set]
+            scanned = []
+            summary_start = None
+            for i in candidates:
+                scanned.append(i + 1)
+                if heading.search(doc[i].get_text("text") or ""):
+                    summary_start = i
+                    break
+            if summary_start is None:
+                return {"piping_classes": [], "pages_scanned": scanned, "appendix_pages": []}
+
+            pages: List[Tuple[int, str]] = []
+            for i in range(summary_start, min(doc.page_count, summary_start + self.config["appendix_summary_max_pages"])):
+                text = doc[i].get_text("text") or ""
+                if i > summary_start and re.search(r'APPENDIX\s*[-–]?\s*[B-Z]\b', text, re.IGNORECASE):
+                    break
+                pages.append((i + 1, text))
+
+        classes: Dict[str, Dict[str, Any]] = {}
+        header_found = False
+        for page_number, text in pages:
+            header = table_header.search(text)
+            if header:
+                header_found = True
+                text = text[header.end():]
+            if not header_found:
+                continue
+            for line in text.splitlines():
+                match = code_pattern.match(line.strip())
+                if not match:
+                    continue
+                code = re.sub(r'\s*[-–]\s*', '-', match.group("code")).upper()
+                classes.setdefault(code, self._appendix_class(code, page_number, "appendix_table"))
+
+        if not classes:
+            for page_number, text in pages:
+                for match in code_pattern.finditer(text):
+                    code = re.sub(r'\s*[-–]\s*', '-', match.group("code")).upper()
+                    classes.setdefault(code, self._appendix_class(code, page_number, "appendix_regex"))
+
+        logger.info("[SpecExtraction] Appendix-A pages %s: %d class codes", [n for n, _ in pages], len(classes))
+        return {
+            "piping_classes": list(classes.values()),
+            "pages_scanned": scanned,
+            "appendix_pages": [n for n, _ in pages],
+        }
+
+    @staticmethod
+    def _appendix_class(code: str, page_number: int, engine: str) -> Dict[str, Any]:
+        return {
+            "class_code": code,
+            "class_full_code": code,
+            "material_grade": "",
+            "pressure_rating": "",
+            "flange_facing": "",
+            "corrosion_allowance": "",
+            "service_list": [],
+            "pt_rating_table": [],
+            "components": [],
+            "raw_notes": "Appendix-A class summary; component details require review.",
+            "confidence": 0.30 if engine == "appendix_table" else 0.20,
+            "_engine": engine,
+            "_appendix_summary": True,
+            "_source_pages": [page_number, page_number],
+        }
+
+    def log_zero_class_diagnostics(self, pdf_path: str, pages: List[int]) -> None:
+        """Log scanned page numbers; raw excerpts require explicit DEBUG logging."""
+        logger.warning("[SpecExtraction] Zero piping classes; scanned PDF pages: %s", pages)
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        import fitz
+        limit = self.config["zero_class_log_chars_per_page"]
+        with fitz.open(pdf_path) as doc:
+            for page_number in pages:
+                raw = doc[page_number - 1].get_text("text") or ""
+                logger.debug(
+                    "[SpecExtraction] Page %d raw text chunk (%d chars%s): %r",
+                    page_number, len(raw), " truncated" if len(raw) > limit else "", raw[:limit],
+                )
 
     def extract_text_for_pages(self, pdf_path: str, start: int, end: int) -> List[str]:
         """Return per-page plain text from PyMuPDF, with running
@@ -340,6 +461,9 @@ class PaperSpecExtractionService:
                 c.setdefault("_source_pages", [page_range[0] + 1, page_range[1] + 1])
             return blob
         except Exception as e:
+            if getattr(e, 'status_code', None) in {401, 403, 404}:
+                self.provider_configuration_errors['Gemini'] = e.status_code
+                self._gemini_quota_exceeded = True
             msg = str(e).lower()
             if "quota" in msg or "rate" in msg or "429" in msg:
                 self._gemini_quota_exceeded = True
@@ -391,6 +515,9 @@ class PaperSpecExtractionService:
                 c.setdefault("_source_pages", [page_range[0] + 1, page_range[1] + 1])
             return blob
         except Exception as e:
+            if getattr(e, 'status_code', None) in {401, 403, 404}:
+                self.provider_configuration_errors['OpenAI'] = e.status_code
+                self._openai_quota_exceeded = True
             msg = str(e).lower()
             if "quota" in msg or "rate" in msg or "429" in msg or "insufficient" in msg:
                 self._openai_quota_exceeded = True
@@ -455,6 +582,9 @@ class PaperSpecExtractionService:
             return blob
         except Exception as e:
             msg = str(e).lower()
+            if getattr(e, 'status_code', None) in {401, 403, 404}:
+                self.provider_configuration_errors['Claude'] = e.status_code
+                self._claude_quota_exceeded = True
             if "quota" in msg or "rate" in msg or "429" in msg or "overloaded" in msg:
                 self._claude_quota_exceeded = True
                 logger.warning("[SpecExtraction] Claude quota — disabling for remainder of job")
@@ -547,7 +677,8 @@ class PaperSpecExtractionService:
         if enable_ensemble is None:
             enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
         
-        engines = list(self.config["ai_engines"])
+        engines = (list(self.config['ai_engines']) if self._user_provider in {'openai', 'claude'}
+                   else self._configured_engines())
         cost_skip_chars = int(self.config["skip_ai_if_text_chars_gte"])
         max_ai_pages = int(self.config["max_ai_pages_per_job"])
         page_count_in_chunk = (end - start + 1)
@@ -690,6 +821,13 @@ class PaperSpecExtractionService:
                         # Already have a usable AI candidate — tesseract's
                         # header-only detection can't improve on it.
                         return gemini_candidate
+                    if self.provider_configuration_errors and not self._text_layer_result_is_complete(text_classes):
+                        # OCR detects titles only; it cannot replace structured
+                        # table extraction when the configured AI is unavailable.
+                        raise ExtractionProviderConfigurationError(
+                            "Structured extraction is unavailable. The configured credentials or model are missing or rejected. "
+                            "Check the default saved credential and model in Admin → AI API Keys (/admin/ai-api-keys), then retry."
+                        )
                     blob = self.extract_via_tesseract(pdf_path, start, end)
                     if blob and blob.get("piping_classes"):
                         return {"piping_classes": blob["piping_classes"], "engine_used": "tesseract"}
@@ -785,6 +923,19 @@ class PaperSpecExtractionService:
                             except (TypeError, ValueError):
                                 key = (str(row), "")
                             if key in pt_seen:
+                                # Same P/T point seen twice — keep any extracted
+                                # allowable_stress (System 3 MaterialsData reads
+                                # it verbatim) instead of dropping the richer row.
+                                for kept in pt_merged:
+                                    try:
+                                        kept_key = (round(float(kept.get("pressure_bar_g", 0)), 3),
+                                                    round(float(kept.get("temperature_c", 0)), 3))
+                                    except (TypeError, ValueError):
+                                        kept_key = (str(kept), "")
+                                    if kept_key == key:
+                                        if not kept.get("allowable_stress") and row.get("allowable_stress"):
+                                            kept["allowable_stress"] = row.get("allowable_stress")
+                                        break
                                 continue
                             pt_seen.add(key)
                             pt_merged.append(row)
@@ -796,6 +947,8 @@ class PaperSpecExtractionService:
                 ))
                 if merged_pages:
                     primary["_source_pages"] = [merged_pages[0], merged_pages[-1]]
+                if existing.get("_appendix_summary") or cls.get("_appendix_summary"):
+                    primary["_appendix_summary"] = True
                 bucket[code] = primary
         return sorted(bucket.values(), key=lambda c: c.get("class_code", ""))
 

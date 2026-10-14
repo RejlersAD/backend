@@ -54,8 +54,8 @@ SPEC_EXTRACTION_CONFIG = {
     ],
 
     # ── Model identifiers ───────────────────────────────────────────────
-    "gemini_model":            "gemini-2.0-flash",
-    "openai_model":            "gpt-4o",
+    "gemini_model":            os.environ.get("SPEC_GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash",
+    "openai_model":            os.environ.get("SPEC_OPENAI_MODEL", "gpt-4o").strip() or "gpt-4o",
     # Increased from 8000 to 16000 to support comprehensive component extraction.
     # A typical piping spec has 50-200+ components; the AI needs sufficient tokens
     # to output complete JSON arrays without truncation.
@@ -95,6 +95,8 @@ SPEC_EXTRACTION_CONFIG = {
     # ── Extraction quality knobs ────────────────────────────────────────
     "confidence_threshold":  0.35,   # below this, class flagged low-confidence
     "min_components_to_keep":  0,    # keep header-only detections (0 = no filter)
+    "appendix_summary_max_pages": 20,
+    "zero_class_log_chars_per_page": 2048,
 
     # ── AI escalation thresholds (OpenAI = last-level AI tier) ──────────
     # Mirrors electrical_checklist's HANDWRITING_CONFIG escalation pattern:
@@ -127,6 +129,11 @@ SPEC_EXTRACTION_CONFIG = {
         r'\s*[:\-]?\s*'
         r'(?P<code>[A-Z][A-Z0-9]{0,10})\b'
     ),
+    "appendix_a_summary_regex": r'APPENDIX\s*[-–]?\s*A\s*[:.\-]?\s*PIPE\s+CLASS\s+SUMMARY',
+    "appendix_table_header_regex": (
+        r'PIPE\s+CLASS(?:\s+NO\.?)?\s+BASIC\s+MATE(?:RIAL)?\.?\s+ASME\s+CLASS'
+    ),
+    "appendix_class_code_regex": r'(?<!\w)(?P<code>\d{6}\s*[-–]\s*[A-Z])\b',
     # Recognises P/T rating tables (column-1 = pressure, col-2 = temperature)
     "pt_table_header_regex": (
         r'(?:PRESSURE.{0,5}TEMPERATURE|P\s*/\s*T\s+RATING|SERVICE\s+LIMITS)'
