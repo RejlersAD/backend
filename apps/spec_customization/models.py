@@ -259,6 +259,11 @@ class PaperSpecExtractionJob(models.Model):
     started_at = models.DateTimeField(null=True, blank=True)
 
     completed_at = models.DateTimeField(null=True, blank=True)
+    saved_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    saved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='saved_spec_extractions',
+    )
 
 
 
@@ -625,4 +630,5 @@ class WorkbookCellOverride(models.Model):
 # ---------------------------------------------------------------------------
 # Project organiser (additive — see project_models.py)
 # ---------------------------------------------------------------------------
-from .project_models import SpecProject  # noqa: E402,F401
+from .project_models import SpecProject, ProjectCreationRequest  # noqa: E402,F401
+from .matching_models import MatchingWorkbookSet, MatchingRule, ComponentMatchingResult  # noqa: E402,F401

@@ -1,6 +1,7 @@
 """Regression tests for the safety boundary around Spec Customization."""
 from unittest.mock import patch
 from types import SimpleNamespace
+import tempfile
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -87,6 +88,85 @@ class ExtractionCompletenessTests(SimpleTestCase):
         self.assertTrue(service._text_layer_result_is_complete([
             {"class_code": "A", "components": [{"component_type": "valve"}]},
         ]))
+
+    def test_appendix_summary_finds_multiline_header_near_page_29(self):
+        import fitz
+        doc = fitz.open()
+        for index in range(33):
+            page = doc.new_page()
+            if index == 28:
+                page.insert_text((50, 60), (
+                    "APPENDIX-A: PIPE CLASS SUMMARY\n"
+                    "Pipe\nClass     Basic Mate.    ASME\nClass\n"
+                    "011412-Z   Carbon Steel   150\n"
+                    "011422-X   Stainless Steel   300"
+                ))
+            if index == 29:
+                page.insert_text((50, 60), "011432-Z\n011437-Y")
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
+            doc.save(pdf.name)
+            result = PaperSpecExtractionService().extract_appendix_a_summary(pdf.name)
+        doc.close()
+
+        self.assertEqual([item["class_code"] for item in result["piping_classes"]],
+                         ["011412-Z", "011422-X", "011432-Z", "011437-Y"])
+        self.assertEqual(result["piping_classes"][0]["_source_pages"], [29, 29])
+        self.assertEqual(result["piping_classes"][-1]["_source_pages"], [30, 30])
+
+    def test_appendix_code_fallback_when_table_header_is_missing(self):
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 60), "APPENDIX-A: PIPE CLASS SUMMARY\nCodes: 011440-X, 011412-Z")
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
+            doc.save(pdf.name)
+            result = PaperSpecExtractionService().extract_appendix_a_summary(pdf.name)
+        doc.close()
+
+        self.assertEqual([item["class_code"] for item in result["piping_classes"]],
+                         ["011440-X", "011412-Z"])
+        self.assertEqual(result["piping_classes"][0]["_engine"], "appendix_regex")
+
+    def test_appendix_code_only_class_survives_data_quality_without_invented_components(self):
+        from .services.data_quality import process_extracted_classes
+
+        original = PaperSpecExtractionService._appendix_class("011440-X", 29, "appendix_regex")
+        cleaned, report = process_extracted_classes([original])
+
+        self.assertEqual(report["output_classes"], 1)
+        self.assertEqual(cleaned[0]["class_code"], "011440-X")
+        self.assertEqual(cleaned[0]["components"], [])
+        self.assertEqual(cleaned[0]["_source_pages"], [29, 29])
+
+    def test_appendix_metadata_does_not_displace_component_extraction(self):
+        service = PaperSpecExtractionService()
+        appendix = service._appendix_class("011412-Z", 29, "appendix_table")
+        detailed = {"class_code": "011412-Z", "class_full_code": "011412-Z",
+                    "confidence": 0.8, "components": [{"component_type": "pipe"}],
+                    "_source_pages": [30, 31], "_engine": "openai_vision"}
+
+        merged = service.merge_classes([[appendix], [detailed]])
+
+        self.assertEqual(merged[0]["components"], detailed["components"])
+        self.assertEqual(merged[0]["_source_pages"], [29, 31])
+        self.assertTrue(merged[0]["_appendix_summary"])
+
+    def test_zero_class_diagnostics_log_page_numbers_and_debug_raw_excerpts(self):
+        import fitz
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 60), "NO CLASSES HERE")
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
+            doc.save(pdf.name)
+            service = PaperSpecExtractionService()
+            with self.assertLogs('apps.spec_customization.services.extraction_service', level='WARNING') as warnings:
+                service.log_zero_class_diagnostics(pdf.name, [1])
+            with self.assertLogs('apps.spec_customization.services.extraction_service', level='DEBUG') as debug:
+                service.log_zero_class_diagnostics(pdf.name, [1])
+        doc.close()
+
+        self.assertIn("scanned PDF pages: [1]", warnings.output[0])
+        self.assertNotIn("NO CLASSES HERE", str(warnings.output))
+        self.assertIn("NO CLASSES HERE", str(debug.output))
 
 
 class WorkbookChatbotPlanningTests(SimpleTestCase):

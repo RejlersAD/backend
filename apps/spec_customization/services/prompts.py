@@ -300,6 +300,14 @@ For each class produce one object in this exact schema:
   "confidence":           0.88                       # 0.0–1.0 self-assessed
 }}
 
+# branch fitting family. For VALVES also copy any stated trim designation
+# (e.g. "Trim 5", "Trim 13", "Stellite") and any maker/model token (e.g.
+# "Velan Fig 150") into `notes` — the CAT builder derives ValveTrim /
+# ValveManufacturer / ValveModelNumber from that text (System 4) because
+# the component schema carries no dedicated valve columns.
+# P–T rows may carry an optional `allowable_stress` string (e.g. "138MPa",
+# "15000psig") — MaterialsData (System 3) uses it verbatim and falls back
+# to the soft-coded default when blank.
 **EXTRACTION CHECKLIST** (verify before submitting):
 ✓ Did you extract ALL pipes (multiple schedules/sizes)?
 ✓ Did you extract ALL fittings (elbows, tees, reducers, caps)?

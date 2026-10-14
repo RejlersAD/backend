@@ -20,6 +20,7 @@ urlpatterns = [
     path('paper-spec/upload/complete/', views.complete_paper_spec_upload, name='upload-complete'),
     path('paper-spec/jobs/',                   views.list_jobs,         name='jobs'),
     path('paper-spec/jobs/<uuid:job_id>/',     views.job_detail,        name='job-detail'),
+    path('paper-spec/jobs/<uuid:job_id>/save/', views.save_job,          name='job-save'),
     path('paper-spec/jobs/<uuid:job_id>/classes/', views.job_classes,   name='job-classes'),
     path('paper-spec/jobs/<uuid:job_id>/cancel/',  views.cancel_job,    name='job-cancel'),
     path('paper-spec/jobs/<uuid:job_id>/export/',  views.export_job,    name='job-export'),

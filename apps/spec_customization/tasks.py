@@ -29,7 +29,7 @@ from .services.config import (
     PARTIAL_CACHE_KEY_TPL,
     PROGRESS_CACHE_TIMEOUT,
 )
-from .services.extraction_service import PaperSpecExtractionService
+from .services.extraction_service import PaperSpecExtractionService, ExtractionProviderConfigurationError
 from .services.data_quality import process_extracted_classes
 from .services.advanced_validation import (
     validate_extracted_classes,
@@ -150,8 +150,9 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
     try:
         job = PaperSpecExtractionJob.objects.select_related("document").get(pk=job_id)
     except PaperSpecExtractionJob.DoesNotExist:
-        logger.error("[SpecExtraction] Job %s not found", job_id)
-        return {"success": False, "error": "job not found"}
+        # A transient visibility failure must not silently abandon a queued job.
+        logger.warning("[SpecExtraction] Job %s not visible; retrying lookup", job_id)
+        raise self.retry(countdown=2, max_retries=5)
 
     cfg = SPEC_EXTRACTION_CONFIG
     job.status = PaperSpecExtractionJob.STATUS_PROCESSING
@@ -181,9 +182,12 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
     service = PaperSpecExtractionService(cfg, user_api_key=user_api_key, user_provider=user_provider, user_model=user_model)
     
     # Get local path for PDF (downloads from S3 if needed)
-    pdf_path, needs_cleanup = _get_local_path(job.document.file)
+    pdf_path, needs_cleanup = None, False
+    scanned_pages = set()
+    classes_found = 0
     
     try:
+        pdf_path, needs_cleanup = _get_local_path(job.document.file)
         total_pages = service.get_page_count(pdf_path) or job.document.total_pages
 
         if total_pages <= 0:
@@ -208,9 +212,13 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             classes_found=0,
         )
 
-        all_results: List[List[Dict[str, Any]]] = []
+        appendix_result = service.extract_appendix_a_summary(pdf_path)
+        all_results: List[List[Dict[str, Any]]] = [appendix_result["piping_classes"]]
+        scanned_pages.update(appendix_result["pages_scanned"])
+        scanned_pages.update(appendix_result["appendix_pages"])
+        classes_found = len(appendix_result["piping_classes"])
+        failed_chunks = []
         ensemble_metrics_list: List[Dict[str, Any]] = []
-        classes_found = 0
         cprog_start = cfg["chunk_progress_start"]
         cprog_end = cfg["chunk_progress_end"]
         band = max(1, cprog_end - cprog_start)
@@ -228,14 +236,21 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
                 return {"success": False, "cancelled": True}
 
             try:
+                logger.info("[SpecExtraction] Job %s attempting PDF pages %d-%d", job_id, start_page + 1, end_page + 1)
                 chunk_result = service.extract_chunk(
                     pdf_path, start_page, end_page,
                     enable_ensemble=enable_ensemble,
                     retry_attempt=0
                 )
+                scanned_pages.update(range(start_page + 1, end_page + 2))
+            except ExtractionProviderConfigurationError:
+                raise
             except Exception as e:
                 logger.exception("[SpecExtraction] chunk %d-%d failed: %s", start_page, end_page, e)
                 chunk_result = {"piping_classes": [], "engine_used": "error"}
+
+            if chunk_result.get('engine_used') == 'error':
+                failed_chunks.append({'page_from': start_page + 1, 'page_to': end_page + 1})
 
             all_results.append(chunk_result.get("piping_classes", []))
             
@@ -278,6 +293,10 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
                 [c for lst in all_results for c in lst],
                 timeout=PROGRESS_CACHE_TIMEOUT,
             )
+
+        job.config_snapshot['extraction_outcome'] = {'failed_chunks': failed_chunks}
+        job.error_message = 'Partial extraction: some document chunks failed. Review the source and retry before exporting.' if failed_chunks else ''
+        job.save(update_fields=['config_snapshot', 'error_message'])
 
         # ── Merge + Advanced Validation + Data Quality + Persist ──────────
         _write_progress(
@@ -325,6 +344,9 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         )
         
         saved = _persist_classes(job, cleaned_classes)
+        if saved == 0:
+            logger.warning("[SpecExtraction] Job %s found zero piping classes", job_id)
+            service.log_zero_class_diagnostics(pdf_path, sorted(scanned_pages))
 
         # Calculate final accuracy estimate
         accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
@@ -400,6 +422,18 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             "quality_report": quality_report,
             "validation_report": validation_report,
         }
+    except Exception as exc:
+        logger.exception("[SpecExtraction] Job %s failed", job_id)
+        if pdf_path and scanned_pages and classes_found == 0:
+            service.log_zero_class_diagnostics(pdf_path, sorted(scanned_pages))
+        job.status = PaperSpecExtractionJob.STATUS_FAILED
+        job.error_message = str(exc) if isinstance(exc, ExtractionProviderConfigurationError) else "Extraction failed while processing the document. Please retry or contact support."
+        job.completed_at = timezone.now()
+        job.user_openai_api_key = ""
+        job.user_claude_api_key = ""
+        job.save(update_fields=['status', 'error_message', 'completed_at', 'user_openai_api_key', 'user_claude_api_key'])
+        _write_progress(str(job.id), state="FAILURE", status=job.error_message)
+        return {"success": False, "error": job.error_message}
     finally:
         # Clean up temporary file if we downloaded from S3
         if needs_cleanup and pdf_path:

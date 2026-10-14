@@ -2656,7 +2656,28 @@ def _rows_materials_data(cls):
 
 
 def _rows_pipe_branch(cls):
-    """One row per (header_npd, branch_npd) pair when fittings include tees."""
+    """One row per (header_npd, branch_npd) pair when fittings include tees.
+
+    SP3D treats PipeBranch as the branch CONNECTION matrix: only emit rows
+    when the class actually carries a branch-making component (tee, olet, or
+    a generic weld-type umbrella family that fans out to them). Otherwise
+    every spec would bulkload the full NPD cross-product (up to N² rows) even
+    for straight-run-only classes that have no branch connections at all.
+    """
+    def _is_branch_maker(c) -> bool:
+        if route_component_to_cat_sheet(c) in ('Tee', 'ReducingTee', 'Weldolet'):
+            return True
+        # Generic "B.W./S.W./SCRD FITTINGS" umbrella rows fan out to tees /
+        # olets (see GENERIC_FITTING_FAMILY_SHEETS) — they make branches too.
+        if is_generic_fitting_family(c):
+            return True
+        # Unrouted olet-likes (sockolet/elbolet/latrolet/...) bulkload onto
+        # the Weldolet sheet but route to None — detect by name so they count.
+        blob = f'{c.sub_type or ""} {c.description or ""}'.lower()
+        return 'olet' in blob
+    has_branch_fitting = any(_is_branch_maker(c) for c in cls.components.all())
+    if not has_branch_fitting:
+        return []
     npds = sorted({n for c in cls.components.all()
                    for n in _enumerate_npds(c.size_from, c.size_to)})
     if not npds:
@@ -3632,6 +3653,23 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
     if d.get('ports', 1) == 1:
         row['FlowDirection[1]'] = S3D_DEFAULTS['FlowDirection_OutOnly']
 
+    # ── Valve identity: extractor-derived trim / manufacturer / model ────
+    # PipingClassComponent carries no dedicated valve columns; valve sheets
+    # previously fell back to static LS1E sentinels (Gate trim=99, Globe=35,
+    # Check=55) even when the paper spec names a real trim or maker. Derive
+    # the values from the extractor free-text FIRST so `merge_fill_blank`
+    # below keeps them ahead of the sheet-level constants.
+    if str(getattr(comp, 'component_type', '') or '').strip().lower() == 'valve':
+        trim = _valve_trim_from_text(comp)
+        if trim:
+            row['ValveTrim'] = trim
+        maker = _valve_manufacturer_from_text(comp)
+        if maker:
+            row['ValveManufacturer'] = maker
+        model = _valve_model_from_text(comp)
+        if model:
+            row['ValveModelNumber'] = model
+
     # Sheet-specific constants (PartDataBasis, ManufacturingMethod, valve
     # trim/model identifiers, SymbolIcon, etc.) — soft-coded per LS1E-A3
     # reference. Merged as fill-if-blank so extractor-derived values keep
@@ -3711,6 +3749,79 @@ def _build_bolt_part_rows(cls, comp) -> list[dict]:
         merge_fill_blank(row, sheet_constants)
         rows.append(row)
     return rows
+
+
+# ── Soft-coded extractor → builder field for valve trim/manufacturer ────
+# PipingClassComponent carries no dedicated valve-trim column; valve sheets
+# previously fell back to static LS1E sentinels (Gate=99, Globe=35, Check=55,
+# others blank) even when the paper spec names a real trim. This map lets
+# `_common_part_row` derive ValveTrim / ValveManufacturer /
+# ValveModelNumber from the extractor's free-text fields (sub_type,
+# description, notes) before the static sheet constants fill blanks.
+VALVE_TRIM_TEXT_MAP: list[tuple[str, str]] = [
+    # (lowercase keyword in component text, SP3D ValveTrim code)
+    ('trim 1', '1'), ('trim1', '1'),
+    ('trim 5', '5'), ('trim5', '5'), ('stellite', '5'),
+    ('trim 8', '8'), ('trim8', '8'),
+    ('trim 12', '12'), ('trim12', '12'),
+    ('trim 13', '13'), ('trim13', '13'),
+    ('trim 16', '16'), ('trim16', '16'),
+    # Named trims that map onto the closest numeric SP3D code.
+    ('13% cr', '35'),
+]
+
+# Soft-coded manufacturer hints — substring → canonical SP3D manufacturer
+# label. First match wins; blank when nothing matches (sheet sentinel fills).
+VALVE_MANUFACTURER_HINTS: list[tuple[str, str]] = [
+    ('velan', 'Velan'),
+    ('cameron', 'Cameron'),
+    ('flowserve', 'Flowserve'),
+    ('kitz', 'Kitz'),
+    ('crane', 'Crane'),
+    ('bonney', 'Bonney Forge'),
+]
+
+
+def _valve_text_blob(comp) -> str:
+    """Lower-cased haystack of the extractor free-text valve fields."""
+    return ' '.join([
+        str(getattr(comp, 'sub_type', '') or ''),
+        str(getattr(comp, 'description', '') or ''),
+        str(getattr(comp, 'notes', '') or ''),
+    ]).lower()
+
+
+def _valve_trim_from_text(comp) -> str:
+    """Return the SP3D ValveTrim code named in the extracted valve text.
+
+    Falls back to '' so `merge_fill_blank` keeps the sheet-level LS1E
+    sentinel (Gate=99, Globe=35, Check=55) when the paper spec names no trim.
+    """
+    blob = _valve_text_blob(comp)
+    for needle, code in VALVE_TRIM_TEXT_MAP:
+        if needle in blob:
+            return code
+    return ''
+
+
+def _valve_manufacturer_from_text(comp) -> str:
+    """Return the canonical manufacturer label hinted in the valve text."""
+    blob = _valve_text_blob(comp)
+    for needle, label in VALVE_MANUFACTURER_HINTS:
+        if needle in blob:
+            return label
+    return ''
+
+
+def _valve_model_from_text(comp) -> str:
+    """Return an explicit valve model/figure number from the extracted text.
+
+    Matches tokens like 'Fig 150', 'Figure 300', 'Model 1070', 'Series 600'.
+    Returns '' when nothing matches so the sheet sentinel fills the blank.
+    """
+    blob = f'{getattr(comp, "sub_type", "") or ""} {getattr(comp, "description", "") or ""} {getattr(comp, "notes", "") or ""}'
+    m = re.search(r'(?i)\b(?:fig(?:ure)?|model|series)\s*\.?\s*([A-Za-z0-9][A-Za-z0-9\-/]{0,19})\b', blob)
+    return m.group(1).strip() if m else ''
 
 
 # Sheet → builder.  All commodity-part sheets share the same multi-NPD builder;

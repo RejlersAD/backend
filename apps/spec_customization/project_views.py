@@ -22,6 +22,11 @@ from __future__ import annotations
 
 import logging
 import re
+import hashlib
+import json
+from uuid import UUID
+from django.db import transaction
+from django.contrib.auth import get_user_model
 
 from django.db.models import Count, Q
 from django.utils import timezone
@@ -31,7 +36,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import PaperSpecDocument, PaperSpecExtractionJob
-from .project_models import SpecProject
+from .project_models import SpecProject, ProjectCreationRequest
 from .services.config import BYOK_CONFIG
 
 try:
@@ -261,6 +266,25 @@ def _create_project(request):
     if not (payload.get('name') or '').strip():
         return Response({'error': 'Project name is required.'},
                         status=status.HTTP_400_BAD_REQUEST)
+    request_id = request.data.get('creation_request_id')
+    if request_id:
+        try:
+            request_id = UUID(str(request_id))
+        except (ValueError, TypeError, AttributeError):
+            return Response({'error': 'creation_request_id must be a UUID.'}, status=400)
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+        with transaction.atomic():
+            get_user_model().objects.select_for_update().get(pk=request.user.pk)
+            previous = ProjectCreationRequest.objects.filter(owner=request.user, request_id=request_id).first()
+            if previous:
+                if previous.payload_hash != fingerprint:
+                    return Response({'error': 'This creation request was already used for different project data.'}, status=409)
+                if not previous.project_id:
+                    return Response({'error': 'The project created by this request has been deleted.'}, status=409)
+                return Response(_serialize_project(previous.project), status=200)
+            project = SpecProject.objects.create(created_by=request.user, **payload)
+            ProjectCreationRequest.objects.create(owner=request.user, request_id=request_id, payload_hash=fingerprint, project=project)
+            return Response(_serialize_project(project), status=201)
     try:
         p = SpecProject.objects.create(created_by=request.user, **payload)
     except Exception as exc:
@@ -450,7 +474,7 @@ def list_project_jobs(request, project_id):
         jobs_qs = (
             PaperSpecExtractionJob.objects
             .filter(document__project_id=pid_str)
-            .select_related('document', 'created_by')
+            .select_related('document', 'created_by', 'saved_by')
             .prefetch_related('piping_classes__components')
         )
 
@@ -485,6 +509,10 @@ def list_project_jobs(request, project_id):
         return Response({
             'success': True,
             'jobs': serializer.data,
+            'current_saved_job_id': str(
+                jobs_qs.filter(saved_at__isnull=False)
+                .order_by('-saved_at', '-created_at').values_list('id', flat=True).first() or ''
+            ),
             'pagination': {
                 'total': total,
                 'page': page,
