@@ -658,3 +658,42 @@ class PIDVTagIndex(models.Model):
     def __str__(self):
         return f'{self.tag} (p{self.page_number}) — {self.document_id}'
 
+
+
+# ===========================================================================
+# 358-Check Management (AI Check Scope Register) - per-project persisted state
+# ===========================================================================
+class PIDCheckManagementState(models.Model):
+    """
+    Server-side persistence for the enterprise P&ID Checker Management
+    workspace (358-check AI Check Scope Register). One row per project.
+
+    rows:          { check_id: { result, confidence, finding, disposition } }
+    revisions:     [ { rev, at, actor, note, state } ] - newest first
+    activity:      [ { at, actor, action, detail } ]   - newest first
+    docs_provided: { document_name: bool }
+    """
+
+    REVIEW_STATES = ('Draft', 'In Review', 'Approved')
+
+    project      = models.OneToOneField(
+        PIDVProject, on_delete=models.CASCADE, related_name='check_management',
+    )
+    rows         = models.JSONField(default=dict, blank=True)
+    review_state = models.CharField(max_length=20, default='Draft')
+    revision     = models.PositiveIntegerField(default=0)
+    revisions    = models.JSONField(default=list, blank=True)
+    activity     = models.JSONField(default=list, blank=True)
+    docs_provided = models.JSONField(default=dict, blank=True)
+    updated_by   = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pidv_check_management_state'
+
+    def __str__(self):
+        return f'CheckMgmt({self.project_id}) rev{self.revision} [{self.review_state}]'

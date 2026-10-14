@@ -864,8 +864,8 @@ def _finalize_document(doc, document_id: str) -> None:
     # Soft-coded, tuned for ONE page — mirrors
     # apps.pid_verification_v2.tasks.process_pid_page exactly (same
     # multi-DPI/multi-angle OCR cost per page).
-    soft_time_limit=900,  # 15 min soft limit per page
-    time_limit=960,       # 16 min hard limit per page
+    soft_time_limit=1740,  # 29 min soft limit per page
+    time_limit=1800,       # 30 min hard limit per page (dense sheets were being SIGKILLed at 960s, losing all work)
 )
 def process_pid_page(self, document_id: str, segment_dict: dict, context: dict = None, symbol_images: list = None):
     """
@@ -1210,9 +1210,18 @@ def parse_reference_data_task(self, reference_id: str):
                 tmp_path = ref_data.original_file.path
                 need_cleanup = False
             except NotImplementedError:
-                # S3-backed storage — download to temp file
-                s3_key = getattr(ref_data.original_file, 'name', None)
-                tmp_path = _download_from_s3(s3_key) if s3_key else None
+                # Remote storage (S3) — read through Django's storage API so the
+                # backend handles location prefixes / auth itself (plain S3 key
+                # download misses the storage `location` prefix and 404s).
+                import tempfile as _tf
+                with ref_data.original_file.open('rb') as src:
+                    fd, tmp_path = _tf.mkstemp(suffix='_' + (ref_data.file_name or 'refdata'))
+                    with os.fdopen(fd, 'wb') as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
                 need_cleanup = True
         elif ref_data.s3_path:
             tmp_path = _download_from_s3(ref_data.s3_path)

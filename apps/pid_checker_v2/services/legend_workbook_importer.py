@@ -71,6 +71,12 @@ HEADER_ALIASES = {
 # overlay approach as legend_pack_splitter.SECTION_LOOKUP_OVERLAYS). When
 # None, a standalone notes/lookup definition is built instead.
 SHEET_RULES: Dict[str, Dict[str, Any]] = {
+    # ── Consolidated legend workbooks (e.g. Legends_Full.xlsx) ──────────────
+    'line numbering':               {'section': SECTION_LINE_LIST,       'kind': 'numbering'},
+    'equipment numbering':          {'section': SECTION_EQUIPMENT_LIST,  'kind': 'numbering'},
+    'p&id numbering':               {'section': SECTION_DRAWING_CONT,    'kind': 'numbering'},
+    'notes & drawing details':      {'section': SECTION_MISCELLANEOUS,   'kind': 'notes'},
+    'symbols':                      {'section': SECTION_MISCELLANEOUS,   'kind': 'symbols'},
     'all codes':                    {'section': SECTION_LINE_LIST,       'kind': 'numbering'},
     'fluid codes':                  {'section': SECTION_LINE_LIST,       'kind': 'codes', 'overlay': 'service'},
     'line designation':             {'section': SECTION_LINE_LIST,       'kind': 'numbering'},

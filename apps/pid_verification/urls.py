@@ -13,6 +13,8 @@ urlpatterns = [
     # Projects
     path('projects/',                          views.projects,       name='projects'),
     path('projects/<str:project_id>/',         views.project_detail, name='project-detail'),
+    path('projects/<str:project_id>/check-management/', views.check_management_state, name='check-management'),
+    path('projects/<str:project_id>/check-management/smart-run/', views.check_management_smart_run, name='check-management-smart-run'),
 
     # Core pipeline
     path('upload-pid/',                        views.upload_pid,     name='upload-pid'),

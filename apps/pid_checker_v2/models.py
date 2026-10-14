@@ -184,8 +184,11 @@ LEGEND_SECTION_CHOICES = tuple(
 class PidCheckerV2LegendSheet(models.Model):
     """A user-owned rule set for one section (e.g. 'line_list').
 
-    Only one legend per (user, section) may be active at a time — enforced
-    by ``activate()`` on the model manager and a partial unique index.
+    Multiple legends per (user, section, project) may be active at the same
+    time — they are merged at resolution time (see
+    ``views._resolve_active_legend``), so e.g. a Line List legend and an
+    Equipment List legend pack, or two complementary section packs, can apply
+    together.
     """
 
     legend_id = models.UUIDField(
@@ -226,14 +229,9 @@ class PidCheckerV2LegendSheet(models.Model):
             models.Index(fields=['project', 'section']),
         ]
         constraints = [
-            # One active legend per (user, section, project). NULL project is
-            # treated as distinct by Postgres, so a global active legend and a
-            # project active legend can coexist for the same (user, section).
-            models.UniqueConstraint(
-                fields=['created_by', 'section', 'project'],
-                condition=models.Q(is_active=True),
-                name='uniq_pidv2_active_legend_per_user_section_project',
-            ),
+            # NOTE: the one-active-legend-per-(user, section, project) partial
+            # unique constraint was removed in migration 0026 — multiple active
+            # legends per section are supported and merged at resolution time.
         ]
 
     def __str__(self) -> str:

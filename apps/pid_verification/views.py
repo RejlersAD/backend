@@ -38,7 +38,7 @@ from rest_framework.response import Response
 from apps.rbac.permissions import HasDisciplineAccess
 from apps.core.queue_service import RobustQueueService, QueueUnavailableException
 
-from .models import PIDVProject, PIDVDocument, PIDVFinding, PIDVLegendSheet, PIDVReferenceData
+from .models import PIDVProject, PIDVDocument, PIDVFinding, PIDVLegendSheet, PIDVReferenceData, PIDCheckManagementState
 from .serializers import (
     PIDVProjectSerializer,
     PIDVProjectCreateSerializer,
@@ -2414,3 +2414,82 @@ def _get_project_or_404(project_id: str, user):
             project_id
         )
         return None
+
+
+# ===========================================================================
+# 358-Check Management state (AI Check Scope Register)
+# ===========================================================================
+def _check_mgmt_payload(state):
+    return {
+        "rows":         state.rows,
+        "reviewState":  state.review_state,
+        "revision":     state.revision,
+        "revisions":    state.revisions,
+        "activity":     state.activity,
+        "docsProvided": state.docs_provided,
+        "updatedAt":    state.updated_at.isoformat() if state.updated_at else None,
+    }
+
+
+@api_view(["GET", "PUT"])
+@permission_classes([IsAuthenticated])
+def check_management_state(request, project_id):
+    """
+    GET -> persisted 358-check management state for the project.
+    PUT -> replace the snapshot (rows / reviewState / revision / revisions /
+           activity / docsProvided). Whitelisted fields only.
+    """
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    state_obj, _ = PIDCheckManagementState.objects.get_or_create(project=project)
+
+    if request.method == "GET":
+        return Response(_check_mgmt_payload(state_obj))
+
+    data = request.data or {}
+    if isinstance(data.get("rows"), dict):
+        state_obj.rows = data["rows"]
+    if isinstance(data.get("reviewState"), str) and data["reviewState"] in PIDCheckManagementState.REVIEW_STATES:
+        state_obj.review_state = data["reviewState"]
+    if isinstance(data.get("revision"), int) and 0 <= data["revision"] < 10000:
+        state_obj.revision = data["revision"]
+    if isinstance(data.get("revisions"), list):
+        state_obj.revisions = data["revisions"][:200]
+    if isinstance(data.get("activity"), list):
+        state_obj.activity = data["activity"][:500]
+    if isinstance(data.get("docsProvided"), dict):
+        state_obj.docs_provided = data["docsProvided"]
+
+    state_obj.updated_by = request.user
+    state_obj.save()
+    return Response(_check_mgmt_payload(state_obj))
+
+
+# ===========================================================================
+# Smart Check run — deterministic register execution (no vision calls)
+# ===========================================================================
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def check_management_smart_run(request, project_id):
+    """
+    POST /api/v1/pid-verification/projects/<project_id>/check-management/smart-run/
+
+    Executes every AI Check Scope Register row that can be concluded from the
+    project's existing analysis data (extraction summaries, comparison
+    results, findings, parsed reference data). Synchronous and fast.
+    """
+    from apps.pid_verification.services.smart_checks import run_smart_checks
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        result = run_smart_checks(project)
+    except Exception:
+        logger.exception("[SmartChecks] run failed for project %s", project_id)
+        return Response({"error": "Smart check run failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response(result, status=status.HTTP_200_OK)

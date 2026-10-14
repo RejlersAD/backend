@@ -174,12 +174,72 @@ def _persist_token_usage(*, user, feature: str, usage: dict,
         logger.exception('Failed to persist token usage for feature=%s', feature)
 
 
+def _merge_legend_definitions(definitions):
+    """Deep-merge several legend definitions into one.
+
+    Dicts merge recursively (later definitions win on conflicts); lists
+    concatenate with de-duplication by 'key'/'id'/'name' for list-of-dict
+    entries; scalars take the later value. Input order = priority order
+    (first = lowest priority, last = highest).
+    """
+    def merge(a, b):
+        if isinstance(a, dict) and isinstance(b, dict):
+            out = dict(a)
+            for k, v in b.items():
+                out[k] = merge(out[k], v) if k in out else v
+            return out
+        if isinstance(a, list) and isinstance(b, list):
+            out = list(a)
+            for item in b:
+                if isinstance(item, dict):
+                    key = next((item.get(f) for f in ('key', 'id', 'name') if item.get(f)), None)
+                    if key is not None and any(
+                        isinstance(x, dict) and key == next((x.get(f) for f in ('key', 'id', 'name') if x.get(f)), None)
+                        for x in out
+                    ):
+                        continue
+                if item not in out:
+                    out.append(item)
+            return out
+        return b
+
+    merged = {}
+    for d in definitions:
+        merged = merge(merged, d or {})
+    return merged
+
+
+def _merged_legend(qs):
+    """Given a queryset of ACTIVE legends for one section, return a single
+    legend object whose definition is the merge of all of them (oldest first,
+    newest wins on conflicts). Returns None when the queryset is empty."""
+    actives = list(qs.order_by('updated_at'))
+    if not actives:
+        return None
+    if len(actives) == 1:
+        return actives[0]
+    newest = actives[-1]
+    merged = PidCheckerV2LegendSheet(
+        legend_id=newest.legend_id,
+        created_by=newest.created_by,
+        project=newest.project,
+        section=newest.section,
+        name=' + '.join(a.name for a in actives),
+        definition=_merge_legend_definitions([a.definition for a in actives]),
+        is_active=True,
+    )
+    merged._state.adding = False  # unsaved merged view — read-only usage
+    return merged
+
+
 def _resolve_active_legend(user, section: str) -> PidCheckerV2LegendSheet | None:
-    """Return the user's active legend for a section, or None."""
-    return (
-        PidCheckerV2LegendSheet.objects
-        .filter(created_by=user, section=section, is_active=True)
-        .first()
+    """Return the user's active legend for a section, or None.
+
+    When several legends are active for the section they are merged into one
+    read-only view (multi-active support).
+    """
+    return _merged_legend(
+        PidCheckerV2LegendSheet.objects.filter(created_by=user, section=section, is_active=True)
     )
 
 
@@ -242,11 +302,8 @@ def _resolve_legend_smart(user, section: str, legend_id=None, project=None):
     # regardless of which teammate uploaded it (created by anyone on the
     # project) — falling back to the most recently updated one.
     if project is not None:
-        obj = (
-            PidCheckerV2LegendSheet.objects
-            .filter(project=project, section=section, is_active=True)
-            .order_by('-updated_at')
-            .first()
+        obj = _merged_legend(
+            PidCheckerV2LegendSheet.objects.filter(project=project, section=section, is_active=True)
         ) or (
             PidCheckerV2LegendSheet.objects
             .filter(project=project, section=section)
@@ -529,7 +586,15 @@ class LegendSheetDetailView(APIView):
 
 
 class LegendSheetActivateView(APIView):
-    """POST → deactivate all sibling legends and activate this one."""
+    """POST → toggle this legend's active state.
+
+    Default behaviour is multi-active: activating no longer deactivates
+    sibling legends in the section, and POSTing an already-active legend
+    deactivates it. Active legends are merged at resolution time.
+
+    Body (optional): { "mode": "exclusive" } restores the legacy behaviour —
+    deactivate all siblings and activate only this one.
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -539,12 +604,16 @@ class LegendSheetActivateView(APIView):
             legend_id=legend_id,
             created_by=request.user,
         )
+        mode = (request.data.get('mode') or 'toggle').strip().lower()
         with transaction.atomic():
-            (PidCheckerV2LegendSheet.objects
-                .filter(created_by=request.user, section=obj.section)
-                .exclude(pk=obj.pk)
-                .update(is_active=False))
-            obj.is_active = True
+            if mode == 'exclusive':
+                (PidCheckerV2LegendSheet.objects
+                    .filter(created_by=request.user, section=obj.section)
+                    .exclude(pk=obj.pk)
+                    .update(is_active=False))
+                obj.is_active = True
+            else:
+                obj.is_active = not obj.is_active
             obj.save(update_fields=['is_active', 'updated_at'])
         return Response(PidCheckerV2LegendSheetSerializer(obj).data)
 
