@@ -808,7 +808,7 @@ def process_extracted_classes(
         quality_report["total_components_before"] += orig_comp_count
         
         # Step 1: Validate empty fields
-        if not validate_empty_fields(cls):
+        if not cls.get("_appendix_summary") and not validate_empty_fields(cls):
             quality_report["removed_low_quality"] += 1
             continue
         
