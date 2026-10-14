@@ -151,6 +151,52 @@ class EmployeeProfileSyncTests(TestCase):
         self.assertEqual(self.employee.employee_code, '23022')
         self.assertEqual(self.employee.emp_code, '23022')
 
+    def _serializer(self, data):
+        request = SimpleNamespace(user=self.user)
+        return UserProfileSerializer(
+            instance=self.profile, data=data, partial=True, context={'request': request},
+        )
+
+    def _stub(self, number, code, emp_code=None, user=None):
+        from datetime import date
+        from apps.hr_core.models import EmployeeMaster
+        return EmployeeMaster.objects.create(
+            user=user, employee_number=number, employee_code=code,
+            emp_code=emp_code or code[:20], first_name='Legacy', last_name='Stub',
+            email='', join_date=date(2020, 1, 1),
+        )
+
+    def test_employee_id_held_by_unlinked_stub_is_rejected_not_silently_reverted(self):
+        self._stub('STUB-777', 'STUB-777')
+
+        serializer = self._serializer({'employee_id': 'STUB-777'})
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('employee_id', serializer.errors)
+
+    def test_unchanged_employee_id_skips_conflict_checks(self):
+        # Legacy duplicate: another linked employee already holds this code.
+        other_user = User.objects.create_user(username='dup.user', email='dup.user@example.com')
+        self._stub('1234', 'DUP-CODE', emp_code='DUP-EMP', user=other_user)
+
+        serializer = self._serializer({'employee_id': '1234', 'phone': '+971533333333'})
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_sync_does_not_write_identifiers_held_by_another_master(self):
+        stub = self._stub('STUB-OTHER', 'CODE-888')
+        UserProfile.objects.filter(pk=self.profile.pk).update(employee_id='CODE-888')
+        self.profile.refresh_from_db()
+
+        EmployeeService.sync_from_rbac_profile(self.profile, {'employee_id'})
+
+        self.employee.refresh_from_db()
+        stub.refresh_from_db()
+        # employee_number was free and is written; the codes held by the stub are not duplicated.
+        self.assertEqual(self.employee.employee_number, 'CODE-888')
+        self.assertEqual(self.employee.employee_code, '1234')
+        self.assertEqual(stub.employee_code, 'CODE-888')
+
     def test_payroll_shared_fields_follow_employee_master(self):
         payroll = PayrollEmployee.objects.create(
             employee=self.employee,

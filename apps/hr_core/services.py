@@ -117,13 +117,28 @@ class EmployeeService:
             updates['email'] = user.email
         if requested('employee_id') and profile.employee_id:
             employee_code = str(profile.employee_id).strip()
-            number_is_available = not EmployeeMaster.objects.filter(
-                employee_number__iexact=employee_code
-            ).exclude(pk=employee.pk).exists()
-            if number_is_available:
-                updates['employee_number'] = employee_code
-            updates['employee_code'] = employee_code
-            updates['emp_code'] = employee_code[:20]
+            # employee_number / employee_code / emp_code are declared UNIQUE on
+            # hr_employee_master. Another row (typically an unlinked legacy
+            # import stub, which the serializer deliberately lets through) may
+            # already hold the code. Writing it blindly either raises
+            # IntegrityError after rbac_user_profiles was already saved, or —
+            # where the DB constraint has drifted away — silently creates a
+            # duplicate identifier. Only write each identifier when it is free.
+            others = EmployeeMaster.objects.exclude(pk=employee.pk)
+            identifier_targets = (
+                ('employee_number', employee_code),
+                ('employee_code', employee_code),
+                ('emp_code', employee_code[:20]),
+            )
+            for column, code in identifier_targets:
+                if not others.filter(**{f'{column}__iexact': code}).exists():
+                    updates[column] = code
+                else:
+                    logger.warning(
+                        '[EmployeeSync] %s=%r already held by another employee record; '
+                        'kept existing value on employee %s',
+                        column, code, employee.pk,
+                    )
         if requested('department'):
             updates['department'] = profile.department or ''
         if requested('job_title'):

@@ -444,6 +444,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
         normalized = str(value or '').strip()
         if not normalized:
             return ''
+        # Re-submitting the profile's current ID (the HR form always sends it)
+        # cannot introduce a new conflict. Skip the conflict checks so records
+        # caught in a pre-existing legacy duplicate can still save other edits.
+        if self.instance is not None and (
+            normalized.casefold() == str(self.instance.employee_id or '').strip().casefold()
+        ):
+            return normalized
         matches = EmployeeMaster.objects.filter(
             Q(employee_number__iexact=normalized)
             | Q(employee_code__iexact=normalized)
@@ -461,6 +468,31 @@ class UserProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 'This employee ID is already assigned to another employee.'
             )
+
+        # Update path only: the profile's identifier is mirrored from its
+        # linked EmployeeMaster.employee_number (EmployeeService.
+        # sync_to_rbac_profile runs on every save). employee_number is UNIQUE,
+        # so if ANOTHER master row (an unlinked legacy stub, or the record of
+        # a soft-deleted profile) already holds this number, the new ID can
+        # never persist — the save would succeed with HTTP 200 but be silently
+        # reverted. Reject it explicitly instead. Profiles not yet linked to a
+        # master are unaffected (EmployeeService._adopt_unlinked_stub claims
+        # matching stubs for them).
+        if self.instance is not None:
+            current_master = (
+                getattr(self.instance, 'canonical_employee', None)
+                or EmployeeMaster.objects.filter(user_id=self.instance.user_id).first()
+            )
+            if current_master is not None:
+                holder_exists = EmployeeMaster.objects.filter(
+                    employee_number__iexact=normalized,
+                ).exclude(pk=current_master.pk).exists()
+                if holder_exists:
+                    raise serializers.ValidationError(
+                        'This employee ID is held by another HR record '
+                        '(an unlinked or archived employee entry). Link or '
+                        'archive that record before reassigning the ID.'
+                    )
         return normalized
     
     class Meta:
