@@ -9,7 +9,9 @@ from .views import (
     ProjectDetailView,
     ProjectHistoryView,
     ProjectCombinedResultsView,
+    ProjectCommentsView,
     AnnotatedPDFView,
+    AnnotatedPagesView,
 )
 
 urlpatterns = [
@@ -17,6 +19,7 @@ urlpatterns = [
     path('projects/<uuid:project_id>/', ProjectDetailView.as_view()),
     path('projects/<uuid:project_id>/history/', ProjectHistoryView.as_view()),
     path('projects/<uuid:project_id>/combined-results/', ProjectCombinedResultsView.as_view(), name='project-combined-results'),
+    path('projects/<uuid:project_id>/comments/', ProjectCommentsView.as_view(), name='project-comments'),
     path('test-key/', TestAPIKeyView.as_view()),
     path('upload/', UploadComparisonView.as_view()),
     path('status/<uuid:job_id>/',
@@ -27,4 +30,6 @@ urlpatterns = [
          ExportExcelView.as_view()),
     path('jobs/<uuid:job_id>/annotated-pdf/',
          AnnotatedPDFView.as_view(), name='annotated-pdf'),
+    path('jobs/<uuid:job_id>/annotated-pages/',
+         AnnotatedPagesView.as_view(), name='annotated-pages'),
 ]

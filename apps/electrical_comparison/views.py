@@ -2,6 +2,7 @@
 Electrical Comparison API Views
 """
 import logging
+import io
 import os
 import re
 import tempfile
@@ -23,7 +24,8 @@ from apps.core.queue_service import RobustQueueService, QueueUnavailableExceptio
 from .models import ElectricalComparisonJob, ElectricalComparisonResult, ElectricalProject
 from .services.excel_export import export_job_to_xlsx
 from .services.seed_electrical_legend import seed_electrical_legend_for_user
-from .services.pdf_annotator import annotate_sld_pdf
+from .services.pdf_annotator import annotate_sld_pdf, get_annotated_pages
+from .services.excel_parser import extract_table_grid
 # BUG FIX: _build_panel_verification/_collect_comparison_rows/
 # _build_combined_comparison used to be DEFINED here and lazy-imported
 # by tasks.py from THIS module inside process_electrical_comparison()'s
@@ -219,6 +221,102 @@ class ProjectCombinedResultsView(APIView):
             response_data['combined_comparison'] = combined_counts
 
         return Response(response_data)
+
+
+# Comment-lifecycle statuses for ProjectCommentsView: discrepancies
+# ("comments") raised by an analysis, and the statuses that kill them
+# when a LATER SLD upload in the same project covers the tag.
+_COMMENT_BAD_STATUSES = {'missing', 'extra', 'panel_missing', 'panel_no_load_list', 'motor_not_verified'}
+_COMMENT_GOOD_STATUSES = {'matched', 'panel_verified', 'motor_verified'}
+
+
+class ProjectCommentsView(APIView):
+    """GET /api/v1/electrical-comparison/projects/<project_id>/comments/
+
+    Comment-lifecycle view across the project's whole job history, built
+    for the workflow "check SLD-1 today, get 'loads missing' comments;
+    upload SLD-2/SLD-3 days later and those comments get killed
+    automatically":
+
+    - A comment is OPENED by the first (chronologically oldest) completed
+      job that reports a tag with a discrepancy status (missing / extra /
+      panel_missing / panel_no_load_list / motor_not_verified).
+    - The comment is KILLED (resolved) by the first LATER completed job
+      where the same tag+source comes back clean (matched /
+      panel_verified / motor_verified) — the SLD that actually covers it.
+    - If a later job reports the same discrepancy again after it was
+      killed, a NEW comment is opened with reopen_count incremented —
+      the history of a tag flapping between revisions stays visible.
+
+    Fully read-only; computed from ElectricalComparisonResult rows, so it
+    works retroactively for projects with existing job history.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = get_object_or_404(ElectricalProject, project_id=project_id, created_by=request.user)
+        completed_jobs = list(ElectricalComparisonJob.objects.filter(
+            project=project, created_by=request.user, status='completed',
+        ).order_by('created_at'))
+        rows = list(ElectricalComparisonResult.objects.filter(
+            job__project=project, job__created_by=request.user, job__status='completed',
+        ).order_by('job__created_at'))
+
+        rows_by_job = {}
+        for r in rows:
+            rows_by_job.setdefault(r.job_id, []).append(r)
+
+        comments = []
+        open_by_key = {}
+        for job in completed_jobs:
+            job_rows = rows_by_job.get(job.job_id, [])
+            good_keys = {(r.tag_number, r.source) for r in job_rows if r.status in _COMMENT_GOOD_STATUSES}
+            job_info = {
+                'job_id': str(job.job_id),
+                'file': job.pid_file_name or '(Excel-only analysis)',
+                'at': job.created_at,
+            }
+            # Kill first, then open — a job can't kill a comment it opens.
+            for key, comment in list(open_by_key.items()):
+                if key in good_keys:
+                    comment['state'] = 'resolved'
+                    comment['resolved_in'] = job_info
+                    del open_by_key[key]
+            for r in job_rows:
+                if r.status not in _COMMENT_BAD_STATUSES:
+                    continue
+                key = (r.tag_number, r.source)
+                if key in open_by_key:
+                    continue  # still open — same comment, don't duplicate
+                previous = [c for c in comments if c['tag_number'] == r.tag_number and c['source'] == r.source]
+                comment = {
+                    'tag_number': r.tag_number,
+                    'source': r.source,
+                    'issue': r.status,
+                    'description': r.description,
+                    'equipment_type': r.equipment_type,
+                    'state': 'open',
+                    'opened_in': job_info,
+                    'resolved_in': None,
+                    'reopen_count': len(previous),
+                }
+                comments.append(comment)
+                open_by_key[key] = comment
+
+        open_comments = [c for c in comments if c['state'] == 'open']
+        resolved_comments = [c for c in comments if c['state'] == 'resolved']
+        return Response({
+            'project_id': str(project.project_id),
+            'project_name': project.project_name,
+            'summary': {
+                'total_comments': len(comments),
+                'open': len(open_comments),
+                'resolved': len(resolved_comments),
+                'jobs_analysed': len(completed_jobs),
+            },
+            'open_comments': open_comments,
+            'resolved_comments': resolved_comments,
+        })
 
 
 class ProjectDetailView(APIView):
@@ -776,9 +874,13 @@ class UploadComparisonView(APIView):
             if equipment_file:
                 task_context['equipment_file_path'] = _save_uploaded_file_to_temp(equipment_file)
                 task_context['equipment_file_name'] = equipment_file.name
+                job.equipment_file = equipment_file
             if load_list_file:
                 task_context['load_list_file_path'] = _save_uploaded_file_to_temp(load_list_file)
                 task_context['load_list_file_name'] = load_list_file.name
+                job.load_list_file = load_list_file
+            if equipment_file or load_list_file:
+                job.save(update_fields=[f for f in ('equipment_file', 'load_list_file') if getattr(job, f)])
         except Exception as e:
             job.status = 'failed'
             job.error_message = f'Failed to save uploaded files: {e}'
@@ -989,10 +1091,15 @@ class JobResultsView(APIView):
             'comparisons_done': comparisons_done,
             'pid_tags_found': _derive_pid_tags_found(results_list),
             'results': results_list,
-            # Drives the "Download Annotated PDF" button (AnnotatedPDFView)
-            # — jobs uploaded before that feature's pid_file storage was
-            # added have no stored PDF, so the button stays hidden for them.
-            'has_pid_file': bool(job.pid_file),
+            # Drives the "View on Drawing" canvas viewer button
+            # (AnnotatedPagesView) — jobs uploaded before the document
+            # storage fields were added have no stored files, so the
+            # button stays hidden for them.
+            'has_pid_file': bool(job.pid_file or job.equipment_file or job.load_list_file),
+            # AGPS-SP-EDS-002 drafting check results (empty dict for jobs
+            # that predate the check or ran without a P&ID) — the
+            # frontend renders the pass/fail/review checklist from this.
+            'drafting_check': job.drafting_results or None,
         }
 
         equipment_counts = _counts_for_source(results_list, 'equipment_list')
@@ -1072,6 +1179,102 @@ class AnnotatedPDFView(APIView):
         response = HttpResponse(annotated_bytes, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="annotated_SLD_{job_id}.pdf"'
         return response
+
+
+class AnnotatedPagesView(APIView):
+    """GET /api/v1/electrical-comparison/jobs/<job_id>/annotated-pages/
+
+    JSON variant of AnnotatedPDFView for the in-browser canvas viewer.
+    Returns one entry per uploaded document:
+      - pid:           each P&ID/SLD page as a base64 PNG + comparison
+                       tag boxes in image-pixel coordinates
+                       (pdf_annotator.get_annotated_pages)
+      - equipment_list / load_list: for PDF uploads, same pages+boxes
+                       shape (boxes built from that source's own result
+                       rows); for .xlsx uploads, a table grid
+                       (excel_parser.extract_table_grid) with each row's
+                       tag + status so the frontend canvas can highlight
+                       rows (red = missing from P&ID, green = matched).
+
+    Requires a completed job; pid is omitted when the job has no stored
+    P&ID (Equipment-vs-Load-List-only analysis). Each document's status
+    comes from ElectricalComparisonResult rows of its own source, so a
+    tag missing from the P&ID is highlighted red in the list it came
+    from — the cross-document recognition aid this endpoint exists for.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, job_id):
+        job = get_object_or_404(ElectricalComparisonJob, job_id=job_id, created_by=request.user)
+        if job.status != 'completed':
+            return Response({'error': 'Job is not completed yet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not (job.pid_file or job.equipment_file or job.load_list_file):
+            return Response(
+                {'error': 'No stored documents for this job (it predates document-viewer support).'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        all_results = list(job.results.all())
+
+        def source_results(source):
+            return [
+                {'tag_number': r.tag_number, 'status': r.status, 'equipment_type': r.equipment_type}
+                for r in all_results if r.source == source
+            ]
+
+        def read_field(field):
+            field.open('rb')
+            try:
+                return field.read()
+            finally:
+                field.close()
+
+        def build_list_document(field, source):
+            """PDF list -> pages+boxes; xlsx list -> table grid with
+            per-row status from that source's comparison results."""
+            file_bytes = read_field(field)
+            name = (field.name or '').lower()
+            if name.endswith('.pdf'):
+                return {'type': 'pages', 'pages': get_annotated_pages(file_bytes, source_results(source))}
+            grid = extract_table_grid(io.BytesIO(file_bytes), source)
+            if grid is None:
+                return None
+            status_by_tag = {}
+            for r in all_results:
+                if r.source == source and r.tag_number not in status_by_tag:
+                    status_by_tag[r.tag_number] = r.status
+            for row in grid['rows']:
+                row['status'] = status_by_tag.get(row['tag']) if row['tag'] else None
+            return {'type': 'table', 'grid': grid}
+
+        try:
+            documents = {}
+            if job.pid_file:
+                documents['pid'] = {
+                    'type': 'pages',
+                    'pages': get_annotated_pages(read_field(job.pid_file), [
+                        {'tag_number': r.tag_number, 'status': r.status, 'equipment_type': r.equipment_type}
+                        for r in all_results
+                    ], located=job.located_boxes or {}),
+                }
+            if job.equipment_file:
+                doc = build_list_document(job.equipment_file, 'equipment_list')
+                if doc:
+                    documents['equipment_list'] = doc
+            if job.load_list_file:
+                doc = build_list_document(job.load_list_file, 'load_list')
+                if doc:
+                    documents['load_list'] = doc
+        except Exception as exc:
+            logger.exception('[ElecCompare] Failed to render annotated pages for job %s', job_id)
+            return Response({'error': f'Failed to render annotated pages: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        if not documents:
+            return Response(
+                {'error': 'No viewable documents for this job.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response({'documents': documents}, status=status.HTTP_200_OK)
 
 
 # Per-tab export filename prefixes — keyed by ElectricalComparisonResult.source.

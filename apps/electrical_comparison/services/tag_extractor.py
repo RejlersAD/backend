@@ -1158,3 +1158,143 @@ def extract_electrical_tags(pdf_bytes, api_key,
         'pages_skipped': pages_skipped,
         'legend_pages_found': legend_pages_found,
     }
+
+# ═══════════════════════════════════════════════════════════════════════
+# Targeted tag locator — a SECOND, narrowly-scoped Vision pass for tags
+# the main extraction (or the reference lists) flagged as 'missing from
+# P&ID'. The P&IDs this app sees are often scanned/raster drawings with
+# no text layer (PyMuPDF search_for finds nothing), so coordinates can
+# only come from the Vision model itself. A targeted "find exactly these
+# N tags" prompt is both cheaper and more reliable than re-running the
+# full extraction — the model is told precisely what to look for.
+#
+# Never raises for Vision/parse failures on individual pages — locating
+# tags is a visual aid layered on top of completed comparison results;
+# a failed page lookup just means fewer located boxes, never a failed
+# job.
+# ═══════════════════════════════════════════════════════════════════════
+
+LOCATE_TAGS_SYSTEM_PROMPT = """You are an expert electrical engineer reading a Single Line Diagram (SLD) drawing page.
+You will be given a list of equipment tag numbers and ONE page image.
+For each tag, report whether it appears ANYWHERE on this page (as a label near a symbol, in a schedule/table, or in a title block) and, if so, the bounding box of the tag text.
+
+Rules:
+- Match tags exactly as written (area-type-sequence, e.g. 285-TSG-001). Also accept the tag with spaces around hyphens removed/added by rendering artifacts.
+- Coordinates are normalized to the page image: x0, y0, x1, y1 in the range 0-1000 (0,0 = top-left corner of the image, 1000,1000 = bottom-right).
+- The box should tightly enclose the tag TEXT (including any suffix letter), not the whole symbol.
+- If a tag appears multiple times on the page, report each occurrence as a separate entry.
+- If a tag does not appear on this page, do not include it at all.
+- Do NOT invent locations. Only report a tag if you can actually read it on the page.
+
+Respond with ONLY a JSON object, no markdown fences:
+{"locations": [{"tag": "285-TSG-001", "x0": 123, "y0": 456, "x1": 210, "y1": 470}]}
+If none of the tags appear on this page: {"locations": []}"""
+
+_LOCATE_COORD_MAX = 1000.0
+
+
+def _parse_locate_response(raw: str) -> list:
+    """Parse the locator's {'locations': [...]} reply; tolerant of
+    markdown fences and surrounding prose, same contract as
+    _parse_electrical_vision_response."""
+    if not raw:
+        return []
+    text = raw.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        if not m:
+            return []
+        try:
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(parsed, dict):
+        return []
+    locations = parsed.get('locations') or []
+    return locations if isinstance(locations, list) else []
+
+
+def locate_tags_on_drawing(pdf_bytes, tags, api_key, provider='claude', model=None):
+    """Locate `tags` (list of tag strings) on the drawing pages of
+    `pdf_bytes` via a targeted Vision pass.
+
+    Returns {tag: [{'page': 1-based int, 'x0', 'y0', 'x1', 'y1'}]} with
+    coordinates in PDF points (same space pdf_annotator.search_for
+    returns), ready to be scaled into rendered-image pixels by the
+    annotated-pages endpoint. Tags never found are simply absent from
+    the dict.
+    """
+    import fitz
+
+    located = {}
+    tags = [t.strip().upper() for t in tags if t and t.strip()]
+    if not tags or not (api_key and api_key.strip()):
+        return located
+
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    try:
+        page_dims = [(p.rect.width, p.rect.height) for p in doc]
+    finally:
+        doc.close()
+
+    tag_list_text = '\n'.join(f'- {t}' for t in tags)
+    user_prompt = (
+        'Locate these equipment tag numbers on this drawing page:\n'
+        f'{tag_list_text}\n\n'
+        'Remember: respond with ONLY the JSON object described.'
+    )
+
+    for page_index, (page_w, page_h) in enumerate(page_dims):
+        # Only drawing pages can hold the tags — same classification the
+        # main extraction pass uses (legend/skip pages never carry real
+        # installed-equipment tags).
+        try:
+            page_type, _ = _classify_page(pdf_bytes, page_index)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('[ElecCompare][Locate] page %d classification failed: %s', page_index + 1, exc)
+            continue
+        if page_type != PAGE_TYPE_DRAWING:
+            continue
+
+        try:
+            image_b64 = _prepare_image_b64(
+                _render_single_page(pdf_bytes, page_index),
+                VISION_OVERVIEW_MAX_DIMENSION_PX,
+            )
+            if provider == 'openai':
+                fn = lambda k, b64, p: _call_openai_electrical(k, b64, p, system_prompt=LOCATE_TAGS_SYSTEM_PROMPT)  # noqa: E731
+            else:
+                fn = lambda k, b64, p: _call_claude_electrical(k, b64, p, model=model, system_prompt=LOCATE_TAGS_SYSTEM_PROMPT)  # noqa: E731
+            raw, _, _ = _with_retries(provider, fn, api_key, image_b64, user_prompt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('[ElecCompare][Locate] page %d Vision call failed: %s', page_index + 1, exc)
+            continue
+
+        for loc in _parse_locate_response(raw):
+            tag = str(loc.get('tag') or '').strip().upper()
+            if tag not in tags:
+                continue
+            try:
+                x0 = float(loc['x0']) / _LOCATE_COORD_MAX * page_w
+                y0 = float(loc['y0']) / _LOCATE_COORD_MAX * page_h
+                x1 = float(loc['x1']) / _LOCATE_COORD_MAX * page_w
+                y1 = float(loc['y1']) / _LOCATE_COORD_MAX * page_h
+            except (KeyError, TypeError, ValueError):
+                continue
+            if x1 <= x0 or y1 <= y0:
+                continue
+            located.setdefault(tag, []).append({
+                'page': page_index + 1,
+                'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
+            })
+            logger.info('[ElecCompare][Locate] %s found on page %d', tag, page_index + 1)
+
+    logger.info(
+        '[ElecCompare][Locate] %d/%d missing tag(s) located on the drawing',
+        len(located), len(tags),
+    )
+    return located

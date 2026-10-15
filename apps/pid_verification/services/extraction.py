@@ -152,7 +152,14 @@ def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | Non
         'holds':               _extract_holds(raw_text),
         'line_sizes':          _extract_line_sizes(raw_text),
         'raw_text':            raw_text,
-        'tag_positions':       {**vision_tag_positions, **_extract_tag_positions(file_path, page_index)},
+        # Text-layer / OCR positions are measured and always win; AI-Vision
+        # positions are coarse zone estimates, labelled 'vision' so the overlay
+        # can treat them as approximate instead of exact.
+        'tag_positions':       {
+            **{k: ({**v, 'src': 'vision'} if isinstance(v, dict) else v)
+               for k, v in (vision_tag_positions or {}).items()},
+            **_extract_tag_positions(file_path, page_index, known_tags=_extract_tags(raw_text)),
+        },
         # Pipeline line designations — Tesseract's vector-PDF + multi-angle
         # scan, ADDITIVELY merged with a scan of the same combined raw_text
         # (catches anything the vector/Tesseract passes missed, e.g. on
@@ -466,8 +473,8 @@ def _extract_line_sizes(text: str):
     return items
 
 
-def _extract_tag_positions(file_path, page_index):
-    # type: (str, int) -> dict
+def _extract_tag_positions(file_path, page_index, known_tags=None):
+    # type: (str, int, object) -> dict
     """
     Extract real bounding-box anchor coordinates for every locatable text
     element on the page, stored as percentage offsets of the page dimensions.
@@ -538,7 +545,7 @@ def _extract_tag_positions(file_path, page_index):
             if key:
                 _record(key, xp, yp)
 
-    def _process_words(words, dim_w, dim_h):
+    def _process_words(words, dim_w, dim_h, scan_tags=True):
         # words: list of (x0, y0, x1, y1, text)
         for idx, (x0, y0, x1, y1, word) in enumerate(words):
             if not word:
@@ -547,11 +554,11 @@ def _extract_tag_positions(file_path, page_index):
             yp = _pct((y0 + y1) / 2.0, dim_h)
 
             # Tags: FT-101, XV-202A, etc.
-            tm = _TAG_PATTERN.fullmatch(word)
+            tm = _TAG_PATTERN.fullmatch(word) if scan_tags else None
             if tm:
                 tag = tm.group(1)
                 if tag not in positions:
-                    positions[tag] = {'x_pct': xp, 'y_pct': yp}
+                    positions[tag] = {'x_pct': xp, 'y_pct': yp, 'src': 'vector'}
                 continue
 
             # Strategy 1: word is entirely a line-size annotation.
@@ -581,9 +588,16 @@ def _extract_tag_positions(file_path, page_index):
         page_w = page.rect.width  or 1
         page_h = page.rect.height or 1
 
+        from apps.pid_verification.services.marker_anchoring import (
+            rotate_box, ocr_anchor_needed, anchor_page_tags,
+        )
+
         # --- Path A: embedded-text PDF ---
+        # Text-layer boxes come back in UNROTATED page space; page.rect and the
+        # rendered drawing image are in ROTATED space. Map every box so vector
+        # positions line up on rotated sheets (e.g. /Rotate 270 landscape P&IDs).
         raw_words = [
-            (w[0], w[1], w[2], w[3], w[4].strip())
+            (*rotate_box(page, w[0], w[1], w[2], w[3]), w[4].strip())
             for w in page.get_text('words')
             if w[4].strip()
         ]
@@ -597,58 +611,29 @@ def _extract_tag_positions(file_path, page_index):
                         for sp in ln.get('spans', []):
                             s = sp.get('text', '').strip()
                             if s:
-                                b = sp['bbox']
+                                b = rotate_box(page, *sp['bbox'])
                                 _scan_text(s,
                                            _pct((b[0] + b[2]) / 2.0, page_w),
                                            _pct((b[1] + b[3]) / 2.0, page_h))
             except Exception:
                 pass
 
-        else:
-            # --- Path B: scanned/image PDF -- Tesseract OCR with per-word bounding boxes ---
-            # Only attempted if Tesseract is actually installed (see
-            # _tesseract_available()) — AI Vision's coarse 9-zone locations
-            # (extract_drawing()'s vision_tag_positions) fill this gap when
-            # Tesseract isn't available, at lower positional precision.
-            if _tesseract_available():
-                try:
-                    import pytesseract
-                    from PIL import Image
-                    import io
-
-                    dpi = 300
-                    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-                    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
-                    img = Image.open(io.BytesIO(pix.tobytes('png')))
-                    img_w, img_h = img.size
-
-                    data = pytesseract.image_to_data(
-                        img,
-                        config='--oem 1 --psm 11',
-                        output_type=pytesseract.Output.DICT,
-                    )
-                    n = len(data.get('text', []))
-                    ocr_words = []
-                    for i in range(n):
-                        txt = str(data['text'][i]).strip()
-                        if not txt:
-                            continue
-                        try:
-                            conf = int(data['conf'][i])
-                        except (ValueError, TypeError):
-                            conf = -1
-                        if conf < 20:   # reject very-low-confidence noise
-                            continue
-                        lft = int(data['left'][i])
-                        top = int(data['top'][i])
-                        wid = int(data['width'][i])
-                        hgt = int(data['height'][i])
-                        ocr_words.append((lft, top, lft + wid, top + hgt, txt))
-
-                    _process_words(ocr_words, img_w, img_h)
-
-                except Exception as exc:
-                    logger.debug('[PIDExtraction] Tesseract OCR coord pass skipped: %s', exc)
+        # --- Path B: OCR anchoring ---
+        # Runs for scanned pages AND hybrid sheets whose drawing text is vector
+        # glyph outlines (text layer holds only title-block text) — see
+        # marker_anchoring.ocr_anchor_needed. Text-layer positions always win;
+        # OCR only fills tags the text layer did not provide.
+        if ocr_anchor_needed(raw_words):
+            try:
+                ocr_tags, ocr_words, (img_w, img_h) = anchor_page_tags(page, known_tags)
+                for tag, pos in ocr_tags.items():
+                    positions.setdefault(tag, pos)
+                _process_words(
+                    [(w['x0'], w['y0'], w['x1'], w['y1'], w['t']) for w in ocr_words],
+                    img_w, img_h, scan_tags=False,
+                )
+            except Exception as exc:
+                logger.warning('[PIDExtraction] OCR anchoring pass failed: %s', exc)
 
         doc.close()
 
@@ -746,7 +731,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
         except (ValueError, TypeError):
             return False
 
-    def _record(size_num, fluid, area, seq, pcls, insul, direction, x_pct, y_pct):
+    def _record(size_num, fluid, area, seq, pcls, insul, direction, x_pct, y_pct, located=True):
         if not _nps_valid(size_num):
             return
         norm_key = _normalize_pipeline_desig_key(size_num, fluid, area, seq, pcls, insul)
@@ -769,15 +754,28 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
         occ_key = (direction,
                    round(x_pct / _OCC_DEDUP_GRID_PCT),
                    round(y_pct / _OCC_DEDUP_GRID_PCT))
+        if not located:
+            # Page-level text match with no coordinates: still counted for the
+            # rule engine, but flagged so overlays never draw it as a marker.
+            # Only kept when no located occurrence exists for this tag.
+            if entry['occurrences']:
+                return
+            occ_key = ('UNLOCATED',)
+        elif entry['occurrences'] and entry['occurrences'][0].get('located') is False:
+            entry['occurrences'].clear()
+            entry['_seen'].discard(('UNLOCATED',))
         if occ_key not in entry['_seen']:
             entry['_seen'].add(occ_key)
-            entry['occurrences'].append({
+            occ = {
                 'direction': direction,
                 'x_pct':     round(x_pct, 2),
                 'y_pct':     round(y_pct, 2),
-            })
+            }
+            if not located:
+                occ['located'] = False
+            entry['occurrences'].append(occ)
 
-    def _scan_text(text, direction, x_pct, y_pct):
+    def _scan_text(text, direction, x_pct, y_pct, located=True):
         for m in _PIPELINE_DESIG_RE.finditer(text):
             _record(
                 m.group(1),          # NPS size
@@ -786,7 +784,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                 m.group(4),          # sequence number
                 m.group(5) or '',    # pipe class
                 m.group(6) or '',    # insulation
-                direction, x_pct, y_pct,
+                direction, x_pct, y_pct, located,
             )
 
     try:
@@ -806,8 +804,14 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
         def _pct(v, dim):
             return round(float(v) / float(dim) * 100.0, 2)
 
+        from apps.pid_verification.services.marker_anchoring import rotate_box, ocr_anchor_needed
+
+        def _rb(b):
+            # Text-layer boxes are in unrotated space; map to rotated page space.
+            return rotate_box(page, b[0], b[1], b[2], b[3])
+
         # ── Path A: vector PDF – span direction vectors ──────────────────
-        raw_words = [w for w in page.get_text('words') if w[4].strip()]
+        raw_words = [(*_rb(w[:4]), w[4]) for w in page.get_text('words') if w[4].strip()]
         has_text  = len(raw_words) > 5
 
         if has_text:
@@ -823,7 +827,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                             txt = sp.get('text', '').strip()
                             if not txt:
                                 continue
-                            b  = sp['bbox']
+                            b  = _rb(sp['bbox'])
                             xp = _pct((b[0] + b[2]) / 2.0, page_w)
                             yp = _pct((b[1] + b[3]) / 2.0, page_h)
                             _scan_text(txt, direction, xp, yp)
@@ -831,10 +835,10 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                         # Also scan the full joined line text (catches tokens split across spans)
                         if len(spans_list) > 1:
                             line_txt = ' '.join(sp.get('text', '') for sp in spans_list)
-                            b0 = spans_list[0]['bbox']
-                            bN = spans_list[-1]['bbox']
-                            xp = _pct((b0[0] + bN[2]) / 2.0, page_w)
-                            yp = _pct((b0[1] + bN[3]) / 2.0, page_h)
+                            b0 = _rb(spans_list[0]['bbox'])
+                            bN = _rb(spans_list[-1]['bbox'])
+                            xp = _pct((min(b0[0], bN[0]) + max(b0[2], bN[2])) / 2.0, page_w)
+                            yp = _pct((min(b0[1], bN[1]) + max(b0[3], bN[3])) / 2.0, page_h)
                             _scan_text(line_txt, direction, xp, yp)
 
                     # Block-level scan: join spans from ALL lines in this block.
@@ -850,10 +854,10 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                     if len(_blk_all_spans) > 2:
                         _blk_joined = ' '.join(sp['text'] for sp in _blk_all_spans)
                         if _PIPELINE_DESIG_RE.search(_blk_joined):
-                            _b0 = _blk_all_spans[0]['bbox']
-                            _bN = _blk_all_spans[-1]['bbox']
-                            _bx = _pct((_b0[0] + _bN[2]) / 2.0, page_w)
-                            _by = _pct((_b0[1] + _bN[3]) / 2.0, page_h)
+                            _b0 = _rb(_blk_all_spans[0]['bbox'])
+                            _bN = _rb(_blk_all_spans[-1]['bbox'])
+                            _bx = _pct((min(_b0[0], _bN[0]) + max(_b0[2], _bN[2])) / 2.0, page_w)
+                            _by = _pct((min(_b0[1], _bN[1]) + max(_b0[3], _bN[3])) / 2.0, page_h)
                             _blk_lines = blk.get('lines', [])
                             _blk_dir = 'V' if _blk_lines and abs(_blk_lines[0].get('dir', (1, 0))[0]) < 0.3 else 'H'
                             _scan_text(_blk_joined, _blk_dir, _bx, _by)
@@ -888,12 +892,14 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
             except Exception as _e:
                 logger.debug('[PIDLineTags] Word-window pass error: %s', _e)
 
-        else:
-            # ── Path B: scanned / image PDF – multi-angle Tesseract ─────
-            # Only attempted if Tesseract is actually installed. When it's
-            # not, the Vision raw_text pass below (always run) is this
-            # page's only source — at a single page-center position rather
-            # than per-orientation coordinates.
+        if not has_text or ocr_anchor_needed(raw_words):
+            # ── Path B: scanned / hybrid PDF – multi-angle Tesseract ────
+            # Also runs for hybrid sheets whose drawing text is vector glyph
+            # outlines (see marker_anchoring.ocr_anchor_needed). Only
+            # attempted if Tesseract is installed. When it's not, the Vision
+            # raw_text pass below (always run) is this page's only source —
+            # at a single page-center position rather than per-orientation
+            # coordinates.
             if _tesseract_available():
                 try:
                     import pytesseract
@@ -944,7 +950,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                     # --- 0° (horizontal) ----------------------------------------
                     for txt, rx, ry in _ocr_words(orig_img):
                         _scan_text(txt, 'H', rx * 100.0, ry * 100.0)
-                    _scan_text(_full_page_text(orig_img), 'H', 50.0, 50.0)  # compound token recovery
+                    _scan_text(_full_page_text(orig_img), 'H', 50.0, 50.0, located=False)  # compound token recovery
 
                     # --- 90° CW (PIL ROTATE_270) — picks up bottom-to-top text --
                     try:
@@ -954,7 +960,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                     for txt, rx, ry in _ocr_words(img_cw):
                         # Map back: CW90 inverse → orig_x ≈ ry, orig_y ≈ 1 - rx
                         _scan_text(txt, 'V', ry * 100.0, (1.0 - rx) * 100.0)
-                    _scan_text(_full_page_text(img_cw), 'V', 50.0, 50.0)
+                    _scan_text(_full_page_text(img_cw), 'V', 50.0, 50.0, located=False)
 
                     # --- 90° CCW (PIL ROTATE_90) — picks up top-to-bottom text --
                     try:
@@ -964,7 +970,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                     for txt, rx, ry in _ocr_words(img_ccw):
                         # Map back: CCW90 inverse → orig_x ≈ 1 - ry, orig_y ≈ rx
                         _scan_text(txt, 'V', (1.0 - ry) * 100.0, rx * 100.0)
-                    _scan_text(_full_page_text(img_ccw), 'V', 50.0, 50.0)
+                    _scan_text(_full_page_text(img_ccw), 'V', 50.0, 50.0, located=False)
 
                 except Exception as exc:
                     logger.warning('[PIDLineTags] Tesseract scanned path error: %s', exc)
@@ -987,7 +993,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
     # _record()'s dedup means this never double-counts a tag Tesseract
     # already found with a real position — it only ADDS tags Tesseract missed.
     if raw_text:
-        _scan_text(raw_text, 'H', 50.0, 50.0)
+        _scan_text(raw_text, 'H', 50.0, 50.0, located=False)
 
     # ── Cloud-truncation resolution pass ─────────────────────────────────
     # When a revision cloud partially covers a line designation, OCR reads a

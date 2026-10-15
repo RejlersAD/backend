@@ -207,40 +207,87 @@ def _parse_pdf_tier2_pdfplumber(pdf_bytes, file_type):
 
 def _parse_excel(file_obj, file_type):
     try:
-        df = pd.read_excel(file_obj, engine='openpyxl')
+        # Read raw (header=None) and scan the first rows for the real
+        # header row. Real-world Equipment/Load List workbooks often
+        # carry a project title / revision block above the actual table
+        # header — with pandas' default header=0 that title becomes the
+        # columns, every real column shows up as "Unnamed: N", and no
+        # tag column is ever found (silently returning zero tags).
+        # _find_tag_desc_columns is the same alias matcher the PDF tiers
+        # use, so header detection stays consistent across formats.
+        df = pd.read_excel(file_obj, engine='openpyxl', header=None)
 
-        tag_col = None
-        desc_col = None
-        for col in df.columns:
-            col_lower = str(col).lower().strip()
-            if col_lower in _TAG_HEADER_ALIASES:
-                tag_col = col
-            if col_lower in _DESC_HEADER_ALIASES:
-                desc_col = col
+        tag_idx = None
+        desc_idx = None
+        header_row_idx = -1
+        for hi in range(min(15, len(df))):
+            t, d = _find_tag_desc_columns(list(df.iloc[hi]))
+            if t is not None:
+                tag_idx, desc_idx, header_row_idx = t, d, hi
+                break
 
         logger.info(
-            '[ElecCompare][Excel] %s columns: %r (tag_col=%r, desc_col=%r)',
-            file_type, list(df.columns), tag_col, desc_col,
+            '[ElecCompare][Excel] %s header row: %d (tag_col=%r, desc_col=%r) of %d row(s); header cells: %r',
+            file_type, header_row_idx, tag_idx, desc_idx, len(df),
+            list(df.iloc[header_row_idx]) if header_row_idx >= 0 else None,
         )
-        if not tag_col:
+        if tag_idx is None:
             return []
 
         results = []
-        for _, row in df.iterrows():
-            tag_val = str(row[tag_col]).strip()
+        for _, row in df.iloc[header_row_idx + 1:].iterrows():
+            tag_val = str(row.iloc[tag_idx]).strip()
             match = ELECTRICAL_TAG_PATTERN.search(tag_val)
             if not match:
                 continue
             tag = match.group(0).upper()
             description = ''
-            if desc_col and pd.notna(row.get(desc_col)):
-                description = str(row[desc_col]).strip()
+            if desc_idx is not None and pd.notna(row.iloc[desc_idx]):
+                description = str(row.iloc[desc_idx]).strip()
             results.append({'tag': tag, 'description': description, 'source': file_type})
 
         return results
 
     except Exception as e:
         raise ValueError(f'Failed to parse Excel file: {str(e)}')
+
+
+def extract_table_grid(file_obj, file_type='equipment_list', max_rows=500):
+    """Canvas-viewer variant of _parse_excel: instead of returning only
+    matched tags, returns the whole sheet as a drawable grid —
+    {'headers': [...], 'rows': [{'cells': [...], 'tag': str|None}]} —
+    so the frontend can render the Excel document on a <canvas> and
+    highlight each row by its comparison status (e.g. red = missing
+    from P&ID). Uses the same header-row scan as _parse_excel; returns
+    None when no tag column can be found (caller then simply skips the
+    highlight layer).
+    """
+    df = pd.read_excel(file_obj, engine='openpyxl', header=None)
+
+    tag_idx = None
+    desc_idx = None
+    header_row_idx = -1
+    for hi in range(min(15, len(df))):
+        t, d = _find_tag_desc_columns(list(df.iloc[hi]))
+        if t is not None:
+            tag_idx, desc_idx, header_row_idx = t, d, hi
+            break
+    if tag_idx is None:
+        return None
+
+    headers = [
+        str(v).strip() if pd.notna(v) else ''
+        for v in df.iloc[header_row_idx]
+    ]
+    rows = []
+    for _, row in df.iloc[header_row_idx + 1:].head(max_rows).iterrows():
+        cells = [str(v).strip() if pd.notna(v) else '' for v in row]
+        if not any(cells):
+            continue
+        tag_val = cells[tag_idx] if tag_idx < len(cells) else ''
+        match = ELECTRICAL_TAG_PATTERN.search(tag_val)
+        rows.append({'cells': cells, 'tag': match.group(0).upper() if match else None})
+    return {'headers': headers, 'rows': rows}
 
 
 def _parse_pdf(file_obj, file_type):
@@ -362,6 +409,48 @@ def extract_panel_tag_from_load_list(pdf_bytes):
         '[ElecCompare][PanelTag] No "PANEL TAG" line found anywhere in Load List PDF (%d page-text extraction(s) checked)',
         len(page_texts),
     )
+    return None
+
+
+def extract_panel_tag_from_excel(file_obj):
+    """Excel variant of extract_panel_tag_from_load_list: scans every
+    cell of the sheet for a "PANEL TAG" line (a Load List workbook
+    carries it as a row above the motor table, e.g. "PANEL TAG :
+    285-U-505A, 380V ESSENTIAL MCC") and returns the same
+    {'panel_tag', 'description'} shape, or None when absent.
+    Enables the panel-verification comparison for .xlsx Load Lists —
+    without it the code falls back to a meaningless direct panel-tags-
+    vs-motor-tags comparison that reports every panel and every motor
+    as a discrepancy."""
+    try:
+        df = pd.read_excel(file_obj, engine='openpyxl', header=None)
+    except Exception as e:
+        raise ValueError(f'Failed to parse Excel file: {str(e)}')
+
+    for _, row in df.iterrows():
+        for cell in row:
+            if pd.isna(cell):
+                continue
+            label_match = PANEL_TAG_LABEL_PATTERN.search(str(cell))
+            if not label_match:
+                continue
+            rest = label_match.group(1)
+            tag_match = ELECTRICAL_TAG_PATTERN.search(rest.upper())
+            if not tag_match:
+                logger.warning(
+                    '[ElecCompare][PanelTag] Found "PANEL TAG" label in Excel but no valid tag followed: %r',
+                    rest[:80],
+                )
+                continue
+            tag = tag_match.group(0).upper()
+            description = rest[tag_match.end():].strip().lstrip(',').strip()
+            logger.info(
+                '[ElecCompare][PanelTag] Panel tag found in Excel: %s (description=%r)',
+                tag, description,
+            )
+            return {'panel_tag': tag, 'description': description}
+
+    logger.info('[ElecCompare][PanelTag] No "PANEL TAG" line found in Load List Excel')
     return None
 
 
