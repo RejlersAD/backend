@@ -54,9 +54,11 @@ from django.db import connection
 from apps.pid_verification_v2.services.comparison_engine import compare_with_equipment_list
 from apps.electrical_comparison.models import ElectricalComparisonJob, ElectricalComparisonResult
 from apps.electrical_comparison.services.tag_extractor import resolve_equipment_type
-from apps.electrical_comparison.services.excel_parser import parse_excel_tags, extract_panel_tag_from_load_list
+from apps.electrical_comparison.services.excel_parser import (
+    parse_excel_tags, extract_panel_tag_from_load_list, LOAD_LIST_MOTOR_TYPE_CODES,
+)
 from apps.electrical_comparison.helpers import (
-    _collect_comparison_rows, _build_panel_verification, _build_combined_comparison,
+    _collect_comparison_rows, _build_panel_verification, _build_combined_comparison, _tag_type_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -612,14 +614,29 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
             for t in pid_tags
         ]
 
-        # Comparison 1 — P&ID vs Equipment List
+        # BUG FIX: pid_equip (every electrical tag on the P&ID — motors
+        # AND panels together) used to be compared, unfiltered, against
+        # BOTH the Equipment List and the Load List. The Load List side
+        # was already purified to motor tags only (_filter_load_list_
+        # motor_tags in excel_parser.py), but the P&ID side never was —
+        # so a motor tag correctly absent from the Equipment List showed
+        # up as a false "extra" there, and a panel tag correctly absent
+        # from the Load List showed up as a false "extra" there too.
+        # Split pid_equip the same way the Load List side already is:
+        # non-motor tags go to the Equipment List comparison, motor tags
+        # go to the Load List comparison. Full Comparison (Tab 4) keeps
+        # using the unfiltered `pid_tags` list, unchanged.
+        pid_equip_panels = [t for t in pid_equip if _tag_type_code(t['tag']) not in LOAD_LIST_MOTOR_TYPE_CODES]
+        pid_equip_motors = [t for t in pid_equip if _tag_type_code(t['tag']) in LOAD_LIST_MOTOR_TYPE_CODES]
+
+        # Comparison 1 — P&ID vs Equipment List (non-motor/panel tags only)
         if pid_file_path and equipment_tags:
-            equipment_results = compare_with_equipment_list(pid_equip, equipment_tags)
+            equipment_results = compare_with_equipment_list(pid_equip_panels, equipment_tags)
             comparisons_done.append('pid_vs_equipment')
 
-        # Comparison 2 — P&ID vs Load List
+        # Comparison 2 — P&ID vs Load List (motor tags only)
         if pid_file_path and load_list_tags:
-            load_results = compare_with_equipment_list(pid_equip, load_list_tags)
+            load_results = compare_with_equipment_list(pid_equip_motors, load_list_tags)
             comparisons_done.append('pid_vs_loadlist')
 
         # Comparison 3 — Equipment List vs Load List (see
@@ -638,9 +655,9 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
 
         results_to_save = []
         if equipment_results is not None:
-            _collect_comparison_rows(job, results_to_save, equipment_results, 'equipment_list', pid_equip, equipment_tags)
+            _collect_comparison_rows(job, results_to_save, equipment_results, 'equipment_list', pid_equip_panels, equipment_tags)
         if load_results is not None:
-            _collect_comparison_rows(job, results_to_save, load_results, 'load_list', pid_equip, load_list_tags)
+            _collect_comparison_rows(job, results_to_save, load_results, 'load_list', pid_equip_motors, load_list_tags)
         if eq_vs_ll_results is not None:
             _collect_comparison_rows(job, results_to_save, eq_vs_ll_results, 'equipment_vs_loadlist', equipment_tags, load_list_tags)
 

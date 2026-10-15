@@ -34,6 +34,13 @@ class ElectricalComparisonJob(models.Model):
     # uploaded / processing / completed / failed
     error_message = models.TextField(blank=True)
     pid_file_name = models.CharField(max_length=255)
+    # The uploaded P&ID/SLD PDF itself, persisted permanently (unlike
+    # task_context['pid_file_path'] in tasks.py, which is a throwaway
+    # temp path deleted at the end of every job — see _cleanup_temp_file).
+    # Added specifically so AnnotatedPDFView can re-open the original
+    # drawing later to overlay comparison-result boxes on it; jobs
+    # uploaded before this field existed simply have pid_file empty.
+    pid_file = models.FileField(upload_to='electrical_comparison/pid_files/%Y/%m/', null=True, blank=True)
     provider = models.CharField(
         max_length=20, default='claude')
     model_used = models.CharField(
