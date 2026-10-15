@@ -714,6 +714,7 @@ def run_instrument_index_task(
     drawing_info: dict,
     legend_b64: str = '',
     legend_filename: str = '',
+    byok: dict | None = None,
 ):
     """Extract the instrument index in the background.
 
@@ -736,7 +737,14 @@ def run_instrument_index_task(
 
     try:
         pid_bytes = base64.b64decode(pid_b64)
-        service = InstrumentIndexService()
+        # BYOK — user-supplied OpenAI/Claude key from the Instrument Index
+        # UI; tried before the shared env/DB engines, never persisted.
+        byok = byok or {}
+        service = InstrumentIndexService(
+            byok_provider=byok.get('provider'),
+            byok_api_key=byok.get('api_key'),
+            byok_model=byok.get('model'),
+        )
 
         legend_context_override = None
         if legend_b64:
