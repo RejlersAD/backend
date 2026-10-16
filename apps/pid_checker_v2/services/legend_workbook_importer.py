@@ -649,6 +649,17 @@ def _inline_symbol_images(images: List[Dict[str, Any]], section: str) -> List[Di
     return saved
 
 
+# Soft-coded: parallel storage writes for legend symbol images. With S3 as
+# the default storage (production), each image used to be its own serial
+# HTTPS PUT inside the request — a 100+ symbol workbook blew past the
+# client's 120 s timeout in production. Storage PUTs are idempotent and
+# independent, so they run in a small thread pool; DB rows are written
+# serially afterwards (fast, local). Storage operations don't participate
+# in the surrounding transaction.atomic() anyway (S3 is not transactional),
+# so behaviour is unchanged — just faster.
+LEGEND_IMAGE_UPLOAD_WORKERS = 6
+
+
 def _save_symbol_images(imgs: List[Dict[str, Any]], *, section: str, project) -> List[Dict[str, str]]:
     """Create/replace LegendSymbolImage rows. Returns one record per saved
     image: {symbol_name, path} (storage path — S3 key when S3 is the default
@@ -658,6 +669,9 @@ def _save_symbol_images(imgs: List[Dict[str, Any]], *, section: str, project) ->
     the cross-project fallback tier in SymbolImagesListView)."""
     from apps.pid_verification.models import PIDVProject
     from django.core.files.base import ContentFile
+    from django.core.files.storage import default_storage
+    from concurrent.futures import ThreadPoolExecutor
+    import uuid as _uuid
 
     pidv_project = None
     if project is not None:
@@ -665,23 +679,47 @@ def _save_symbol_images(imgs: List[Dict[str, Any]], *, section: str, project) ->
 
     from ..views import _normalize_symbol_image
 
-    saved: List[Dict[str, str]] = []
+    # Phase 0 (serial, fast): dedupe names + resolve existing rows (DB reads).
+    prepared = []
     used: set = set()
     for item in imgs:
         name = _dedupe_name(_norm(item['name']).upper() or 'SYMBOL', used)
-        data = item['data']
-        data, content_type = _normalize_symbol_image(data, '.png')
+        data, content_type = _normalize_symbol_image(item['data'], '.png')
         obj = LegendSymbolImage.objects.filter(
             project=pidv_project, section=section, symbol_name=name,
         ).first()
+        old_path = obj.image_file.name if (obj is not None and obj.image_file) else None
+        prepared.append({
+            'symbol_name': name, 'data': data, 'content_type': content_type,
+            'obj': obj, 'old_path': old_path,
+        })
+
+    # Phase 1 (parallel): storage deletes+PUTs only — no DB access in threads.
+    def _store(p):
+        if p['old_path']:
+            try:
+                default_storage.delete(p['old_path'])
+            except Exception:
+                logger.warning('[LegendWorkbook] could not delete old symbol image %s', p['old_path'])
+        p['path'] = default_storage.save(f'{_uuid.uuid4().hex}.png', ContentFile(p['data']))
+        return p
+
+    if len(prepared) > 1:
+        with ThreadPoolExecutor(max_workers=LEGEND_IMAGE_UPLOAD_WORKERS) as pool:
+            prepared = list(pool.map(_store, prepared))
+    elif prepared:
+        prepared = [_store(prepared[0])]
+
+    # Phase 2 (serial): DB rows with the already-stored paths (no storage I/O).
+    saved: List[Dict[str, str]] = []
+    for p in prepared:
+        obj = p['obj']
         if obj is None:
-            obj = LegendSymbolImage(project=pidv_project, section=section, symbol_name=name)
-        elif obj.image_file:
-            obj.image_file.delete(save=False)
-        obj.content_type = content_type
-        import uuid as _uuid
-        obj.image_file.save(f'{_uuid.uuid4().hex}.png', ContentFile(data), save=True)
-        saved.append({'symbol_name': name, 'path': obj.image_file.name})
+            obj = LegendSymbolImage(project=pidv_project, section=section, symbol_name=p['symbol_name'])
+        obj.content_type = p['content_type']
+        obj.image_file.name = p['path']
+        obj.save()
+        saved.append({'symbol_name': p['symbol_name'], 'path': p['path']})
     return saved
 
 
