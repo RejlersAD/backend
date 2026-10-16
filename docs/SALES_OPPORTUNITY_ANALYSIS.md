@@ -130,3 +130,20 @@ intact. No production rollout or migration is implied by local verification.
 
 The two-minute target is a reading experience after background processing.
 No two-minute ingestion SLA or 500-file provider throughput benchmark is claimed.
+
+## Development release verification — 16 October 2026
+
+Aligned with the fetched `origin/development` without conflicts. The isolated
+Docker release-test run passed all 88 tests across opportunity analysis, letter
+extraction, saved-letter regeneration, letter output/attachments and MSG parsing.
+The Windows virtual environment lacks WeasyPrint; PDF-dependent verification
+therefore uses the existing Python 3.11 Docker runtime with real rendering.
+
+The local PostgreSQL database already had Sales 0030 and 0031 applied. After a
+custom-format database backup, Sales 0032 and seven other pending migrations
+applied successfully: electrical_comparison 0005–0008, pid_checker_v2 0026,
+pid_verification 0015 and spec_customization 0013. Direct schema inspection
+confirmed the analysis suppression and letter fingerprint columns. The full
+application `makemigrations --check --dry-run --skip-checks` found no changes.
+This evidence concerns local PostgreSQL; production migration and deployment
+remain unverified. Apply the migrations before deploying the matching API/workers.
