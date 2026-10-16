@@ -133,13 +133,18 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.assertEqual(result.status_code, 204)
         self.assertFalse(OpportunityWorkspace.objects.exists())
 
-    def test_delete_queued_or_linked_workspace_preserves_recovery_evidence(self):
+    def test_delete_queued_or_linked_workspace_removes_it(self):
         workspace = setup_workspace(self.opportunity, self.actor)
         result = self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/')
-        self.assertEqual(result.status_code, 409)
-        self.assertTrue(OpportunityWorkspace.objects.filter(pk=workspace.pk).exists())
+        self.assertEqual(result.status_code, 204)
+        self.assertFalse(OpportunityWorkspace.objects.filter(pk=workspace.pk).exists())
+        replacement = Deal.objects.create(deal_code='Q-102102', deal_name='Synthetic replacement',
+                                          client=self.client_record, owner=self.actor)
+        workspace = setup_workspace(replacement, self.actor)
         self.assertEqual(run_workspace_setup(workspace.pk)['status'], 'ready')
-        self.assertEqual(self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/').status_code, 409)
+        self.assertEqual(self.api.delete(f'/api/v1/sales/deals/{replacement.pk}/').status_code, 204)
+        self.assertFalse(OpportunityWorkspace.objects.exists())
+        self.assertFalse(Deal.objects.filter(pk=replacement.pk).exists())
 
     def test_client_cascade_cannot_erase_linked_workspace(self):
         workspace = self.ready()
@@ -567,15 +572,13 @@ class WorkspaceGuardDurabilityTests(WorkspaceFixtures, TransactionTestCase):
                         deal_locked.set()
                     return result
                 with connection.execute_wrapper(observe_parent_lock):
-                    try:
-                        delete_opportunity_with_workspace_guard(Deal.objects.get(pk=self.opportunity.pk))
-                    except WorkspaceAPIError as exc:
-                        return exc.status_code
+                    delete_opportunity_with_workspace_guard(Deal.objects.get(pk=self.opportunity.pk))
             finally:
                 close_old_connections()
         with ThreadPoolExecutor(max_workers=2) as pool:
             audit_future = pool.submit(checkpoint)
             deletion_future = pool.submit(deletion)
             self.assertEqual(audit_future.result(timeout=20), 'audit_committed')
-            self.assertEqual(deletion_future.result(timeout=20), 409)
-        self.assertTrue(Deal.objects.filter(pk=self.opportunity.pk).exists())
+            self.assertIsNone(deletion_future.result(timeout=20))
+        self.assertFalse(Deal.objects.filter(pk=self.opportunity.pk).exists())
+        self.assertFalse(OpportunityWorkspace.objects.exists())

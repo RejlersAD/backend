@@ -184,10 +184,17 @@ class PrivateAttachmentTests(PrivateFixtures, TestCase):
         with override_settings(SALES_ATTACHMENT_ROOT=self.private_root.name + '-changed'):
             self.assertEqual(self.api.get(url).data['code'], 'private_storage_changed')
 
-    def test_deleted_opportunity_and_parent_cannot_orphan_private_attachments(self):
+    def test_deleted_opportunity_removes_private_attachments_and_client_guard_remains(self):
         self.upload()
-        self.assertEqual(self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/').status_code, 409)
+        attempt = OpportunityWorkspaceUpload.objects.get()
+        storage, _ = attachment_storage()
+        self.assertTrue(storage.exists(attempt.storage_name))
         self.assertEqual(self.api.delete(f'/api/v1/sales/clients/{self.client_record.pk}/').status_code, 409)
+        self.assertEqual(self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/').status_code, 204)
+        self.assertFalse(Deal.objects.filter(pk=self.opportunity.pk).exists())
+        self.assertFalse(OpportunityWorkspaceUpload.objects.exists())
+        self.assertFalse(storage.exists(attempt.storage_name))
+        self.assertEqual(list(Path(self.private_root.name).rglob('original')), [])
 
     def test_local_cursor_rejects_forged_remote_cursor_and_changed_storage(self):
         self.upload()

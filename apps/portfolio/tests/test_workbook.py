@@ -167,3 +167,26 @@ class WorkbookReaderTests(TestCase):
         self.assertIsNone(row['overclaim_aed'])
         self.assertEqual(row['extra']['booked_manhours'], '100.00000000')
         self.assertEqual(row['extra']['executive']['actual_manhours'], '100.00000000')
+
+    def test_inflated_declared_dimensions_from_formatting_residue_are_ignored(self):
+        def inflate(workbook, sheet, columns):
+            forecast = workbook.create_sheet('Delivery Rolling Forecast')
+            for col, label in enumerate(['Project ID', 'Project Sub ID', 'Project Title', date(2026, 10, 1)], 1):
+                forecast.cell(7, col, label)
+            for col, value in enumerate(['00042', '00042-1', 'Sample project', 10], 1):
+                forecast.cell(8, col, value)
+            # A past edit far outside the data keeps the declared dimension
+            # inflated even after its value is cleared.
+            residue = forecast.cell(20000, 600, 'residue')
+            residue.value = None
+            self.assertGreater(forecast.max_row, 10000)
+            self.assertGreater(forecast.max_column, 500)
+        parsed = read_workbook(workbook_bytes(mutate=inflate))
+        self.assertEqual(parsed['row_count'], 1)
+
+    def test_genuinely_oversized_sheet_content_is_still_rejected(self):
+        def oversize(workbook, sheet, columns):
+            forecast = workbook.create_sheet('Delivery Rolling Forecast')
+            forecast.cell(10001, 1, 'too many rows')
+        with self.assertRaisesRegex(ValueError, 'Delivery Rolling Forecast exceeds the supported'):
+            read_workbook(workbook_bytes(mutate=oversize))
