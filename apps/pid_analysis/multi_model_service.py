@@ -169,7 +169,7 @@ class MultiModelAIService:
         """Google Gemini completion"""
         try:
             # Use stable Gemini 2.0-flash (fast, supports vision, widely available)
-            model_name = "gemini-2.0-flash"
+            model_name = "gemini-3.8-flash"
             print(f"[GEMINI] Using model: {model_name} (SDK: {GENAI_SDK})")
             
             # Collect all text parts and image parts

@@ -28,8 +28,8 @@ TASK_PROVIDERS = {
 }
 
 # ─── Model names (edit here to upgrade without code changes) ─────────────────
-GEMINI_VISION_MODEL  = os.getenv('GEMINI_VISION_MODEL',  'gemini-2.0-flash')
-GEMINI_TEXT_MODEL    = os.getenv('GEMINI_TEXT_MODEL',    'gemini-2.0-flash')
+GEMINI_VISION_MODEL  = os.getenv('GEMINI_VISION_MODEL',  'gemini-3.8-flash')
+GEMINI_TEXT_MODEL    = os.getenv('GEMINI_TEXT_MODEL',    'gemini-3.8-flash')
 OPENAI_VISION_MODEL  = os.getenv('OPENAI_VISION_MODEL',  'gpt-4o')
 OPENAI_TEXT_MODEL    = os.getenv('OPENAI_TEXT_MODEL',    'gpt-4o')
 

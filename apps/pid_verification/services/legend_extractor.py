@@ -42,7 +42,7 @@ MIN_TEXT_CHARS_FOR_TEXT_ONLY = 200
 AI_MODEL = 'gpt-4o'
 
 # Gemini model for primary vision extraction
-GEMINI_MODEL = os.getenv('GEMINI_VISION_MODEL', 'gemini-2.0-flash')
+GEMINI_MODEL = os.getenv('GEMINI_VISION_MODEL', 'gemini-3.8-flash')
 
 # Maximum image dimension (px) to send to AI — resized if larger.
 AI_IMAGE_MAX_PX = 4096   # increased from 2048 for better OCR on scanned PDFs

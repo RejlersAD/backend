@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ── Soft-coded: extraction config ─────────────────────────────────────────────
 MIN_TEXT_CHARS_FOR_TEXT_ONLY = 300     # chars; below this we fall back to AI Vision
 AI_MODEL                     = 'gpt-4o'
-GEMINI_MODEL                 = os.getenv('GEMINI_VISION_MODEL', 'gemini-2.0-flash')
+GEMINI_MODEL                 = os.getenv('GEMINI_VISION_MODEL', 'gemini-3.8-flash')
 AI_IMAGE_MAX_PX              = 4096   # max dimension per page sent to AI (px) — increased from 2048
 AI_MAX_TOKENS                = 16384  # max tokens per OpenAI batch call — increased from 4096
 # DPI scale factor for rendering PDF pages.  3× base ≈ 216–300 DPI — captures small-font

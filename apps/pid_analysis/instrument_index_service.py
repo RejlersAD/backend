@@ -2374,7 +2374,7 @@ EXTRACTION_CONFIG = {
     "engine_order":      ["gemini", "tesseract", "openai"],
 
     # Gemini model
-    "gemini_model":      "gemini-2.0-flash",
+    "gemini_model":      "gemini-3.8-flash",
 
     # Multi-orientation passes (handles vertical / slanted text)
     "enable_rotation":   True,    # Add 90° CW and 90° CCW passes
@@ -5418,7 +5418,7 @@ Rules:
 
         try:
             from google.genai import types as _gtypes
-            model = self.extraction_config.get("gemini_model", "gemini-2.0-flash")
+            model = self.extraction_config.get("gemini_model", "gemini-3.8-flash")
             response = self.gemini_client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -6647,11 +6647,11 @@ Rules:
     # ────────────────────────────────────────────────────────────────────
 
     def _call_gemini_vision(self, b64_image, prompt, mode_label, max_tokens=None):
-        """Call Gemini Vision (gemini-2.0-flash); return parsed list or []."""
+        """Call Gemini Vision (gemini-3.8-flash); return parsed list or []."""
         try:
             from google.genai import types as _gtypes
             cfg = self.extraction_config
-            model = cfg.get("gemini_model", "gemini-2.0-flash")
+            model = cfg.get("gemini_model", "gemini-3.8-flash")
             logger.info(f"[InstrumentIndex] Calling Gemini Vision ({mode_label}, model={model})…")
 
             image_bytes = base64.b64decode(b64_image)
@@ -6717,7 +6717,7 @@ Rules:
                 try:
                     from google.genai import types as _gtypes
                     cfg = self.extraction_config
-                    model = cfg.get("gemini_model", "gemini-2.0-flash")
+                    model = cfg.get("gemini_model", "gemini-3.8-flash")
                     image_bytes = base64.b64decode(b64_image)
                     image_part  = _gtypes.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
                     system_text = (

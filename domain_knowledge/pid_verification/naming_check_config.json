@@ -6,7 +6,7 @@
 
   "_ai_comment": "AI provider for the vision pass. 'gemini' uses GEMINI_API_KEY env var first, falls back to OpenAI (OPENAI_API_KEY). 'openai' uses OpenAI only.",
   "ai_provider": "gemini",
-  "ai_model":    "gemini-2.0-flash",
+  "ai_model":    "gemini-3.8-flash",
   "ai_fallback_model": "gpt-4o",
   "max_tokens":   8000,
   "temperature":  0.0,

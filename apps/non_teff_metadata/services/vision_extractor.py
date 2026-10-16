@@ -21,7 +21,7 @@ Strategy (in priority order, soft-coded in ``VISION_CONFIG``):
      fully usable in offline mode.
 
      Provider chain (soft-coded, cost-first):
-       1. **Google Gemini** (gemini-2.0-flash) — PRIMARY. Generous free tier,
+       1. **Google Gemini** (gemini-3.8-flash) — PRIMARY. Generous free tier,
           excellent at title-block reading. Used whenever GEMINI_API_KEY is
           set. Effectively zero-cost for our volume.
        2. **OpenAI gpt-4o-mini** — secondary. Used only when Gemini is
@@ -94,7 +94,7 @@ VISION_CONFIG: Dict[str, Any] = {
     # Gemini's free tier (1M tokens/day on flash models) covers virtually
     # any document-control workload — we keep it first.
     'providers': [
-        {'provider': 'gemini', 'model': 'gemini-2.0-flash',     'enabled': True},
+        {'provider': 'gemini', 'model': 'gemini-3.8-flash',     'enabled': True},
         {'provider': 'gemini', 'model': 'gemini-1.5-flash',     'enabled': True},   # legacy fallback
         {'provider': 'openai', 'model': 'gpt-4o-mini',          'enabled': True},   # paid but cheap
         {'provider': 'openai', 'model': 'gpt-4o',               'enabled': False},  # opt-in only

@@ -40,7 +40,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── Soft-coded: model names (override via env vars) ───────────────────────────
-GEMINI_MODEL        = os.getenv('GEMINI_VISION_MODEL',  'gemini-2.0-flash')
+GEMINI_MODEL        = os.getenv('GEMINI_VISION_MODEL',  'gemini-3.8-flash')
 OPENAI_VISION_MODEL = os.getenv('OPENAI_VISION_MODEL',  'gpt-4o')
 
 # Soft-coded: max tokens per AI call

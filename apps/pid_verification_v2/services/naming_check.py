@@ -86,7 +86,7 @@ def _default_config() -> Dict[str, Any]:
             "inconsistent_area_prefix": "minor",
             "ai_detected": "major",
         },
-        "ai_model": "gemini-2.0-flash",
+        "ai_model": "gemini-3.8-flash",
         "ai_fallback_model": "gpt-4o",
         "max_tokens": 8000,
         "temperature": 0.0,
@@ -327,7 +327,7 @@ def _call_gemini(
             return ""
 
         client = lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key))
-        model  = config.get("ai_model", "gemini-2.0-flash")
+        model  = config.get("ai_model", "gemini-3.8-flash")
 
         parts = [
             user_prompt,

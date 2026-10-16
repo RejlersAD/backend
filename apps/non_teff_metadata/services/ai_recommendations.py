@@ -47,7 +47,7 @@ RECO_CONFIG: Dict[str, Any] = {
 
     # Cost-first provider chain — same shape as vision_extractor.VISION_CONFIG.
     'providers': [
-        {'provider': 'gemini', 'model': 'gemini-2.0-flash',  'enabled': True},
+        {'provider': 'gemini', 'model': 'gemini-3.8-flash',  'enabled': True},
         {'provider': 'gemini', 'model': 'gemini-1.5-flash',  'enabled': True},
         {'provider': 'openai', 'model': 'gpt-4o-mini',       'enabled': True},
     ],
@@ -477,7 +477,7 @@ def recommend_for_item(*, item_id: str, file_name: str,
     Returns a compact recommendations dict for a single item. The shape is:
 
         {
-          "provider":       "gemini:gemini-2.0-flash" | "heuristic" | ...,
+          "provider":       "gemini:gemini-3.8-flash" | "heuristic" | ...,
           "summary":        "...",
           "inferred_type":  "...",
           "discipline":     "...",

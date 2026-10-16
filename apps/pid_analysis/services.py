@@ -239,8 +239,8 @@ class PIDAnalysisService:
             # Gemini provider config (soft-coded)
             _gem = cfg.get('gemini', {})
             self.gemini_enabled         = bool(_gem.get('enabled', False))
-            self._GEMINI_PRIMARY_MODEL  = _gem.get('primary_model', 'gemini-2.0-flash')
-            self._GEMINI_FALLBACK_MODEL = _gem.get('fallback_model', 'gemini-2.0-flash-lite')
+            self._GEMINI_PRIMARY_MODEL  = _gem.get('primary_model', 'gemini-3.8-flash')
+            self._GEMINI_FALLBACK_MODEL = _gem.get('fallback_model', 'gemini-3.5-flash-lite')
             self.gemini_api_key_env     = _gem.get('api_key_env', 'GEMINI_API_KEY')
             self.gemini_max_tokens      = int(_gem.get('max_output_tokens', 32768))
 
@@ -309,8 +309,8 @@ class PIDAnalysisService:
                 "Bottom-Left", "Bottom-Center", "Bottom-Right",
             ]
             self.gemini_enabled         = False
-            self._GEMINI_PRIMARY_MODEL  = 'gemini-2.0-flash'
-            self._GEMINI_FALLBACK_MODEL = 'gemini-2.0-flash-lite'
+            self._GEMINI_PRIMARY_MODEL  = 'gemini-3.8-flash'
+            self._GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite'
             self.gemini_api_key_env     = 'GEMINI_API_KEY'
             self.gemini_max_tokens      = 32768
             self.pass3_provider         = 'openai'
@@ -450,7 +450,7 @@ class PIDAnalysisService:
             if not parts:
                 print(f'[WARNING] {pass_label}: no content parts for Gemini — skipping')
                 return ''
-            model_name = getattr(self, '_GEMINI_PRIMARY_MODEL', 'gemini-2.0-flash')
+            model_name = getattr(self, '_GEMINI_PRIMARY_MODEL', 'gemini-3.8-flash')
             print(
                 f'[INFO] {pass_label}: calling Gemini {model_name}'
                 f' ({len(parts)} parts, max_tokens={max_tokens})...'
