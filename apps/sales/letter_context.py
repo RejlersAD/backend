@@ -146,7 +146,6 @@ def build_letter_context(deal, letter=None, custom_data=None):
     org = Organization.objects.filter(is_active=True).first()
     company_name = letterhead['sender_company'] if letterhead['sender_company'] else (org.name if org else 'RADAI')
 
-    client_contact = deal.client_contact
     service_choices = dict(deal._meta.get_field('service_categories').choices or {})
     service_line = ', '.join(
         service_choices.get(s, s) for s in (deal.service_categories or [])
@@ -158,8 +157,8 @@ def build_letter_context(deal, letter=None, custom_data=None):
         'deal_description': deal.description or '',
         'client_name': deal.client.company_name if deal.client else '',
         'client_reference': deal.client_reference or '',
-        'client_contact_name': client_contact.full_name if client_contact else 'The Project Manager',
-        'client_email': client_contact.email if client_contact else '',
+        'client_contact_name': letterhead['recipient_name'] or 'The Project Manager',
+        'client_email': letterhead['recipient_email'],
         'opportunity_type': deal.get_opportunity_type_display() if deal.opportunity_type else '',
         'service_line': service_line,
         'core_services': ', '.join(service_choices.get(s, s) for s in (deal.service_categories or [])[:3]) or 'our core service lines',

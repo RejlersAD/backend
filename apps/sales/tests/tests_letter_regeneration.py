@@ -80,7 +80,105 @@ class LetterRegenerationStorageTests(TestCase):
         self.assertEqual(response.data['subject'], payload['subject'])
         self.assertEqual(response.data['body'], payload['body'])
         self.assertEqual(response.data['custom_data']['letterhead']['rev'], 1)
-        self.assertEqual(response.data['custom_data']['attachments']['version'], 1)
+        self.assertNotIn('attachments', response.data['custom_data'])
+
+    def test_repeated_prepare_reuses_saved_letter_and_rendered_files(self):
+        from apps.sales.workflow import prepare_letter
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test') as docx:
+            refresh_letter_files(self.letter, self.actor)
+            pdf.reset_mock()
+            docx.reset_mock()
+            first = prepare_letter(self.letter.opportunity, self.actor, 'eoi')
+            second = prepare_letter(self.letter.opportunity, self.actor, 'eoi')
+        self.assertEqual(first.pk, self.letter.pk)
+        self.assertEqual(second.pk, first.pk)
+        self.assertEqual(SalesLetter.objects.count(), 1)
+        pdf.assert_not_called()
+        docx.assert_not_called()
+
+    def test_unchanged_save_does_not_render_or_increment_revision(self):
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test'), \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test'):
+            refresh_letter_files(self.letter, self.actor)
+        self.letter.refresh_from_db()
+        old = (self.letter.pdf_file.name, self.letter.docx_file.name, self.letter.updated_at)
+        with patch('apps.sales.letter_pdf.generate_letter_pdf') as pdf, \
+             patch('apps.sales.letter_docx.generate_letter_docx') as docx:
+            result = refresh_letter_files(self.letter, self.actor)
+        self.assertEqual(result.custom_data['letterhead']['rev'], 1)
+        self.assertEqual((result.pdf_file.name, result.docx_file.name, result.updated_at), old)
+        pdf.assert_not_called()
+        docx.assert_not_called()
+
+    def test_new_preparation_renders_only_once_and_preserves_later_edits(self):
+        from apps.sales.workflow import prepare_letter
+        opportunity = self.letter.opportunity
+        self.letter.delete()
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test') as docx:
+            first = prepare_letter(opportunity, self.actor, 'eoi')
+            second = prepare_letter(opportunity, self.actor, 'eoi')
+            self.assertEqual(first.pk, second.pk)
+            self.assertEqual(pdf.call_count, 1)
+            self.assertEqual(docx.call_count, 1)
+            first.body = 'Reviewed manually edited body'
+            refresh_letter_files(first, self.actor)
+            reopened = prepare_letter(opportunity, self.actor, 'eoi')
+        self.assertEqual(reopened.pk, first.pk)
+        self.assertEqual(reopened.body, 'Reviewed manually edited body')
+        self.assertEqual(SalesLetter.objects.count(), 1)
+        self.assertEqual(reopened.custom_data['letterhead']['rev'], 1)
+        self.assertEqual(pdf.call_count, 2)
+
+    def test_changed_content_increments_once_and_retry_is_noop(self):
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test') as docx:
+            refresh_letter_files(self.letter, self.actor)
+            self.letter.body = 'Reviewed new letter body'
+            refresh_letter_files(self.letter, self.actor)
+            refresh_letter_files(self.letter, self.actor)
+        self.letter.refresh_from_db()
+        self.assertEqual(self.letter.custom_data['letterhead']['rev'], 2)
+        self.assertEqual(self.letter.body, 'Reviewed new letter body')
+        self.assertEqual(pdf.call_count, 2)
+        self.assertEqual(docx.call_count, 2)
+
+    def test_changed_context_updates_existing_draft_not_new_letter(self):
+        from apps.sales.workflow import prepare_letter
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test'), \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test'):
+            first = prepare_letter(self.letter.opportunity, self.actor, 'eoi')
+            opportunity = self.letter.opportunity
+            opportunity.deal_name = 'Updated opportunity context'
+            opportunity.save(update_fields=['deal_name'])
+            updated = prepare_letter(opportunity, self.actor, 'eoi')
+            repeated = prepare_letter(opportunity, self.actor, 'eoi')
+        self.assertEqual(first.pk, updated.pk)
+        self.assertEqual(updated.pk, repeated.pk)
+        self.assertEqual(SalesLetter.objects.count(), 1)
+        self.assertEqual(repeated.custom_data['letterhead']['rev'], 2)
+
+    def test_sent_letter_is_reused_but_changed_context_creates_new_draft(self):
+        from apps.sales.workflow import prepare_letter
+        opportunity = self.letter.opportunity
+        self.letter.delete()
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test'), \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test'):
+            sent = prepare_letter(opportunity, self.actor, 'eoi')
+            sent.mark_sent('buyer@example.test')
+            reopened = prepare_letter(opportunity, self.actor, 'eoi')
+            self.assertEqual(reopened.pk, sent.pk)
+            opportunity.description = 'Updated tender scope'
+            opportunity.save(update_fields=['description'])
+            draft = prepare_letter(opportunity, self.actor, 'eoi')
+            repeated = prepare_letter(opportunity, self.actor, 'eoi')
+        self.assertNotEqual(draft.pk, sent.pk)
+        self.assertEqual(repeated.pk, draft.pk)
+        self.assertEqual(draft.status, 'draft')
+        sent.refresh_from_db()
+        self.assertEqual(sent.status, 'sent')
+        self.assertEqual(SalesLetter.objects.count(), 2)
 
     @override_settings(FRONTEND_URL='https://www.radai.ae')
     def test_preview_contract_allows_frontend_iframe(self):
@@ -104,5 +202,9 @@ class LetterRegenerationStorageTests(TestCase):
                 self.assertNotIn('X-Frame-Options', response)
                 self.assertIn('https://www.radai.ae', response['Content-Security-Policy'])
                 self.assertEqual(response['Cache-Control'], 'private, no-store')
+                self.assertEqual(response['Content-Length'], str(len(b'%PDF-test')))
                 if method == api.get:
                     self.assertEqual(b''.join(response.streaming_content), b'%PDF-test')
+                else:
+                    self.assertFalse(response.streaming)
+                    self.assertEqual(response.content, b'')

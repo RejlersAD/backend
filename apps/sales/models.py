@@ -14,6 +14,7 @@ from .classification_models import OpportunityDocumentClassification, Opportunit
 from .proposal_review_models import ProposalReviewDocument, ProposalReviewComment, ProposalReviewCommand  # noqa: F401
 from .bid_preparation_models import BidPreparation, QuotePreparationRevision, BidPreparationCommand  # noqa: F401
 from .letter_models import SalesLetterTemplate, SalesLetter  # noqa: F401
+from .analysis_models import OpportunityAnalysis, OpportunityAnalysisSource, OpportunityAnalysisChunk  # noqa: F401
 
 User = get_user_model()
 
