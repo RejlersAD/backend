@@ -11,4 +11,4 @@ class SalesConfig(AppConfig):
     
     def ready(self):
         """Initialize app - import signals if any"""
-        pass
+        from . import analysis_signals  # noqa: F401

@@ -5,6 +5,8 @@ container parser is olefile; property selection is deliberately top-level only.
 All returned content remains untrusted evidence for a reviewable suggestion.
 """
 import codecs
+from datetime import datetime, timedelta, timezone
+from email.parser import Parser
 from html.parser import HTMLParser
 import struct
 
@@ -124,6 +126,24 @@ def extract_msg_text(source, size):
             parts = []
             for label, tag in [('Subject', '0037'), ('From', '0C1A'), ('Sender', '0C1F'), ('To', '0E04'), ('Cc', '0E03')]:
                 value = text_property(tag)
+                if value:
+                    parts.append(f'{label}: {value[:2000]}')
+            # Original transport identity is also useful for letter references.
+            transport = Parser().parsestr(text_property('007D'), headersonly=True)
+            sent = str(transport.get('Date', ''))
+            if not sent:
+                for offset in range(32, len(properties), 16):
+                    tag, = struct.unpack_from('<I', properties, offset)
+                    if tag == 0x00390040:  # PidTagClientSubmitTime, FILETIME.
+                        ticks, = struct.unpack_from('<Q', properties, offset + 8)
+                        try:
+                            sent = (datetime(1601, 1, 1, tzinfo=timezone.utc)
+                                    + timedelta(microseconds=ticks // 10)).strftime('%a, %d %b %Y %H:%M:%S %z')
+                        except OverflowError:
+                            pass
+                        break
+            message_id = text_property('1035') or str(transport.get('Message-ID', ''))
+            for label, value in [('Date', sent), ('Message-ID', message_id)]:
                 if value:
                     parts.append(f'{label}: {value[:2000]}')
             body = text_property('1000')

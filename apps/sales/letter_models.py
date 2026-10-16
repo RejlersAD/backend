@@ -68,6 +68,8 @@ class SalesLetter(TimeStampedModel):
     sent_to = models.EmailField(blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     custom_data = models.JSONField(default=dict, blank=True)
+    preparation_fingerprint = models.CharField(max_length=64, blank=True)
+    rendered_fingerprint = models.CharField(max_length=64, blank=True)
     # PDF fields
     pdf_file = models.FileField(upload_to=letter_pdf_upload_path, null=True, blank=True)
     pdf_generated_at = models.DateTimeField(null=True, blank=True)

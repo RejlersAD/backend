@@ -241,6 +241,8 @@ def operation_action(request, view):
             # PDF bytes additionally require the source opportunity export grant.
             return review_actions[operation]
     if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'DealViewSet'):
+        if operation in {'opportunity_analysis', 'opportunity_analysis_sources'}:
+            return 'export'
         if operation in {'bid_decision_justification', 'proposal_draft_field'}:
             return 'read'
         if operation == 'bid_decision':

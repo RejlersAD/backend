@@ -711,6 +711,35 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     ordering_fields = ['deal_code', 'id', 'created_at', 'expected_close_date', 'estimated_value', 'weighted_value']
     ordering = ['-created_at']
 
+    @action(detail=True, methods=['get', 'post'], url_path='analysis')
+    def opportunity_analysis(self, request, pk=None):
+        from .opportunity_analysis import analysis_projection, request_analysis
+        deal = self.get_object()
+        if request.method == 'POST':
+            if not isinstance(request.data, dict) or set(request.data) - {'retry'} or type(request.data.get('retry', False)) is not bool:
+                raise ValidationError({'detail': 'Analysis accepts only an optional boolean retry flag.'})
+            result = request_analysis(deal, request.user, request.data.get('retry', False))
+        else:
+            if request.query_params:
+                raise ValidationError({'detail': 'Analysis uses the saved opportunity.'})
+            result = analysis_projection(deal, request.user)
+        return Response(result, status=202 if request.method == 'POST' and result['status'] == 'queued' else 200,
+                        headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path='analysis/sources')
+    def opportunity_analysis_sources(self, request, pk=None):
+        from .opportunity_analysis import analysis_projection
+        if set(request.query_params) - {'offset'}:
+            raise ValidationError({'detail': 'Only a source offset is supported.'})
+        try:
+            offset = int(request.query_params.get('offset', '0'))
+            if offset < 0 or offset > 1_000_000:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise ValidationError({'offset': 'Use a nonnegative integer offset.'})
+        return Response(analysis_projection(self.get_object(), request.user, offset),
+                        headers={'Cache-Control': 'no-store, private'})
+
     @action(detail=True, methods=['get'], url_path='workspace')
     def workspace(self, request, pk=None):
         from .opportunity_workspace import workspace_projection
@@ -1000,6 +1029,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         from .letter_attachments import attach_letter_files
         try:
             attach_letter_files(letter, actor)
+            letter.refresh_from_db()
         except Exception as e:
             logger.error(f"Failed to attach letter {letter.id} files to Correspondence: {e}")
 
@@ -1080,6 +1110,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             as_attachment=False,
             filename=f"{deal.deal_code}-{letter.letter_type}.pdf"
         )
+        if request.method == 'HEAD':
+            # Gunicorn streams FileResponse's iterator even on HEAD. Sending
+            # PDF bytes after these headers breaks the development HTTP proxy.
+            from django.http import HttpResponse
+            headers = dict(response.items())
+            response.close()
+            response = HttpResponse(headers=headers)
         # This authenticated PDF is embedded by the configured frontend origin.
         # X-Frame-Options: SAMEORIGIN would block that cross-origin iframe.
         response.xframe_options_exempt = True
@@ -1163,10 +1200,8 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             letter.body = data['body']
         if 'custom_data' in data:
             letter.custom_data = data['custom_data']
-        letter.save(update_fields=['subject', 'body', 'custom_data', 'updated_at'])
-
         from .workflow import refresh_letter_files
-        refresh_letter_files(letter, request.user)
+        letter = refresh_letter_files(letter, request.user)
 
         # Refresh from DB so serialized custom_data reflects the rev bump.
         letter.refresh_from_db()
@@ -1184,21 +1219,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         except Deal.letters.RelatedObjectDoesNotExist:
             raise ValidationError({'letter': 'Letter not found for this opportunity.'})
         
-        # Update fields
-        updated_fields = []
-        if 'subject' in request.data:
-            letter.subject = request.data['subject']
-            updated_fields.append('subject')
-        if 'body' in request.data:
-            letter.body = request.data['body']
-            updated_fields.append('body')
-        if 'custom_data' in request.data:
-            letter.custom_data = request.data['custom_data']
-            updated_fields.append('custom_data')
-        
-        if updated_fields:
-            updated_fields.append('updated_at')
-            letter.save(update_fields=updated_fields)
+        serializer = SalesLetterRegenerateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        for field, value in serializer.validated_data.items():
+            setattr(letter, field, value)
+        from .workflow import refresh_letter_files
+        letter = refresh_letter_files(letter, request.user)
+        self._attach_letter_files(letter, request.user)
         
         return Response(SalesLetterSerializer(letter, context={'request': request}).data)
 

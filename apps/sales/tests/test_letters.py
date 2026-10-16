@@ -192,6 +192,7 @@ class LetterGenerationTests(TestCase):
 
     def test_refresh_letter_files_bumps_revision(self):
         letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        letter.body += '\n\nReviewed clarification.'
         refresh_letter_files(letter, self.actor)
         letter.refresh_from_db()
         self.assertEqual(letter.custom_data['letterhead']['rev'], 1)
@@ -254,7 +255,21 @@ class LetterAttachTests(TestCase):
         self.assertEqual(event.data['folder'], 'correspondence')
         self.assertEqual(len(event.data['files']), 2)
 
+        with patch('apps.sales.letter_attachments.upload_private_file') as upload:
+            repeated = attach_letter_files(letter, self.actor)
+        self.assertEqual(repeated['version'], 1)
+        upload.assert_not_called()
+
         letter.refresh_from_db()
+        letter.custom_data['attachments'].pop('fingerprint')
+        letter.save(update_fields=['custom_data'])
+        with patch('apps.sales.letter_attachments.upload_private_file') as upload:
+            legacy = attach_letter_files(letter, self.actor)
+        self.assertEqual(legacy['version'], 1)
+        upload.assert_not_called()
+
+        letter.refresh_from_db()
+        letter.body += '\n\nReviewed clarification.'
         refresh_letter_files(letter, self.actor)
         letter.refresh_from_db()
         attachments = attach_letter_files(letter, self.actor)
@@ -301,8 +316,21 @@ class LetterAttachTests(TestCase):
             {f['kind'] for f in response.data['attachments']['files']},
             {'pdf', 'docx'},
         )
+        repeated = api.post(url, {'letter_type': 'eoi'}, format='json')
+        self.assertEqual(repeated.status_code, 200, repeated.data)
+        self.assertEqual(repeated.data['id'], letter_id)
+        self.assertEqual(repeated.data['attachments']['version'], 1)
+        self.assertEqual(SalesLetter.objects.count(), 1)
 
         detail = f'/api/v1/sales/deals/{self.opportunity.pk}/letters/{letter_id}/'
+        unchanged = api.post(detail + 'regenerate-pdf/', {
+            'subject': response.data['subject'],
+            'body': response.data['body'],
+            'custom_data': response.data['custom_data'],
+        }, format='json')
+        self.assertEqual(unchanged.status_code, 200, unchanged.data)
+        self.assertEqual(unchanged.data['custom_data']['letterhead']['rev'], 0)
+        self.assertEqual(unchanged.data['attachments']['version'], 1)
         regen = api.post(detail + 'regenerate-pdf/', {
             'subject': 'Edited subject',
             'custom_data': response.data['custom_data'],
@@ -310,6 +338,13 @@ class LetterAttachTests(TestCase):
         self.assertEqual(regen.status_code, 200, regen.data)
         self.assertEqual(regen.data['custom_data']['letterhead']['rev'], 1)
         self.assertEqual(regen.data['attachments']['version'], 2)
+        retry = api.post(detail + 'regenerate-pdf/', {
+            'subject': 'Edited subject',
+            'custom_data': response.data['custom_data'],
+        }, format='json')
+        self.assertEqual(retry.status_code, 200, retry.data)
+        self.assertEqual(retry.data['custom_data']['letterhead']['rev'], 1)
+        self.assertEqual(retry.data['attachments']['version'], 2)
 
         docx = api.get(detail + 'docx/')
         self.assertEqual(docx.status_code, 200)
