@@ -68,8 +68,8 @@ class _TextBodyParser(HTMLParser):
 
     def text(self):
         text = ''.join(self.parts).replace('\r\n', '\n').replace('\r', '\n')
-        text = re.sub(r'[\t ]+\n', '\n', text)
-        return re.sub(r'\n[\t ]*\n(?:[\t ]*\n)+', '\n\n', text).strip()
+        text = '\n'.join(line.rstrip('\t ') for line in text.split('\n'))
+        return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
 def _safe_link(value):

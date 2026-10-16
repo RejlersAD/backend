@@ -146,6 +146,8 @@ def save_letter_pdf(letter, custom_data=None):
     Generate and save PDF to letter's pdf_file field.
     Returns the saved file path.
     """
+    from .letter_extraction import require_recipient
+    require_recipient({**(letter.custom_data or {}), **(custom_data or {})}.get('letterhead') or {})
     pdf_bytes = generate_letter_pdf(letter, custom_data)
 
     # Create filename

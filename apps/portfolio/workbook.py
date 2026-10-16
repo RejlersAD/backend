@@ -19,6 +19,11 @@ from openpyxl.utils import get_column_letter
 PARSER_VERSION = '2.1'
 HEADER_ROW = 7
 MAX_BYTES = 25 * 1024 * 1024
+# Generous bounds for dynamic workbooks refreshed from SharePoint.
+# Excel max is 1,048,576 rows x 16,384 columns; keep well below memory risk
+# but far above any legitimate daily-updated workbook.
+MAX_WORKSHEET_ROWS = 100000
+MAX_WORKSHEET_COLS = 16384
 MISSING = {'', '-', 'n/a', 'n.a', 'n.a.', 'na', 'nil'}
 TEXT_HEADERS = {
     'project_code': 'PROJECT ID', 'subproject_code': 'PROJECT SUB ID',
@@ -58,6 +63,17 @@ def _json_value(value):
 
 def _warning(warnings, sheet, row, col, field, code):
     warnings.append({'sheet': sheet, 'cell': f'{get_column_letter(col)}{row}', 'field': field, 'code': code})
+
+
+def _content_bounds(sheet):
+    # Declared sheet dimensions are inflated by leftover formatting or by past
+    # edits far outside the data, so only value-bearing cells prove content.
+    rows = cols = 0
+    for (row, col), cell in sheet._cells.items():
+        if cell.value is not None:
+            rows = max(rows, row)
+            cols = max(cols, col)
+    return rows, cols
 
 
 def _number(cell, formula, *, sheet, row, col, field, warnings, percent=False):
@@ -207,8 +223,10 @@ def read_workbook(path_or_bytes):
         if 'POC' not in workbook.sheetnames:
             raise ValueError('Workbook must contain the POC source sheet.')
         for name in ('POC', 'Delivery Rolling Forecast'):
-            if name in workbook.sheetnames and (workbook[name].max_row > 10000 or workbook[name].max_column > 500):
-                raise ValueError(f'{name} exceeds the supported worksheet dimensions.')
+            if name in workbook.sheetnames:
+                used_rows, used_cols = _content_bounds(workbook[name])
+                if used_rows > MAX_WORKSHEET_ROWS or used_cols > MAX_WORKSHEET_COLS:
+                    raise ValueError(f'{name} exceeds the supported worksheet dimensions.')
         sheet, source = workbook['POC'], formulas['POC']
         headers = _columns(sheet)
         columns = {key: _single(headers, label) for key, label in
@@ -269,10 +287,13 @@ def read_workbook(path_or_bytes):
                     for col in monetary_columns
                 )
                 if title or source.cell(number, columns['title']).data_type == 'f' or has_financial_data:
-                    raise ValueError(f'POC row {number} requires both project and subproject identifiers.')
-                continue
+                    _warning(warnings, 'POC', number, columns['project_code'],
+                             'project_code', 'missing_project_identity')
+                    continue
             if not code or not sub:
-                raise ValueError(f'POC row {number} requires both project and subproject identifiers.')
+                _warning(warnings, 'POC', number, columns['project_code'],
+                         'project_code', 'missing_project_identity')
+                continue
             if any(sheet.cell(number, columns[key]).data_type == 'e' for key in ('project_code', 'subproject_code')):
                 raise ValueError(f'POC row {number} contains an invalid project identifier.')
             if (code, sub) in seen:

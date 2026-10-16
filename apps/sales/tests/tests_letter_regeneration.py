@@ -34,6 +34,7 @@ class LetterRegenerationStorageTests(TestCase):
         self.letter = SalesLetter.objects.create(
             opportunity=opportunity, letter_type='eoi', template=template,
             subject='Test subject', body='Test body', generated_by=actor,
+            custom_data={'letterhead': {'recipient_name': 'Saved Buyer', 'recipient_email': 'buyer@client.test'}},
         )
 
     def test_refresh_does_not_require_local_storage_paths(self):
@@ -117,7 +118,7 @@ class LetterRegenerationStorageTests(TestCase):
         self.letter.delete()
         with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
              patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test') as docx:
-            first = prepare_letter(opportunity, self.actor, 'eoi')
+            first = prepare_letter(opportunity, self.actor, 'eoi', {'letterhead': {'recipient_name': 'Saved Buyer', 'recipient_email': 'buyer@client.test'}})
             second = prepare_letter(opportunity, self.actor, 'eoi')
             self.assertEqual(first.pk, second.pk)
             self.assertEqual(pdf.call_count, 1)
@@ -130,6 +131,66 @@ class LetterRegenerationStorageTests(TestCase):
         self.assertEqual(SalesLetter.objects.count(), 1)
         self.assertEqual(reopened.custom_data['letterhead']['rev'], 1)
         self.assertEqual(pdf.call_count, 2)
+
+    def test_prepared_letter_attachment_cannot_change_its_own_recipient_context(self):
+        from io import BytesIO
+        from uuid import uuid4
+        from apps.sales.models import OpportunityWorkspace, OpportunityWorkspaceUpload
+        from apps.sales.workflow import prepare_letter
+
+        opportunity = self.letter.opportunity
+        self.letter.delete()
+        with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test') as docx:
+            first = prepare_letter(opportunity, self.actor, 'eoi', {'letterhead': {'recipient_name': 'Saved Buyer', 'recipient_email': 'buyer@client.test'}})
+            original_files = (first.pdf_file.name, first.docx_file.name)
+            workspace = OpportunityWorkspace.objects.create(opportunity=opportunity)
+            upload = OpportunityWorkspaceUpload.objects.create(
+                workspace=workspace, request_id=uuid4(), actor=self.actor,
+                folder_key='correspondence', name='response.pdf', size=9,
+                sha256='a' * 64, provider='radai', status='ready',
+            )
+            first.custom_data['attachments'] = {'files': [
+                {'kind': 'pdf', 'status': 'ready', 'file': {'id': f'radai-{upload.pk}'}},
+            ]}
+            first.save(update_fields=['custom_data'])
+            with patch('apps.sales.private_attachments.download_private_file',
+                       return_value=(BytesIO(b'%PDF-test'), upload.name)) as download, \
+                 patch('apps.sales.document_classification_content.extract_document_text',
+                       return_value=('Contact Name: Internal Sender\nEmail: sender@our-company.test', {})):
+                reopened = prepare_letter(opportunity, self.actor, 'eoi')
+                repeated = prepare_letter(opportunity, self.actor, 'eoi')
+            download.assert_not_called()
+        self.assertEqual(reopened.pk, first.pk)
+        self.assertEqual(repeated.pk, first.pk)
+        self.assertEqual((reopened.pdf_file.name, reopened.docx_file.name), original_files)
+        self.assertEqual(repeated.custom_data['letterhead']['rev'], 0)
+        self.assertEqual(SalesLetter.objects.count(), 1)
+        self.assertEqual(pdf.call_count, 1)
+        self.assertEqual(docx.call_count, 1)
+
+    def test_source_metadata_change_without_content_change_keeps_output_version(self):
+        from apps.sales.workflow import prepare_letter
+
+        opportunity = self.letter.opportunity
+        self.letter.delete()
+        fields = {'recipient_name': 'Buyer', 'recipient_email': 'buyer@client.test'}
+        with patch('apps.sales.letter_extraction.extract_opportunity_letter_fields') as extract, \
+             patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
+             patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test') as docx:
+            extract.return_value = {**fields, '_source': {'upload_id': 'first', 'sha256': 'a' * 64}}
+            first = prepare_letter(opportunity, self.actor, 'eoi')
+            original_files = (first.pdf_file.name, first.docx_file.name)
+            extract.return_value = {**fields, '_source': {'upload_id': 'new-version', 'sha256': 'b' * 64}}
+            reopened = prepare_letter(opportunity, self.actor, 'eoi')
+            reopened = prepare_letter(opportunity, self.actor, 'eoi')
+            reopened = refresh_letter_files(reopened, self.actor)
+        self.assertEqual(reopened.pk, first.pk)
+        self.assertEqual((reopened.pdf_file.name, reopened.docx_file.name), original_files)
+        self.assertEqual(reopened.custom_data['letterhead']['rev'], 0)
+        self.assertEqual(reopened.custom_data['letter_extraction']['source']['upload_id'], 'new-version')
+        self.assertEqual(pdf.call_count, 1)
+        self.assertEqual(docx.call_count, 1)
 
     def test_changed_content_increments_once_and_retry_is_noop(self):
         with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test') as pdf, \
@@ -165,7 +226,7 @@ class LetterRegenerationStorageTests(TestCase):
         self.letter.delete()
         with patch('apps.sales.letter_pdf.generate_letter_pdf', return_value=b'%PDF-test'), \
              patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test'):
-            sent = prepare_letter(opportunity, self.actor, 'eoi')
+            sent = prepare_letter(opportunity, self.actor, 'eoi', {'letterhead': {'recipient_name': 'Saved Buyer', 'recipient_email': 'buyer@client.test'}})
             sent.mark_sent('buyer@example.test')
             reopened = prepare_letter(opportunity, self.actor, 'eoi')
             self.assertEqual(reopened.pk, sent.pk)

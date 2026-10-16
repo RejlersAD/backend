@@ -203,6 +203,8 @@ def generate_letter_docx(letter, custom_data=None):
 
 def save_letter_docx(letter, custom_data=None):
     """Generate and save the DOCX to the letter's docx_file field."""
+    from .letter_extraction import require_recipient
+    require_recipient({**(letter.custom_data or {}), **(custom_data or {})}.get('letterhead') or {})
     docx_bytes = generate_letter_docx(letter, custom_data)
     filename = f"{letter.opportunity.deal_code}-{letter.letter_type}-{letter.generated_at.strftime('%Y%m%d')}.docx"
     letter.docx_file.save(filename, ContentFile(docx_bytes), save=False)

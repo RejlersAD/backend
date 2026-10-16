@@ -13,8 +13,13 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from apps.rbac.action_policy import module_action_allowed
 from apps.rbac.data_visibility_mixin import build_visibility_filter
 
-from .models import Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload, ProjectHandover
+from .models import (Client, Deal, OpportunityDocument, OpportunityWorkspace,
+                     OpportunityWorkspaceUpload, ProjectHandover)
+from .attachment_storage import attachment_storage
 from .attachment_streams import configured_limit, prepare_upload
+from .classification_models import (OpportunityDocumentClassification,
+                                    OpportunityDocumentClassificationCommand,
+                                    OpportunityDocumentClassificationRun)
 from .workflow import _audit
 from .workspace_graph import (
     WorkspaceError, WorkspaceGraph, file_projection, version_projection, workspace_config,
@@ -110,12 +115,14 @@ def delete_opportunity_with_workspace_guard(opportunity):
     # Worker checkpoints lock workspace then append a Deal-referencing audit.
     # NO KEY UPDATE allows that FK check to finish while we await the workspace.
     Deal.objects.select_for_update(no_key=True).get(pk=opportunity.pk)
-    workspace = OpportunityWorkspace.objects.select_for_update().filter(opportunity=opportunity).first()
-    if workspace and (workspace.status != 'not_configured' or _registered(workspace)
-                      or workspace.uploads.exists()):
-        raise WorkspaceAPIError('workspace_retained', 409)
     if ProjectHandover.objects.filter(opportunity=opportunity).exists():
         raise WorkspaceAPIError('handover_retained', 409)
+    workspace = OpportunityWorkspace.objects.select_for_update().filter(opportunity=opportunity).first()
+    if workspace:
+        # Opportunity deletion is not restricted by workspace state: purge the
+        # local ledger and stored RADAI objects. Linked SharePoint content is
+        # not touched here; an administrator reconciles it in SharePoint.
+        _purge_workspace_storage(workspace)
     # Generated letters belong to the opportunity; remove them and their files.
     for letter in opportunity.letters.all():
         if letter.pdf_file:
@@ -128,6 +135,35 @@ def delete_opportunity_with_workspace_guard(opportunity):
     # Activity history only exists for this opportunity.
     opportunity.audit_events.all().delete()
     opportunity.delete()
+
+
+def _delete_stored_radai_objects(uploads):
+    from .private_attachments import _name
+    try:
+        storage, fingerprint = attachment_storage()
+    except Exception:
+        return
+    for attempt in uploads.filter(provider='radai', storage_name__gt=''):
+        if attempt.storage_fingerprint != fingerprint or attempt.storage_name != _name(attempt):
+            continue
+        try:
+            storage.delete(attempt.storage_name)
+        except Exception:
+            pass
+
+
+def _purge_workspace_storage(workspace):
+    uploads = OpportunityWorkspaceUpload.objects.filter(workspace=workspace)
+    _delete_stored_radai_objects(uploads)
+    # Classification rows PROTECT their document and upload; remove them first.
+    OpportunityDocumentClassificationCommand.objects.filter(
+        Q(document__workspace=workspace) | Q(upload__workspace=workspace)).delete()
+    OpportunityDocumentClassificationRun.objects.filter(upload__workspace=workspace).delete()
+    OpportunityDocumentClassification.objects.filter(document__workspace=workspace).delete()
+    # Documents and uploads reference each other with PROTECT; clear one side.
+    uploads.update(document=None, previous_upload=None)
+    OpportunityDocument.objects.filter(workspace=workspace).delete()
+    uploads.delete()
 
 
 @transaction.atomic

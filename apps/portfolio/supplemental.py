@@ -13,7 +13,8 @@ import re
 
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-from .workbook import _date_value, _json_value, _normal, _number, _text, _warning
+from .workbook import (_content_bounds, _date_value, _json_value, _normal, _number, _text, _warning,
+                       MAX_WORKSHEET_ROWS, MAX_WORKSHEET_COLS)
 
 
 EXECUTIVE_HEADERS = {
@@ -40,7 +41,9 @@ def _headers(sheet, row):
 
 def _column(headers, label, sheet, *, required=True):
     matches = headers.get(_normal(label), [])
-    if len(matches) > 1 or required and not matches:
+    if required and not matches:
+        raise ValueError(f'{sheet} requires one {label!r} header.')
+    if required and len(matches) > 1:
         raise ValueError(f'{sheet} requires one {label!r} header.')
     return matches[0] if matches else None
 
@@ -90,7 +93,8 @@ def _optional_sheet(workbook, name, warnings):
         warnings.append({'sheet': name, 'code': 'optional_sheet_missing'})
         return None
     sheet = workbook[name]
-    if sheet.max_row > 10000 or sheet.max_column > 500:
+    rows, cols = _content_bounds(sheet)
+    if rows > MAX_WORKSHEET_ROWS or cols > MAX_WORKSHEET_COLS:
         raise ValueError(f'{name} exceeds the supported worksheet dimensions.')
     return sheet
 

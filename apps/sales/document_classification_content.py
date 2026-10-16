@@ -185,6 +185,25 @@ def _xml_text(source, suffix, text_limit=TEXT_CHARS, all_parts=False):
                 count += 1
                 if count > 100_000:
                     raise ContentUnavailable('structure_limit')
+            paragraphs = list(tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')) if suffix == '.docx' else []
+            if paragraphs:
+                # Formatting runs are contiguous text, not separate paragraphs.
+                for paragraph in paragraphs:
+                    parts = []
+                    for element in paragraph.iter():
+                        local = element.tag.rsplit('}', 1)[-1]
+                        if local == 't' and element.text:
+                            parts.append(element.text)
+                        elif local in {'tab', 'br', 'cr'}:
+                            parts.append('\t' if local == 'tab' else '\n')
+                    value = ''.join(parts).strip()
+                    if value:
+                        pieces.append(value)
+                        text_length += len(value) + 1
+                        if text_length >= text_limit:
+                            return '\n'.join(pieces)[:text_limit]
+                continue
+            for element in tree.iter():
                 # Text nodes only; no formulas/URLs/XML attributes.
                 if element.tag.rsplit('}', 1)[-1] in {'t', 'p'} and element.text and element.text.strip():
                     pieces.append(element.text.strip())
