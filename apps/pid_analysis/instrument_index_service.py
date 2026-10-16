@@ -3001,7 +3001,7 @@ class InstrumentIndexService:
       4. Tesseract OCR       — last resort for pure scanned PDFs
     """
 
-    def __init__(self):
+    def __init__(self, byok_provider=None, byok_api_key=None, byok_model=None):
         self.extraction_config  = EXTRACTION_CONFIG.copy()
         self._quota_exceeded    = False   # set True on OpenAI 429
         self._gemini_quota_exceeded = False
@@ -3012,6 +3012,20 @@ class InstrumentIndexService:
         # the Django boot fast. None = not loaded yet, False = load failed.
         self._easyocr_reader   = None
         self._paddleocr_reader = None
+        # BYOK (Bring Your Own Key) — a user-supplied OpenAI/Claude key
+        # passed per-upload from the Instrument Index UI. When present, a
+        # dedicated 'byok' engine is tried FIRST in _vision_pass, before
+        # the shared/quota-limited env keys — the user's own key, used
+        # directly (no DB credential lookup, same rule as
+        # electrical_comparison's _call_claude_electrical). Never persisted.
+        self.byok_provider = (byok_provider or '').strip().lower() or None
+        self.byok_api_key  = (byok_api_key or '').strip() or None
+        self.byok_model    = (byok_model or '').strip() or None
+        self._byok_quota_exceeded = False
+        if self.byok_api_key and self.byok_provider not in ('openai', 'claude'):
+            logger.warning("[InstrumentIndex] BYOK provider %r unsupported — ignored", self.byok_provider)
+            self.byok_provider = None
+            self.byok_api_key = None
 
     # ────────────────────────────────────────────────────────────────────
     # Initialisation helpers
@@ -6488,9 +6502,18 @@ Rules:
         engines = self.extraction_config.get("ai_engines", ["gemini", "openai"])
         if only_engine:
             engines = [only_engine]
+        # BYOK: the user's own key takes priority over every shared engine.
+        if self.byok_api_key and not only_engine:
+            engines = ["byok"] + list(engines)
         for engine in engines:
             instruments = []
-            if engine == "gemini":
+            if engine == "byok":
+                if self._byok_quota_exceeded:
+                    continue
+                instruments = self._call_byok_vision(b64, prompt, f"{mode}_byok_{self.byok_provider}", max_tokens)
+                if not instruments:
+                    instruments = self._call_byok_vision(b64, fallback_prompt, f"{mode}_byok_{self.byok_provider}_fb", max_tokens)
+            elif engine == "gemini":
                 if self._gemini_quota_exceeded or not self.gemini_client:
                     continue
                 instruments = self._call_gemini_vision(b64, prompt, f"{mode}_gemini", max_tokens)
@@ -6790,6 +6813,79 @@ Rules:
                 logger.error(f"[InstrumentIndex] OpenAI quota/rate-limit hit ({mode_label}) — OpenAI disabled")
             else:
                 logger.error(f"[InstrumentIndex] OpenAI Vision error ({mode_label}): {e}", exc_info=True)
+            return []
+
+    def _call_byok_vision(self, b64_image, prompt, mode_label, max_tokens=None):
+        """Call the USER'S OWN OpenAI or Claude key (BYOK) — direct SDK
+        client, no DB/env credential lookup. Same response contract as
+        _call_openai_vision (parsed instrument list or [])."""
+        cfg = self.extraction_config
+        if max_tokens is None:
+            max_tokens = cfg["max_tokens_primary"]
+        if self._byok_quota_exceeded:
+            logger.warning(f"[InstrumentIndex] Skipping BYOK call ({mode_label}) — quota exceeded")
+            return []
+
+        system_prompt = (
+            "You are an expert P&ID analyst and process instrumentation engineer "
+            "with 20+ years of experience reading ADNOC / oil & gas engineering drawings. "
+            "You can identify ALL types of instrument symbols regardless of orientation. "
+            "Extract EVERY instrument tag you see. Return ONLY a valid JSON array."
+        )
+        try:
+            if self.byok_provider == 'claude':
+                import anthropic
+                from apps.pid_checker_v2.services.vision_extractor import VISION_MODELS
+                client = anthropic.Anthropic(api_key=self.byok_api_key, timeout=cfg.get("openai_request_timeout_sec", 180))
+                logger.info(f"[InstrumentIndex] Calling Claude Vision BYOK ({mode_label}, max_tokens={max_tokens})…")
+                resp = client.messages.create(
+                    model=self.byok_model or VISION_MODELS['claude'],
+                    max_tokens=max_tokens,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64_image}},
+                        {"type": "text", "text": prompt},
+                    ]}],
+                )
+                raw = ''.join(b.text for b in resp.content if getattr(b, 'type', None) == 'text')
+            else:  # openai
+                import openai
+                client = openai.OpenAI(
+                    api_key=self.byok_api_key,
+                    timeout=cfg.get("openai_request_timeout_sec", 180),
+                    max_retries=cfg.get("openai_max_retries", 2),
+                )
+                logger.info(f"[InstrumentIndex] Calling OpenAI Vision BYOK ({mode_label}, max_tokens={max_tokens})…")
+                resp = client.chat.completions.create(
+                    model=self.byok_model or cfg.get("model", "gpt-4o"),
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}", "detail": "high"}},
+                        ]},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=cfg.get("temperature", 0.1),
+                )
+                raw = resp.choices[0].message.content
+
+            raw_len = len(raw or "")
+            logger.info(f"[InstrumentIndex] BYOK {self.byok_provider} response {raw_len} chars ({mode_label})")
+            if not raw or not raw.strip():
+                logger.warning(f"[InstrumentIndex] BYOK returned EMPTY content ({mode_label})")
+                return []
+            return self._parse_response(raw)
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "insufficient_quota" in err_str or "rate_limit" in err_str.lower():
+                self._byok_quota_exceeded = True
+                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} quota/rate-limit hit ({mode_label}) — BYOK disabled")
+            elif "401" in err_str or "authentication" in err_str.lower() or "invalid_api_key" in err_str.lower():
+                self._byok_quota_exceeded = True  # don't keep retrying a bad key on every tile
+                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} key rejected ({mode_label}): {e}")
+            else:
+                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} Vision error ({mode_label}): {e}", exc_info=True)
             return []
 
     # Keep _call_vision as alias for backward compatibility

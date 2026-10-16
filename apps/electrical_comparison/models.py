@@ -34,6 +34,31 @@ class ElectricalComparisonJob(models.Model):
     # uploaded / processing / completed / failed
     error_message = models.TextField(blank=True)
     pid_file_name = models.CharField(max_length=255)
+    # The uploaded P&ID/SLD PDF itself, persisted permanently (unlike
+    # task_context['pid_file_path'] in tasks.py, which is a throwaway
+    # temp path deleted at the end of every job — see _cleanup_temp_file).
+    # Added specifically so AnnotatedPDFView can re-open the original
+    # drawing later to overlay comparison-result boxes on it; jobs
+    # uploaded before this field existed simply have pid_file empty.
+    pid_file = models.FileField(upload_to='electrical_comparison/pid_files/%Y/%m/', null=True, blank=True)
+    # The uploaded Equipment List / Load List files (.xlsx or .pdf),
+    # persisted for the same reason as pid_file: AnnotatedPagesView
+    # re-opens them later to render the canvas viewer (highlighted rows
+    # for Excel, highlighted boxes for PDF) long after the task's temp
+    # copies were cleaned up.
+    equipment_file = models.FileField(upload_to='electrical_comparison/equipment_lists/%Y/%m/', null=True, blank=True)
+    load_list_file = models.FileField(upload_to='electrical_comparison/load_lists/%Y/%m/', null=True, blank=True)
+    # Targeted Vision pass results (tag_extractor.locate_tags_on_drawing):
+    # {tag: [{'page': 1-based, 'x0','y0','x1','y1' in PDF points}]} for
+    # 'missing' tags the AI managed to locate on the scanned drawing
+    # after all. Consumed by AnnotatedPagesView to draw [LOCATED] boxes
+    # on the Drawing canvas.
+    located_boxes = models.JSONField(default=dict, blank=True)
+    # AGPS-SP-EDS-002 drafting-standard check results
+    # (services/drafting_check.run_drafting_check):
+    # {'pages': [{'page', 'checks': [{'rule_id','rule','status',
+    # 'evidence'}]}], 'summary': {'pass','fail','review'}}.
+    drafting_results = models.JSONField(default=dict, blank=True)
     provider = models.CharField(
         max_length=20, default='claude')
     model_used = models.CharField(

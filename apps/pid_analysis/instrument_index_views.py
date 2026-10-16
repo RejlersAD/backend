@@ -110,7 +110,19 @@ def extract_instrument_index(request):
         f"({len(pid_bytes) / 1024:.1f} KB) — drawing: {drawing_info['drawing_number']}"
     )
 
-    service = _get_service()
+    # BYOK — user-supplied OpenAI/Claude key (used by the legend parse
+    # and by the legacy synchronous path below; the async Celery path
+    # gets the same values via task_args).
+    byok = {
+        'provider': (request.data.get('provider') or '').strip().lower(),
+        'api_key':  (request.data.get('api_key')  or '').strip(),
+        'model':    (request.data.get('model')    or '').strip(),
+    }
+    service = InstrumentIndexService(
+        byok_provider=byok['provider'],
+        byok_api_key=byok['api_key'],
+        byok_model=byok['model'],
+    )
     legend_context_override = None
     if legend_file:
         legend_bytes = legend_file.read()
@@ -145,6 +157,10 @@ def extract_instrument_index(request):
             task_args = (
                 upload_id, pid_b64, pid_file.name, drawing_info,
                 legend_b64, (legend_file.name if legend_file else ''),
+                # BYOK — user-supplied OpenAI/Claude key from the UI
+                # (optional; empty dict = shared engines only). Passed
+                # through to the task/service, never stored.
+                byok,
             )
             try:
                 run_instrument_index_task.delay(*task_args)

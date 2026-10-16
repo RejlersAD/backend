@@ -54,9 +54,11 @@ from django.db import connection
 from apps.pid_verification_v2.services.comparison_engine import compare_with_equipment_list
 from apps.electrical_comparison.models import ElectricalComparisonJob, ElectricalComparisonResult
 from apps.electrical_comparison.services.tag_extractor import resolve_equipment_type
-from apps.electrical_comparison.services.excel_parser import parse_excel_tags, extract_panel_tag_from_load_list
+from apps.electrical_comparison.services.excel_parser import (
+    parse_excel_tags, extract_panel_tag_from_load_list, extract_panel_tag_from_excel, LOAD_LIST_MOTOR_TYPE_CODES,
+)
 from apps.electrical_comparison.helpers import (
-    _collect_comparison_rows, _build_panel_verification, _build_combined_comparison,
+    _collect_comparison_rows, _build_panel_verification, _build_combined_comparison, _tag_type_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -579,6 +581,14 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
                 load_list_bytes = f.read()
             if is_load_list_pdf:
                 load_list_panel_info = extract_panel_tag_from_load_list(load_list_bytes)
+            else:
+                # xlsx Load Lists carry the same "PANEL TAG: ..." line as
+                # a row above the motor table — without extracting it
+                # here, the Equipment-vs-Load-List comparison below fell
+                # back to a direct panel-tags-vs-motor-tags match that
+                # reported every panel and every motor as a discrepancy
+                # (they're different equipment classes by design).
+                load_list_panel_info = extract_panel_tag_from_excel(io.BytesIO(load_list_bytes))
             load_fileobj = io.BytesIO(load_list_bytes)
             load_fileobj.name = load_list_file_name
             load_list_tags = parse_excel_tags(load_fileobj, 'load_list')
@@ -612,22 +622,39 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
             for t in pid_tags
         ]
 
-        # Comparison 1 — P&ID vs Equipment List
+        # BUG FIX: pid_equip (every electrical tag on the P&ID — motors
+        # AND panels together) used to be compared, unfiltered, against
+        # BOTH the Equipment List and the Load List. The Load List side
+        # was already purified to motor tags only (_filter_load_list_
+        # motor_tags in excel_parser.py), but the P&ID side never was —
+        # so a motor tag correctly absent from the Equipment List showed
+        # up as a false "extra" there, and a panel tag correctly absent
+        # from the Load List showed up as a false "extra" there too.
+        # Split pid_equip the same way the Load List side already is:
+        # non-motor tags go to the Equipment List comparison, motor tags
+        # go to the Load List comparison. Full Comparison (Tab 4) keeps
+        # using the unfiltered `pid_tags` list, unchanged.
+        pid_equip_panels = [t for t in pid_equip if _tag_type_code(t['tag']) not in LOAD_LIST_MOTOR_TYPE_CODES]
+        pid_equip_motors = [t for t in pid_equip if _tag_type_code(t['tag']) in LOAD_LIST_MOTOR_TYPE_CODES]
+
+        # Comparison 1 — P&ID vs Equipment List (non-motor/panel tags only)
         if pid_file_path and equipment_tags:
-            equipment_results = compare_with_equipment_list(pid_equip, equipment_tags)
+            equipment_results = compare_with_equipment_list(pid_equip_panels, equipment_tags)
             comparisons_done.append('pid_vs_equipment')
 
-        # Comparison 2 — P&ID vs Load List
+        # Comparison 2 — P&ID vs Load List (motor tags only)
         if pid_file_path and load_list_tags:
-            load_results = compare_with_equipment_list(pid_equip, load_list_tags)
+            load_results = compare_with_equipment_list(pid_equip_motors, load_list_tags)
             comparisons_done.append('pid_vs_loadlist')
 
         # Comparison 3 — Equipment List vs Load List (see
-        # views._build_panel_verification's own docstring for why this
-        # is panel-verification, not a direct tag comparison, when the
-        # Load List is a PDF).
+        # helpers._build_panel_verification's own docstring for why this
+        # is panel-verification, not a direct tag comparison). Now keyed
+        # on whether a PANEL TAG was found — in the Load List PDF OR
+        # xlsx — rather than the file format; only a Load List with no
+        # panel tag at all falls back to the old direct comparison.
         if equipment_tags and load_list_tags:
-            if is_load_list_pdf:
+            if load_list_panel_info:
                 panel_verification = _build_panel_verification(equipment_tags, load_list_tags, load_list_panel_info)
             else:
                 eq_vs_ll_results = compare_with_equipment_list(equipment_tags, load_list_tags)
@@ -638,9 +665,9 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
 
         results_to_save = []
         if equipment_results is not None:
-            _collect_comparison_rows(job, results_to_save, equipment_results, 'equipment_list', pid_equip, equipment_tags)
+            _collect_comparison_rows(job, results_to_save, equipment_results, 'equipment_list', pid_equip_panels, equipment_tags)
         if load_results is not None:
-            _collect_comparison_rows(job, results_to_save, load_results, 'load_list', pid_equip, load_list_tags)
+            _collect_comparison_rows(job, results_to_save, load_results, 'load_list', pid_equip_motors, load_list_tags)
         if eq_vs_ll_results is not None:
             _collect_comparison_rows(job, results_to_save, eq_vs_ll_results, 'equipment_vs_loadlist', equipment_tags, load_list_tags)
 
@@ -690,6 +717,40 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
 
         if results_to_save:
             ElectricalComparisonResult.objects.bulk_create(results_to_save)
+
+        # Targeted locator pass — for every 'missing' tag (in a reference
+        # list but not found on the P&ID by the main extraction), ask the
+        # Vision model to find exactly those tags on the drawing. Scanned
+        # P&IDs have no text layer, so this is the only way to get their
+        # coordinates for the canvas viewer. Best-effort: a failure here
+        # must never fail an otherwise-completed job.
+        missing_tags = sorted({r.tag_number for r in results_to_save if r.status == 'missing'})
+        if pid_file_path and resolved_key and missing_tags:
+            try:
+                from .services.tag_extractor import locate_tags_on_drawing
+                with open(pid_file_path, 'rb') as f:
+                    pid_bytes = f.read()
+                located = locate_tags_on_drawing(pid_bytes, missing_tags, resolved_key, provider, model)
+                if located:
+                    job.located_boxes = located
+            except Exception:
+                logger.exception('[ElecCompareTask] Locate pass failed for job_id=%s (non-fatal)', job_id)
+
+        # AGPS-SP-EDS-002 drafting-standard check — runs whenever a P&ID
+        # was uploaded (the sheet-size rule is free/programmatic even
+        # without an API key; the title-block/presentation rules use the
+        # same Vision key as extraction). Best-effort, like the locate
+        # pass above.
+        if pid_file_path:
+            try:
+                from .services.drafting_check import run_drafting_check
+                with open(pid_file_path, 'rb') as f:
+                    drafting_pdf_bytes = f.read()
+                drafting = run_drafting_check(drafting_pdf_bytes, resolved_key, provider, model)
+                if drafting and drafting.get('pages'):
+                    job.drafting_results = drafting
+            except Exception:
+                logger.exception('[ElecCompareTask] Drafting check failed for job_id=%s (non-fatal)', job_id)
 
         job.status = 'completed'
         job.save()
