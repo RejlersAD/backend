@@ -1238,6 +1238,10 @@ CELERY_BEAT_SCHEDULE['sales-document-classifications'] = {
     'task': 'apps.sales.tasks.dispatch_document_classifications',
     'schedule': 60.0, 'options': {'expires': 60},
 }
+CELERY_BEAT_SCHEDULE['sales-opportunity-analyses'] = {
+    'task': 'apps.sales.tasks.dispatch_opportunity_analyses',
+    'schedule': 15.0, 'options': {'expires': 15},
+}
 
 # ==============================================================================
 # End of Celery Configuration

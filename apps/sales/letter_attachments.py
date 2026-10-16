@@ -10,10 +10,13 @@ all created by those services, identical to a manually uploaded file.
 """
 
 import logging
-from uuid import uuid4
+import hashlib
+from uuid import NAMESPACE_URL, uuid5
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from django.db import transaction
 
 from .letter_docx import DOCX_CONTENT_TYPE, get_letter_docx_bytes
 from .letter_pdf import get_letter_pdf_bytes
@@ -66,6 +69,7 @@ def _letter_file_payloads(letter):
     return payloads
 
 
+@transaction.atomic
 def attach_letter_files(letter, actor):
     """Upload the letter PDF+DOCX to the Correspondence folder via the standard
     workspace upload service and record the outcome. Never raises.
@@ -74,17 +78,45 @@ def attach_letter_files(letter, actor):
     endpoint makes for the deployment's storage (no fallback chain).
     """
     from .workflow import _audit
+    from .models import Deal, SalesLetter
+
+    Deal.objects.select_for_update().get(pk=letter.opportunity_id)
+    letter = SalesLetter.objects.select_for_update().get(pk=letter.pk)
 
     existing = (letter.custom_data or {}).get('attachments') or {}
-    version = int(existing.get('version') or 0) + 1
     provider = 'sharepoint' if workspace_config() is not None else 'radai'
     upload = upload_workspace_file if provider == 'sharepoint' else upload_private_file
+    payloads = _letter_file_payloads(letter)
+    fingerprint = hashlib.sha256(
+        repr([(kind, name, hashlib.sha256(content).hexdigest()) for kind, name, content, _ in payloads]).encode()
+    ).hexdigest()
+    unchanged = existing.get('fingerprint') == fingerprint and existing.get('provider') == provider
+    attached_at = parse_datetime(existing['attached_at']) if existing.get('attached_at') else None
+    generated = [value for value in (letter.pdf_generated_at, letter.docx_generated_at) if value]
+    if (not existing.get('fingerprint') and attached_at and timezone.is_aware(attached_at)
+            and generated and max(generated) <= attached_at and existing.get('provider') == provider
+            and len(existing.get('files', [])) == 2
+            and all(item.get('status') == 'ready' for item in existing['files'])):
+        existing['fingerprint'] = fingerprint
+        letter.custom_data = {**letter.custom_data, 'attachments': existing}
+        letter.save(update_fields=['custom_data'])
+        return existing
+    if unchanged and len(existing.get('files', [])) == 2 and all(
+        item.get('status') == 'ready' for item in existing['files']
+    ):
+        return existing
+    version = int(existing.get('version') or 0) + (0 if unchanged else 1)
 
     files = []
-    for kind, filename, content, content_type in _letter_file_payloads(letter):
+    for kind, filename, content, content_type in payloads:
+        prior = next((item for item in existing.get('files', [])
+                      if item.get('kind') == kind and item.get('status') == 'ready'), None)
+        if unchanged and prior:
+            files.append(prior)
+            continue
         # The upload ledger keys attempts by a UUID request id — the manual
         # upload endpoint validates one per upload, so mirror that exactly.
-        request_id = uuid4()
+        request_id = uuid5(NAMESPACE_URL, f'radai-letter:{letter.pk}:{provider}:{fingerprint}:{kind}')
         uploaded = SimpleUploadedFile(filename, content, content_type=content_type)
         try:
             result, _created = upload(
@@ -98,6 +130,7 @@ def attach_letter_files(letter, actor):
     custom_data = dict(letter.custom_data or {})
     custom_data['attachments'] = {
         'version': version,
+        'fingerprint': fingerprint,
         'folder': CORRESPONDENCE_FOLDER,
         'provider': provider,
         'attached_at': timezone.now().isoformat(),

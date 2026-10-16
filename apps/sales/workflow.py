@@ -1,6 +1,8 @@
 """Governed Sales opportunity commands and Project Control handover."""
 
 import logging
+import hashlib
+import json
 
 from datetime import timedelta
 from decimal import Decimal
@@ -501,6 +503,36 @@ def _get_letter_context(opportunity, custom_data=None):
     return build_letter_context(opportunity, custom_data=custom_data)
 
 
+def _letter_fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _stable_letter_context(context, preparation=False):
+    context = dict(context)
+    for key in ('current_date', 'today', 'logo_path', 'logo_uri', 'logo_data_uri', 'attachments', 'letterhead_manual_fields'):
+        context.pop(key, None)
+    head = dict(context.get('letterhead') or {})
+    ignored = ('rev', 'confidential', 'confidential_date', 'our_ref') if preparation else ('rev', 'confidential')
+    for key in ignored:
+        head.pop(key, None)
+    context['letterhead'] = head
+    extraction = context.pop('letter_extraction', None)
+    if preparation and isinstance(extraction, dict):
+        source = extraction.get('source') or {}
+        context['letter_extraction'] = {
+            'source': {key: source[key] for key in ('upload_id', 'sha256', 'intake_id') if key in source},
+            'fields': extraction.get('fields') or [],
+        }
+    return context
+
+
+def _letter_content_fingerprint(letter):
+    return _letter_fingerprint({
+        'subject': letter.subject, 'body': letter.body,
+        'context': _stable_letter_context(_get_letter_context(letter.opportunity, letter.custom_data)),
+    })
+
+
 @transaction.atomic
 def prepare_letter(opportunity, actor, letter_type, custom_data=None):
     """
@@ -511,6 +543,7 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
     - Regret Expertise: Only when bid_decision == 'no_bid'
     - Regret Manpower: Only when bid_decision == 'no_bid'
     """
+    opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
     # Validate opportunity state
     if opportunity.stage not in {'proposal', 'no_bid'}:
         raise ValidationError({'stage': 'Letter preparation is only available after bid decision.'})
@@ -539,11 +572,141 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
     
     # Build context and render; persist the computed letterhead so the editor
     # pre-fills and later regenerations reuse edited values.
+    from .letter_extraction import extract_opportunity_letter_fields, require_recipient
+    has_overrides = bool(custom_data)
+    custom_data = dict(custom_data or {})
+    custom_data.pop('letter_extraction', None)
+    extracted = extract_opportunity_letter_fields(opportunity, actor)
+    source = extracted.pop('_source', None)
+    if source:
+        custom_data['letter_extraction'] = {'source': source, 'fields': list(extracted), 'values': dict(extracted)}
+    overrides = custom_data.get('letterhead') or {}
+    if overrides:
+        custom_data['letterhead_manual_fields'] = sorted(
+            key for key in overrides if key.startswith('recipient_') or key == 'your_ref')
+    custom_data['letterhead'] = {**extracted, **(custom_data.get('letterhead') or {})}
+    existing = opportunity.letters.filter(letter_type=letter_type).exclude(status='archived').first()
+    # Validate before context defaults, reference allocation, reuse or file I/O.
+    # A saved named recipient remains usable when reopening a reviewed letter.
+    saved_head = ((existing.custom_data or {}).get('letterhead') or {}) if existing else {}
+    require_recipient({**saved_head, **custom_data['letterhead']})
+    if not extracted.get('recipient_name') and existing:
+        custom_data['letterhead'] = {**saved_head, **custom_data['letterhead']}
     context = _get_letter_context(opportunity, custom_data)
+    preparation_basis = {
+        'template_id': template.pk, 'template_version': template.version,
+        'subject_template': template.subject_template, 'body_template': template.body_template,
+        'context': _stable_letter_context(context, preparation=True),
+    }
+    fingerprint = _letter_fingerprint(preparation_basis)
+    existing = opportunity.letters.filter(letter_type=letter_type).exclude(status='archived').first()
+    previous_extraction = ((existing.custom_data or {}).get('letter_extraction') or {}) if existing else {}
+    if (existing and existing.status == 'draft' and not has_overrides
+            and (existing.pdf_file or existing.docx_file or existing.preparation_fingerprint)):
+        # Reconcile automatic source facts before cache reuse without replacing
+        # reviewed wording, explicit recipient overrides or intentional clears.
+        saved_data = dict(existing.custom_data or {})
+        saved_head = dict(saved_data.get('letterhead') or {})
+        manual_values = saved_data.get('letterhead_manual_fields') or []
+        manual = {value for value in manual_values if isinstance(value, str)} if isinstance(manual_values, list) else set()
+        previously_detected = (previous_extraction.get('fields') or []) if isinstance(previous_extraction, dict) else []
+        previous_values = (previous_extraction.get('values') or {}) if isinstance(previous_extraction, dict) else {}
+        for key, value in previous_values.items():
+            if saved_head.get(key) != value:
+                manual.add(key)
+        same_contact = all(
+            not str(saved_head.get(key) or '').strip() or not extracted.get(key)
+            or (key in previously_detected and key not in manual)
+            or str(saved_head[key]).strip().casefold() == str(extracted[key]).strip().casefold()
+            for key in ('recipient_name', 'recipient_email')
+        )
+        missing = {}
+        if source and same_contact:
+            for key in ('recipient_name', 'recipient_title', 'recipient_company',
+                        'recipient_email', 'recipient_address', 'your_ref'):
+                if key not in manual and (key in previously_detected or not str(saved_head.get(key) or '').strip()):
+                    value = extracted.get(key, '')
+                    if saved_head.get(key, '') != value:
+                        missing[key] = value
+        if (extracted.get('recipient_company') and 'recipient_company' not in manual
+                and 'recipient_company' not in previously_detected and opportunity.client
+                and saved_head.get('recipient_company') == opportunity.client.company_name
+                and saved_head.get('recipient_company') != extracted['recipient_company']):
+            # This is the known client-master fallback, not a previously
+            # extracted company. Use the explicit inviting company in the file.
+            missing['recipient_company'] = extracted['recipient_company']
+        if same_contact and missing:
+            saved_head.update(missing)
+            saved_data['letterhead'] = saved_head
+            if source:
+                saved_data['letter_extraction'] = {
+                    'source': source, 'fields': list(extracted), 'values': dict(extracted),
+                    'retained_fields': sorted(key for key in manual if key in extracted),
+                }
+            existing.custom_data = saved_data
+            existing.preparation_fingerprint = fingerprint
+            return refresh_letter_files(existing, actor, automatic_fields=tuple(missing))
+        if source:
+            saved_data['letter_extraction'] = {
+                'source': source, 'fields': list(extracted), 'values': dict(extracted),
+                'retained_fields': sorted(key for key in extracted if saved_head.get(key, '') != extracted[key]),
+            }
+            if saved_data != existing.custom_data:
+                existing.custom_data = saved_data
+                existing.save(update_fields=['custom_data'])
+            if not same_contact:
+                existing.preparation_fingerprint = fingerprint
+                existing.save(update_fields=['preparation_fingerprint'])
+                return existing
+    if existing and (existing.pdf_file or existing.docx_file or existing.preparation_fingerprint):
+        require_recipient((existing.custom_data or {}).get('letterhead') or {})
+    if existing and existing.preparation_fingerprint == fingerprint:
+        current_render = _letter_content_fingerprint(existing)
+        if existing.pdf_file and existing.docx_file and existing.rendered_fingerprint != current_render:
+            existing.rendered_fingerprint = current_render
+            existing.save(update_fields=['rendered_fingerprint'])
+        return existing
+    if existing and existing.preparation_fingerprint:
+        # A re-upload can change source IDs/hashes without changing any letter
+        # fields. Compare with the saved provenance before deciding to render;
+        # keep the original file's provenance and any reviewed manual edits.
+        previous_source_context = dict(preparation_basis['context'])
+        previous_source_context.pop('letter_extraction', None)
+        if previous_extraction:
+            previous_source_context['letter_extraction'] = previous_extraction
+        if existing.preparation_fingerprint == _letter_fingerprint({
+            **preparation_basis, 'context': _stable_letter_context(previous_source_context, preparation=True),
+        }):
+            existing.preparation_fingerprint = fingerprint
+            updated_fields = ['preparation_fingerprint']
+            current_render = _letter_content_fingerprint(existing)
+            if existing.pdf_file and existing.docx_file and existing.rendered_fingerprint != current_render:
+                existing.rendered_fingerprint = current_render
+                updated_fields.append('rendered_fingerprint')
+            existing.save(update_fields=updated_fields)
+            return existing
+    # Adopt historical letters on first reopen without overwriting reviewed text.
+    if (existing and not existing.preparation_fingerprint and not has_overrides
+            and existing.pdf_file and existing.docx_file):
+        existing.preparation_fingerprint = fingerprint
+        existing.save(update_fields=['preparation_fingerprint'])
+        return existing
     stored_custom_data = dict(custom_data or {})
     stored_custom_data['letterhead'] = context['letterhead']
     subject = _render_letter_template(template.subject_template, context)
     body = _render_letter_template(template.body_template, context)
+
+    if existing and existing.status == 'draft':
+        old_head = (existing.custom_data or {}).get('letterhead') or {}
+        manual = (existing.custom_data or {}).get('letterhead_manual_fields') or []
+        for key in ('our_ref', 'confidential_date', 'rev', 'confidential', *manual):
+            if key in old_head:
+                stored_custom_data['letterhead'][key] = old_head[key]
+        existing.subject, existing.body = subject, body
+        existing.custom_data = {**existing.custom_data, **stored_custom_data}
+        existing.template = template
+        existing.preparation_fingerprint = fingerprint
+        return refresh_letter_files(existing, actor, automatic_fields=tuple(extracted))
 
     # Create letter record
     letter = SalesLetter.objects.create(
@@ -554,6 +717,7 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
         body=body,
         generated_by=actor,
         custom_data=stored_custom_data,
+        preparation_fingerprint=fingerprint,
     )
 
     # Generate PDF
@@ -570,6 +734,9 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"Failed to generate DOCX for letter {letter.id}: {e}")
+    if letter.pdf_file and letter.docx_file:
+        letter.rendered_fingerprint = _letter_content_fingerprint(letter)
+        letter.save(update_fields=['rendered_fingerprint'])
     _audit(
         opportunity,
         actor,
@@ -587,24 +754,70 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
 
 
 @transaction.atomic
-def refresh_letter_files(letter, actor, custom_data=None):
+def refresh_letter_files(letter, actor, custom_data=None, *, automatic_fields=()):
     """Regenerate PDF+DOCX for an edited letter and bump the revision marker.
 
     Correspondence-folder attach is performed by the caller after this
     transaction commits.
     """
-    if custom_data:
+    Deal.objects.select_for_update().get(pk=letter.opportunity_id)
+    stored = SalesLetter.objects.select_for_update().get(pk=letter.pk)
+    if custom_data is not None:
         letter.custom_data = custom_data
+    data = dict(letter.custom_data or {})
+    if not automatic_fields and 'letter_extraction' in (stored.custom_data or {}):
+        data['letter_extraction'] = stored.custom_data['letter_extraction']
+    # Attachment outcomes and revision markers are server-owned, not editor input.
+    if 'attachments' in (stored.custom_data or {}):
+        data['attachments'] = stored.custom_data['attachments']
+    else:
+        data.pop('attachments', None)
+    head = {**((stored.custom_data or {}).get('letterhead') or {}), **(data.get('letterhead') or {})}
+    from .letter_extraction import require_recipient
+    require_recipient(head)
+    manual_values = (stored.custom_data or {}).get('letterhead_manual_fields') or []
+    manual = {value for value in manual_values if isinstance(value, str)} if isinstance(manual_values, list) else set()
+    for key in ('recipient_name', 'recipient_title', 'recipient_company', 'recipient_email', 'recipient_address', 'your_ref'):
+        if key in head and head.get(key) != ((stored.custom_data or {}).get('letterhead') or {}).get(key) and key not in automatic_fields:
+            manual.add(key)
+    if manual:
+        data['letterhead_manual_fields'] = sorted(manual)
+    else:
+        data.pop('letterhead_manual_fields', None)
+    head['rev'] = ((stored.custom_data or {}).get('letterhead') or {}).get('rev', 0)
+    if 'confidential' in ((stored.custom_data or {}).get('letterhead') or {}):
+        head['confidential'] = stored.custom_data['letterhead']['confidential']
+    data['letterhead'] = head
+    letter.custom_data = data
+    fingerprint = _letter_content_fingerprint(letter)
+    previous = stored.rendered_fingerprint or _letter_content_fingerprint(stored)
+    legacy_context = _stable_letter_context(_get_letter_context(stored.opportunity, stored.custom_data))
+    if 'letter_extraction' in (stored.custom_data or {}):
+        legacy_context['letter_extraction'] = stored.custom_data['letter_extraction']
+    legacy = _letter_fingerprint({'subject': stored.subject, 'body': stored.body, 'context': legacy_context})
+    unchanged = fingerprint == previous or (
+        previous == legacy and fingerprint == _letter_content_fingerprint(stored))
+    if stored.pdf_file and stored.docx_file and unchanged:
+        if data != stored.custom_data:
+            stored.custom_data = data
+            stored.save(update_fields=['custom_data'])
+        if stored.preparation_fingerprint != letter.preparation_fingerprint:
+            stored.preparation_fingerprint = letter.preparation_fingerprint
+            stored.save(update_fields=['preparation_fingerprint'])
+        return stored
     letterhead = dict((letter.custom_data or {}).get('letterhead') or {})
     letterhead['rev'] = int(letterhead.get('rev') or 0) + 1
     letterhead['confidential'] = f"{letterhead.get('confidential_date', '')} / Rev {letterhead['rev']}"
     letter.custom_data = {**(letter.custom_data or {}), 'letterhead': letterhead}
-    letter.save(update_fields=['custom_data', 'updated_at'])
+    letter.save(update_fields=['subject', 'body', 'custom_data', 'template',
+                              'preparation_fingerprint', 'updated_at'])
 
     from .letter_docx import regenerate_letter_docx
     from .letter_pdf import regenerate_letter_pdf
     regenerate_letter_pdf(letter)
     regenerate_letter_docx(letter)
+    letter.rendered_fingerprint = fingerprint
+    letter.save(update_fields=['rendered_fingerprint'])
 
     _audit(
         letter.opportunity,

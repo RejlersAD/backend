@@ -73,3 +73,29 @@ def dispatch_document_classifications():
 def classify_opportunity_document(run_id):
     from .document_classification import run_document_classification
     return run_document_classification(run_id)
+
+
+@shared_task(ignore_result=True, soft_time_limit=30, time_limit=45)
+def dispatch_opportunity_analyses():
+    from .opportunity_analysis import due_analysis_ids
+    for report_id in due_analysis_ids():
+        try:
+            analyze_opportunity_step.delay(str(report_id))
+        except Exception:
+            break  # SQL intent remains due even when the broker is unavailable.
+
+
+@shared_task(ignore_result=True, acks_late=True, reject_on_worker_lost=True,
+             soft_time_limit=180, time_limit=210)
+def analyze_opportunity_step(report_id):
+    from .opportunity_analysis import run_analysis_step, Report
+    processed = run_analysis_step(report_id)
+    # Continue incrementally without waiting for the next periodic dispatch.
+    if processed:
+        report = Report.objects.filter(pk=report_id, status='queued', lease_token__isnull=True).first()
+        if report:
+            try:
+                analyze_opportunity_step.apply_async(args=[report_id], countdown=20 if report.error_code else 1)
+            except Exception:
+                pass
+    return processed

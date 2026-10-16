@@ -457,6 +457,10 @@ _tmp_*.py
 !apps/sales/tests/test_bid_preparation.py
 !apps/sales/tests/test_bid_decision_access.py
 !apps/sales/tests/test_bid_justification.py
+!apps/sales/tests/test_letter_extraction.py
+!apps/sales/tests/test_opportunity_analysis.py
+!apps/sales/migrations/0030_*.py
+!docs/SALES_OPPORTUNITY_ANALYSIS.md
 !docs/SALES_BID_JUSTIFICATION.md
 !apps/sales/tests/test_proposal_readiness.py
 !apps/sales/tests/test_proposal_readiness_postgresql.py

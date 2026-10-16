@@ -149,8 +149,9 @@ class ContentUnavailable(Exception):
         self.code = code
 
 
-def _xml_text(source, suffix):
+def _xml_text(source, suffix, text_limit=TEXT_CHARS, all_parts=False):
     total, count, pieces = 0, 0, []
+    text_length = 0
     with ZipFile(source) as archive:
         entries = archive.infolist()
         if len(entries) > 4096 or len({row.filename for row in entries}) != len(entries):
@@ -164,10 +165,12 @@ def _xml_text(source, suffix):
         if suffix == '.docx':
             names = ['word/document.xml']
         elif suffix == '.pptx':
-            names = sorted(row.filename for row in entries if re.fullmatch(r'ppt/slides/slide\d+\.xml', row.filename))[:50]
+            names = sorted(row.filename for row in entries if re.fullmatch(r'ppt/slides/slide\d+\.xml', row.filename))
+            if not all_parts:
+                names = names[:50]
         else:
-            names = ['xl/sharedStrings.xml'] + sorted(row.filename for row in entries
-                     if re.fullmatch(r'xl/worksheets/sheet\d+\.xml', row.filename))[:10]
+            sheets = sorted(row.filename for row in entries if re.fullmatch(r'xl/worksheets/sheet\d+\.xml', row.filename))
+            names = ['xl/sharedStrings.xml'] + (sheets if all_parts else sheets[:10])
         for name in names:
             if name not in archive.namelist():
                 continue
@@ -182,12 +185,32 @@ def _xml_text(source, suffix):
                 count += 1
                 if count > 100_000:
                     raise ContentUnavailable('structure_limit')
+            paragraphs = list(tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')) if suffix == '.docx' else []
+            if paragraphs:
+                # Formatting runs are contiguous text, not separate paragraphs.
+                for paragraph in paragraphs:
+                    parts = []
+                    for element in paragraph.iter():
+                        local = element.tag.rsplit('}', 1)[-1]
+                        if local == 't' and element.text:
+                            parts.append(element.text)
+                        elif local in {'tab', 'br', 'cr'}:
+                            parts.append('\t' if local == 'tab' else '\n')
+                    value = ''.join(parts).strip()
+                    if value:
+                        pieces.append(value)
+                        text_length += len(value) + 1
+                        if text_length >= text_limit:
+                            return '\n'.join(pieces)[:text_limit]
+                continue
+            for element in tree.iter():
                 # Text nodes only; no formulas/URLs/XML attributes.
                 if element.tag.rsplit('}', 1)[-1] in {'t', 'p'} and element.text and element.text.strip():
                     pieces.append(element.text.strip())
-                    if sum(map(len, pieces)) >= TEXT_CHARS:
-                        return '\n'.join(pieces)[:TEXT_CHARS]
-    return '\n'.join(pieces)[:TEXT_CHARS]
+                    text_length += len(pieces[-1])
+                    if text_length >= text_limit:
+                        return '\n'.join(pieces)[:text_limit]
+    return '\n'.join(pieces)[:text_limit]
 
 
 def extract_document_text(source, name, size):
