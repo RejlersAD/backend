@@ -151,6 +151,7 @@ def dispatch_io_document_processing(
     thorough: bool = False,
     check_cache: bool = False,
     compare_best: bool = False,
+    vision_model: str | None = None,
 ) -> None:
     """Single entry point views.py's create()/re_extract()/
     force_fresh_extract() use to kick off extraction — hides the
@@ -206,7 +207,7 @@ def dispatch_io_document_processing(
 
     if not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
         process_io_document.delay(
-            document_id, vision_provider, vision_api_key, thorough, check_cache, compare_best,
+            document_id, vision_provider, vision_api_key, thorough, check_cache, compare_best, vision_model,
         )
         return
 
@@ -216,7 +217,7 @@ def dispatch_io_document_processing(
     def _run():
         try:
             process_io_document.delay(
-                document_id, vision_provider, vision_api_key, thorough, check_cache, compare_best,
+                document_id, vision_provider, vision_api_key, thorough, check_cache, compare_best, vision_model,
             )
         except Exception:
             logger.exception(
@@ -239,6 +240,58 @@ def dispatch_io_document_processing(
             connection.close()
 
     threading.Thread(target=_run, daemon=True, name=f'io-extract-{document_id}').start()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Soft-coded safeguard: documents stuck in 'extracting' longer than this
+# (e.g. worker restarted mid-chord, before errbacks existed) are swept to
+# 'failed' by the status/list endpoints so the UI never spins forever.
+# ─────────────────────────────────────────────────────────────────────
+STALE_EXTRACTING_MINUTES = 30
+
+
+@shared_task(name='instrument_io_workflow.chord_error')
+def io_chord_error(*args, **kwargs):
+    """Errback for the page-processing chords.
+
+    If ANY fanned-out page task hard-fails, Celery never calls the
+    finalize callback — which previously left the document stuck in
+    'extracting' forever. This errback marks it failed with an
+    actionable message instead. Wired via .on_error() at the chord
+    call sites below.
+    """
+    document_id = kwargs.get('document_id')
+    exc = args[1] if len(args) > 1 else (args[0] if args else None)
+    logger.error('[IOWF] chord failed for document %s: %s', document_id, exc)
+    if not document_id:
+        return
+    try:
+        from .models import IOListDocument
+        IOListDocument.objects.filter(id=document_id).update(
+            status='failed',
+            extraction_error='A page-processing task failed — extraction was stopped. Please use Re-extract to try again.',
+            current_phase='',
+        )
+    except Exception:
+        logger.exception('[IOWF] chord errback could not mark document %s failed', document_id)
+
+
+def sweep_stale_extracting_documents() -> int:
+    """Mark long-stuck 'extracting' documents as failed. Cheap — intended
+    to be called from the lightweight status/list endpoints. Returns the
+    number of documents swept."""
+    from datetime import timedelta
+    from django.utils import timezone
+    from .models import IOListDocument
+    cutoff = timezone.now() - timedelta(minutes=STALE_EXTRACTING_MINUTES)
+    return IOListDocument.objects.filter(
+        status='extracting', updated_at__lt=cutoff,
+    ).update(
+        status='failed',
+        extraction_error='Extraction stalled (no progress for over '
+                         f'{STALE_EXTRACTING_MINUTES} minutes) — please use Re-extract to try again.',
+        current_phase='',
+    )
 
 
 def _looks_like_pid_drawing(pages: list) -> bool:
@@ -275,6 +328,7 @@ def process_io_document(
     self, document_id: str,
     vision_provider: str | None = None, vision_api_key: str | None = None,
     thorough: bool = False, check_cache: bool = False, compare_best: bool = False,
+    vision_model: str | None = None,
 ) -> None:
     """Coordinator: classify pages, fan out per-page/group subtasks via a
     Celery chord, dispatch finalize_io_document as its callback. Runs
@@ -397,7 +451,7 @@ def process_io_document(
             )
 
         subtasks = [
-            process_pid_vision_page.s(document_id, idx, vision_provider, vision_api_key, thorough)
+            process_pid_vision_page.s(document_id, idx, vision_provider, vision_api_key, thorough, vision_model)
             for idx in range(page_count)
         ]
         # vision_calls_total: the REAL, known-upfront call count for
@@ -418,11 +472,13 @@ def process_io_document(
             vision_calls_total=vision_calls_total, vision_calls_done=0, tokens_used_total=0,
             provisional_rows_count=0, provisional_comments_count=0,
         )
-        chord(subtasks)(finalize_io_document.s(
-            document_id, started, document_type='pid_drawing', thorough=thorough,
-            vision_key_supplied=key_supplied, vision_provider=vision_provider,
-            compare_best=compare_best,
-        ))
+        chord(subtasks)(
+            finalize_io_document.s(
+                document_id, started, document_type='pid_drawing', thorough=thorough,
+                vision_key_supplied=key_supplied, vision_provider=vision_provider,
+                compare_best=compare_best,
+            ).on_error(io_chord_error.s(document_id=document_id))
+        )
         logger.info(
             '[IOWF] Detected P&ID drawing document %s (%d pages) — dispatched %d parallel Vision/OCR unit(s)',
             document_id, page_count, len(subtasks),
@@ -454,7 +510,10 @@ def process_io_document(
         finalize_io_document.delay([], document_id, started)
         return
 
-    chord(subtasks)(finalize_io_document.s(document_id, started))
+    chord(subtasks)(
+        finalize_io_document.s(document_id, started)
+            .on_error(io_chord_error.s(document_id=document_id))
+    )
     logger.info(
         '[IOWF] Dispatched %d parallel unit(s) for document %s '
         '(%d comment page(s) as 1 unit, %d io page(s) as %d units)',
@@ -546,6 +605,7 @@ def process_pid_vision_page(
     self, document_id: str, page_index: int,
     vision_provider: str | None, vision_api_key: str | None,
     thorough: bool = False,
+    vision_model: str | None = None,
 ) -> dict:
     """One P&ID drawing page — fully independent of every other page,
     safe to run in parallel. BYOK Vision when a key was supplied; local
@@ -599,7 +659,7 @@ def process_pid_vision_page(
 
                 result['io_rows'] = extract_pid_tags_from_page(
                     pdf_bytes, page_index, vision_provider, vision_api_key, thorough=thorough,
-                    on_call_complete=_on_call_complete,
+                    on_call_complete=_on_call_complete, model=vision_model,
                 )
             except Exception as exc:  # noqa: BLE001
                 status = getattr(exc, 'status_code', None) or getattr(exc, 'http_status', None)

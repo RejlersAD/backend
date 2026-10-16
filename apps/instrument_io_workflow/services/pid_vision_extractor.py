@@ -54,6 +54,23 @@ VISION_MODELS = {
     'openai': 'gpt-4o',
 }
 
+# Soft-coded BYOK model picker — the user may choose any of these per
+# provider (frontend offers the same list). resolve_vision_model()
+# validates against this whitelist, so an arbitrary model string from a
+# request can never reach the provider SDK; anything unknown falls back
+# to the provider default above.
+ALLOWED_VISION_MODELS = {
+    'claude': ['claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4-5-20250929'],
+    'openai': ['gpt-4o', 'gpt-4o-mini'],
+}
+
+
+def resolve_vision_model(provider: str, model: str | None) -> str:
+    """Return a validated model for the provider (default when blank/unknown)."""
+    if model and model in ALLOWED_VISION_MODELS.get(provider, ()):  # whitelist check
+        return model
+    return VISION_MODELS.get(provider, '')
+
 VISION_RENDER_DPI = 220
 VISION_MAX_DIMENSION_PX = 2200
 
@@ -666,17 +683,18 @@ def _tile_image(img: Image.Image, rows: int, cols: int, overlap_frac: float) -> 
     return tiles
 
 
-def _call_claude(api_key: str, image_b64: str) -> tuple[str, int]:
+def _call_claude(api_key: str, image_b64: str, model: str | None = None) -> tuple[str, int]:
     """Returns (raw response text, real token count) — see tokens_used's
     own comment below for where that number comes from."""
     import anthropic
+    model = resolve_vision_model('claude', model)
     logger.info(
         '[IOWF] Calling Claude vision: model=%s image_b64_bytes=%d prompt_chars=%d',
-        VISION_MODELS['claude'], len(image_b64), len(VISION_USER_PROMPT),
+        model, len(image_b64), len(VISION_USER_PROMPT),
     )
     client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.messages.create(
-        model=VISION_MODELS['claude'],
+        model=model,
         max_tokens=VISION_MAX_TOKENS,
         # claude-sonnet-5 is a hybrid-reasoning model that emits extended
         # 'thinking' content blocks by default even though nothing here
@@ -757,17 +775,18 @@ def _call_claude(api_key: str, image_b64: str) -> tuple[str, int]:
     return text, tokens_used
 
 
-def _call_openai(api_key: str, image_b64: str) -> tuple[str, int]:
+def _call_openai(api_key: str, image_b64: str, model: str | None = None) -> tuple[str, int]:
     """Returns (raw response text, real token count) — see tokens_used's
     own comment below for where that number comes from."""
     import openai
+    model = resolve_vision_model('openai', model)
     logger.info(
         '[IOWF] Calling OpenAI vision: model=%s image_b64_bytes=%d prompt_chars=%d',
-        VISION_MODELS['openai'], len(image_b64), len(VISION_USER_PROMPT),
+        model, len(image_b64), len(VISION_USER_PROMPT),
     )
     client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.chat.completions.create(
-        model=VISION_MODELS['openai'],
+        model=model,
         max_tokens=VISION_MAX_TOKENS,
         temperature=0.0,
         messages=[
@@ -806,11 +825,11 @@ def _call_openai(api_key: str, image_b64: str) -> tuple[str, int]:
     return text
 
 
-def _call_vision(provider: str, api_key: str, image_b64: str) -> tuple[str, int]:
+def _call_vision(provider: str, api_key: str, image_b64: str, model: str | None = None) -> tuple[str, int]:
     if provider == 'claude':
-        return _call_claude(api_key, image_b64)
+        return _call_claude(api_key, image_b64, model)
     if provider == 'openai':
-        return _call_openai(api_key, image_b64)
+        return _call_openai(api_key, image_b64, model)
     raise ValueError(f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
 
 
@@ -874,7 +893,7 @@ def _is_retriable_network_error(exc: Exception) -> bool:
     ))
 
 
-def _call_vision_with_retries(provider: str, api_key: str, image_b64: str) -> tuple[str, int]:
+def _call_vision_with_retries(provider: str, api_key: str, image_b64: str, model: str | None = None) -> tuple[str, int]:
     """Wraps _call_vision with the fixed retry policy above — up to
     VISION_CONNECTION_RETRY_MAX_ATTEMPTS attempts total,
     VISION_CONNECTION_RETRY_DELAY_S between them. A fixed short delay
@@ -896,7 +915,7 @@ def _call_vision_with_retries(provider: str, api_key: str, image_b64: str) -> tu
     last_exc: Exception | None = None
     for attempt in range(1, VISION_CONNECTION_RETRY_MAX_ATTEMPTS + 1):
         try:
-            return _call_vision(provider, api_key, image_b64)
+            return _call_vision(provider, api_key, image_b64, model)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if not _is_retriable_network_error(exc) or attempt == VISION_CONNECTION_RETRY_MAX_ATTEMPTS:
@@ -1850,6 +1869,7 @@ def _backfill_line_tags_via_location_mentions(rows: list[dict]) -> int:
 
 def _extract_tags_from_image(
     img: Image.Image, provider: str, api_key: str, page_index: int, max_dim: int,
+    model: str | None = None,
 ) -> tuple[list[dict], int]:
     """Downscale + encode + call Vision + parse + convert to canonical
     rows, for exactly ONE image — a full page (Quick Scan) or a single
@@ -1861,7 +1881,7 @@ def _extract_tags_from_image(
     """
     resized = _downscale(img, max_dim)
     image_b64 = _image_to_b64_png(resized)
-    raw, tokens_used = _call_vision_with_retries(provider, api_key, image_b64)
+    raw, tokens_used = _call_vision_with_retries(provider, api_key, image_b64, model)
     if page_index == 0:
         _log_raw_vision_response_for_diagnostics(raw)
     rows = [_row_from_tag_info(info, page_index) for info in _parse_tags(raw)]
@@ -1899,6 +1919,7 @@ def _log_raw_vision_response_for_diagnostics(raw: str) -> None:
 def extract_pid_tags_from_page(
     pdf_bytes: bytes, page_index: int, provider: str, api_key: str,
     thorough: bool = False, on_call_complete=None,
+    model: str | None = None,
 ) -> list[dict]:
     """Vision-extract tags/symbols from exactly ONE page — the unit of
     work shared by extract_pid_tags_via_vision's whole-document loop below
@@ -1993,7 +2014,7 @@ def extract_pid_tags_from_page(
             tokens_used = 0
             try:
                 pass_rows, tokens_used = _extract_tags_from_image(
-                    page_img, provider, api_key, page_index, VISION_MAX_DIMENSION_PX,
+                    page_img, provider, api_key, page_index, VISION_MAX_DIMENSION_PX, model,
                 )
                 rows.extend(pass_rows)
                 any_success = True
@@ -2022,7 +2043,7 @@ def extract_pid_tags_from_page(
             tokens_used = 0
             try:
                 tile_rows, tokens_used = _extract_tags_from_image(
-                    tile, provider, api_key, page_index, VISION_TILE_MAX_DIMENSION_PX,
+                    tile, provider, api_key, page_index, VISION_TILE_MAX_DIMENSION_PX, model,
                 )
                 rows.extend(tile_rows)
             except Exception:
@@ -2049,6 +2070,7 @@ def extract_pid_tags_from_page(
 
 def extract_pid_tags_via_vision(
     pdf_bytes: bytes, provider: str, api_key: str, thorough: bool = False,
+    model: str | None = None,
 ) -> tuple[list[dict], list[str]]:
     """One page at a time (each page itself either VISION_PASSES calls, or
     VISION_TILE_ROWS x VISION_TILE_COLS x VISION_PASSES calls if
@@ -2080,7 +2102,7 @@ def extract_pid_tags_via_vision(
     last_status: int | None = None
     for page_index in range(page_count):
         try:
-            rows.extend(extract_pid_tags_from_page(pdf_bytes, page_index, provider, api_key, thorough=thorough))
+            rows.extend(extract_pid_tags_from_page(pdf_bytes, page_index, provider, api_key, thorough=thorough, model=model))
         except Exception as exc:  # noqa: BLE001
             # Deliberately logged at ERROR with exc_info — this is the
             # single most important diagnostic line for "some pages'
@@ -2128,8 +2150,9 @@ def extract_pid_tags_via_vision(
     return deduped, warnings
 
 
-def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
-    """One minimal text-only call to confirm a BYOK key actually works."""
+def test_api_key(provider: str, api_key: str, model: str | None = None) -> tuple[bool, str]:
+    """One minimal text-only call to confirm a BYOK key actually works.
+    Optionally validates against the user-selected model (whitelisted)."""
     api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
     if not api_key or not api_key.strip():
         return False, 'API key is required.'
@@ -2138,7 +2161,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
             import anthropic
             client = lazy_provider_client('anthropic', anthropic.Anthropic, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
             client.messages.create(
-                model=VISION_MODELS['claude'],
+                model=resolve_vision_model('claude', model),
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
                 # Same fix as _call_claude — without this, claude-sonnet-5's
                 # default thinking would consume the entire 5-token test
@@ -2154,7 +2177,7 @@ def test_api_key(provider: str, api_key: str) -> tuple[bool, str]:
             import openai
             client = lazy_provider_client('openai', openai.OpenAI, api_key=lambda: (api_key), timeout=VISION_REQUEST_TIMEOUT_S)
             client.chat.completions.create(
-                model=VISION_MODELS['openai'],
+                model=resolve_vision_model('openai', model),
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
                 messages=[{'role': 'user', 'content': 'Hi'}],
             )

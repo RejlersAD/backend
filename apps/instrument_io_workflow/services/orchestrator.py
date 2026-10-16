@@ -340,6 +340,7 @@ def extract_document(
     pdf_bytes: bytes, user=None, force_refresh: bool = True,
     vision_provider: str | None = None, vision_api_key: str | None = None,
     thorough: bool = False,
+    vision_model: str | None = None,
 ) -> Dict[str, Any]:
     """Synchronous extraction — used inline by views.py for any document
     at or under config.PAGE_FANOUT_THRESHOLD pages (the vast majority).
@@ -386,6 +387,7 @@ def extract_document(
                 from .pid_vision_extractor import extract_pid_tags_via_vision
                 io_rows, vision_warnings = extract_pid_tags_via_vision(
                     pdf_bytes, vision_provider, vision_api_key, thorough=thorough,
+                    model=vision_model,
                 )
                 # BUG FIX: a per-page Vision failure (bad key, rate limit,
                 # network error...) used to be caught INSIDE

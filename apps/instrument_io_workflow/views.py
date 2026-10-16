@@ -225,6 +225,24 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
             timer.
         """
         document = self.get_object()
+        # Soft-coded safeguard (tasks.sweep_stale_extracting_documents): if
+        # THIS document has been stuck in 'extracting' far beyond any real
+        # run (e.g. a pre-errback chord that lost a task), flip it to
+        # 'failed' here so the polling UI stops spinning and offers
+        # Re-extract. Cheap single-row check on an endpoint that is
+        # already polled while extraction runs.
+        if document.status == 'extracting':
+            from .tasks import STALE_EXTRACTING_MINUTES
+            from datetime import timedelta
+            from django.utils import timezone
+            if document.updated_at < timezone.now() - timedelta(minutes=STALE_EXTRACTING_MINUTES):
+                document.status = 'failed'
+                document.extraction_error = (
+                    'Extraction stalled (no progress for over '
+                    f'{STALE_EXTRACTING_MINUTES} minutes) — please use Re-extract to try again.'
+                )
+                document.current_phase = ''
+                document.save(update_fields=['status', 'extraction_error', 'current_phase', 'updated_at'])
         return Response({
             'id': document.id,
             'status': document.status,
@@ -282,6 +300,7 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         vision_provider = request.data.get('vision_provider') or None
         vision_api_key  = request.data.get('vision_api_key') or None
         thorough        = str(request.data.get('thorough', '')).lower() in ('1', 'true', 'yes')
+        vision_model    = request.data.get('vision_model') or None  # BYOK model picker (see re_extract)
         logger.info(
             "[IOWF] create(): thorough=%r vision_provider=%r key supplied=%s "
             "— may reuse a cached Vision result for this exact file+scan-mode (see check_cache below); "
@@ -365,7 +384,7 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         from .tasks import dispatch_io_document_processing
         dispatch_io_document_processing(
             str(document.id), vision_provider, vision_api_key, thorough,
-            check_cache=True,
+            check_cache=True, vision_model=vision_model,
         )
         document.refresh_from_db()
         ser = self.get_serializer(document)
@@ -403,6 +422,10 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         vision_provider = request.data.get('vision_provider') or None
         vision_api_key  = request.data.get('vision_api_key') or None
         thorough        = str(request.data.get('thorough', '')).lower() in ('1', 'true', 'yes')
+        # BYOK model picker (soft-coded whitelist enforced in
+        # pid_vision_extractor.resolve_vision_model — unknown/blank falls
+        # back to the provider default, so older clients keep working).
+        vision_model    = request.data.get('vision_model') or None
 
         document.status = 'extracting'
         document.extraction_started_at = timezone.now()
@@ -413,7 +436,7 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         from .tasks import dispatch_io_document_processing
         dispatch_io_document_processing(
             str(document.id), vision_provider, vision_api_key, thorough,
-            check_cache=True,
+            check_cache=True, vision_model=vision_model,
         )
         document.refresh_from_db()
         ser = self.get_serializer(document)
@@ -451,6 +474,7 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         vision_provider = request.data.get('vision_provider') or None
         vision_api_key  = request.data.get('vision_api_key') or None
         thorough        = str(request.data.get('thorough', '')).lower() in ('1', 'true', 'yes')
+        vision_model    = request.data.get('vision_model') or None  # see re_extract above
 
         document.status = 'extracting'
         document.extraction_started_at = timezone.now()
@@ -459,7 +483,7 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
         from .tasks import dispatch_io_document_processing
         dispatch_io_document_processing(
             str(document.id), vision_provider, vision_api_key, thorough,
-            check_cache=False, compare_best=True,
+            check_cache=False, compare_best=True, vision_model=vision_model,
         )
         document.refresh_from_db()
         ser = self.get_serializer(document)
@@ -777,12 +801,13 @@ def vision_test_key_view(request):
 
     provider = request.data.get('provider')
     api_key  = request.data.get('api_key')
+    model    = request.data.get('model') or None   # BYOK model picker (whitelisted in test_api_key)
     if not provider or not provider_available(provider, api_key):
         return Response(
             {'valid': False, 'message': 'Select an available administrator-configured AI provider.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    valid, message = test_api_key(provider, api_key)
+    valid, message = test_api_key(provider, api_key, model)
     return Response({'valid': valid, 'message': message})
 
 
