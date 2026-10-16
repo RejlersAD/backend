@@ -23,6 +23,7 @@ from .pressure_instrument_views import (
 )
 from .instrument_index_views import (
     extract_instrument_index,
+    test_instrument_index_byok_key,
     get_instrument_index_status,
     download_instrument_index_excel,
     get_instrument_categories,
@@ -179,6 +180,7 @@ urlpatterns = [
 
     # Instrument Index — ALL instruments extraction
     path('instrument-index/analyze/', extract_instrument_index, name='instrument-index-analyze'),
+    path('instrument-index/test-key/', test_instrument_index_byok_key, name='instrument-index-test-key'),
     path('instrument-index/status/<str:upload_id>/', get_instrument_index_status, name='instrument-index-status'),
     path('instrument-index/download-excel/<str:upload_id>/', download_instrument_index_excel, name='instrument-index-download'),
     path('instrument-index/categories/', get_instrument_categories, name='instrument-index-categories'),

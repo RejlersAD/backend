@@ -2991,6 +2991,62 @@ _SERVICE_VERB_MAP = {
 }
 
 
+# ─── Soft-coded: BYOK key self-test ──────────────────────────────────
+# One minimal text-only call to validate the user's key BEFORE a long
+# extraction run. Model whitelist mirrors the frontend picker — unknown
+# or blank model falls back to the provider default. The key is used for
+# this single call and never stored.
+II_BYOK_TEST_ALLOWED_MODELS = {
+    'claude': ['claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4-5-20250929'],
+    'openai': ['gpt-4o', 'gpt-4o-mini'],
+}
+II_BYOK_TEST_DEFAULT_MODEL = {'claude': 'claude-sonnet-5', 'openai': 'gpt-4o'}
+II_BYOK_TEST_MAX_TOKENS = 5
+II_BYOK_TEST_TIMEOUT_S = 30
+
+
+def test_byok_key(provider, api_key, model=None):
+    """Returns (valid: bool, message: str) — a single cheap ping call."""
+    provider = (provider or '').strip().lower()
+    api_key = (api_key or '').strip()
+    if provider not in II_BYOK_TEST_ALLOWED_MODELS:
+        return False, f"Unsupported provider '{provider}'. Choose Claude or OpenAI."
+    if not api_key:
+        return False, 'API key is required.'
+    allowed = II_BYOK_TEST_ALLOWED_MODELS[provider]
+    use_model = model if model in allowed else II_BYOK_TEST_DEFAULT_MODEL[provider]
+    try:
+        if provider == 'claude':
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key, timeout=II_BYOK_TEST_TIMEOUT_S)
+            client.messages.create(
+                model=use_model,
+                max_tokens=II_BYOK_TEST_MAX_TOKENS,
+                # Disable extended thinking so hybrid models don't consume
+                # the tiny test budget on thinking tokens.
+                thinking={'type': 'disabled'},
+                messages=[{'role': 'user', 'content': 'Hi'}],
+            )
+        else:
+            import openai
+            client = openai.OpenAI(api_key=api_key, timeout=II_BYOK_TEST_TIMEOUT_S)
+            client.chat.completions.create(
+                model=use_model,
+                max_tokens=II_BYOK_TEST_MAX_TOKENS,
+                messages=[{'role': 'user', 'content': 'Hi'}],
+            )
+        return True, f'API key is valid and working ({use_model}).'
+    except Exception as exc:  # noqa: BLE001
+        status = getattr(exc, 'status_code', None) or getattr(exc, 'http_status', None)
+        if status in (401, 403):
+            return False, 'Invalid API key. Please check and try again.'
+        if status == 404:
+            return False, f'Model {use_model} is not available for this key — pick another model.'
+        if status == 429:
+            return False, 'Key valid but quota/rate-limited right now — try again shortly.'
+        return False, f'Connection test failed: {exc}'
+
+
 class InstrumentIndexService:
     """
     Extract ALL instrument tags from a P&ID drawing.
