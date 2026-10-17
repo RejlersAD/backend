@@ -64,7 +64,6 @@ MESSAGES = {
     'download_too_large': 'This file exceeds the configured download limit. Open it in SharePoint.',
     'document_changed': 'The document changed while it was being read. Refresh the folder and retry.',
     'version_stale': 'A newer document version exists. Refresh its details before uploading a new version.',
-    'cannot_delete_last_version': 'At least one document version must remain. Upload a replacement version first.',
     'delete_not_supported': 'Delete is currently supported for RADAI attachments only.',
     'handover_retained': 'This opportunity has a project handover and cannot be deleted.',
 }

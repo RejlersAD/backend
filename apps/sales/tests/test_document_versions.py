@@ -262,6 +262,38 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         history = self.api.get(self.file_url(first) + 'versions/').data['versions']
         self.assertEqual([row['id'] for row in history], ['3', '1'])
 
+    def test_deleting_the_only_version_removes_the_document_and_stored_object(self):
+        first = self.upload()
+        attempt = OpportunityWorkspaceUpload.objects.get()
+        storage, _ = attachment_storage()
+        self.assertTrue(storage.exists(attempt.storage_name))
+        removed = self.api.delete(self.file_url(first))
+        self.assertEqual(removed.status_code, 200, removed.data)
+        self.assertEqual(removed.data['deleted_id'], first.data['id'])
+        self.assertEqual(removed.data['document_id'], first.data['document_id'])
+        self.assertIsNone(removed.data['current'])
+        self.assertFalse(OpportunityDocument.objects.exists())
+        self.assertEqual(OpportunityWorkspaceUpload.objects.get().status, 'deleted')
+        self.assertFalse(storage.exists(attempt.storage_name))
+        self.assertEqual(self.api.get(self.file_url(first)).status_code, 404)
+        listing = self.api.get(self.url + 'folders/proposal/files/', {'storage': 'radai'})
+        self.assertEqual(listing.data['item_count'], 0)
+        deleted = OpportunityAuditEvent.objects.get(event_type='workspace_file_deleted')
+        self.assertTrue(deleted.data['document_removed'])
+
+    def test_deleting_legacy_ungrouped_upload_removes_it_outright(self):
+        first = self.upload()
+        upload = OpportunityWorkspaceUpload.objects.get()
+        OpportunityDocumentClassificationRun.objects.all().delete()
+        OpportunityWorkspaceUpload.objects.filter(pk=upload.pk).update(document=None)
+        OpportunityDocument.objects.all().delete()
+        removed = self.api.delete(self.file_url(first))
+        self.assertEqual(removed.status_code, 200, removed.data)
+        self.assertEqual(removed.data['deleted_id'], first.data['id'])
+        self.assertIsNone(removed.data['current'])
+        self.assertEqual(OpportunityWorkspaceUpload.objects.get().status, 'deleted')
+        self.assertFalse(OpportunityDocument.objects.exists())
+
 
 @override_settings(**CONFIG)
 class ProposalVersionEvidenceTests(ReviewFixtures, TestCase):

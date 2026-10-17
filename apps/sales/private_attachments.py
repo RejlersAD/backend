@@ -16,10 +16,14 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .attachment_storage import attachment_storage
 from .attachment_streams import CHUNK_BYTES, prepare_upload
+from .classification_models import (OpportunityDocumentClassification,
+                                    OpportunityDocumentClassificationCommand,
+                                    OpportunityDocumentClassificationRun)
 from .document_versions import (current_uploads, head_token, materialize_document, publish_version,
                                reserve_version, resolve_document, validate_version_input, version_projection)
 from .models import Deal, OpportunityWorkspace, OpportunityWorkspaceUpload
-from .opportunity_workspace import FOLDERS, WorkspaceAPIError, _actor, require_access, upload_limit, workspace_allowed
+from .opportunity_workspace import (FOLDERS, WorkspaceAPIError, _actor, _delete_stored_radai_objects,
+                                    require_access, upload_limit, workspace_allowed)
 from .workflow import _audit
 
 
@@ -206,16 +210,17 @@ def delete_private_file(opportunity, actor, key, file_id):
         _identity(locked)
         document = resolve_document(locked)
         if not document:
-            raise WorkspaceAPIError('cannot_delete_last_version', 409)
+            # A legacy upload with no document is its own single version.
+            return _delete_upload_tree(opportunity, actor, key, locked, None)
         document = type(document).objects.select_for_update().get(pk=document.pk)
         if document.pending_upload_id:
             raise WorkspaceAPIError('upload_in_progress', 409)
         ready = OpportunityWorkspaceUpload.objects.select_for_update().filter(document=document, status='ready')
         if ready.count() <= 1:
-            raise WorkspaceAPIError('cannot_delete_last_version', 409)
-        replacement = document.head_upload
+            # Deleting the last ready version removes the document outright.
+            return _delete_upload_tree(opportunity, actor, key, locked, document)
+        replacement = ready.exclude(pk=locked.pk).order_by('-version_number', '-pk').first()
         if document.head_upload_id == locked.pk:
-            replacement = ready.exclude(pk=locked.pk).order_by('-version_number', '-pk').first()
             document.head_upload = replacement
             document.name = replacement.name
             document.save(update_fields=['head_upload', 'name'])
@@ -229,6 +234,32 @@ def delete_private_file(opportunity, actor, key, file_id):
         })
         current = OpportunityWorkspaceUpload.objects.select_related('actor', 'document__head_upload').get(pk=document.head_upload_id)
     return {'deleted_id': 'radai-' + str(locked.pk), 'document_id': str(document.pk), 'current': _project(current, actor)}
+
+
+def _delete_upload_tree(opportunity, actor, key, upload, document):
+    """Delete a file outright, including its document when no ready version remains."""
+    _delete_stored_radai_objects(OpportunityWorkspaceUpload.objects.filter(pk=upload.pk))
+    if document:
+        OpportunityDocumentClassificationCommand.objects.filter(
+            Q(document=document) | Q(upload=upload)).delete()
+        OpportunityDocumentClassification.objects.filter(document=document).delete()
+        OpportunityDocumentClassificationRun.objects.filter(upload=upload).delete()
+        OpportunityWorkspaceUpload.objects.filter(document=document).update(document=None)
+        upload.document = None
+        document.delete()
+    else:
+        OpportunityDocumentClassificationCommand.objects.filter(upload=upload).delete()
+        OpportunityDocumentClassificationRun.objects.filter(upload=upload).delete()
+    upload.status = 'deleted'
+    upload.error_code = ''
+    upload.save(update_fields=['status', 'error_code', 'updated_at'])
+    _audit(opportunity, actor, 'workspace_file_deleted', data={
+        'upload_id': str(upload.pk), 'folder_key': key, 'storage_provider': 'radai',
+        'document_id': str(document.pk) if document else None, 'version': upload.version_number,
+        'head_upload_id': None, 'document_removed': bool(document),
+    })
+    return {'deleted_id': 'radai-' + str(upload.pk),
+            'document_id': str(document.pk) if document else None, 'current': None}
 
 
 def private_file_versions(opportunity, actor, key, file_id, cursor=None):
