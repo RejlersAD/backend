@@ -13,30 +13,51 @@ def size_nb_from_line_number(line_number):
     return match.group(1) + '"' if match else ''
 
 
-def load_specification_lookups(user_id):
+def load_specification_lookups(user_id, pms_data=None):
+    """Builds the code → {pms_class, rating, facing, area} lookup used by
+    enrich_specifications(). Legend-sourced mappings (below) are the
+    original source; `pms_data` — an optional list of
+    {code, pms_class?, rating?, facing?} dicts parsed client-side from an
+    uploaded PMS Excel/CSV (see ValveMTO.jsx's PMS Document stage) — is
+    applied AFTER them and overwrites any legend value for the same code,
+    so an uploaded PMS document always takes priority over legend data.
+    """
     lookups = {key: {} for key in set(LOOKUP_FIELDS.values())}
-    if not user_id:
-        return lookups
-    from .models import ValveMTOLegend
-    for legend in ValveMTOLegend.objects.filter(
-        created_by_id=user_id, is_active=True,
-        section__in=('piping', 'line_list', 'scope_symbols', 'limit_line'),
-    ):
-        for field in legend.definition.get('fields', []):
-            target = LOOKUP_FIELDS.get(field.get('key'))
-            if not target:
-                continue
-            for code, value in (field.get('lookup') or {}).items():
-                code = str(code).strip().upper()
-                values = value if isinstance(value, dict) else {target: value}
-                for key in lookups:
-                    text = str(values.get(key) or '').strip()
-                    if not text:
-                        continue
-                    existing = lookups[key].get(code)
-                    if existing and existing != text:
-                        raise ValueError(f'Conflicting active legend {key} mappings for {code}.')
-                    lookups[key][code] = text
+    if user_id:
+        from .models import ValveMTOLegend
+        for legend in ValveMTOLegend.objects.filter(
+            created_by_id=user_id, is_active=True,
+            section__in=('piping', 'line_list', 'scope_symbols', 'limit_line'),
+        ):
+            for field in legend.definition.get('fields', []):
+                target = LOOKUP_FIELDS.get(field.get('key'))
+                if not target:
+                    continue
+                for code, value in (field.get('lookup') or {}).items():
+                    code = str(code).strip().upper()
+                    values = value if isinstance(value, dict) else {target: value}
+                    for key in lookups:
+                        text = str(values.get(key) or '').strip()
+                        if not text:
+                            continue
+                        existing = lookups[key].get(code)
+                        if existing and existing != text:
+                            raise ValueError(f'Conflicting active legend {key} mappings for {code}.')
+                        lookups[key][code] = text
+
+    for row in (pms_data or []):
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get('code') or '').strip().upper()
+        if not code:
+            continue
+        if row.get('pms_class'):
+            lookups['pms_class'][code] = str(row['pms_class']).strip()
+        if row.get('rating'):
+            lookups['rating'][code] = str(row['rating']).strip()
+        if row.get('facing'):
+            lookups['facing'][code] = str(row['facing']).strip()
+
     return lookups
 
 

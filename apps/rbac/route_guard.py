@@ -25,6 +25,14 @@ class ModuleActionGuardMixin:
         if (self.__class__.__module__, self.__class__.__name__) == ('apps.sales.views', 'DealViewSet') and (
                 getattr(self, 'action_map', {}).get(request.method.lower()) in ('workspace_upload', 'workspace_upload_version')):
             return super().dispatch(request, *args, **kwargs)
+        # The exact Finance command commits its lease before Graph I/O, then
+        # atomically commits publication/checkpoint in the domain service.
+        # Keeping this command outside the blanket transaction preserves a
+        # failed attempt and releases its lock while the remote file is read.
+        # Authentication and all action/source checks below still execute.
+        if request.method == 'POST' and (self.__class__.__module__, self.__class__.__name__) == (
+                'apps.finance.sharepoint_views', 'FinanceReceivablesRefreshView'):
+            return super().dispatch(request, *args, **kwargs)
         # Keep eligibility checks and the ensuing decision in one transaction.
         # DRF converts exceptions to responses; explicitly roll back those too.
         with transaction.atomic():

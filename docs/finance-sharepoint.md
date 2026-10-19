@@ -23,7 +23,7 @@ FINANCE_SHAREPOINT_CLIENT_SECRET=
 FINANCE_SHAREPOINT_DRIVE_ID=
 FINANCE_SHAREPOINT_ITEM_ID=
 FINANCE_SHAREPOINT_SYNC_ENABLED=false
-FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800
+FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=300
 ```
 
 The application secret never belongs in frontend configuration, Git, chat or
@@ -68,6 +68,15 @@ Invoice` sheet and row-5 headers, detects the final invoice row and rejects gaps
 or unexpected headers. It reads saved formula results; Excel calculations are
 not executed. The maximum downloaded XLSX size is 25 MiB.
 
+The original A:AE layout and the workbook with `Business Unit` inserted at H
+are supported. In the latter, original H:AE fields move to I:AF. Both the source
+row reader and workbook-summary reader validate their required headers through
+the same column mapping before publication. Unknown layouts still fail validation
+and leave the previous snapshot active. The new column does not introduce a
+business-unit reporting rule or change any financial calculations. See
+[receivables-source.md](receivables-source.md) for preserved field semantics and
+AE/AF summary compatibility during rollback.
+
 For the existing local Celery deployment, after the first successful publication, enable
 `FINANCE_SHAREPOINT_SYNC_ENABLED=true` and restart the backend, worker and single
 Celery beat scheduler with matching settings. When Docker Compose mounts or
@@ -81,11 +90,11 @@ celery -A config worker --loglevel=info
 celery -A config beat --loglevel=info
 ```
 
-No UI setup screen or new public API is introduced. Operators can inspect the
-singleton `ReceivablesSyncState` through the backend: last attempt, last successful
-check, sanitized last error and last synchronized snapshot. The Finance pages
-continue showing the existing published source provenance; they do not yet show
-a separate remote-connection badge.
+No UI credential setup is introduced. Operators can inspect the singleton
+`ReceivablesSyncState` through the backend: last attempt, last successful check,
+sanitized last error and last synchronized snapshot. The protected refresh/status
+API below exposes only safe timestamps, source IDs and the caller's refresh
+capability; it does not expose credentials, resource URLs or raw errors.
 
 ## Publication and recovery
 
@@ -181,7 +190,8 @@ Deploy this backend change against the latest production branch, preserving
 unrelated newer changes. Railway's existing pre-deploy command applies the full
 migration graph; verify Finance `0015` before publishing a workbook. Keep the
 five Finance identity/resource settings in the production server's secret
-configuration and set the interval to `1800`. For the automatic in-service runtime
+configuration and set the interval to `300` for the five-minute cadence requested
+on 19 October. For the automatic in-service runtime
 below, enabling the switch starts validation and publication through the existing
 ETL. Operators using the manual command path can validate and publish first while
 the schedule remains disabled.
@@ -199,7 +209,7 @@ set these existing variables in Railway and deploy their staged changes:
 
 ```dotenv
 FINANCE_SHAREPOINT_SYNC_ENABLED=true
-FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800
+FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=300
 ```
 
 The first due attempt runs on startup. Every publication validates the entire
@@ -209,6 +219,13 @@ prevent multiple backend replicas or restarts from starting duplicate scheduled
 attempts. Existing publication leases continue protecting manual and Celery
 imports. Existing local Celery behavior is preserved; the production runner does
 not require enabling the generic Celery worker or shared beat schedule.
+
+These settings must be registered on the running Railway backend and their
+staged changes deployed. Editing a private local `.env.production` file does
+not update Railway. A successful check of an unchanged workbook reuses the
+existing snapshot and advances the internal last-success checkpoint; it does
+not create a duplicate snapshot every five minutes. Validation failures can
+therefore coexist with a healthy web server and an active five-minute timer.
 
 The Finance process emits only safe status, count and timing metadata. Failed
 validation/access preserves the last successful source. Transient Graph failures
@@ -238,6 +255,41 @@ and an actual scheduled run. Public HTTP health alone does not establish Finance
 database or worker readiness. Do not report the live connection active until
 these production checks have been observed.
 
-The dashboard's **Refresh data** action reads the active SQL snapshot. Its
-publication date changes when a new source is published; a successful unchanged
-remote check updates the internal sync checkpoint without creating a new snapshot.
+## Explicit dashboard refresh (FIN-SYNC-06, 19 October 2026)
+
+The user requested that **Refresh data** check Microsoft Graph immediately and
+then reload the dashboard. Ordinary dashboard GETs remain reads of the validated
+SQL snapshot. The new protected endpoint is
+`/api/v1/finance/dashboard/receivables/refresh/`:
+
+- GET requires Finance Overview read access. It returns `status` (`idle`,
+  `syncing`, `failed`, `disabled` or `restricted`), `last_checked_at`,
+  `last_attempt_at`, `snapshot_id`, `snapshot_published_at` and `can_refresh`.
+  Without Outgoing Invoices read access, it returns `restricted` and null source
+  metadata without reading Finance source tables.
+- POST accepts an empty JSON object and uses only the registered server workbook.
+  It requires Finance Overview read and Outgoing Invoices read/update access;
+  explicit user denies still apply. Disabled synchronization returns 503.
+  Successful responses are 200 with `status` (`synchronized`, `unchanged` or
+  `busy`) and the safe status object in `sync`. A failed remote read or validation
+  returns a sanitized 502 response with `detail` and `sync`, retaining the previous
+  published source. A busy response means an existing lease owns the attempt,
+  not that this request completed a Graph check.
+
+Finance dashboard GET also includes this object as additive `sharepoint_sync`,
+pinned to the source snapshot used by that response. A successful check advances
+`last_checked_at`; unchanged workbook content retains its existing publication
+timestamp and snapshot ID. A manually replaced source does not inherit the old
+source's last successful remote-check timestamp. No synthetic snapshot or date
+is created to make unchanged data appear new.
+
+This exact POST is excluded from the route guard's blanket outer transaction,
+while retaining its authentication and action checks. The existing domain service
+commits its lease before Graph I/O and atomically publishes validated rows with
+the checkpoint afterward. Failed attempt metadata therefore survives an HTTP
+error; unrelated commands retain their transaction behavior. The shared lease,
+generation guard and immutable source rules remain unchanged. No schema change
+or new worker is required.
+
+Focused guarded API checks are in `apps.finance.tests_sharepoint_refresh` and
+must run alongside the Finance source/runtime regressions before release.

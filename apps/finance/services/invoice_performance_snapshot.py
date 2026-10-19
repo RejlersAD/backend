@@ -5,8 +5,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from .invoice_performance import aggregate_invoice_days
+from .workbook_layout import WORKBOOK_MAX_COLUMN, validated_column_indices
 from .workbook_summary_snapshot import HEADERS, _cell_currency, _cell_kind, _text
 
 
@@ -39,18 +41,19 @@ def generate_invoice_performance_snapshot(path, *, sheet='External Invoice ', fi
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         worksheet = workbook[sheet]
-        header = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=31))
-        from openpyxl.utils import column_index_from_string
-        for column, expected in {**HEADERS, 'B': 'Invoice Date'}.items():
-            if _text(header[column_index_from_string(column) - 1].value).casefold() != expected.casefold():
-                raise ValueError(f'Unexpected header at {column}{header_row}.')
+        header = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=WORKBOOK_MAX_COLUMN))
+        indices = validated_column_indices(
+            header, {**HEADERS, 'B': 'Invoice Date'}, header_row=header_row, casefold=True,
+        )
         if last_row > worksheet.max_row:
             raise ValueError('The last invoice row is outside the worksheet.')
         counters = {'currency_conflict_count': 0, 'receipt_currency_mismatch_count': 0,
                     'invalid_invoice_date_count': 0}
 
         def source_rows():
-            for row_number, row in enumerate(worksheet.iter_rows(min_row=first_row, max_col=31), first_row):
+            for row_number, physical in enumerate(
+                    worksheet.iter_rows(min_row=first_row, max_col=WORKBOOK_MAX_COLUMN), first_row):
+                row = tuple(physical[index] for index in indices)
                 invoice_id = _text(row[0].value)
                 footer = invoice_id.casefold().rstrip(':') in {'total', 'grand total', 'subtotal', 'sub total'}
                 if row_number > last_row:
@@ -83,7 +86,9 @@ def generate_invoice_performance_snapshot(path, *, sheet='External Invoice ', fi
     return {'schema_version': '1.0',
             'source': {'file_name': path.name, 'sheet': sheet, 'first_row': first_row, 'last_row': last_row,
                        'snapshot_at': captured.isoformat(), 'sha256': digest, 'scope': 'full_external_workbook',
-                       'invoice_date_column': 'B', 'amount_column': 'L', 'receipt_column': 'AA',
-                       'currency_column': 'AE', 'currency_method': 'strict_agreement_or_single_source',
+                       'invoice_date_column': 'B', 'amount_column': get_column_letter(indices[11] + 1),
+                       'receipt_column': get_column_letter(indices[26] + 1),
+                       'currency_column': get_column_letter(indices[30] + 1),
+                       'currency_method': 'strict_agreement_or_single_source',
                        'tax_basis': 'recorded_invoice_amount'},
             'coverage': counters, 'days': days}

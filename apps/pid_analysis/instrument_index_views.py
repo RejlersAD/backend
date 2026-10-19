@@ -19,7 +19,7 @@ import logging
 
 from django.core.cache import cache
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.http import HttpResponse
 
@@ -33,6 +33,22 @@ EXCEL_CACHE_TTL = 600  # 10 minutes
 # Soft-coded flag — set to False to force the legacy synchronous path
 # (used by unit tests and by clients that cannot poll).
 II_ASYNC_ENABLED = True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BYOK key self-test — one minimal provider call; the key is never stored.
+# Mirrors instrument_io_workflow's vision_test_key_view.
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def test_instrument_index_byok_key(request):
+    """POST {provider, api_key, model?} → {valid, message}."""
+    from .instrument_index_service import test_byok_key
+    provider = (request.data.get('provider') or 'claude').strip()
+    api_key  = (request.data.get('api_key') or '').strip()
+    model    = (request.data.get('model') or '').strip() or None
+    valid, message = test_byok_key(provider, api_key, model)
+    return Response({'valid': valid, 'message': message})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ from apps.finance.receivables_source_models import (
     ReceivablesSourceRow, ReceivablesSourceSnapshot, ReceivablesSyncState,
 )
 from .workbook_summary import validate_snapshot, validate_source_summary
+from .workbook_layout import WORKBOOK_MAX_COLUMN, validated_column_indices
 from .workbook_summary_snapshot import (
     FOOTER_LABELS, _cell_currency, _cell_kind, _text, generate_workbook_snapshot,
 )
@@ -114,13 +115,13 @@ def read_receivables_source(path, *, sheet='External Invoice ', first_row=6, las
         worksheet = workbook[sheet]
         if last_row is not None and last_row > worksheet.max_row:
             raise ValueError('The last invoice row is outside the worksheet.')
-        from openpyxl.utils import column_index_from_string
-        header = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=31))
-        for column, expected in SOURCE_HEADERS.items():
-            if _text(header[column_index_from_string(column) - 1].value).casefold() != expected.casefold():
-                raise ValueError(f'Unexpected source header at {column}{header_row}.')
+        header = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=WORKBOOK_MAX_COLUMN))
+        indices = validated_column_indices(header, SOURCE_HEADERS, header_row=header_row,
+                                           casefold=True, error_prefix='Unexpected source header')
         detected_end = False
-        for number, cells in enumerate(worksheet.iter_rows(min_row=first_row, max_col=31), first_row):
+        for number, physical_cells in enumerate(
+                worksheet.iter_rows(min_row=first_row, max_col=WORKBOOK_MAX_COLUMN), first_row):
+            cells = tuple(physical_cells[index] for index in indices)
             invoice_number = _text(cells[0].value)
             footer = invoice_number.casefold().rstrip(':') in FOOTER_LABELS
             if last_row is None:

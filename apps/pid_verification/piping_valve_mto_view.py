@@ -6,10 +6,20 @@ Extraction + BYOK endpoints:
 
     POST /api/v1/pid-verification/extract-valve-mto/        (start)
         multipart/form-data: pid_file=<PDF>, vision_provider=<openai|claude>
-        (optional), vision_api_key=<key> (optional — see BYOK note below),
-        scan_mode=<quick|thorough> (optional — defaults to "thorough" when
-        omitted; see services.piping_valve_mto_extractor._scan_mode_params
-        for exactly what each resolves to)
+        (optional), vision_model=<model id> (optional — caller-chosen model
+        for the selected provider, e.g. the frontend's "AI Model" dropdown;
+        empty/omitted falls back to services.piping_valve_mto_extractor's
+        own VISION_MODELS[provider] default, unchanged from before this
+        parameter existed), vision_api_key=<key> (optional — see BYOK note
+        below), scan_mode=<quick|thorough> (optional — defaults to
+        "thorough" when omitted; see
+        services.piping_valve_mto_extractor._scan_mode_params for exactly
+        what each resolves to), pms_data=<JSON array string> (optional —
+        a list of {code, pms_class?, rating?, facing?} dicts parsed
+        client-side from an uploaded PMS Excel/CSV; overlays and takes
+        priority over legend-sourced lookups for the same code — see
+        services.piping_valve_mto_extractor.extract_valve_mto_streaming's
+        own docstring)
         → 202 {status: "queued", job_id, ...}
 
     GET  /api/v1/pid-verification/extract-valve-mto/<job_id>/   (poll)
@@ -64,6 +74,7 @@ existing LegendSheetsModal component.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -124,6 +135,7 @@ def extract_valve_mto_view(request):
         return JsonResponse({'status': 'error', 'message': 'Choose local or vision extraction.'}, status=400)
     vision_provider = None
     vision_api_key = None
+    vision_model = None
     credential_mode = 'central'
     if extraction_mode == 'vision':
         from .services.piping_valve_mto_extractor import SUPPORTED_PROVIDERS
@@ -131,6 +143,10 @@ def extract_valve_mto_view(request):
         if vision_provider not in SUPPORTED_PROVIDERS:
             return JsonResponse({'status': 'error', 'message': 'Choose OpenAI or Claude for AI Vision extraction.'}, status=400)
         vision_api_key = (request.data.get('vision_api_key') or '').strip() or None
+        # Caller-chosen model for the selected provider (frontend's "AI
+        # Model" dropdown) — optional; empty/omitted falls back to
+        # piping_valve_mto_extractor.VISION_MODELS[provider] untouched.
+        vision_model = (request.data.get('vision_model') or '').strip() or None
         credential_mode = (request.data.get('vision_credential_mode') or 'central').strip().lower()
         if credential_mode not in ('central', 'byok'):
             return JsonResponse({'status': 'error', 'message': 'Choose central credentials or BYOK.'}, status=400)
@@ -159,9 +175,36 @@ def extract_valve_mto_view(request):
     # right where the request is parsed, not just buried in the extractor.
     scan_mode = (request.data.get('scan_mode') or '').strip().lower() or 'thorough'
 
+    # Optional PMS (Piping Material Specification) overlay — parsed
+    # client-side from an uploaded Excel/CSV by ValveMTO.jsx's PMS
+    # Document stage, sent here as a JSON-encoded list of
+    # {code, pms_class?, rating?, facing?} dicts. Malformed JSON or a
+    # non-list payload is rejected with 400 rather than let a bad request
+    # crash the whole upload — see services.piping_valve_mto_extractor's
+    # own docstring for how this overlays (and takes priority over)
+    # legend-sourced lookups for the same code.
+    pms_data_raw = request.data.get('pms_data')
+    pms_data = None
+    if pms_data_raw:
+        try:
+            parsed = json.loads(pms_data_raw)
+            if not isinstance(parsed, list):
+                raise ValueError('pms_data must be a JSON array')
+        except (TypeError, ValueError):
+            # The upload was already staged to tmp_path above — clean it up
+            # before bailing out, same as the start_job() failure path below.
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return JsonResponse({'status': 'error', 'message': 'pms_data must be a valid JSON array.'}, status=400)
+        pms_data = parsed
+
     try:
         job_id = start_job(
             tmp_path, upload.name, vision_provider=vision_provider, vision_api_key=vision_api_key,
+            vision_model=vision_model, pms_data=pms_data,
             user_id=request.user.pk, scan_mode=scan_mode,
             extraction_mode=extraction_mode,
             credential_mode=credential_mode,

@@ -2445,6 +2445,46 @@ EXTRACTION_CONFIG = {
     # net on top of per-call timeouts so a single hung page can never freeze
     # the request indefinitely. Should be >= openai/gemini timeout.
     "page_pass_timeout_sec":    int(os.environ.get("INSTRUMENT_INDEX_PAGE_TIMEOUT_SEC", "480")),
+
+    # ─── Soft-coded BYOK routing (env-tunable) ──────────────────────────────
+    # When the user supplies their own key (BYOK), ALL Vision work runs on
+    # that key only — no fall-through to the shared Gemini/OpenAI engines
+    # (rate-limited / out of credit) and no shared Gemini text enrichment.
+    # Set INSTRUMENT_INDEX_BYOK_EXCLUSIVE=false to restore the legacy
+    # "BYOK first, then shared engines" waterfall.
+    "byok_exclusive": os.environ.get("INSTRUMENT_INDEX_BYOK_EXCLUSIVE", "true").lower() in ("1", "true", "yes"),
+    # EasyOCR + PaddleOCR are CPU/memory heavy (installed in the production
+    # image only). With a BYOK Vision run they add minutes per page for
+    # marginal recall, so they are skipped. Set to false to always run them.
+    "skip_supplementary_ocr_with_byok": os.environ.get(
+        "INSTRUMENT_INDEX_SKIP_SUPP_OCR_WITH_BYOK", "true").lower() in ("1", "true", "yes"),
+
+    # ─── Soft-coded BYOK-DIRECT extraction (env-tunable) ────────────────────
+    # When a BYOK key is supplied, skip the whole OCR stack (text layer,
+    # Tesseract, EasyOCR, PaddleOCR, shared Gemini text enrichment) and send
+    # EVERY page straight to the user's Vision model (multi-pass per page).
+    # Set INSTRUMENT_INDEX_BYOK_DIRECT=false to return to the hybrid pipeline.
+    "byok_direct": os.environ.get("INSTRUMENT_INDEX_BYOK_DIRECT", "true").lower() in ("1", "true", "yes"),
+    # Optionally union the free PyMuPDF text-layer tags into BYOK-direct
+    # results (instant, no OCR). Off = pure Vision extraction.
+    "byok_direct_merge_text_layer": os.environ.get(
+        "INSTRUMENT_INDEX_BYOK_MERGE_TEXT_LAYER", "false").lower() in ("1", "true", "yes"),
+    # Pages scanned concurrently on BYOK-direct runs (each page itself runs
+    # `parallel_passes` concurrent Vision passes).
+    "byok_page_concurrency": int(os.environ.get("INSTRUMENT_INDEX_BYOK_PAGE_CONCURRENCY", "3")),
+    # Passes per page on BYOK-direct runs: "tiles" (4 zoomed quadrants —
+    # fastest, best resolution per call), "primary+tiles" (5) or "all" (7).
+    "byok_direct_pass_set": os.environ.get("INSTRUMENT_INDEX_BYOK_PASS_SET", "tiles"),
+    # Claude model used when the user leaves "default" selected.
+    "byok_claude_default_model": os.environ.get("INSTRUMENT_INDEX_BYOK_CLAUDE_MODEL", "claude-opus-5"),
+    # Hybrid-reasoning Claude models emit extended thinking by default, which
+    # burns max_tokens and latency without improving tag reading.
+    "byok_claude_disable_thinking": True,
+    # Claude rejects images > ~5 MB and internally downscales to ~1568 px on
+    # the long edge, so larger renders only add upload time (or hard-fail).
+    # Images are shrunk/re-encoded to stay within these limits before sending.
+    "byok_claude_max_px":    int(os.environ.get("INSTRUMENT_INDEX_BYOK_CLAUDE_MAX_PX", "2048")),
+    "byok_claude_max_bytes": int(os.environ.get("INSTRUMENT_INDEX_BYOK_CLAUDE_MAX_BYTES", "3800000")),
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2991,6 +3031,89 @@ _SERVICE_VERB_MAP = {
 }
 
 
+# ─── Soft-coded: BYOK key self-test ──────────────────────────────────
+# One minimal text-only call to validate the user's key BEFORE a long
+# extraction run. Model whitelist mirrors the frontend picker — unknown
+# or blank model falls back to the provider default. The key is used for
+# this single call and never stored.
+II_BYOK_TEST_ALLOWED_MODELS = {
+    'claude': ['claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4-5-20250929'],
+    'openai': ['gpt-4o', 'gpt-4o-mini'],
+}
+II_BYOK_TEST_DEFAULT_MODEL = {'claude': 'claude-sonnet-5', 'openai': 'gpt-4o'}
+II_BYOK_TEST_MAX_TOKENS = 5
+II_BYOK_TEST_TIMEOUT_S = 30
+
+
+class ByokFatalError(RuntimeError):
+    """Raised when the user's BYOK key cannot be used at all (no credits,
+    rejected key, unavailable model). Propagates past extract_instruments'
+    catch-all so the task reports a clear, actionable failure instead of a
+    silent 0-tag result."""
+
+
+def _classify_byok_error(provider, model, err_str):
+    """Return (fatal_message | None, stop_byok: bool) for a BYOK API error."""
+    low = err_str.lower()
+    who = 'Anthropic' if provider == 'claude' else 'OpenAI'
+    if 'credit balance' in low or 'insufficient_quota' in low or 'billing' in low:
+        return (f'Your {who} account has no API credits left for this key. '
+                f'Top up billing in the {who} console, then re-run.'), True
+    if '401' in err_str or 'authentication' in low or 'invalid_api_key' in low or 'invalid x-api-key' in low:
+        return 'Your API key was rejected by the provider. Check the key and re-run.', True
+    if 'not_found_error' in low or ('404' in err_str and 'model' in low):
+        return (f'Model "{model}" is not available for this key. '
+                'Pick another model and re-run.'), True
+    if '429' in err_str or 'rate_limit' in low:
+        return None, True     # transient — stop hammering, but not a hard failure
+    return None, False
+
+
+def test_byok_key(provider, api_key, model=None):
+    """Returns (valid: bool, message: str) — a single cheap ping call."""
+    provider = (provider or '').strip().lower()
+    api_key = (api_key or '').strip()
+    if provider not in II_BYOK_TEST_ALLOWED_MODELS:
+        return False, f"Unsupported provider '{provider}'. Choose Claude or OpenAI."
+    if not api_key:
+        return False, 'API key is required.'
+    allowed = II_BYOK_TEST_ALLOWED_MODELS[provider]
+    use_model = model if model in allowed else II_BYOK_TEST_DEFAULT_MODEL[provider]
+    try:
+        if provider == 'claude':
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key, timeout=II_BYOK_TEST_TIMEOUT_S)
+            client.messages.create(
+                model=use_model,
+                max_tokens=II_BYOK_TEST_MAX_TOKENS,
+                # Disable extended thinking so hybrid models don't consume
+                # the tiny test budget on thinking tokens.
+                thinking={'type': 'disabled'},
+                messages=[{'role': 'user', 'content': 'Hi'}],
+            )
+        else:
+            import openai
+            client = openai.OpenAI(api_key=api_key, timeout=II_BYOK_TEST_TIMEOUT_S)
+            client.chat.completions.create(
+                model=use_model,
+                max_tokens=II_BYOK_TEST_MAX_TOKENS,
+                messages=[{'role': 'user', 'content': 'Hi'}],
+            )
+        return True, f'API key is valid and working ({use_model}).'
+    except Exception as exc:  # noqa: BLE001
+        status = getattr(exc, 'status_code', None) or getattr(exc, 'http_status', None)
+        fatal, _stop = _classify_byok_error(provider, use_model, str(exc))
+        if fatal:
+            return False, fatal
+        if status in (401, 403):
+            return False, 'Invalid API key. Please check and try again.'
+        if status == 404:
+            return False, f'Model {use_model} is not available for this key — pick another model.'
+        if status == 429:
+            return False, 'Key valid but quota/rate-limited right now — try again shortly.'
+        return False, f'Connection test failed: {exc}'
+
+
 class InstrumentIndexService:
     """
     Extract ALL instrument tags from a P&ID drawing.
@@ -3022,6 +3145,8 @@ class InstrumentIndexService:
         self.byok_api_key  = (byok_api_key or '').strip() or None
         self.byok_model    = (byok_model or '').strip() or None
         self._byok_quota_exceeded = False
+        # Actionable message set on the first unrecoverable BYOK error.
+        self.byok_fatal_error = None
         if self.byok_api_key and self.byok_provider not in ('openai', 'claude'):
             logger.warning("[InstrumentIndex] BYOK provider %r unsupported — ignored", self.byok_provider)
             self.byok_provider = None
@@ -3118,6 +3243,54 @@ class InstrumentIndexService:
             self._paddleocr_reader = False
             return None
 
+    def _byok_exclusive(self):
+        """True when a BYOK key is present and the run must use it exclusively."""
+        return bool(self.byok_api_key) and bool(self.extraction_config.get("byok_exclusive", True))
+
+    def _vision_engines(self, engine_order):
+        """Vision engine list for this run. The user's BYOK key always comes
+        first; with byok_exclusive it is the ONLY engine (no shared fallback).
+        Without BYOK the legacy shared-engine order is returned unchanged."""
+        shared = [e for e in engine_order if e != "tesseract"]
+        if self.byok_api_key:
+            return ["byok"] if self._byok_exclusive() else ["byok"] + shared
+        return shared
+
+    def _byok_scan_all_pages(self, pid_bytes, drawing_info):
+        """BYOK-direct: full multi-pass Vision scan of EVERY page on the
+        user's own key. Pages run concurrently (byok_page_concurrency);
+        each page runs its passes concurrently (parallel_passes)."""
+        try:
+            pages = self._to_jpeg_pages(pid_bytes)
+        except Exception as pe:
+            logger.error(f"[InstrumentIndex] BYOK-direct PDF→image failed: {pe}")
+            return []
+        n = max(1, int(self.extraction_config.get("byok_page_concurrency", 2)))
+
+        def _one(item):
+            page_no, jpeg = item
+            try:
+                return page_no, self._analyse_page(jpeg, drawing_info, page_no, only_engine="byok")
+            except Exception as exc:
+                logger.warning(f"[InstrumentIndex] BYOK-direct page {page_no} failed: {exc}")
+                return page_no, []
+
+        items = list(enumerate(pages, start=1))
+        if n <= 1 or len(items) <= 1:
+            results = [_one(it) for it in items]
+        else:
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=min(n, len(items))) as _ex:
+                results = list(_ex.map(_one, items))
+        out = []
+        for _page_no, insts in sorted(results, key=lambda r: r[0]):
+            out.extend(insts)
+        logger.info(
+            f"[InstrumentIndex] BYOK-direct scanned {len(items)} page(s) "
+            f"(page concurrency={n}) → {len(out)} raw tags"
+        )
+        return out
+
     def _run_supplementary_ocr(self, gray_img, page_no, seen_tags, dn, rev, instruments):
         """
         Run EasyOCR + PaddleOCR on the same preprocessed page image used by
@@ -3128,6 +3301,8 @@ class InstrumentIndexService:
         for circle-embedded text and stylised fonts where Tesseract is weak.
         """
         cfg = self.extraction_config
+        if self.byok_api_key and cfg.get("skip_supplementary_ocr_with_byok", True):
+            return
         min_conf = float(cfg.get("supplementary_ocr_min_conf", 0.30))
 
         # Convert PIL gray image → numpy array (both libs accept this).
@@ -3224,14 +3399,27 @@ class InstrumentIndexService:
                 self._load_legend_context_from_s3(drawing_info),
             )
 
+            # BYOK-direct: every page goes straight to the user's Vision model;
+            # the OCR stack (text layer, Tesseract, EasyOCR, PaddleOCR, shared
+            # Gemini text enrichment) is skipped entirely. Soft-coded.
+            _byok_direct = self._byok_exclusive() and bool(cfg.get("byok_direct", True))
+            if _byok_direct:
+                logger.info(
+                    "[InstrumentIndex] BYOK-direct mode — %s Vision on every page, OCR stack skipped",
+                    self.byok_provider,
+                )
+
             # ── Step 1: PyMuPDF text layer (free, always runs) ────────────
-            text_instruments = self._extract_with_text_layer(pid_bytes, drawing_info)
+            if _byok_direct and not cfg.get("byok_direct_merge_text_layer", False):
+                text_instruments = []
+            else:
+                text_instruments = self._extract_with_text_layer(pid_bytes, drawing_info)
             logger.info(f"[InstrumentIndex] Text-layer: {len(text_instruments)} tags")
 
             # ── Step 2: Tesseract OCR (free, runs on ALL PDFs) ────────────
             # Catches tags in instrument circles that the text layer may split or miss.
             tess_instruments: list = []
-            if self.tesseract_available and cfg.get("tesseract_on_all", True):
+            if not _byok_direct and self.tesseract_available and cfg.get("tesseract_on_all", True):
                 logger.info("[InstrumentIndex] Tesseract OCR — running alongside text layer…")
                 tess_instruments = self._extract_with_tesseract(pid_bytes, drawing_info)
                 logger.info(f"[InstrumentIndex] Tesseract OCR: {len(tess_instruments)} tags")
@@ -3243,12 +3431,14 @@ class InstrumentIndexService:
             # ── Step 2.5: Contextual enrichment — pattern-based, zero AI quota ──
             # Fills: loop_number, service_description, line_number, equipment_number,
             #        fail_safe, signal_type, set_point using PDF text layer patterns.
-            if all_free:
+            if all_free and not _byok_direct:
                 logger.info("[InstrumentIndex] Running contextual enrichment (pattern-based)…")
                 all_free = self._enrich_from_pdf_context(all_free, pid_bytes)
 
-                # Gemini text-only enrichment (much lighter quota than Vision)
-                if not self._gemini_quota_exceeded and self.gemini_client:
+                # Gemini text-only enrichment (much lighter quota than Vision).
+                # Skipped on BYOK-exclusive runs — it uses the shared Gemini key.
+                if (not self._byok_exclusive()
+                        and not self._gemini_quota_exceeded and self.gemini_client):
                     try:
                         import fitz as _fitz
                         _doc = _fitz.open(stream=pid_bytes, filetype="pdf")
@@ -3274,14 +3464,27 @@ class InstrumentIndexService:
             _category = (drawing_info or {}).get("project_category") or "default"
             _force_full_vision = _category in set(cfg.get("full_vision_categories", []))
 
-            if _force_full_vision:
+            if _byok_direct:
+                vision_full = self._byok_scan_all_pages(pid_bytes, drawing_info)
+                if not vision_full and self.byok_fatal_error:
+                    raise ByokFatalError(self.byok_fatal_error)
+                all_free = self._merge_instruments(all_free + vision_full)
+                # Cheap pattern-based context fill (no OCR, no AI) on the Vision results.
+                if all_free:
+                    try:
+                        all_free = self._enrich_from_pdf_context(all_free, pid_bytes)
+                    except Exception as _ectx:
+                        logger.warning(f"[InstrumentIndex] BYOK-direct context fill skipped: {_ectx}")
+                logger.info(f"[InstrumentIndex] BYOK-direct total: {len(all_free)} tags")
+
+            elif _force_full_vision:
                 logger.info(
                     "[InstrumentIndex] category='%s' → forcing full multi-page AI vision pass",
                     _category,
                 )
                 vision_full = []
                 seen_v = {(i.get("tag_number") or "").strip().upper() for i in all_free}
-                for engine in [e for e in engine_order if e != "tesseract"]:
+                for engine in self._vision_engines(engine_order):
                     if engine == "gemini" and (self._gemini_quota_exceeded or not self.gemini_client):
                         continue
                     if engine == "openai" and (self._quota_exceeded or not self.openai_client):
@@ -3318,10 +3521,14 @@ class InstrumentIndexService:
                         len(vision_full), len(all_free),
                     )
 
-            if len(all_free) >= MIN_TEXT_TAGS:
+            if _byok_direct:
+                # Every page was already fully scanned on the BYOK key.
+                all_instruments = list(all_free)
+
+            elif len(all_free) >= MIN_TEXT_TAGS:
                 # Good free-tier results — use AI to enrich service descriptions and find any missed tags
                 enriched = []
-                for eng in [e for e in engine_order if e != "tesseract"]:
+                for eng in self._vision_engines(engine_order):
                     if eng == "gemini" and (self._gemini_quota_exceeded or not self.gemini_client):
                         continue
                     if eng == "openai" and (self._quota_exceeded or not self.openai_client):
@@ -3353,7 +3560,7 @@ class InstrumentIndexService:
                 logger.info("[InstrumentIndex] Sparse free-tier — trying full AI Vision extraction…")
                 all_instruments = list(all_free)
 
-                for engine in [e for e in engine_order if e != "tesseract"]:
+                for engine in self._vision_engines(engine_order):
                     if engine == "gemini" and (self._gemini_quota_exceeded or not self.gemini_client):
                         logger.info("[InstrumentIndex] Gemini unavailable — skipping")
                         continue
@@ -3445,6 +3652,8 @@ class InstrumentIndexService:
             logger.info(f"[InstrumentIndex] ✅ Total unique instruments: {len(all_instruments)}")
             return all_instruments
 
+        except ByokFatalError:
+            raise
         except Exception as e:
             logger.error(f"[InstrumentIndex] extract_instruments error: {e}", exc_info=True)
             return []
@@ -6365,17 +6574,26 @@ Rules:
         # engines, same downstream merge. Pure orchestration change.
         pass_specs = []
 
+        # BYOK-direct pass set (soft-coded): Claude downscales a full page to
+        # ~1568 px, so full-page/rotated passes add little — the 2×2 zoomed
+        # tiles carry the usable resolution. "tiles" | "primary+tiles" | "all".
+        _pass_set = (cfg.get("byok_direct_pass_set", "tiles")
+                     if only_engine == "byok" and cfg.get("byok_direct", True) else "all")
+        _include_primary = _pass_set in ("all", "primary+tiles") or not cfg["enable_tiling"]
+        _include_rotation = _pass_set == "all"
+
         # Pass 1: Full drawing, normal orientation
-        pass_specs.append((
-            "Pass 1 (0° full)",
-            jpeg_bytes,
-            "Standard orientation. Extract ALL instrument tags visible.",
-            "primary",
-            cfg["max_tokens_primary"],
-        ))
+        if _include_primary:
+            pass_specs.append((
+                "Pass 1 (0° full)",
+                jpeg_bytes,
+                "Standard orientation. Extract ALL instrument tags visible.",
+                "primary",
+                cfg["max_tokens_primary"],
+            ))
 
         # Rotation passes
-        if cfg["enable_rotation"]:
+        if cfg["enable_rotation"] and _include_rotation:
             for angle in cfg["rotation_angles"]:
                 rotated_img = img.rotate(-angle, expand=True)
                 rot_jpeg = self._pil_to_jpeg(rotated_img)
@@ -6440,28 +6658,32 @@ Rules:
                 f"[InstrumentIndex] Page {page_no} — dispatching {len(pass_specs)} "
                 f"passes with concurrency={parallel_n} (budget={page_budget}s)"
             )
-            with _cf.ThreadPoolExecutor(max_workers=parallel_n) as _ex:
-                futures = [_ex.submit(_run_one, spec) for spec in pass_specs]
-                try:
-                    for fut in _cf.as_completed(futures, timeout=page_budget):
+            # Explicit executor (not `with`): on budget expiry we must NOT
+            # block on still-running calls — `with` would wait for them,
+            # defeating page_pass_timeout_sec. Stragglers finish in the
+            # background and their results are discarded.
+            _ex = _cf.ThreadPoolExecutor(max_workers=parallel_n)
+            futures = [_ex.submit(_run_one, spec) for spec in pass_specs]
+            try:
+                for fut in _cf.as_completed(futures, timeout=page_budget):
+                    try:
+                        all_pass_instruments.extend(fut.result())
+                    except Exception as exc:
+                        logger.warning(f"[InstrumentIndex] Page {page_no} — pass result error: {exc}")
+            except _cf.TimeoutError:
+                done = sum(1 for f in futures if f.done())
+                logger.warning(
+                    f"[InstrumentIndex] Page {page_no} — page budget {page_budget}s exceeded; "
+                    f"collected {done}/{len(futures)} passes, continuing with partial results"
+                )
+                for fut in futures:
+                    if fut.done():
                         try:
                             all_pass_instruments.extend(fut.result())
-                        except Exception as exc:
-                            logger.warning(f"[InstrumentIndex] Page {page_no} — pass result error: {exc}")
-                except _cf.TimeoutError:
-                    done = sum(1 for f in futures if f.done())
-                    logger.warning(
-                        f"[InstrumentIndex] Page {page_no} — page budget {page_budget}s exceeded; "
-                        f"collected {done}/{len(futures)} passes, continuing with partial results"
-                    )
-                    for fut in futures:
-                        if fut.done():
-                            try:
-                                all_pass_instruments.extend(fut.result())
-                            except Exception:
-                                pass
-                        else:
-                            fut.cancel()
+                        except Exception:
+                            pass
+            finally:
+                _ex.shutdown(wait=False, cancel_futures=True)
 
         # ── Merge & deduplicate ──────────────────────────────────────────
         merged = self._merge_instruments(all_pass_instruments)
@@ -6502,9 +6724,10 @@ Rules:
         engines = self.extraction_config.get("ai_engines", ["gemini", "openai"])
         if only_engine:
             engines = [only_engine]
-        # BYOK: the user's own key takes priority over every shared engine.
-        if self.byok_api_key and not only_engine:
-            engines = ["byok"] + list(engines)
+        # BYOK: the user's own key takes priority over every shared engine —
+        # and is the ONLY engine on byok_exclusive runs (no shared fallback).
+        elif self.byok_api_key:
+            engines = ["byok"] if self._byok_exclusive() else ["byok"] + list(engines)
         for engine in engines:
             instruments = []
             if engine == "byok":
@@ -6815,6 +7038,32 @@ Rules:
                 logger.error(f"[InstrumentIndex] OpenAI Vision error ({mode_label}): {e}", exc_info=True)
             return []
 
+    def _fit_image_for_claude(self, b64_image):
+        """Downscale/re-encode a base64 JPEG so it fits Claude's image limits
+        (soft-coded byok_claude_max_px / byok_claude_max_bytes). Returns the
+        original string untouched when already within limits or on error."""
+        cfg = self.extraction_config
+        max_px = int(cfg.get("byok_claude_max_px", 2048))
+        max_bytes = int(cfg.get("byok_claude_max_bytes", 3_800_000))
+        try:
+            raw = base64.b64decode(b64_image)
+            from PIL import Image as _PILImage
+            img = _PILImage.open(io.BytesIO(raw))
+            if max(img.size) <= max_px and len(raw) <= max_bytes:
+                return b64_image
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.thumbnail((max_px, max_px))
+            for quality in (88, 80, 70, 60):
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=quality, optimize=True)
+                if buf.tell() <= max_bytes:
+                    break
+            return base64.b64encode(buf.getvalue()).decode("utf-8")
+        except Exception as exc:
+            logger.debug(f"[InstrumentIndex] Claude image fit skipped: {exc}")
+            return b64_image
+
     def _call_byok_vision(self, b64_image, prompt, mode_label, max_tokens=None):
         """Call the USER'S OWN OpenAI or Claude key (BYOK) — direct SDK
         client, no DB/env credential lookup. Same response contract as
@@ -6835,17 +7084,20 @@ Rules:
         try:
             if self.byok_provider == 'claude':
                 import anthropic
-                from apps.pid_checker_v2.services.vision_extractor import VISION_MODELS
+                b64_image = self._fit_image_for_claude(b64_image)
                 client = anthropic.Anthropic(api_key=self.byok_api_key, timeout=cfg.get("openai_request_timeout_sec", 180))
-                logger.info(f"[InstrumentIndex] Calling Claude Vision BYOK ({mode_label}, max_tokens={max_tokens})…")
+                claude_model = self.byok_model or cfg.get("byok_claude_default_model", "claude-opus-5")
+                extra = {"thinking": {"type": "disabled"}} if cfg.get("byok_claude_disable_thinking", True) else {}
+                logger.info(f"[InstrumentIndex] Calling Claude Vision BYOK ({mode_label}, model={claude_model}, max_tokens={max_tokens})…")
                 resp = client.messages.create(
-                    model=self.byok_model or VISION_MODELS['claude'],
+                    model=claude_model,
                     max_tokens=max_tokens,
                     system=system_prompt,
                     messages=[{"role": "user", "content": [
                         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64_image}},
                         {"type": "text", "text": prompt},
                     ]}],
+                    **extra,
                 )
                 raw = ''.join(b.text for b in resp.content if getattr(b, 'type', None) == 'text')
             else:  # openai
@@ -6878,12 +7130,16 @@ Rules:
             return self._parse_response(raw)
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "insufficient_quota" in err_str or "rate_limit" in err_str.lower():
+            fatal, stop = _classify_byok_error(
+                self.byok_provider, self.byok_model or cfg.get("byok_claude_default_model"), err_str)
+            if stop:
+                # Stop every other in-flight/queued BYOK pass immediately.
                 self._byok_quota_exceeded = True
-                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} quota/rate-limit hit ({mode_label}) — BYOK disabled")
-            elif "401" in err_str or "authentication" in err_str.lower() or "invalid_api_key" in err_str.lower():
-                self._byok_quota_exceeded = True  # don't keep retrying a bad key on every tile
-                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} key rejected ({mode_label}): {e}")
+            if fatal:
+                self.byok_fatal_error = self.byok_fatal_error or fatal
+                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} fatal ({mode_label}): {fatal}")
+            elif stop:
+                logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} rate-limited ({mode_label}) — BYOK paused")
             else:
                 logger.error(f"[InstrumentIndex] BYOK {self.byok_provider} Vision error ({mode_label}): {e}", exc_info=True)
             return []
