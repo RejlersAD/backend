@@ -24,7 +24,7 @@ import os
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, ProtectedError
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -284,7 +284,13 @@ def project_detail(request, project_id):
         return Response(_serialize_project(p, user=request.user))
 
     # DELETE
-    p.delete()
+    try:
+        p.delete()
+    except ProtectedError:
+        return Response({
+            'error': 'Cannot delete this project because it has linked data. '
+                      'Please remove all associated records first before deleting the project.',
+        }, status=status.HTTP_400_BAD_REQUEST)
     return Response({'deleted': True, 'project_id': str(project_id)})
 
 
