@@ -49,16 +49,33 @@ audit is separately retained by the core migration.
 
 Headers are checked before import. The default source is `External Invoice `
 (including its trailing space), header row 5, invoice rows 6 through 4409.
-Column R is preserved and normalized by exact label: `New` stays `new`, and
-`Paid (partial)` becomes `partial`. Unknown statuses remain outside the eligible
-unpaid statuses. Dates come from their recorded cells, including Due Date N.
+The Graph reader detects the final invoice row rather than using that manual
+command default. Two layouts are supported: the original A:AE layout and the
+layout with `Business Unit` inserted at H, shifting original H:AE to I:AF.
+Every header required by a reader is checked at its mapped position before
+values are read. The two `COMPANY` columns at E/F keep their distinct meanings;
+arbitrary insertions, renamed required headers and column reordering are rejected.
+`Business Unit` is a layout marker, not a new imported dimension or allocation rule.
 
-L, M, Y and AA retain cached numeric values with eight decimal places. Blank,
-text and Excel error cells remain unknown. M is the recorded AED invoice amount;
-it is never regenerated from L. Original invoice, remaining balance and receipt
+`Payment Status` is preserved and normalized by exact label: `New` stays `new`, and
+`Paid (partial)` becomes `partial`. Unknown statuses remain outside the eligible
+unpaid statuses. Dates come from their recorded cells, including `Due Date`.
+
+`Invoice Amount`, `Inv Amt. (AED)`, `Balance to be received` and `Actual Payment
+Received` retain cached numeric values with eight decimal places. Blank,
+text and Excel error cells remain unknown. The recorded AED invoice amount
+is never regenerated from the original invoice amount. Original invoice, remaining balance and receipt
 currencies are each classified independently from that cell's explicit currency
-format and AE. Conflicts and absent currencies stay explicit. Neither blank AE
+format and `Inv. CUR` (AE in the original layout, AF after the H insertion).
+Conflicts and absent currencies stay explicit. Neither blank `Inv. CUR`
 nor an unspecified currency defaults to AED.
+
+Source rows and the stored workbook summary use the same verified mapping and
+retain their existing amount, currency, status and row-count checks. The summary's
+`source.currency_column` records AE or AF accurately; the JSON schema and SQL
+models are unchanged. Existing AE summaries remain readable. An older application
+that only accepts AE cannot read an AF summary, so rollback requires a compatible
+reader or reactivation of a previously retained AE workbook after pausing sync.
 
 From the backend directory, review a workbook without database reads or writes:
 
@@ -93,17 +110,17 @@ reports out of Git. The importer requires cached spreadsheet formula values and
 does not run Excel calculations. Review explicit sheet and row bounds if the
 workbook layout changes.
 
-With an active source, the AED dashboard sums recorded column M across original
+With an active source, the AED dashboard sums recorded `Inv Amt. (AED)` across original
 invoice currencies. Unpaid includes New, Pending and Overdue invoice amounts;
-Partial uses the recorded column Y balance only when its currency is known to be
+Partial uses the recorded `Balance to be received` only when its currency is known to be
 AED. A missing balance remains unknown. Total overdue includes only recorded
-Overdue statuses. The 30+, 60+ and 90+ cards use Due Date N and strict age
+Overdue statuses. The 30+, 60+ and 90+ cards use `Due Date` and strict age
 thresholds greater than 30, 60 and 90 days among eligible unpaid invoices.
 
 Verify the Finance and Executive APIs return `source.mode = "workbook"`, the
 expected snapshot identity, and the same overdue count and AED sum in both the
 dashboard and filtered customer-invoice register. The verified source below has
-18 overdue rows totaling AED 1,846,363.06. Original-currency views use recorded L
+18 overdue rows totaling AED 1,846,363.06. Original-currency views use recorded `Invoice Amount`
 and preserve separate currencies. Source invoice identifiers are display-only;
 they do not link to potentially mismatched operational invoice details.
 

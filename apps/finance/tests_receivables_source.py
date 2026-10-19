@@ -49,6 +49,72 @@ class ReceivablesSourceTests(TestCase):
     def load(self, path, count, **kwargs):
         return import_receivables_source(path, last_row=5 + count, **kwargs)
 
+    def test_business_unit_column_preserves_source_facts_and_matching_summary(self):
+        path = self.workbook([
+            {'A': 'DUP', 'C': date(2026, 9, 2), 'G': 'RAD-1', 'H': 'Project name',
+             'L': 120.125, 'M': 440.859, 'O': '30 days', 'P': 'Manager',
+             'R': 'Paid (partial)', 'Y': 20.12345678, 'Z': date(2026, 9, 19),
+             'AA': 100, 'AC': 'Recorded note', 'AD': 'PROJECT-ID', 'AE': 'USD',
+             'formats': {'L': '[$USD] #,##0.00', 'Y': '[$AED] #,##0.00',
+                         'AA': '[$USD] #,##0.00'}},
+            {'A': 'DUP', 'G': 'RAD-1', 'L': None, 'M': '#VALUE!', 'R': 'New',
+             'Y': None, 'AA': 'Pending', 'AE': 'EUR'},
+        ])
+        _, original_rows, original_reconciliation = read_receivables_source(path, last_row=None)
+        original = self.load(path, 2)
+        workbook = load_workbook(path)
+        worksheet = workbook.active
+        worksheet.insert_cols(8)
+        worksheet['H5'] = 'Business Unit'
+        worksheet['H6'] = 'Engineering'
+        worksheet['H7'] = 'Consulting'
+        # These new auxiliary fields must never replace recorded source amounts.
+        worksheet['AG5'] = 'Inv. Amount (Excl. VAT)'
+        worksheet['AG6'] = 999999
+        worksheet['AJ5'] = 'Balance payable'
+        worksheet['AJ6'] = 888888
+        workbook.save(path)
+        workbook.close()
+        metadata, shifted_rows, shifted_reconciliation = read_receivables_source(path, last_row=None)
+        self.assertEqual(metadata['row_count'], 2)
+        self.assertEqual(shifted_rows, original_rows)
+        self.assertEqual(shifted_reconciliation, original_reconciliation)
+        self.assertEqual(shifted_rows[0]['project_name'], 'Project name')
+        self.assertEqual(shifted_rows[0]['invoice_amount_aed'], Decimal('440.859'))
+        self.assertEqual(shifted_rows[0]['actual_payment_currency'], 'USD')
+        published = import_receivables_source(path, last_row=None)
+        self.assertNotEqual(published['snapshot_id'], original['snapshot_id'])
+        summary = published['reconciliation']['workbook_summary']
+        previous = original['reconciliation']['workbook_summary']
+        self.assertEqual(summary['source']['currency_column'], 'AF')
+        self.assertEqual(previous['source']['currency_column'], 'AE')
+        self.assertEqual({k: v for k, v in summary.items() if k != 'source'},
+                         {k: v for k, v in previous.items() if k != 'source'})
+        active = get_active_receivables_source()
+        self.assertEqual(active._receivables_snapshot.pk, published['snapshot_id'])
+        self.assertEqual(list(active.values_list('row_number', flat=True)), [6, 7])
+        self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 2)
+
+    def test_unrecognized_shift_or_wrong_shifted_header_preserves_active_source(self):
+        original = self.load(self.workbook([{'L': 10, 'M': 10}]), 1)
+        for coordinate, label in [('H5', 'Department'), ('N5', 'Wrong AED amount'),
+                                  ('AF5', 'Project ID')]:
+            with self.subTest(coordinate=coordinate):
+                replacement = self.workbook([{'L': 20, 'M': 20}], name='replacement.xlsx')
+                workbook = load_workbook(replacement)
+                worksheet = workbook.active
+                worksheet.insert_cols(8)
+                worksheet['H5'] = 'Business Unit'
+                worksheet[coordinate] = label
+                workbook.save(replacement)
+                workbook.close()
+                with self.assertRaisesMessage(ValueError, f'Unexpected source header at {coordinate}'):
+                    import_receivables_source(replacement, last_row=None)
+                self.assertEqual(get_active_receivables_source()._receivables_snapshot.pk,
+                                 original['snapshot_id'])
+                self.assertEqual(ReceivablesSourceSnapshot.objects.count(), 1)
+                self.assertEqual(ReceivablesSourceRow.objects.count(), 1)
+
     def test_source_preserves_monetary_cells_status_and_independent_currencies(self):
         path = self.workbook([
             {'A': 'USD', 'L': 13650, 'M': 50095.5, 'R': 'Overdue',

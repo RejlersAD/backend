@@ -7,7 +7,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from openpyxl import load_workbook
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import get_column_letter
+
+from .workbook_layout import WORKBOOK_MAX_COLUMN, validated_column_indices
 
 from .workbook_summary import (
     AMOUNT_FIELDS, COVERAGE_FIELDS, CURRENCY_AMOUNT_FIELDS, CURRENCY_METHOD,
@@ -65,7 +67,7 @@ def _format_currencies(number_format):
 
 
 def _cell_currency(amount_cell, currency_cell):
-    """Require agreement when both AE and this amount's format state a code."""
+    """Require agreement when Inv. CUR and this amount's format state a code."""
     formats = _format_currencies(amount_cell.number_format)
     if len(formats) > 1:
         return None, 'conflict'
@@ -118,10 +120,8 @@ def generate_workbook_snapshot(workbook_path, *, last_row, sheet='External Invoi
         worksheet = workbook[sheet]
         if last_row > worksheet.max_row:
             raise ValueError('The last invoice row is outside the worksheet.')
-        headers = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=31))
-        for column, expected in HEADERS.items():
-            if _text(headers[column_index_from_string(column) - 1].value) != expected:
-                raise ValueError(f'Unexpected header at {column}{header_row}.')
+        headers = next(worksheet.iter_rows(min_row=header_row, max_row=header_row, max_col=WORKBOOK_MAX_COLUMN))
+        indices = validated_column_indices(headers, HEADERS, header_row=header_row)
         totals = {key: Decimal('0') for key in AMOUNT_FIELDS}
         coverage = {key: dict.fromkeys(COVERAGE_FIELDS, 0) for key in AMOUNT_FIELDS}
         currencies = {}
@@ -132,7 +132,9 @@ def generate_workbook_snapshot(workbook_path, *, last_row, sheet='External Invoi
         projects = set()
         project_excluded_rows = 0
         count = 0
-        for row_number, row in enumerate(worksheet.iter_rows(min_row=first_row, max_col=31), first_row):
+        for row_number, physical_cells in enumerate(
+                worksheet.iter_rows(min_row=first_row, max_col=WORKBOOK_MAX_COLUMN), first_row):
+            row = tuple(physical_cells[index] for index in indices)
             invoice_id = _text(row[0].value)
             footer = invoice_id.casefold().rstrip(':') in FOOTER_LABELS
             if row_number > last_row:
@@ -197,7 +199,8 @@ def generate_workbook_snapshot(workbook_path, *, last_row, sheet='External Invoi
         'source': {'file_name': path.name, 'sheet': sheet, 'first_row': first_row,
                    'last_row': last_row, 'snapshot_at': captured.isoformat(),
                    'sha256': digest, 'scope': 'full_workbook',
-                   'currency_column': 'AE', 'currency_header': 'Inv. CUR', 'currency_method': CURRENCY_METHOD},
+                   'currency_column': get_column_letter(indices[30] + 1),
+                   'currency_header': 'Inv. CUR', 'currency_method': CURRENCY_METHOD},
         'invoice_count': count,
         'totals': {**{key: _money(value) for key, value in totals.items()}, 'project_count': len(projects)},
         'coverage': coverage,

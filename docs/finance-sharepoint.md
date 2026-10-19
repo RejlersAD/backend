@@ -23,7 +23,7 @@ FINANCE_SHAREPOINT_CLIENT_SECRET=
 FINANCE_SHAREPOINT_DRIVE_ID=
 FINANCE_SHAREPOINT_ITEM_ID=
 FINANCE_SHAREPOINT_SYNC_ENABLED=false
-FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800
+FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=300
 ```
 
 The application secret never belongs in frontend configuration, Git, chat or
@@ -67,6 +67,15 @@ status, source ID and row counts. The reader supports the existing `External
 Invoice` sheet and row-5 headers, detects the final invoice row and rejects gaps
 or unexpected headers. It reads saved formula results; Excel calculations are
 not executed. The maximum downloaded XLSX size is 25 MiB.
+
+The original A:AE layout and the workbook with `Business Unit` inserted at H
+are supported. In the latter, original H:AE fields move to I:AF. Both the source
+row reader and workbook-summary reader validate their required headers through
+the same column mapping before publication. Unknown layouts still fail validation
+and leave the previous snapshot active. The new column does not introduce a
+business-unit reporting rule or change any financial calculations. See
+[receivables-source.md](receivables-source.md) for preserved field semantics and
+AE/AF summary compatibility during rollback.
 
 For the existing local Celery deployment, after the first successful publication, enable
 `FINANCE_SHAREPOINT_SYNC_ENABLED=true` and restart the backend, worker and single
@@ -181,7 +190,8 @@ Deploy this backend change against the latest production branch, preserving
 unrelated newer changes. Railway's existing pre-deploy command applies the full
 migration graph; verify Finance `0015` before publishing a workbook. Keep the
 five Finance identity/resource settings in the production server's secret
-configuration and set the interval to `1800`. For the automatic in-service runtime
+configuration and set the interval to `300` for the five-minute cadence requested
+on 19 October. For the automatic in-service runtime
 below, enabling the switch starts validation and publication through the existing
 ETL. Operators using the manual command path can validate and publish first while
 the schedule remains disabled.
@@ -199,7 +209,7 @@ set these existing variables in Railway and deploy their staged changes:
 
 ```dotenv
 FINANCE_SHAREPOINT_SYNC_ENABLED=true
-FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=1800
+FINANCE_SHAREPOINT_SYNC_INTERVAL_SECONDS=300
 ```
 
 The first due attempt runs on startup. Every publication validates the entire
@@ -209,6 +219,13 @@ prevent multiple backend replicas or restarts from starting duplicate scheduled
 attempts. Existing publication leases continue protecting manual and Celery
 imports. Existing local Celery behavior is preserved; the production runner does
 not require enabling the generic Celery worker or shared beat schedule.
+
+These settings must be registered on the running Railway backend and their
+staged changes deployed. Editing a private local `.env.production` file does
+not update Railway. A successful check of an unchanged workbook reuses the
+existing snapshot and advances the internal last-success checkpoint; it does
+not create a duplicate snapshot every five minutes. Validation failures can
+therefore coexist with a healthy web server and an active five-minute timer.
 
 The Finance process emits only safe status, count and timing metadata. Failed
 validation/access preserves the last successful source. Transient Graph failures

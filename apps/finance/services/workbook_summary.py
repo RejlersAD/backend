@@ -32,7 +32,7 @@ def _nonnegative_integer(value):
 
 def _validate_currency_breakdown(data):
     source = data['source']
-    if (source['currency_column'] != 'AE' or source['currency_header'] != 'Inv. CUR'
+    if (source['currency_column'] not in {'AE', 'AF'} or source['currency_header'] != 'Inv. CUR'
             or source['currency_method'] != CURRENCY_METHOD):
         raise ValueError('Unexpected workbook currency source.')
     groups = data['currency_breakdown']
