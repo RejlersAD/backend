@@ -37,7 +37,10 @@ from .equipment_analysis_views import (
     analyze_pid_equipment_batch,
     download_equipment_excel,
     get_equipment_analysis_results,
-    get_equipment_analysis_status
+    get_equipment_analysis_status)
+from .equipment_deep_extract import (
+    deep_extract_equipment,
+    deep_extract_models,
 )
 from .equipment_register_views import (
     current_equipment_register,
@@ -195,6 +198,9 @@ urlpatterns = [
     path('equipment/download-excel/<str:upload_id>/', download_equipment_excel, name='equipment-download-excel'),
     path('equipment/results/<str:upload_id>/', get_equipment_analysis_results, name='equipment-results'),
     path('equipment/status/<str:upload_id>/', get_equipment_analysis_status, name='equipment-status'),
+    # Phase 2 — BYOK AI deep extraction (additive; see equipment_deep_extract.py)
+    path('equipment/deep-extract/', deep_extract_equipment, name='equipment-deep-extract'),
+    path('equipment/deep-extract/models/', deep_extract_models, name='equipment-deep-extract-models'),
 
     # Durable Equipment Register drafts
     path('equipment-registers/current/', current_equipment_register, name='equipment-register-current'),

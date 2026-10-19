@@ -185,7 +185,14 @@ def _classify_equipment_types(equipment: list, config: dict) -> None:
     _desg_codes = config.get('designation_codes', {})
     _prefix_map = config.get('tag_prefix_type_map', {})
     _pfx_keys   = sorted(_prefix_map.keys(), key=len, reverse=True)
-    _type_re    = re.compile(r'^([A-Z]{1,4})')
+    # Soft-coded via extraction.tag_type_prefix_pattern. The default allows an
+    # optional leading unit number (497-PU-3197 → PU) so unit-prefixed tags
+    # classify the same as plain tags (PU-3197).
+    _type_re = re.compile(
+        config.get('extraction', {}).get(
+            'tag_type_prefix_pattern', r'^(?:\d{2,4}-)?([A-Z]{1,4})'
+        )
+    )
     for _item in equipment:
         _match = _type_re.match(_item.get('tag', ''))
         if _match:
