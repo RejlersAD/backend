@@ -141,13 +141,26 @@ VISION_MODELS = {
     'openai': VISION_MODEL,
     'claude': os.getenv('VALVE_MTO_CLAUDE_MODEL', 'claude-opus-5-5'),
 }
-# Claude Opus 5.5 has always-on adaptive thinking (medium effort by default)
-# and rejects thinking={'type': 'disabled'} — for these models the parameter
-# must simply be omitted. Older models (e.g. claude-sonnet-5) still get
-# thinking disabled explicitly so 'thinking' blocks can't consume the output
-# budget before the JSON answer is written.
-_CLAUDE_ADAPTIVE_THINKING_MODELS = {'claude-opus-5-5'}
+# BUG FIX: thinking={'type': 'disabled'} is rejected by non-Opus Claude
+# 5.x models (confirmed with Sonnet 5.5), and Opus 5.5 has always-on
+# adaptive thinking that doesn't need (or accept) an explicit disable
+# either — so no Claude model call in this module sends a `thinking`
+# kwarg at all any more (see _call_vision_batch_json / test_api_key).
 TEST_CONNECTION_MAX_TOKENS = 16
+
+# Approximate list-price $/1K tokens per model (as of this feature's
+# authoring) — used only for an estimated cost figure surfaced in the
+# activity feed, never for billing. Unlisted/unknown models cost $0
+# (COST_PER_1K_TOKENS.get(model, {}) falls back to an empty dict).
+COST_PER_1K_TOKENS = {
+    'claude-opus-5-5': {'input': 0.015, 'output': 0.075},
+    'claude-sonnet-5-5': {'input': 0.003, 'output': 0.015},
+    'claude-haiku-5-5': {'input': 0.00025, 'output': 0.00125},
+    'gpt-4o': {'input': 0.005, 'output': 0.015},
+    'gpt-4o-mini': {'input': 0.00015, 'output': 0.0006},
+}
+# Fixed conversion rate (AED is pegged to USD) — not a live FX rate.
+AED_PER_USD = 3.67
 
 # Canonical row schema — must match frontend `valveMTO.config.js` VALVE_COLUMNS.
 # NOTE: order does not affect extraction; new keys are additive. Frontend
@@ -508,7 +521,25 @@ Project Legend Sheet data (from this user's own active legend sheets per section
   For process lines: SIZE-SERVICE-CLASS-...
   If valve is on a branch, use the branch line number, not the header.
   Extract EXACTLY as written including all dashes and suffixes (-N, -P etc.)
-- PIPING_CLASS: The short piping specification code explicitly shown on the connected line or a verified project lookup. Do not assume a fixed code format.
+
+FLUID_CODES reference:
+<<<FLUID_CODES_TABLE>>>
+- PIPING_CLASS: Extract the piping specification code for this valve.
+  Look in these places in order:
+  1. Line number connected to this valve
+     e.g. 6-PL-DC3N-8166-P → DC3N
+  2. Nearby line numbers on the same pipe
+     run or header this valve branches from
+  3. A piping class label printed near
+     the valve or on the pipe itself
+  4. Any spec break annotation nearby
+
+  Examples of piping class codes:
+  DC3N, AC3N, BC3N, AC6N, FL, CD, PL,
+  AB, AC3, DC3, BC3, AS1A0A, AC1A3B
+
+  If truly not visible anywhere → leave empty
+  Do not assume or invent a class.
 - PIPING_MATERIAL_CLASS: The material-class description from an explicit drawing annotation or a verified project lookup for PIPING_CLASS. Otherwise leave empty; do not replace it with an unrelated project's class.
 - SIZE_1_NB: Valve size. Use a size label printed directly next to the valve symbol (e.g. 1", 3/4", 2") if present; otherwise the size at the start of LINE_NUMBER. Output in inches as written, e.g. 3/4", 1-1/2", 8".
 - SIZE_2_NB: Only for PSVs / reducing valves with inlet × outlet sizes (e.g. 2"x3" → SIZE_1 = 2", SIZE_2 = 3"). Otherwise leave empty.
@@ -1487,10 +1518,17 @@ def _recover_truncated_rows(text: str) -> Optional[Dict[str, Any]]:
 
 def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs: List[str],
                              batch_idx: Optional[int] = None, credential_mode: str = 'central',
-                             legend_images: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+                             legend_images: Optional[List[Dict[str, str]]] = None,
+                             vision_model: Optional[str] = None) -> Dict[str, Any]:
     """One Vision call for one batch of page images, for EITHER provider —
-    returns the parsed {'rows': [...], 'project_meta': {...}} dict (or
-    raises on any failure, which callers already handle per-batch).
+    returns the parsed {'rows': [...], 'project_meta': {...}, '_usage':
+    {'input_tokens': int, 'output_tokens': int}} dict (or raises on any
+    failure, which callers already handle per-batch). '_usage' is read
+    straight off the API response's own usage/token-count field for
+    whichever provider was called — real values, not estimates. It's an
+    extra top-level key the caller reads directly; _parse_vision_payload
+    only ever reads its own known keys ('valves'/'rows'/'project_meta'/
+    etc.), so '_usage' riding along in the same dict is harmless there.
     Shared by both the non-streaming and streaming extraction paths so
     Claude support only had to be added in one place.
 
@@ -1498,9 +1536,15 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
     batch — real diagnostic gap found & fixed: nothing previously logged
     this per batch, only once for the whole job) and is optional so
     existing callers that don't have a batch index still work unchanged.
+
+    `vision_model`: caller-chosen model for this provider (e.g. the
+    frontend's "AI Model" dropdown). None/empty falls back to
+    VISION_MODELS[provider] — the env-configured default — unchanged from
+    before this parameter existed.
     """
+    resolved_model = (vision_model or '').strip() or VISION_MODELS.get(provider, VISION_MODEL)
     batch_label = f'batch {batch_idx}' if batch_idx is not None else 'batch'
-    logger.info('[ValveMTO] %s: calling provider=%s model=%s', batch_label, provider, VISION_MODELS.get(provider, '?'))
+    logger.info('[ValveMTO] %s: calling provider=%s model=%s', batch_label, provider, resolved_model)
     if credential_mode not in ('central', 'byok'):
         raise ValueError('Choose central credentials or BYOK.')
     client_factory = personal_provider_client if credential_mode == 'byok' else lazy_provider_client
@@ -1534,14 +1578,16 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
                     'type': 'base64', 'media_type': 'image/jpeg', 'data': reference['image'],
                 }},
             ])
-        claude_model = VISION_MODELS['claude']
+        claude_model = resolved_model
+        # BUG FIX (real, confirmed): sending `thinking: {'type': 'disabled'}`
+        # to a non-Opus Claude 5.x model (confirmed with Sonnet 5.5) gets the
+        # call rejected — that payload is only valid for models WITH
+        # thinking to disable. Opus 5.5 has always-on adaptive thinking and
+        # was never sent this param either (omitting it keeps the default
+        # medium effort the request was tuned for). Net effect: no model in
+        # this call ever needs an explicit `thinking` kwarg, so none is sent
+        # for any Claude model — each one just uses its own default.
         create_kwargs: Dict[str, Any] = {}
-        if claude_model in _CLAUDE_ADAPTIVE_THINKING_MODELS:
-            # Opus 5.5: adaptive thinking is always on; omitting `effort`
-            # keeps the default medium level the request was tuned for.
-            pass
-        else:
-            create_kwargs['thinking'] = {'type': 'disabled'}
         resp = client.messages.create(
             model=claude_model,
             # BUG FIX (real, confirmed root cause of "mostly empty rows"):
@@ -1560,19 +1606,23 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
             # same truncation risk reappears at the old cap under heavy
             # tile density.
             max_tokens=40000,
-            # thinking is controlled via create_kwargs above: disabled for
-            # older models (claude-sonnet-5 emits 'thinking' blocks that can
-            # consume the output budget before the JSON answer is written),
-            # omitted for adaptive-thinking models like claude-opus-5-5
-            # (medium effort default) which reject the disabled setting.
+            # create_kwargs is always empty now — see the BUG FIX comment
+            # above where it's declared — no Claude model gets an explicit
+            # `thinking` kwarg any more.
             system='You are an expert piping engineer extracting a Valve Material Take-Off (MTO) table from a P&ID drawing. Return ONLY a JSON object — no prose, no markdown fences.',
             messages=[{'role': 'user', 'content': content}],
             **create_kwargs,
         )
+        usage = {
+            'input_tokens': getattr(resp.usage, 'input_tokens', 0) or 0,
+            'output_tokens': getattr(resp.usage, 'output_tokens', 0) or 0,
+        }
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
         raw = ''.join(parts) or '{}'
         try:
-            return _extract_json_object(raw)
+            result = _extract_json_object(raw)
+            result['_usage'] = usage
+            return result
         except (json.JSONDecodeError, ValueError):
             recovered = _recover_truncated_rows(raw)
             if recovered is not None:
@@ -1581,6 +1631,7 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
                     'recovered %d complete row(s) from before the cutoff instead of discarding '
                     'the whole batch', batch_label, len(recovered['rows']),
                 )
+                recovered['_usage'] = usage
                 return recovered
             raise
 
@@ -1596,14 +1647,20 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
             {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{reference["image"]}'}},
         ])
     resp = client.chat.completions.create(
-        model=VISION_MODELS['openai'],
+        model=resolved_model,
         temperature=VISION_TEMPERATURE,
         response_format={'type': 'json_object'},
         messages=[{'role': 'user', 'content': content}],
     )
+    usage = {
+        'input_tokens': getattr(resp.usage, 'prompt_tokens', 0) or 0,
+        'output_tokens': getattr(resp.usage, 'completion_tokens', 0) or 0,
+    }
     raw = resp.choices[0].message.content or '{}'
     try:
-        return json.loads(raw)
+        result = json.loads(raw)
+        result['_usage'] = usage
+        return result
     except (json.JSONDecodeError, ValueError):
         recovered = _recover_truncated_rows(raw)
         if recovered is not None:
@@ -1612,6 +1669,7 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
                 'recovered %d complete row(s) from before the cutoff instead of discarding '
                 'the whole batch', batch_label, len(recovered['rows']),
             )
+            recovered['_usage'] = usage
             return recovered
         raise
 
@@ -1634,9 +1692,10 @@ def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
             import anthropic
             client = personal_provider_client('anthropic', anthropic.Anthropic, api_key=api_key,
                                               timeout=20, max_retries=0)
+            # Same fix as _call_vision_batch_json above: `thinking: {'type':
+            # 'disabled'}` is rejected by non-Opus Claude 5.x models, so no
+            # explicit `thinking` kwarg is sent for any Claude model here.
             test_kwargs: Dict[str, Any] = {}
-            if VISION_MODELS['claude'] not in _CLAUDE_ADAPTIVE_THINKING_MODELS:
-                test_kwargs['thinking'] = {'type': 'disabled'}
             client.messages.create(
                 model=VISION_MODELS['claude'], max_tokens=TEST_CONNECTION_MAX_TOKENS,
                 messages=[{'role': 'user', 'content': 'Hi'}], **test_kwargs,
@@ -1848,16 +1907,24 @@ def _dedupe_and_renumber(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _match_tag_to_line_number(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """FIX 3 — post-processing: a tagged valve (MOV-2002, SDV-2001, ...)
-    whose line_number Vision left empty can sometimes be recovered from
-    a nearby row that shares the same area and size and DOES have a
-    line number — e.g. an untagged valve on the same branch, or a
-    sibling valve whose own line was read correctly. Only applied when
-    there is EXACTLY ONE distinct line_number value among the matching
-    rows — an ambiguous group (multiple different candidate lines) is
-    left alone rather than guessed. Never invents a line number from
-    scratch; only ever copies one already present on another row in
-    this same extraction."""
+    """FIX 3 — post-processing: a valve (tagged, e.g. MOV-2002/SDV-2001, OR
+    untagged, e.g. a manual ball valve) whose line_number Vision left
+    empty can sometimes be recovered from a nearby row that shares the
+    same area and size and DOES have a line number — e.g. a sibling
+    valve on the same branch whose own line was read correctly. Only
+    applied when there is EXACTLY ONE distinct line_number value among
+    the matching rows — an ambiguous group (multiple different candidate
+    lines) is left alone rather than guessed. Never invents a line
+    number from scratch; only ever copies one already present on another
+    row in this same extraction.
+
+    BUG FIX: previously restricted to rows with a valve_tag, which meant
+    untagged valves (e.g. manual ball valves, which normally have NO tag
+    per the Vision prompt's own VALVE_TAG rule) never got this recovery
+    even when they had the same area/size as a sibling with a known
+    line. Removed that restriction — any row with a missing line_number
+    is now eligible, tagged or not.
+    """
     by_group: Dict[Tuple[str, str], set] = {}
     for r in rows:
         line_number = str(r.get('line_number') or '').strip()
@@ -1867,9 +1934,8 @@ def _match_tag_to_line_number(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
         by_group.setdefault(key, set()).add(line_number)
 
     for r in rows:
-        valve_tag = str(r.get('valve_tag') or '').strip()
         line_number = str(r.get('line_number') or '').strip()
-        if not valve_tag or line_number:
+        if line_number:
             continue
         key = ((r.get('area') or '').strip().lower(), str(r.get('size_1') or '').strip().lower())
         candidates = by_group.get(key)
@@ -1886,10 +1952,12 @@ def extract_valve_mto_streaming(
     on_partial=None,
     vision_provider: Optional[str] = None,
     vision_api_key: Optional[str] = None,
+    vision_model: Optional[str] = None,
     user_id=None,
     scan_mode: Optional[str] = None,
     extraction_mode: str = 'vision',
     credential_mode: str = 'central',
+    pms_data: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Same logic as `extract_valve_mto` but emits incremental progress/results
@@ -1905,6 +1973,11 @@ def extract_valve_mto_streaming(
     uses only the supplied personal key, without registry or environment
     fallback. Default central mode preserves existing callers' behavior.
 
+    vision_model: caller-chosen model for the selected provider (e.g. the
+    frontend's "AI Model" dropdown). None/empty (every existing caller
+    before this parameter existed) falls back to VISION_MODELS[provider],
+    unchanged from before.
+
     user_id: whoever started this extraction — used by
     _build_legend_context to look up their own uploaded Legend Sheet(s)
     and ground the Vision prompt in real project data. None (default,
@@ -1915,6 +1988,15 @@ def extract_valve_mto_streaming(
     what each resolves to. None/unrecognised defaults to 'thorough'
     (SCAN_MODE_DEFAULT), matching piping_valve_mto_view.py's own default
     for a request that doesn't specify one at all.
+
+    pms_data: optional list of {code, pms_class?, rating?, facing?} dicts
+    parsed client-side from an uploaded PMS Excel/CSV (ValveMTO.jsx's PMS
+    Document stage). Passed straight through to
+    apps.valve_mto.specification_lookup.load_specification_lookups,
+    where it overlays (and takes priority over) legend-sourced mappings
+    for the same code. None/empty means rating/pms_class/facing are
+    filled from active legends only, unchanged from before this
+    parameter existed.
     """
     if extraction_mode == 'local':
         from .local_valve_mto import extract_local_valve_mto
@@ -1971,6 +2053,7 @@ def extract_valve_mto_streaming(
             'status': 'error', 'error': error, 'rows': [], 'warnings': [error],
             'engine': 'none', 'page_count': pages, 'project_meta': text_meta,
         }
+    resolved_vision_model = (vision_model or '').strip() or VISION_MODELS.get(provider, VISION_MODEL)
 
     if not api_key:
         error = 'An administrator must configure an available AI provider before valve extraction can run.'
@@ -2008,7 +2091,7 @@ def extract_valve_mto_streaming(
     try:
         from apps.valve_mto.specification_lookup import load_specification_lookups, enrich_specifications
         from .local_valve_mto import _extract_class_from_line_number
-        specifications = load_specification_lookups(user_id)
+        specifications = load_specification_lookups(user_id, pms_data=pms_data)
         regions = _render_native_regions(
             pdf_path, VISION_MAX_PAGES,
             on_render_progress=(lambda cur, tot: on_progress(cur, tot, 0)) if on_progress else None,
@@ -2105,7 +2188,7 @@ def extract_valve_mto_streaming(
     logger.info(
         '[ValveMTO] Streaming vision → provider=%s model=%s pages=%d scan_mode=%s '
         'tiles=%dx%d passes=%d batches=%d (parallel=%d)',
-        provider, VISION_MODELS[provider], len({r['page'] for r in regions}) if regions else len(images), (scan_mode or SCAN_MODE_DEFAULT),
+        provider, resolved_vision_model, len({r['page'] for r in regions}) if regions else len(images), (scan_mode or SCAN_MODE_DEFAULT),
         tile_rows, tile_cols, 1 if regions else passes, total_batches, VISION_PARALLEL_BATCHES,
     )
 
@@ -2134,12 +2217,14 @@ def extract_valve_mto_streaming(
             prompt += f'\nVerified DRG. TITLE for AREA on every row: {page_titles[page_idx]}.'
         try:
             data = _call_vision_batch_json(provider, api_key, prompt, batch_imgs, batch_idx=batch_idx,
-                                           credential_mode=credential_mode, legend_images=legend_images)
+                                           credential_mode=credential_mode, legend_images=legend_images,
+                                           vision_model=resolved_vision_model)
         except Exception as exc:
             logger.warning('[ValveMTO] Batch %d (page %d) failed: %s', batch_idx, page_idx + 1, exc)
             fatal = _classify_openai_error(exc)
-            return [], {}, [f'batch starting at page {page_idx + 1} failed: {exc}'], fatal, [], True
+            return [], {}, [f'batch starting at page {page_idx + 1} failed: {exc}'], fatal, [], True, {'input_tokens': 0, 'output_tokens': 0}
 
+        usage = data.get('_usage') or {'input_tokens': 0, 'output_tokens': 0}
         if region:
             data = _locate_region_rows(data, region)
         if page_titles.get(page_idx):
@@ -2170,7 +2255,7 @@ def extract_valve_mto_streaming(
         warns.extend(ocr_warnings)
         if region_ocr:
             warns.append('Region-specific rotated OCR supplied text hints; values still require drawing verification.')
-        return rows, meta, warns, None, excluded, False
+        return rows, meta, warns, None, excluded, False, usage
 
     all_rows: List[Dict[str, Any]] = []
     all_excluded: List[Dict[str, Any]] = []
@@ -2178,6 +2263,11 @@ def extract_valve_mto_streaming(
     completed = 0
     fatal_msgs: List[str] = []
     failed_batches = 0
+    # Accumulated across all batches — this loop processes futures one at a
+    # time (as_completed yields sequentially even though the underlying API
+    # calls ran in parallel threads), so no lock is needed for these totals.
+    total_input_tokens = 0
+    total_output_tokens = 0
 
     parallelism = max(1, min(VISION_PARALLEL_BATCHES, len(batches)))
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
@@ -2185,9 +2275,9 @@ def extract_valve_mto_streaming(
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
-                rows, meta, warns, fatal, excluded, failed = fut.result()
+                rows, meta, warns, fatal, excluded, failed, usage = fut.result()
             except Exception as exc:                                            # pragma: no cover
-                rows, meta, warns, fatal, excluded, failed = [], {}, [f'batch {idx} crashed: {exc}'], None, [], True
+                rows, meta, warns, fatal, excluded, failed, usage = [], {}, [f'batch {idx} crashed: {exc}'], None, [], True, {'input_tokens': 0, 'output_tokens': 0}
             all_rows.extend(rows)
             all_excluded.extend(excluded)
             for k, v in meta.items():
@@ -2198,6 +2288,8 @@ def extract_valve_mto_streaming(
                 fatal_msgs.append(fatal)
             if failed:
                 failed_batches += 1
+            total_input_tokens += usage.get('input_tokens', 0) or 0
+            total_output_tokens += usage.get('output_tokens', 0) or 0
             completed += 1
 
             partial = _dedupe_and_renumber(list(all_rows))
@@ -2274,6 +2366,17 @@ def extract_valve_mto_streaming(
     else:
         engine = 'vision' if final_rows else ('text' if text_meta else 'none')
     warnings = list(dict.fromkeys(warnings))
+
+    # Estimated cost (list price, not billing) for the tokens actually
+    # consumed across every batch — COST_PER_1K_TOKENS.get(model, {})
+    # defaults to {} for an unlisted model, so .get('input'/'output', 0)
+    # below makes an unknown model cost $0 rather than raising.
+    model_costs = COST_PER_1K_TOKENS.get(resolved_vision_model, {})
+    input_cost = (total_input_tokens / 1000) * model_costs.get('input', 0)
+    output_cost = (total_output_tokens / 1000) * model_costs.get('output', 0)
+    total_cost_usd = input_cost + output_cost
+    total_cost_aed = total_cost_usd * AED_PER_USD
+
     return {
         'status': 'error' if error_msg else ('ok' if final_rows else 'empty'),
         'engine': engine,
@@ -2284,4 +2387,10 @@ def extract_valve_mto_streaming(
         'error': error_msg,
         'harvested_line_numbers': candidate_lines,
         'excluded': all_excluded,
+        'total_input_tokens': total_input_tokens,
+        'total_output_tokens': total_output_tokens,
+        'total_cost_usd': round(total_cost_usd, 4),
+        'total_cost_aed': round(total_cost_aed, 4),
+        'model': resolved_vision_model,
+        'provider': provider,
     }

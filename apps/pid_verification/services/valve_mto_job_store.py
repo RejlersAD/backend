@@ -227,7 +227,8 @@ def _run_in_thread(
     job_id: str, pdf_path: str, filename: str,
     vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
     user_id=None, scan_mode: Optional[str] = None, extraction_mode: str = 'vision',
-    credential_mode: str = 'central',
+    credential_mode: str = 'central', vision_model: Optional[str] = None,
+    pms_data=None,
 ) -> None:
     """Execute extraction; clean up the temp file when done."""
     # Late import — keeps this module importable without the heavy deps.
@@ -254,10 +255,12 @@ def _run_in_thread(
             ),
             vision_provider=vision_provider,
             vision_api_key=vision_api_key,
+            vision_model=vision_model,
             user_id=user_id,
             scan_mode=scan_mode,
             extraction_mode=extraction_mode,
             credential_mode=credential_mode,
+            pms_data=pms_data,
         )
         # Soft-coded: extractor flips status to 'error' when every batch fails
         # with a fatal OpenAI error (e.g. insufficient_quota). Propagate the
@@ -283,6 +286,16 @@ def _run_in_thread(
                 rows=result.get('rows', []),
                 project_meta=result.get('project_meta', {}),
                 warnings=result.get('warnings', []),
+                # Token/cost usage (see piping_valve_mto_extractor's own
+                # COST_PER_1K_TOKENS) — forwarded so the frontend's poll
+                # response (piping_valve_mto_view.py's status view returns
+                # the whole job snapshot) can show them in the activity feed.
+                total_input_tokens=result.get('total_input_tokens', 0),
+                total_output_tokens=result.get('total_output_tokens', 0),
+                total_cost_usd=result.get('total_cost_usd', 0),
+                total_cost_aed=result.get('total_cost_aed', 0),
+                model=result.get('model', ''),
+                provider=result.get('provider', ''),
             )
     except Exception as exc:                                      # pragma: no cover
         logger.exception('[ValveMTO] job %s crashed', job_id)
@@ -300,7 +313,8 @@ def start_job(
     pdf_path: str, filename: str,
     vision_provider: Optional[str] = None, vision_api_key: Optional[str] = None,
     user_id=None, scan_mode: Optional[str] = None, extraction_mode: str = 'vision',
-    credential_mode: str = 'central',
+    credential_mode: str = 'central', vision_model: Optional[str] = None,
+    pms_data=None,
 ) -> str:
     """Create a job snapshot in cache+disk and start a daemon thread.
 
@@ -317,12 +331,25 @@ def start_job(
     piping_valve_mto_extractor._scan_mode_params's own docstring. None
     (default) resolves to 'thorough' there, matching
     piping_valve_mto_view.py's own default for an omitted scan_mode.
+
+    vision_model: caller-chosen model for the selected provider (e.g. the
+    frontend's "AI Model" dropdown). None (default) falls back to
+    piping_valve_mto_extractor.VISION_MODELS[provider], unchanged from
+    before this parameter existed.
+
+    pms_data: optional list of {code, pms_class?, rating?, facing?} dicts
+    parsed client-side from an uploaded PMS Excel/CSV (ValveMTO.jsx's PMS
+    Document stage) — passed straight through to
+    extract_valve_mto_streaming, which overlays it onto the legend-based
+    specification lookup (PMS data takes priority for the same code).
+    None (default) means rating/pms_class/facing are filled from active
+    legends only, unchanged from before this parameter existed.
     """
     job_id = JobStore.create({'filename': filename})
     th = threading.Thread(
         target=_run_in_thread,
         args=(job_id, pdf_path, filename, vision_provider, vision_api_key, user_id, scan_mode,
-              extraction_mode, credential_mode),
+              extraction_mode, credential_mode, vision_model, pms_data),
         name=f'valve-mto-{job_id[:8]}',
         daemon=True,
     )
