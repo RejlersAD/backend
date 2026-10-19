@@ -132,7 +132,7 @@ def _build_source_register(source, *, currency, company, page, page_size, orderi
             default=Value(None), output_field=MONEY,
         ),
     )
-    # AED is the workbook's stored home amount (M), across original currencies.
+    # AED uses the workbook's stored Inv Amt. (AED), across original currencies.
     if currency != 'AED':
         source = source.filter(normalized_currency='' if currency == 'UNSPECIFIED' else currency)
     if company:
@@ -172,12 +172,12 @@ def _build_source_register(source, *, currency, company, page, page_size, orderi
     data['totals'] = totals
     data['pagination'].update(count=count, pages=pages, has_next=page < pages, has_previous=page > 1)
     data['definitions'].update({
-        'scope': 'Invoice rows from the active external customer workbook snapshot. Cancelled and credit-note rows are excluded. AED includes all original currencies using stored Inv Amt. (AED), column M. Other currency selections filter original Invoice Amount currency. Company and Payment Status filters apply.',
-        'amount': 'Recorded Invoice Amount (L), in its original currency. Mixed currencies are not added into a single total; per-currency totals are supplied.',
-        'amount_home': 'Recorded Inv Amt. (AED), column M, across every original currency. No exchange rates are applied or refreshed.',
-        'amount_due_home': 'Recorded Balance to be received (Y) only when its recorded currency is AED. Foreign or unspecified-currency balances remain unknown. No balance is recalculated from invoice amounts or receipts.',
-        'actual_payment_received': 'Recorded Actual Payment Received (AA), with its own recorded currency. Blank values remain unknown. Mixed receipt currencies are not added into a single total.',
-        'totals': 'Totals cover every matching source row across all pages. Home invoice totals sum recorded column M. Original invoice and receipt totals are separated by their recorded currencies. Missing values remain unknown.',
+        'scope': 'Invoice rows from the active external customer workbook snapshot. Cancelled and credit-note rows are excluded. AED includes all original currencies using stored Inv Amt. (AED). Other currency selections filter original Invoice Amount currency. Company and Payment Status filters apply.',
+        'amount': 'Recorded Invoice Amount, in its original currency. Mixed currencies are not added into a single total; per-currency totals are supplied.',
+        'amount_home': 'Recorded Inv Amt. (AED), across every original currency. No exchange rates are applied or refreshed.',
+        'amount_due_home': 'Recorded Balance to be received only when its recorded currency is AED. Foreign or unspecified-currency balances remain unknown. No balance is recalculated from invoice amounts or receipts.',
+        'actual_payment_received': 'Recorded Actual Payment Received, with its own recorded currency. Blank values remain unknown. Mixed receipt currencies are not added into a single total.',
+        'totals': 'Totals cover every matching source row across all pages. Home invoice totals sum recorded Inv Amt. (AED). Original invoice and receipt totals are separated by their recorded currencies. Missing values remain unknown.',
         'status': 'Original workbook Payment Status is preserved, without operational recalculation. The normalized value supports filtering; its original label is displayed.',
     })
     sort_field = SORT_FIELDS[ordering.lstrip('-')]

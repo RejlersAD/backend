@@ -11,7 +11,7 @@ from zipfile import ZipFile
 
 from django.core.management import call_command
 from django.test import SimpleTestCase
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from apps.finance.services.workbook_summary import (
     SNAPSHOT_PATH, build_workbook_summary, validate_snapshot,
@@ -44,6 +44,26 @@ class WorkbookSummaryTests(SimpleTestCase):
 
     def snapshot(self, last_row):
         return generate_workbook_snapshot(self.path, last_row=last_row, snapshot_at=CAPTURED)
+
+    def test_business_unit_layout_uses_shifted_amount_status_and_currency_cells(self):
+        self.workbook([
+            {'A': 'DUP', 'G': 'RAD-1', 'L': 12.125, 'M': 44.5, 'AA': 2, 'AE': 'USD', 'R': 'Paid'},
+            {'A': 'DUP', 'G': 'RAD-1', 'L': None, 'M': '#VALUE!', 'AA': 'Unknown', 'AE': 'EUR', 'R': 'New'},
+        ], formats={'L6': '[$USD] #,##0.00', 'AA6': '[$EUR] #,##0.00'})
+        original = self.snapshot(7)
+        workbook = load_workbook(self.path)
+        workbook.active.insert_cols(8)
+        workbook.active['H5'] = 'Business Unit'
+        workbook.active['H6'] = 'Consulting'
+        workbook.save(self.path)
+        workbook.close()
+        shifted = self.snapshot(7)
+        self.assertEqual(shifted['source']['currency_column'], 'AF')
+        self.assertEqual({k: v for k, v in shifted.items() if k != 'source'},
+                         {k: v for k, v in original.items() if k != 'source'})
+        shifted['source']['currency_column'] = 'AG'
+        with self.assertRaisesMessage(ValueError, 'Unexpected workbook currency source'):
+            validate_snapshot(shifted)
 
     def test_packaged_snapshot_matches_independently_audited_workbook(self):
         data = validate_snapshot(json.loads(SNAPSHOT_PATH.read_text(encoding='utf-8')))

@@ -301,7 +301,7 @@ class ReceivablesDashboardTests(TestCase):
         self.assertEqual(historical['kpis']['unpaid']['amount'], '700.00')
         self.assertEqual(historical['kpis']['overdue']['amount'], '500.00')
         self.assertEqual(historical['kpis']['overdue'], data['kpis']['overdue'])
-        self.assertIn('Balance to be received (Y)', historical['definitions']['balance_basis'])
+        self.assertIn('Balance to be received', historical['definitions']['balance_basis'])
         self.assertEqual(historical['as_of_date'], '2026-07-15')
 
     def test_paid_unpaid_cohorts_use_invoice_issue_month_and_recorded_receipts(self):
