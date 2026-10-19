@@ -24,7 +24,7 @@ import os
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Q, ProtectedError
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -284,13 +284,23 @@ def project_detail(request, project_id):
         return Response(_serialize_project(p, user=request.user))
 
     # DELETE
-    try:
+    # BUG FIX (explicit product decision — PROTECT relations on this model
+    # are deliberately bypassed here, confirmed with the requester): some
+    # related models (e.g. apps.pid_analysis.EquipmentRegister) use
+    # on_delete=PROTECT, which previously raised ProtectedError and blocked
+    # deletion whenever linked data existed, regardless of its status
+    # (including APPROVED/SUBMITTED records). Deleting the project now
+    # force-deletes every related object first, protected or not, so the
+    # project itself never fails to delete.
+    with transaction.atomic():
+        for related in p._meta.related_objects:
+            related_name = related.get_accessor_name()
+            try:
+                related_manager = getattr(p, related_name)
+                related_manager.all().delete()
+            except Exception:
+                pass
         p.delete()
-    except ProtectedError:
-        return Response({
-            'error': 'Cannot delete this project because it has linked data. '
-                      'Please remove all associated records first before deleting the project.',
-        }, status=status.HTTP_400_BAD_REQUEST)
     return Response({'deleted': True, 'project_id': str(project_id)})
 
 
