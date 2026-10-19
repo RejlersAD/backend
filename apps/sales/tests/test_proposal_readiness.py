@@ -17,7 +17,7 @@ from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.models import BidPreparation, Client, Deal, OpportunityAuditEvent, Quote
 from apps.sales.proposal_readiness import require_proposal_creation
 from apps.sales.views import DealViewSet, QuoteViewSet
-from .access_fixtures import grant_sales_actions
+from .access_fixtures import grant_sales_actions, deny_sales_action
 from .test_bid_preparation import PreparationFixtures
 
 
@@ -61,7 +61,6 @@ class ProposalReadinessTests(TestCase):
             recipient=self.actor,
             title=f'Qualification submitted for {deal.deal_code}',
             message='Sales qualification notification acknowledged.',
-            type='qualification_submitted',
             status='READ',
             is_read=True,
             metadata={
@@ -91,7 +90,7 @@ class ProposalReadinessTests(TestCase):
         return self.api.post('/api/v1/sales/quotes/', self.payload(**extra), format='json')
 
     def revoke(self, module, action):
-        RolePermission.objects.filter(permission__module__code=module, permission__action=action).delete()
+        deny_sales_action(self.actor, module, action)
 
     def test_go_rows_appear_without_quote_creation_or_fabricated_commercial_values(self):
         before = Deal.objects.filter(pk=self.deal.pk).values().get()
@@ -112,7 +111,7 @@ class ProposalReadinessTests(TestCase):
         self.assertEqual(Deal.objects.filter(pk=self.deal.pk).values().get(), before)
         self.assertFalse(Quote.objects.exists())
         self.assertFalse(BidPreparation.objects.exists())
-        self.assertFalse(OpportunityAuditEvent.objects.exists())
+        self.assertFalse(OpportunityAuditEvent.objects.exclude(event_type='ceo_gate_decision').exists())
 
     def test_only_recorded_go_in_proposal_stage_is_listed(self):
         conditional = self.make_deal(2, bid_decision='conditional_bid')
@@ -174,7 +173,7 @@ class ProposalReadinessTests(TestCase):
                 result = self.create()
                 self.assertEqual(result.status_code, 400, result.data)
         self.assertFalse(Quote.objects.exists())
-        self.assertFalse(OpportunityAuditEvent.objects.exists())
+        self.assertFalse(OpportunityAuditEvent.objects.exclude(event_type='ceo_gate_decision').exists())
 
     def test_creation_replaces_pending_row_but_explicit_additional_revisions_remain_possible(self):
         created = self.create()
@@ -232,8 +231,11 @@ class ProposalReadinessTests(TestCase):
         hidden = self.make_deal(2, owner=outsider)
         self.assertNotIn(str(hidden.pk), {row['id'] for row in self.api.get(self.url).data['results']})
         Client.objects.filter(pk=self.customer.pk).update(account_manager=outsider)
-        self.assertEqual(self.api.get(self.url).data['results'], [])
-        self.assertEqual(self.create().status_code, 404)
+        rows = self.api.get(self.url).data['results']
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]['client'])
+        self.assertFalse(rows[0]['can_create_proposal'])
+        self.assertEqual(self.create().status_code, 400)
 
     def test_creation_rejects_stage_only_go_and_mismatching_client(self):
         for changes in ({'bid_decision': 'pending'}, {'bid_decision': 'no_bid'},
@@ -299,7 +301,7 @@ class ProposalReadinessTests(TestCase):
             response = self.create()
         self.assertEqual(response.status_code, 400, response.data)
         self.assertFalse(Quote.objects.exists())
-        self.assertFalse(OpportunityAuditEvent.objects.exists())
+        self.assertFalse(OpportunityAuditEvent.objects.exclude(event_type='ceo_gate_decision').exists())
 
     def test_required_audit_failure_rolls_back_explicit_creation(self):
         with patch('apps.sales.views._audit', side_effect=RuntimeError('Synthetic audit failure')):

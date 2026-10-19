@@ -20,7 +20,8 @@ from apps.rbac.models import Permission, RolePermission, UserPermissionOverride
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.models import Client, Deal, Quote
 from apps.sales.views import QuoteViewSet
-from .access_fixtures import grant_sales_actions
+from apps.sales.opportunity_export import _csv_cell
+from .access_fixtures import grant_sales_actions, deny_sales_action
 
 
 router = DefaultRouter()
@@ -83,7 +84,7 @@ class ProposalRegisterTests(TestCase):
         self.assertEqual(row['prepared_by_name'], 'Proposal Preparer')
 
     def test_list_requires_proposal_read_grant(self):
-        RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='read').delete()
+        deny_sales_action(self.actor, 'sales_proposals', 'read')
         self.assertEqual(self.api.get(self.url).status_code, 403)
 
     @patch('rest_framework.pagination.PageNumberPagination.page_size', 2)
@@ -135,24 +136,24 @@ class ProposalRegisterTests(TestCase):
         self.assertEqual(row['Proposed price'], '0.00')
 
     def test_proposal_export_grant_required_independently_of_read(self):
-        RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='export').delete()
+        deny_sales_action(self.actor, 'sales_proposals', 'export')
         self.assertTrue(module_action_allowed(self.actor, 'sales_proposals', 'read'))
         response = self.export()
         self.assertEqual(response.status_code, 403)
         self.assertNotIn('Content-Disposition', response)
 
     def test_proposal_read_required_independently_of_export(self):
-        RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='read').delete()
+        deny_sales_action(self.actor, 'sales_proposals', 'read')
         self.assertTrue(module_action_allowed(self.actor, 'sales_proposals', 'export'))
         self.assertEqual(self.export().status_code, 403)
 
     def test_opportunity_read_required_for_related_source_data(self):
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='read').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'read')
         self.assertEqual(self.export().status_code, 403)
 
     def test_post_export_requires_neither_create_nor_opportunity_export(self):
         RolePermission.objects.filter(permission__action='create').delete()
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='export').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'export')
         self.assertEqual(self.export().status_code, 200)
 
     def test_explicit_export_denial_overrides_role_grant(self):
@@ -185,7 +186,10 @@ class ProposalRegisterTests(TestCase):
         self.actor.save(update_fields=['first_name'])
         Deal.objects.filter(pk=self.deal.pk).update(deal_code='=VF', service_categories=['-SERVICE'])
         Quote.objects.filter(pk=self.quote.pk).update(quote_number='=PROPOSAL', currency='+AED', status='=STATUS')
-        for value in ('=SUM(1,2)', '+1+2', '-1+2', '@SUM(A1)', '\t=1+2', ' \r=1+2', '\ufeff=1+2', '\x00=1+2'):
+        # PostgreSQL text cannot store NUL; exercise that boundary at the CSV
+        # encoder directly and keep the persisted export cases portable.
+        self.assertEqual(_csv_cell('\x00=1+2'), "'\x00=1+2")
+        for value in ('=SUM(1,2)', '+1+2', '-1+2', '@SUM(A1)', '\t=1+2', ' \r=1+2', '\ufeff=1+2'):
             with self.subTest(value=repr(value)):
                 Deal.objects.filter(pk=self.deal.pk).update(deal_name=value)
                 row = self.csv_rows(self.export())[0]

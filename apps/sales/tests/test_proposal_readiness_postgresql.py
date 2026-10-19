@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 
 from apps.sales.models import Client, OpportunityAuditEvent, Quote
 from .test_bid_preparation import PreparationFixtures
+from .access_fixtures import complete_proposal_prerequisites
 
 
 @skipUnless(connection.vendor == 'postgresql', 'Real PostgreSQL row locks required')
@@ -48,6 +49,7 @@ class ProposalReadinessConcurrencyTests(PreparationFixtures, TransactionTestCase
 
     def test_client_block_committed_while_create_waits_prevents_quote_and_audit(self):
         """Initial validation sees the old client; the locked recheck sees the block."""
+        complete_proposal_prerequisites(self.deal, self.actor)
         Client.objects.filter(pk=self.customer.pk).update(status='prospect')
         payload = {
             'deal': str(self.deal.pk), 'client': str(self.customer.pk),

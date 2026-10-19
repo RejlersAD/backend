@@ -18,6 +18,7 @@ from apps.sales.models import Client, Deal, OpportunityAuditEvent, Quote
 from apps.sales.views import DealViewSet, QuoteViewSet
 from . import test_bid_decision_access as bid_fixtures
 from .test_email_ai_provider import completion
+from .access_fixtures import complete_proposal_prerequisites
 
 
 router = DefaultRouter()
@@ -47,6 +48,7 @@ class ProposalDraftAITests(TestCase):
             bid_decision_reason='Confirm the design input basis before committing the execution scope.',
         )
         self.deal.refresh_from_db()
+        complete_proposal_prerequisites(self.deal, self.actor)
         self.quote = Quote.objects.create(
             quote_number='AI-PROP-1', deal=self.deal, client=self.customer, prepared_by=self.actor,
             subtotal='123.00', total_amount='123.00', estimated_cost='54.00', currency='AED',
@@ -93,7 +95,8 @@ class ProposalDraftAITests(TestCase):
         self.assertEqual(Deal.objects.filter(pk=self.deal.pk).values().get(), self.before_deal)
         self.assertEqual(Quote.objects.filter(pk=self.quote.pk).values().get(), self.before_quote)
         self.assertEqual(Quote.objects.count(), 1)
-        self.assertFalse(OpportunityAuditEvent.objects.filter(opportunity=self.deal).exists())
+        self.assertEqual(list(OpportunityAuditEvent.objects.filter(opportunity=self.deal)
+                              .values_list('event_type', flat=True)), ['ceo_gate_decision'])
 
     def test_each_field_drafts_before_creation_without_mutation_or_approval(self):
         for field in ('scope', 'deliverables', 'assumptions', 'exclusions'):
@@ -215,7 +218,8 @@ class ProposalDraftAITests(TestCase):
                 else:
                     Client.objects.filter(pk=self.customer.pk).update(account_manager=other)
                 for saved in (False, True):
-                    self.assertEqual(self.ask(saved=saved).status_code, 404)
+                    self.assertEqual(self.ask(saved=saved).status_code,
+                                     400 if 'client_owner' in changes and not saved else 404)
                 Deal.objects.filter(pk=self.deal.pk).update(owner=self.actor)
                 Client.objects.filter(pk=self.customer.pk).update(account_manager=self.actor)
         self.provider.assert_not_called()

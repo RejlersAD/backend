@@ -682,7 +682,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                                            request.query_params.get('page', 1)),
                         headers={'Cache-Control': 'no-store, private'})
 
-    business_approval_actions = {'bid_decision', 'approve_award', 'reject_award'}
+    business_approval_actions = {'bid_decision', 'ceo_decision', 'approve_award', 'reject_award'}
     """
     ViewSet for Deal/Opportunity Management
     
