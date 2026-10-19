@@ -1,5 +1,5 @@
 """Synthetic storage transport: no tenant, network share or application DB writes."""
-from datetime import timedelta
+from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from types import SimpleNamespace
@@ -15,9 +15,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.rbac.action_policy import operation_action
-from apps.rbac.models import RolePermission
+from apps.sales.tests.access_fixtures import deny_sales_action
 from apps.rbac.route_guard import ModuleActionGuardMixin
-from apps.sales.models import Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload
+from apps.sales.models import (Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload,
+                               ProposalReviewCommand, ProposalReviewComment, ProposalReviewDocument, Quote)
 from apps.sales.opportunity_registration import create_registered_opportunity
 from apps.sales.opportunity_workspace import (
     FOLDERS, WorkspaceAPIError, _claim, delete_opportunity_with_workspace_guard, due_workspace_ids,
@@ -146,6 +147,29 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.assertFalse(OpportunityWorkspace.objects.exists())
         self.assertFalse(Deal.objects.filter(pk=replacement.pk).exists())
 
+    def test_delete_purges_proposal_review_evidence(self):
+        workspace = self.ready()
+        upload = OpportunityWorkspaceUpload.objects.create(
+            workspace=workspace, request_id=uuid4(), actor=self.actor, folder_key='proposal',
+            name='Proposal.pdf', size=5, sha256='a' * 64, status='complete')
+        quote = Quote.objects.create(quote_number='Q-PURGE-1', deal=self.opportunity,
+            client=self.client_record, subtotal='100.00', total_amount='100.00',
+            valid_until=date.today() + timedelta(days=30))
+        document = ProposalReviewDocument.objects.create(quote=quote, attachment=upload, revision=1,
+            name='Proposal.pdf', sha256='a' * 64, size=5, page_count=2, created_by=self.actor)
+        parent = ProposalReviewComment.objects.create(document=document, body='Check the scope')
+        ProposalReviewComment.objects.create(document=document, parent=parent, body='Scope confirmed')
+        ProposalReviewCommand.objects.create(quote=quote, document=document, actor=self.actor,
+            request_id=uuid4(), action='comment', payload_hash='b' * 64)
+        result = self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/')
+        self.assertEqual(result.status_code, 204)
+        self.assertFalse(Deal.objects.filter(pk=self.opportunity.pk).exists())
+        self.assertFalse(OpportunityWorkspace.objects.exists())
+        self.assertFalse(OpportunityWorkspaceUpload.objects.exists())
+        self.assertFalse(ProposalReviewDocument.objects.exists())
+        self.assertFalse(ProposalReviewComment.objects.exists())
+        self.assertFalse(ProposalReviewCommand.objects.exists())
+
     def test_client_cascade_cannot_erase_linked_workspace(self):
         workspace = self.ready()
         result = self.api.delete(f'/api/v1/sales/clients/{self.client_record.pk}/')
@@ -255,7 +279,7 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.assertIn(self.api.post(self.url + 'setup/', {}, format='json').status_code, (403, 404))
 
     def test_explicit_read_permission_required_even_for_setup(self):
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='read').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'read')
         self.assertEqual(self.api.get(self.url).status_code, 403)
         self.assertEqual(self.api.post(self.url + 'setup/', {}, format='json').status_code, 403)
 
@@ -274,7 +298,7 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.ready()
         for action in ('read', 'create', 'update'):
             with self.subTest(action=action), transaction.atomic():
-                RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action=action).delete()
+                deny_sales_action(self.actor, 'sales_opportunities', action)
                 result = self.api.post(self.url + 'folders/tender/upload/', {
                     'upload_request_id': str(uuid4()), 'file': SimpleUploadedFile('scope.pdf', b'bytes'),
                 })
@@ -285,7 +309,7 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
 
     def test_active_requester_losing_update_grant_stops_worker(self):
         workspace = setup_workspace(self.opportunity, self.actor)
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='update').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'update')
         self.assertEqual(run_workspace_setup(workspace.pk)['code'], 'authority_changed')
         self.assertFalse(self.graph.created)
 

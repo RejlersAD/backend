@@ -253,6 +253,17 @@ class OpportunityWorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             record_bid_decision(stale, self.approver, 'bid')
 
+    def test_stale_qualification_cannot_duplicate_review_notifications(self):
+        stale = Deal.objects.get(pk=self.opportunity.pk)
+        submit_qualification(self.opportunity, self.owner)
+        notifications = Notification.objects.filter(metadata__opportunity_id=str(self.opportunity.pk)).count()
+        with self.assertRaises(ValidationError):
+            submit_qualification(stale, self.owner)
+        self.assertEqual(Notification.objects.filter(
+            metadata__opportunity_id=str(self.opportunity.pk)).count(), notifications)
+        self.assertEqual(OpportunityAuditEvent.objects.filter(
+            opportunity=self.opportunity, event_type='qualification_submitted').count(), 1)
+
     def test_expired_framework_cannot_pass_qualification(self):
         framework = FrameworkAgreement.objects.create(
             framework_number='FA-OLD-001', title='Expired engineering services',

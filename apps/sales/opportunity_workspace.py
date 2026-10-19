@@ -20,6 +20,8 @@ from .attachment_streams import configured_limit, prepare_upload
 from .classification_models import (OpportunityDocumentClassification,
                                     OpportunityDocumentClassificationCommand,
                                     OpportunityDocumentClassificationRun)
+from .proposal_review_models import (ProposalReviewComment, ProposalReviewCommand,
+                                     ProposalReviewDocument)
 from .workflow import _audit
 from .workspace_graph import (
     WorkspaceError, WorkspaceGraph, file_projection, version_projection, workspace_config,
@@ -64,7 +66,6 @@ MESSAGES = {
     'download_too_large': 'This file exceeds the configured download limit. Open it in SharePoint.',
     'document_changed': 'The document changed while it was being read. Refresh the folder and retry.',
     'version_stale': 'A newer document version exists. Refresh its details before uploading a new version.',
-    'cannot_delete_last_version': 'At least one document version must remain. Upload a replacement version first.',
     'delete_not_supported': 'Delete is currently supported for RADAI attachments only.',
     'handover_retained': 'This opportunity has a project handover and cannot be deleted.',
 }
@@ -160,6 +161,16 @@ def _purge_workspace_storage(workspace):
         Q(document__workspace=workspace) | Q(upload__workspace=workspace)).delete()
     OpportunityDocumentClassificationRun.objects.filter(upload__workspace=workspace).delete()
     OpportunityDocumentClassification.objects.filter(document__workspace=workspace).delete()
+    # Proposal review artifacts PROTECT their upload and quote; remove them first.
+    ProposalReviewCommand.objects.filter(document__attachment__workspace=workspace).delete()
+    # Thread parents are protected. Unlink only relationships within this
+    # workspace before purging its comments; foreign children remain protected.
+    ProposalReviewComment.objects.filter(
+        document__attachment__workspace=workspace,
+        parent__document__attachment__workspace=workspace,
+    ).update(parent=None)
+    ProposalReviewComment.objects.filter(document__attachment__workspace=workspace).delete()
+    ProposalReviewDocument.objects.filter(attachment__workspace=workspace).delete()
     # Documents and uploads reference each other with PROTECT; clear one side.
     uploads.update(document=None, previous_upload=None)
     OpportunityDocument.objects.filter(workspace=workspace).delete()

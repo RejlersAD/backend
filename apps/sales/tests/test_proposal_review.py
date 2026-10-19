@@ -19,12 +19,11 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.rbac.action_policy import operation_action
-from apps.rbac.models import RolePermission
 from apps.rbac.route_guard import ModuleActionGuardMixin
 from apps.sales.models import (Quote, OpportunityAuditEvent, OpportunityWorkspaceUpload,
                                ProposalReviewDocument, ProposalReviewComment, ProposalReviewCommand)
 from apps.sales.proposal_review import ReviewError, _pdf_pages, review_command, review_content, review_projection
-from apps.sales.tests.access_fixtures import grant_sales_actions
+from apps.sales.tests.access_fixtures import grant_sales_actions, deny_sales_action
 from apps.sales.tests.test_opportunity_workspace import CONFIG
 from apps.sales.tests.test_private_attachments import PrivateFixtures
 from apps.sales.views import QuoteViewSet
@@ -324,18 +323,18 @@ class ProposalReviewTests(ReviewFixtures, TestCase):
 
     def test_read_create_update_export_denials_and_foreign_deal_visibility(self):
         document_id = self.document()
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='export').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'export')
         state = self.api.get(self.review_url)
         self.assertEqual(state.status_code, 200)
         self.assertFalse(state.data['capabilities']['can_preview'])
         self.assertEqual(self.api.get(self.review_url + f'documents/{document_id}/content/').status_code, 403)
-        RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='create').delete()
+        deny_sales_action(self.actor, 'sales_proposals', 'create')
         self.assertEqual(self.post(document_id, 'comments', body='Denied').status_code, 403)
-        RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='update').delete()
+        deny_sales_action(self.actor, 'sales_proposals', 'update')
         self.assertEqual(self.post(document_id, 'submit', outcome='reviewed').status_code, 403)
         with patch('apps.sales.proposal_review.build_visibility_filter', return_value=Q(pk=uuid4())):
             self.assertEqual(self.api.get(self.review_url).status_code, 404)
-        RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='read').delete()
+        deny_sales_action(self.actor, 'sales_proposals', 'read')
         self.assertEqual(self.api.get(self.review_url).status_code, 403)
 
     def test_download_closes_buffer_after_late_proposal_permission_loss(self):
@@ -345,7 +344,7 @@ class ProposalReviewTests(ReviewFixtures, TestCase):
         def read_and_revoke(*args):
             result = download_private_file(*args)
             buffers.append(result[0])
-            RolePermission.objects.filter(permission__module__code='sales_proposals', permission__action='read').delete()
+            deny_sales_action(self.actor, 'sales_proposals', 'read')
             return result
         with patch('apps.sales.proposal_review.download_private_file', side_effect=read_and_revoke):
             with self.assertRaises(PermissionDenied):
@@ -378,7 +377,7 @@ class ProposalReviewTests(ReviewFixtures, TestCase):
             view = QuoteViewSet()
             view.action = name
             self.assertEqual(operation_action(request, view), action)
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='export').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'export')
         request = APIRequestFactory().get(self.review_url)
         force_authenticate(request, user=self.actor)
         self.assertEqual(guarded.as_view({'get': 'review_content'})(request, pk=str(self.quote.pk), document_id=document_id).status_code, 403)

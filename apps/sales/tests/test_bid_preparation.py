@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 
 from apps.core.project_models import Project
 from apps.planning_intelligence.models import PlanningProject, Schedule, ScheduleVersion, TechnicalProposal
-from apps.rbac.models import Organization, RolePermission
+from apps.rbac.models import Organization, RolePermission, UserProfile
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.models import BidPreparation, BidPreparationCommand, Client, Deal, Quote, QuotePreparationRevision, OpportunityAuditEvent
 from apps.sales.views import DealViewSet, QuoteViewSet
@@ -282,15 +282,12 @@ class BidPreparationTests(PreparationFixtures, TestCase):
             {'technical_proposal_id': str(self.technical.pk)}, format='json')
         self.assertEqual(result.status_code, 409)
 
-    def test_generic_draft_edit_works_and_quote_list_respects_known_organization(self):
+    def test_generic_draft_edit_works_and_quote_list_respects_sales_team_scope(self):
         result = self.api.patch(self.quote_url, {'notes': 'Retained authored note'}, format='json')
         self.assertEqual(result.status_code, 200, result.data)
         foreign = get_user_model().objects.create_user(username='foreign-owner', email='foreign-owner@example.test')
-        grant_sales_actions(foreign, 'sales_opportunities')
         org = Organization.objects.create(code='foreign-owner', name='Foreign owner')
-        profile = foreign.rbac_profile
-        profile.organization = org
-        profile.save(update_fields=['organization'])
+        UserProfile.objects.create(user=foreign, organization=org)
         Deal.objects.filter(pk=self.deal.pk).update(owner=foreign)
         self.assertEqual(self.api.get(self.quote_url).status_code, 404)
         self.assertEqual(self.api.get('/api/v1/sales/quotes/').data['count'], 0)
