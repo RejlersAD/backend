@@ -205,6 +205,70 @@ def _normalize_text(text: str) -> str:
     return text
 
 
+def _ocr_render_page_image(page, scale: float, ext_cfg: dict):
+    """
+    Render a PDF page to a PIL grayscale image for OCR.
+
+    When extraction.ocr_remove_markup_enabled is true (default), the page is
+    rendered in COLOUR first and every pixel matching one of the soft-coded
+    extraction.ocr_markup_color_rules (default: red revision clouds/markups)
+    is erased to white before greyscale conversion.  Revision clouds drawn
+    over a P&ID otherwise rasterise on top of the data they surround and
+    corrupt the OCR of the tag boxes underneath them.
+
+    Falls back to direct greyscale rendering when the option is disabled or
+    numpy is unavailable — behaviour then is identical to the original code.
+    """
+    import io
+    import fitz
+    from PIL import Image
+
+    mat = fitz.Matrix(scale, scale)
+    if not bool(ext_cfg.get('ocr_remove_markup_enabled', True)):
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+        return Image.open(io.BytesIO(pix.tobytes('png')))
+    try:
+        import numpy as np
+    except ImportError:
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+        return Image.open(io.BytesIO(pix.tobytes('png')))
+
+    pix = page.get_pixmap(matrix=mat)  # RGB so markup colours are detectable
+    img = Image.open(io.BytesIO(pix.tobytes('png'))).convert('RGB')
+    arr = np.array(img)  # uint8 — base buffer, kept as-is
+    # Memory note: A0 pages at scale 3 are ~10k×7k px.  Channel math is done
+    # with short-lived int16 temporaries (one at a time) instead of persistent
+    # int32 copies of all three channels — peak extra usage drops ~6×.
+    rules = [ru for ru in ext_cfg.get('ocr_markup_color_rules', []) or []
+             if isinstance(ru, dict) and not str(ru.get('name', '')).startswith('_')]
+    if not rules:
+        rules = [{'channel': 'r', 'min_value': 120, 'dominance': 50}]  # red clouds
+    chidx = {'r': 0, 'g': 1, 'b': 2}
+    mask = np.zeros(arr.shape[:2], dtype=bool)
+    for ru in rules:
+        dom = str(ru.get('channel', 'r')).lower()
+        if dom not in chidx:
+            continue
+        d = arr[:, :, chidx[dom]]
+        cond = np.ones(arr.shape[:2], dtype=bool)
+        if 'min_value' in ru:
+            cond &= d >= int(ru['min_value'])
+        if 'max_value' in ru:
+            cond &= d <= int(ru['max_value'])
+        dominance = int(ru.get('dominance', 0))
+        if dominance > 0:
+            for other, oi in chidx.items():
+                if other == dom:
+                    continue
+                # d >= other + dominance, computed in int16 to avoid uint8 wrap
+                cond &= d.astype(np.int16) >= (arr[:, :, oi].astype(np.int16) + dominance)
+        mask |= cond
+    if mask.any():
+        arr[mask] = 255
+        img = Image.fromarray(arr)
+    return img.convert('L')
+
+
 def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
     """
     Extract all text from a PDF with three progressive strategies.
@@ -377,9 +441,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                 seen_snippets: set = set()
                 for _run_scale in _scales_to_run:
                     print(f'[EQ-DIAG] OCR page min_dim={_page_min_dim:.0f}  scale={_run_scale}', flush=True)
-                    mat      = fitz.Matrix(_run_scale, _run_scale)
-                    pix      = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
-                    base_img = Image.open(io.BytesIO(pix.tobytes('png')))
+                    base_img = _ocr_render_page_image(page, _run_scale, ext_cfg)
                     _effective_dpi = int(72 * _run_scale)
                     base_img = ImageEnhance.Contrast(base_img).enhance(1.8)
                     base_img = base_img.filter(ImageFilter.SHARPEN)
@@ -406,9 +468,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                 if _is_large and _TILE_ROWS > 0 and _TILE_COLS > 0:
                     print(f'[EQ-DIAG] Tiling {_TILE_ROWS}x{_TILE_COLS} scale={_TILE_SCALE} psm={_TILE_PSM}', flush=True)
                     _tile_dpi = int(72 * _TILE_SCALE)
-                    _tmat  = fitz.Matrix(_TILE_SCALE, _TILE_SCALE)
-                    _tpix  = page.get_pixmap(matrix=_tmat, colorspace=fitz.csGRAY)
-                    _tfull = Image.open(io.BytesIO(_tpix.tobytes('png')))
+                    _tfull = _ocr_render_page_image(page, _TILE_SCALE, ext_cfg)
                     _tfull = ImageEnhance.Contrast(_tfull).enhance(2.0)
                     _tfull = _tfull.filter(ImageFilter.SHARPEN)
                     _tw, _th = _tfull.size
@@ -1854,8 +1914,11 @@ def _build_databox_index(text: str, config: dict) -> dict:
     if not label_map:
         return {}
 
+    # Optional leading unit prefix (497-PU-3197) so unit-prefixed tags are
+    # associated with their data boxes as one identity instead of only the
+    # unit-less tail (PU-3197).
     _DB_TAG_RE = re.compile(
-        r'\b([A-Z]{1,3}-[0-9]{2,5}[A-Za-z]?(?:-[A-Z0-9]{1,4})?)\b',
+        r'\b((?:\d{2,4}-)?[A-Z]{1,3}-[0-9]{2,5}[A-Za-z]?(?:-[A-Z0-9]{1,4})?)\b',
         re.IGNORECASE,
     )
 
@@ -1945,6 +2008,79 @@ def _build_databox_index(text: str, config: dict) -> dict:
                 if field_or_pair not in index[tag]:
                     index[tag][field_or_pair] = raw_value
 
+    # ── Two-column rectangle data boxes (label row above value row) ──────
+    # Soft-coded via 'databox_tag_labels' and 'databox_nextline_label_map'.
+    # On ADNOC-style P&IDs the equipment data box is a rectangle whose cells
+    # read "TAG NUMBER" / "SERVICE DESCRIPTION" with the VALUE on the NEXT
+    # OCR line (no colon), e.g.:
+    #     TAG NUMBER \n 497-PU-3197   ...   SERVICE DESCRIPTION \n AIR COMPRESSOR PACKAGE
+    #
+    # Pass 1 (tag labels): a tag found on the line after a tag-label marks
+    # that tag as a confirmed data-box owner (Gate 2 keeps it even when no
+    # colon-style parameter label OCR'd cleanly inside a red cloud region).
+    def _next_nonempty_line(pos: int) -> str:
+        for _ln in text[pos:pos + 200].split('\n'):
+            _ln = _ln.strip()
+            if _ln:
+                return _ln
+        return ''
+
+    def _label_pattern(lbl: str) -> 're.Pattern | None':
+        _words = lbl.strip().split()
+        if not _words:
+            return None
+        _p = r'[\s./()\-]{0,5}'.join(re.escape(w) for w in _words)
+        # Trailing (?![A-Za-z]) stops "TAG NUMBER" matching "TAG NUMBERING …"
+        # in general notes; leading \b stops mid-word hits.
+        try:
+            return re.compile(r'\b' + _p + r'(?![A-Za-z])', re.IGNORECASE)
+        except re.error:
+            return None
+
+    for _tag_lbl in config.get('databox_tag_labels', []) or []:
+        _pat = _label_pattern(_tag_lbl)
+        if not _pat:
+            continue
+        for _m in _pat.finditer(text):
+            _val = _next_nonempty_line(_m.end())
+            _tm = _DB_TAG_RE.search(_val)
+            if not _tm:
+                continue
+            _t = _tm.group(1).upper()
+            if _t not in index:
+                index[_t] = {}
+            index[_t].setdefault('_tag_box', 'yes')
+
+    # Pass 2 (next-line value labels): value is the next non-empty line.
+    _nextline_map = {
+        k: v for k, v in (config.get('databox_nextline_label_map', {}) or {}).items()
+        if not str(k).startswith('_')
+    }
+    for _lbl, _field in sorted(_nextline_map.items(), key=lambda kv: -len(kv[0])):
+        _pat = _label_pattern(_lbl)
+        if not _pat or not isinstance(_field, str):
+            continue
+        for _m in _pat.finditer(text):
+            _val = _next_nonempty_line(_m.end())
+            # Value sanity: at least 2 alphabetic words, no tag/doc shapes.
+            _alpha_words = [w for w in _val.split() if sum(c.isalpha() for c in w) >= 3]
+            if len(_alpha_words) < 2 or _DB_TAG_RE.search(_val):
+                continue
+            _val = _val[:80].strip().rstrip('.,;')
+            win_start   = max(0, _m.start() - db_window)
+            pre_text    = text[win_start:_m.start()]
+            tag_matches = list(_DB_TAG_RE.finditer(pre_text))
+            if not tag_matches:
+                post_text   = text[_m.end():min(len(text), _m.end() + 400)]
+                tag_matches = list(_DB_TAG_RE.finditer(post_text))
+            if not tag_matches:
+                continue
+            _t = tag_matches[-1].group(1).upper()
+            if _t not in index:
+                index[_t] = {}
+            if _field not in index[_t]:
+                index[_t][_field] = _val
+
     if index:
         print(
             f'[EQ-DIAG][DataBox] Indexed {len(index)} equipment: '
@@ -1997,13 +2133,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     }
 
     # Soft-coded via tag_pattern in equipment_type_config.json.
+    # Default supports an OPTIONAL leading unit prefix (497-PU-3197,
+    # 427-V-3064) used by ADNOC-style two-column data boxes, in addition to
+    # the plain PREFIX-NNN[-SUFFIX] form.  The match-reading code below is
+    # group-agnostic (last two groups = type prefix, serial number), so
+    # legacy 2-group patterns configured in JSON keep working unchanged.
     # The optional (?:-[A-Za-z0-9]{1,4})? captures project train/unit suffixes such
     # as -TF, -1F, -2A that are common in O&G tag numbering (e.g. V-308-TF,
     # V-805-1F).  Without this suffix, duplicate-deduplication collapses
     # equipment with the same base number but different trains into one row.
     # tag_pattern_ignorecase (default True): compile with IGNORECASE so OCR
     # lowercase variants like C-010c-TF are found; tag is always uppercased.
-    _tag_pat_default = r'\b([A-Za-z]{1,2})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)\b'
+    _tag_pat_default = r'\b(?:(\d{2,4})-)?([A-Za-z]{1,3})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)\b'
     _tag_ic = bool(ext_cfg.get('tag_pattern_ignorecase', True))
     tag_re = re.compile(
         ext_cfg.get('tag_pattern', _tag_pat_default),
@@ -2014,7 +2155,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     # Used by description strategy 1: identify bare tag lines and pure-noise tokens.
     # Must also match the extended suffix form so lines like "V-308-TF" are
     # not misidentified as description text.  IGNORECASE covers OCR lowercase.
-    _tag_like_re  = re.compile(r'^[A-Za-z]{1,2}-\d{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?$', re.IGNORECASE)
+    _tag_like_re  = re.compile(r'^(?:\d{2,4}-)?[A-Za-z]{1,3}-\d{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?$', re.IGNORECASE)
     _noise_tok_re = re.compile(r'^[\d\.\+\-\/\%\(\)\[\]]{1,6}$')
 
     # Soft-coded reject patterns for description lines — lines matching any of
@@ -2093,6 +2234,17 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
 
     seen = set()
     results = []
+
+    # ── Soft-coded OCR separator cleanup (tag_cleanup_regexes) ───────────
+    # Applied before data-box indexing and tag matching so systematic OCR
+    # misreads of the tag separator (e.g. "497-PU=3197" where Tesseract read
+    # '-' as '=') are normalised everywhere consistently.  Default rules only
+    # fire between two alphanumerics, leaving equations and labels untouched.
+    for _tc_pat, _tc_rep in ext_cfg.get('tag_cleanup_regexes', []) or []:
+        try:
+            text = re.sub(_tc_pat, _tc_rep, text)
+        except re.error:
+            continue
 
     # ── Global data-box index (built once, merged per-tag below) ─────────
     # Scans the full OCR text for LABEL : VALUE pairs in equipment data boxes
@@ -2177,7 +2329,14 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     break
 
     for m in tag_re.finditer(text):
-        prefix = m.group(1).upper()
+        # Group-agnostic reading: with the default unit-aware pattern the
+        # groups are (unit|None, type_prefix, serial); with a legacy 2-group
+        # pattern they are (type_prefix, serial).  Always take the LAST TWO
+        # groups so both forms work; the full match is the tag identity so
+        # 497-PU-3197 and PU-3197 stay distinct.
+        _mgroups = m.groups()
+        prefix = (_mgroups[-2] if len(_mgroups) >= 2 else (_mgroups[0] if _mgroups else '')) or ''
+        prefix = prefix.upper()
         tag    = m.group(0).upper()   # always uppercase — OCR may emit lowercase letters
 
         if prefix in instr_valve_prefixes:
@@ -2187,6 +2346,12 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # Filter non-equipment project-reference suffixes
         _tag_suffix_m = re.search(r'-([A-Z]{1,4})$', tag)
         if _tag_suffix_m and _tag_suffix_m.group(1) in _exclude_suffixes:
+            continue
+        # Soft-coded full-tag exclusions (equipment_type_config.json
+        # 'exclude_tag_patterns') — e.g. ADNOC drawing numbers [UNIT-]D-NNNNN.
+        _excl_tag_pats = ext_cfg.get('exclude_tag_patterns', [])
+        if _excl_tag_pats and any(re.search(_xp, tag) for _xp in _excl_tag_pats):
+            print(f'[EQ-DIAG] exclude_tag_patterns skipped: {tag!r}', flush=True)
             continue
 
         # ── Gate 0: tag-context annotation reject ────────────────────
@@ -2915,8 +3080,25 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # merged in here.  Only fills columns that the narrow context-window
         # extraction above left empty — never overwrites a found value.
         _db_vals = _databox_idx.get(tag.upper(), {})
+        # Soft-coded unit-insensitive fallback (mirrors Gate 2): when the exact
+        # tag has no entry, try the tag with its leading unit prefix stripped.
+        if not _db_vals and bool(ext_cfg.get('databox_gate2_unit_insensitive_match', True)):
+            _db_vals = _databox_idx.get(re.sub(r'^\d{2,4}-', '', tag.upper()), {})
+            if not _db_vals:
+                _tag_norm = re.sub(r'^\d{2,4}-', '', tag.upper())
+                for _ik, _iv in _databox_idx.items():
+                    if re.sub(r'^\d{2,4}-', '', _ik.upper()) == _tag_norm:
+                        _db_vals = _iv
+                        break
         if _db_vals:
             _last = results[-1]
+            # Soft-coded: 'description_databox_override_pattern' — when the
+            # context-window description is a recognised placeholder (default:
+            # the box header "TAG NUMBER" itself), let the data-box
+            # SERVICE DESCRIPTION value replace it instead of only filling
+            # empty fields.
+            _desc_ovr = ext_cfg.get('description_databox_override_pattern',
+                                    r'^tag\s*(number|no)?\.?$')
             for _fk, _fv in _db_vals.items():
                 if _fk in _last:
                     # For _min/_max fields the explicit databox label extraction
@@ -2926,6 +3108,9 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     if _fk.endswith(('_min', '_max')):
                         if _fv:  # only write a non-empty databox value
                             _last[_fk] = _fv
+                    elif _fk == 'description' and _fv and _desc_ovr and \
+                            re.match(_desc_ovr, str(_last.get('description', '')), re.IGNORECASE):
+                        _last['description'] = _fv
                     elif not _last[_fk]:
                         _last[_fk] = _fv
             # Normalise oper_temperature if it was filled from the databox
@@ -3016,8 +3201,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _prefer_db_idx and _databox_idx:
             # ── Tier A: databox-index is authoritative ───────────────────
             # Only tags confirmed by the proximity-based label scan are primary.
+            # Soft-coded 'databox_gate2_unit_insensitive_match' (default true):
+            # also match with the leading unit prefix stripped on both sides so
+            # OCR unit-dropout (PU-3197 vs 497-PU-3197) does not drop real rows.
+            _unit_ins = bool(ext_cfg.get('databox_gate2_unit_insensitive_match', True))
+            if _unit_ins:
+                _idx_norm = {re.sub(r'^\d{2,4}-', '', k.upper()) for k in _databox_idx}
             for _item in results:
-                if _item['tag'].upper() in _databox_idx:
+                _itag = _item['tag'].upper()
+                _hit  = _itag in _databox_idx
+                if not _hit and _unit_ins:
+                    _hit = re.sub(r'^\d{2,4}-', '', _itag) in _idx_norm
+                if _hit:
                     _kept.append(_item)
                 else:
                     _dropped.append(_item['tag'])
@@ -3041,7 +3236,15 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     flush=True,
                 )
 
-        results = _kept if _kept else results  # safety: never return empty when all pass
+        # Soft-coded: 'gate2_fallback_keep_all_when_empty' (default true
+        # preserves legacy behaviour).  When false, a page where the data-box
+        # index matched none of the candidate tags yields NO rows instead of
+        # returning every unfiltered candidate — stops cross-reference noise
+        # from flooding the register on pages without equipment data boxes.
+        _keep_all = bool(ext_cfg.get('gate2_fallback_keep_all_when_empty', True))
+        if _kept or not _keep_all:
+            results = _kept
+        # else: safety — never return empty when all candidates were dropped
 
     # ── Description reject filter ───────────────────────────────────
     # Soft-coded via 'description_reject_patterns' in equipment_type_config.json.
@@ -3249,29 +3452,58 @@ def _dedup_equipment_by_tag(items: list) -> list:
     When the same tag appears on more than one page (e.g. it was referenced on
     page 1 AND has its own data box on page 2), keep only the entry with the
     most populated fields.  This ensures the richest extraction result wins.
+
+    Soft-coded: extraction.dedup_strip_unit_prefix (default true) treats tags
+    that are identical once the leading unit number is stripped
+    (PU-3198 vs 497-PU-3198 — an OCR pass dropped the unit) as ONE row.  The
+    richest entry wins and adopts the unit-prefixed tag as canonical; empty
+    fields are filled from the discarded variant(s) so no data is lost.
+    Tags differing in the unit itself (427-PU-3237 vs 497-PU-3237) are kept
+    separate — they are genuinely different units.
     """
+    try:
+        _cfg_dedup   = _load_config()
+        _strip_unit  = bool(_cfg_dedup.get('extraction', {}).get('dedup_strip_unit_prefix', True))
+    except Exception:
+        _strip_unit = True
+
+    def _group_key(tag: str) -> str:
+        if _strip_unit:
+            return re.sub(r'^\d{2,4}-(?=[A-Z]{1,3}-\d)', '', tag)
+        return tag
+
     by_tag: dict = {}
     for item in items:
         tag = (item.get('tag') or '').upper()
         if not tag:
             continue
-        if tag not in by_tag:
-            by_tag[tag] = item
+        key = _group_key(tag)
+        if key not in by_tag:
+            by_tag[key] = item
         else:
             from apps.pid_analysis.equipment_metadata import _merge_metadata
             _skip_keys = {'sl_no', 'tag', 'type_label', 'area', 'drawing_ref',
                           'line_connections', 'nozzle_connections'}
             _pop_new = sum(1 for k, v in item.items()
                            if k not in _skip_keys and v and v not in ('', 'No', [], 'N/A'))
-            _pop_old = sum(1 for k, v in by_tag[tag].items()
+            _pop_old = sum(1 for k, v in by_tag[key].items()
                            if k not in _skip_keys and v and v not in ('', 'No', [], 'N/A'))
-            winner = item if _pop_new > _pop_old else by_tag[tag]
-            loser = by_tag[tag] if winner is item else item
+            winner = item if _pop_new > _pop_old else by_tag[key]
+            loser = by_tag[key] if winner is item else item
+            # Adopt the unit-prefixed tag identity when only one variant has it
+            if not re.match(r'^\d{2,4}-', winner.get('tag', '')) and re.match(r'^\d{2,4}-', loser.get('tag', '')):
+                winner['tag'] = loser['tag']
+            # Fill winner's empty scalar fields from the loser (never overwrite)
+            for _fk, _fv in loser.items():
+                if _fk in _skip_keys or _fk in ('metadata', 'equipment_master'):
+                    continue
+                if _fv not in ('', 'No', [], 'N/A', None) and winner.get(_fk) in ('', 'No', [], 'N/A', None):
+                    winner[_fk] = _fv
             if winner.get('metadata') and loser.get('metadata'):
                 winner['metadata'] = _merge_metadata(winner['metadata'], loser['metadata'])
                 from apps.pid_analysis.equipment_metadata import equipment_master_view
                 winner['equipment_master'] = equipment_master_view(winner['metadata'])
-            by_tag[tag] = winner
+            by_tag[key] = winner
     result = list(by_tag.values())
     print(f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out', flush=True)
 

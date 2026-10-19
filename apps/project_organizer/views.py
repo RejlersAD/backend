@@ -313,10 +313,37 @@ def project_detail(request, project_id):
         p.save(update_fields=[*updates, 'updated_at'])
         return Response(_serialize_project(p, user=request.user))
 
-    # DELETE — see _force_delete's own docstring for why this recurses
-    # instead of doing a single pass over p._meta.related_objects.
-    with transaction.atomic():
-        _force_delete(p)
+    # DELETE
+    # The Equipment Register chain (register → revisions → items → change
+    # events) uses on_delete=PROTECT as a controlled-document audit guard.
+    # Tear it down explicitly in FK-safe order first (the current_revision
+    # self-link is a circular PROTECT that generic recursion cannot untangle),
+    # then let upstream's generic _force_delete handle anything else.
+    from apps.pid_analysis.models import (
+        EquipmentItem,
+        EquipmentItemChange,
+        EquipmentRegister,
+    )
+    try:
+        with transaction.atomic():
+            registers = list(p.equipment_registers.all())
+            for reg in registers:
+                # register.current_revision is PROTECT — detach before removing revisions
+                reg.current_revision = None
+                reg.save(update_fields=['current_revision'])
+                revisions = reg.revisions.all()
+                EquipmentItemChange.objects.filter(item__revision__in=revisions).delete()
+                EquipmentItem.objects.filter(revision__in=revisions).delete()
+                revisions.delete()
+            EquipmentRegister.objects.filter(pk__in=[r.pk for r in registers]).delete()
+            _force_delete(p)
+    except ProtectedError as exc:
+        return Response(
+            {'error': 'Project cannot be deleted because related records are '
+                      'protected. Remove or archive them first.',
+             'detail': str(exc)},
+            status=status.HTTP_409_CONFLICT,
+        )
     return Response({'deleted': True, 'project_id': str(project_id)})
 
 
