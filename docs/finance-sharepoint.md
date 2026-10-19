@@ -90,11 +90,11 @@ celery -A config worker --loglevel=info
 celery -A config beat --loglevel=info
 ```
 
-No UI setup screen or new public API is introduced. Operators can inspect the
-singleton `ReceivablesSyncState` through the backend: last attempt, last successful
-check, sanitized last error and last synchronized snapshot. The Finance pages
-continue showing the existing published source provenance; they do not yet show
-a separate remote-connection badge.
+No UI credential setup is introduced. Operators can inspect the singleton
+`ReceivablesSyncState` through the backend: last attempt, last successful check,
+sanitized last error and last synchronized snapshot. The protected refresh/status
+API below exposes only safe timestamps, source IDs and the caller's refresh
+capability; it does not expose credentials, resource URLs or raw errors.
 
 ## Publication and recovery
 
@@ -255,6 +255,41 @@ and an actual scheduled run. Public HTTP health alone does not establish Finance
 database or worker readiness. Do not report the live connection active until
 these production checks have been observed.
 
-The dashboard's **Refresh data** action reads the active SQL snapshot. Its
-publication date changes when a new source is published; a successful unchanged
-remote check updates the internal sync checkpoint without creating a new snapshot.
+## Explicit dashboard refresh (FIN-SYNC-06, 19 October 2026)
+
+The user requested that **Refresh data** check Microsoft Graph immediately and
+then reload the dashboard. Ordinary dashboard GETs remain reads of the validated
+SQL snapshot. The new protected endpoint is
+`/api/v1/finance/dashboard/receivables/refresh/`:
+
+- GET requires Finance Overview read access. It returns `status` (`idle`,
+  `syncing`, `failed`, `disabled` or `restricted`), `last_checked_at`,
+  `last_attempt_at`, `snapshot_id`, `snapshot_published_at` and `can_refresh`.
+  Without Outgoing Invoices read access, it returns `restricted` and null source
+  metadata without reading Finance source tables.
+- POST accepts an empty JSON object and uses only the registered server workbook.
+  It requires Finance Overview read and Outgoing Invoices read/update access;
+  explicit user denies still apply. Disabled synchronization returns 503.
+  Successful responses are 200 with `status` (`synchronized`, `unchanged` or
+  `busy`) and the safe status object in `sync`. A failed remote read or validation
+  returns a sanitized 502 response with `detail` and `sync`, retaining the previous
+  published source. A busy response means an existing lease owns the attempt,
+  not that this request completed a Graph check.
+
+Finance dashboard GET also includes this object as additive `sharepoint_sync`,
+pinned to the source snapshot used by that response. A successful check advances
+`last_checked_at`; unchanged workbook content retains its existing publication
+timestamp and snapshot ID. A manually replaced source does not inherit the old
+source's last successful remote-check timestamp. No synthetic snapshot or date
+is created to make unchanged data appear new.
+
+This exact POST is excluded from the route guard's blanket outer transaction,
+while retaining its authentication and action checks. The existing domain service
+commits its lease before Graph I/O and atomically publishes validated rows with
+the checkpoint afterward. Failed attempt metadata therefore survives an HTTP
+error; unrelated commands retain their transaction behavior. The shared lease,
+generation guard and immutable source rules remain unchanged. No schema change
+or new worker is required.
+
+Focused guarded API checks are in `apps.finance.tests_sharepoint_refresh` and
+must run alongside the Finance source/runtime regressions before release.

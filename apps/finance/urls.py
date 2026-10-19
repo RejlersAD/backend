@@ -29,6 +29,7 @@ from .salary_views import (
 # Import workflow views
 from .workflow_views import PayrollWorkflowViewSet
 from .command_center_views import FinanceCommandCenterView, FinanceCustomerInvoiceRegisterView, FinanceReceivablesDashboardView
+from .sharepoint_views import FinanceReceivablesRefreshView
 
 app_name = 'finance'
 
@@ -64,6 +65,7 @@ urlpatterns = [
     # Dashboard
     path('dashboard/command-center/', FinanceCommandCenterView.as_view(), name='command-center'),
     path('dashboard/receivables/', FinanceReceivablesDashboardView.as_view(), name='receivables-dashboard'),
+    path('dashboard/receivables/refresh/', FinanceReceivablesRefreshView.as_view(), name='receivables-refresh'),
     path('dashboard/customer-invoices/', FinanceCustomerInvoiceRegisterView.as_view(), name='customer-invoice-register'),
     path('dashboard/stats/', dashboard_stats, name='dashboard-stats'),
 

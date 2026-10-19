@@ -9,6 +9,7 @@ from apps.rbac.permissions import HasModuleAccess
 from .services.command_center import build_command_center
 from .services.receivables_dashboard import build_receivables_dashboard
 from .services.customer_invoice_register import ORDERINGS, PAYMENT_STATUSES, build_customer_invoice_register
+from .services.sharepoint_status import finance_sharepoint_status
 
 
 class FinanceCommandCenterView(APIView):
@@ -47,7 +48,11 @@ class FinanceReceivablesDashboardView(APIView):
     def get(self, request):
         filters = ReceivablesDashboardFilters(data=request.query_params)
         filters.is_valid(raise_exception=True)
-        response = Response(build_receivables_dashboard(request.user, **filters.validated_data))
+        data = build_receivables_dashboard(request.user, **filters.validated_data)
+        data['sharepoint_sync'] = finance_sharepoint_status(
+            request.user, snapshot_id=data['sources']['receivables'].get('snapshot_id'),
+        )
+        response = Response(data)
         response['Cache-Control'] = 'private, no-store'
         return response
 
