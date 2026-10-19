@@ -515,15 +515,18 @@ Project Legend Sheet data (from this user's own active legend sheets per section
   3. From line number: IA-3-AS1A0A-FA-427-1003-N → AREA = 427.
   Use the 3-digit unit/area number. Same area for all valves on the same sheet.
 - PID_NUMBER: The drawing number of THIS sheet, taken ONLY from its title block, using its actual project format. NEVER use reference-document numbers or off-page connector destinations. Same value for every row of the sheet.
-- LINE_NUMBER: Extract complete pipe designation connected to this valve. Look for text ON the pipe line itself.
-  For instrument air lines: IA-SIZE-CLASS-...
-  For drain lines: DR-SIZE-CLASS-...
-  For process lines: SIZE-SERVICE-CLASS-...
-  If valve is on a branch, use the branch line number, not the header.
-  Extract EXACTLY as written including all dashes and suffixes (-N, -P etc.)
+- LINE_NUMBER: The pipe designation connected to the valve, using the actual project format. For a branch valve, use the header it branches from only when connectivity is visible.
 
-FLUID_CODES reference:
-<<<FLUID_CODES_TABLE>>>
+  Line number formats vary by project:
+  Format 1: 6-PL-DC3N-8166-P
+    (SIZE-SERVICE-CLASS-NUMBER-P)
+  Format 2: IA-3-AS1A0A-FA-1003-N
+    (SERVICE-SIZE-CLASS-AREA-NUMBER-N)
+  Format 3: DR-2-AS1A0A-FA-1018-N
+    (DRAIN-SIZE-CLASS-AREA-NUMBER-N)
+
+  Extract the COMPLETE line number exactly as shown on drawing. Include all segments with dashes.
+- FLUID_CODES: <<<FLUID_CODES_TABLE>>>
 - PIPING_CLASS: Extract the piping specification code for this valve.
   Look in these places in order:
   1. Line number connected to this valve

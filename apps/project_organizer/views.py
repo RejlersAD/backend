@@ -24,7 +24,7 @@ import os
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, ProtectedError
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -213,6 +213,36 @@ def _get_accessible_project(user, project_id, *, lock=False):
     return None, Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
 
 
+def _force_delete(instance):
+    """Delete `instance`, recursively deleting whatever blocks it first.
+
+    BUG FIX: the previous cascade-delete (a single pass over
+    p._meta.related_objects, each wrapped in try/except Exception: pass)
+    only cleared ONE LEVEL of relations. If any of those related objects
+    were themselves blocked by a deeper on_delete=PROTECT relation (e.g.
+    something pointing at an EquipmentRegister row, not just at the
+    Project itself), that inner .delete() call raised its own
+    ProtectedError, got silently swallowed by the bare except, and the
+    blocking row was never actually removed — so the outer project delete
+    could still fail. This recurses into Django's own ProtectedError.
+    protected_objects (the exact instances blocking a given delete) until
+    nothing blocks anything, so an arbitrarily deep PROTECT chain is
+    cleared, not just the first level.
+
+    Same explicit product decision as before (confirmed with the
+    requester): PROTECT relations exist deliberately on some models
+    (e.g. apps.pid_analysis.EquipmentRegister, for APPROVED/SUBMITTED
+    business records) and are being force-bypassed here on purpose.
+    """
+    while True:
+        try:
+            instance.delete()
+            return
+        except ProtectedError as e:
+            for blocking_obj in e.protected_objects:
+                _force_delete(blocking_obj)
+
+
 # ---------------------------------------------------------------------------
 # Project CRUD
 # ---------------------------------------------------------------------------
@@ -283,8 +313,10 @@ def project_detail(request, project_id):
         p.save(update_fields=[*updates, 'updated_at'])
         return Response(_serialize_project(p, user=request.user))
 
-    # DELETE
-    p.delete()
+    # DELETE — see _force_delete's own docstring for why this recurses
+    # instead of doing a single pass over p._meta.related_objects.
+    with transaction.atomic():
+        _force_delete(p)
     return Response({'deleted': True, 'project_id': str(project_id)})
 
 
