@@ -6,6 +6,7 @@ rendering the PDF/DOCX output, so what the user edits is exactly what is
 generated.
 """
 
+from .decision_terminology import decision_text
 import html
 import re
 
@@ -171,7 +172,7 @@ def build_letter_context(deal, letter=None, custom_data=None):
         'expected_close_date': deal.expected_close_date.strftime('%d %b %Y') if deal.expected_close_date else '',
         'estimated_value': f"{deal.estimated_value:,.2f}" if deal.estimated_value else '',
         'currency': deal.currency or '',
-        'bid_decision': deal.get_bid_decision_display() if deal.bid_decision else '',
+        'bid_decision': decision_text(deal.get_bid_decision_display()) if deal.bid_decision else '',
         'bid_decision_reason': deal.bid_decision_reason or '',
         'current_date': timezone.now().strftime('%d %B %Y'),
         'today': timezone.now().strftime('%d %B %Y'),

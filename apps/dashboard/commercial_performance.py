@@ -139,7 +139,7 @@ def _win_rate(deals, as_of):
     value = round(won / len(closed) * 100, 2) if closed and not undated and not future else None
     result = metric('win_rate', 'Win rate', value, unit='percent', status='available' if value is not None else 'unavailable',
                     source='Recorded CRM outcomes and actual close dates', route='/sales/opportunities',
-                    description='Current awarded or converted opportunities divided by awarded, converted and lost opportunities with recorded actual close dates in the trailing 365 calendar days. No-bid and cancelled records are excluded; all original currencies are counted together.')
+                    description='Current awarded or converted opportunities divided by awarded, converted and lost opportunities with recorded actual close dates in the trailing 365 calendar days. No-Go and cancelled records are excluded; all original currencies are counted together.')
     result.update({'period': 'trailing_365_days', 'period_start': start.isoformat(), 'period_end': as_of.isoformat(),
                    'numerator': won, 'denominator': len(closed), 'missing_close_date_count': undated, 'future_close_date_count': future})
     if value is None:
@@ -163,7 +163,7 @@ def _flags(deal, as_of):
     def add(code, title, detail, severity='medium'):
         flags.append({'code': code, 'title': title, 'detail': detail, 'severity': severity})
     if deal.stage in QUALIFIED_STAGES and deal.bid_decision == 'pending':
-        add('bid_decision_pending', 'Review bid decision', 'The opportunity has a recorded pending bid/no-bid decision.')
+        add('bid_decision_pending', 'Review Go decision', 'The opportunity has a recorded pending Go/No-Go decision.')
     if deal.award_status == 'pending':
         add('award_approval_pending', 'Review award approval', 'The recorded award is awaiting approval.', 'high')
     if deal.stage == 'proposal' and deal.submission_due_date and deal.submission_due_date < as_of:
@@ -275,7 +275,7 @@ def _build_commercial(user, context):
     result['register'] = {'status': 'available', 'opportunities': register[:200], 'total_rows': len(register),
                           'total_rows_by_currency': dict(Counter(row['currency'] for row in register)),
                           'returned_rows': min(len(register), 200), 'truncated': len(register) > 200, 'scope': dict(SCOPE),
-                          'description': 'Recorded open opportunities. Probability is stored CRM weighting, not a validated prediction. Health reflects listed register flags; no recorded flags does not imply bid readiness or likelihood of winning.'}
+                          'description': 'Recorded open opportunities. Probability is stored CRM weighting, not a validated prediction. Health reflects listed register flags; no recorded flags does not imply Go readiness or likelihood of winning.'}
     actions.sort(key=lambda row: (SEVERITY_ORDER.get(row['severity'], 9), row['id']))
     result.update({'actions': actions[:50], 'actions_status': 'available', 'action_count': len(actions),
                    'actions_returned': min(len(actions), 50), 'actions_truncated': len(actions) > 50})
@@ -283,9 +283,9 @@ def _build_commercial(user, context):
     result['bid_calendar'] = {'status': 'available', 'rows': calendar[:50], 'total_rows': len(calendar),
                               'total_rows_by_currency': dict(Counter(row['currency'] for row in calendar)),
                               'returned_rows': min(len(calendar), 50), 'truncated': len(calendar) > 50,
-                              'description': 'Recorded submission targets of current proposal-stage opportunities, including past dates and dates through the next 30 days. A passed target does not prove non-submission. Readiness and dedicated bid accountability are not connected; owners are opportunity owners.'}
+                              'description': 'Recorded submission targets of current proposal-stage opportunities, including past dates and dates through the next 30 days. A passed target does not prove non-submission. Readiness and dedicated Go accountability are not connected; owners are opportunity owners.'}
     counts = _quality_counts(open_deals)
-    result['commercial_quality'] = {'status': 'available', 'description': 'Specific field completeness and weighting checks across all visible open CRM opportunities and all currencies. These checks do not establish commercial approval, legal review or bid quality.',
+    result['commercial_quality'] = {'status': 'available', 'description': 'Specific field completeness and weighting checks across all visible open CRM opportunities and all currencies. These checks do not establish commercial approval, legal review or Go quality.',
                                      'metrics': [metric(key, label, counts[key], source='CRM opportunity register', route='/sales/opportunities', description=reason) for key, label, reason in QUALITY]}
     result['client_concentration'] = _concentration(open_deals)
     for stage in OPEN_STAGES:

@@ -318,4 +318,4 @@ def validate_bound_enterprise_project(project, target):
     from apps.sales.models import BidPreparation
     binding = BidPreparation.objects.filter(planning_project=project).select_related('opportunity').first()
     if binding and (not target or binding.opportunity.converted_project_id != target.pk):
-        raise ValidationError('This bid workspace can only connect to its opportunity’s converted project.')
+        raise ValidationError('This Go workspace can only connect to its opportunity’s converted project.')

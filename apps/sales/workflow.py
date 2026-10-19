@@ -173,9 +173,9 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
     from .bid_decision_access import require_bid_decision_access
     decision_authority = require_bid_decision_access(actor, opportunity)
     if opportunity.stage != 'qualified':
-        raise ValidationError({'stage': 'Bid decision is available only for a qualified opportunity.'})
+        raise ValidationError({'stage': 'Go decision is available only for a qualified opportunity.'})
     if decision not in {'bid', 'conditional_bid', 'no_bid'}:
-        raise ValidationError({'decision': 'Use bid, conditional_bid, or no_bid.'})
+        raise ValidationError({'decision': 'Select Go, Conditional Go or No-Go.'})
     if decision in {'conditional_bid', 'no_bid'} and not reason:
         raise ValidationError({'reason': 'A justification is required for this decision.'})
     # Warning only: record the Go / No-go decision and flag incomplete commercials.
@@ -190,7 +190,7 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
     )
     if decision_authority == 'configured_route' and requires_management and actor.id == opportunity.owner_id:
         raise ValidationError({
-            'approver': 'A high-risk or high-value bid decision requires independent management approval.',
+            'approver': 'A high-risk or high-value Go decision requires independent management approval.',
         })
     old = opportunity.stage
     opportunity.bid_decision = decision
@@ -216,7 +216,7 @@ def record_ceo_decision(opportunity, actor, decision, reason=''):
     if not has_business_position(actor, ('ceo',)):
         raise PermissionDenied('Only the CEO can record this lifecycle decision.')
     if opportunity.stage != 'proposal' or opportunity.bid_decision not in {'bid', 'conditional_bid'}:
-        raise ValidationError({'stage': 'CEO decision is available only after a Bid or Conditional Bid enters proposal stage.'})
+        raise ValidationError({'stage': 'CEO decision is available only after a Go or Conditional Go enters proposal stage.'})
     value = str(decision or '').strip().lower()
     if value in {'go', 'approved', 'approve', 'yes'}:
         approved = True
@@ -252,7 +252,7 @@ def close_opportunity(opportunity, actor, *, outcome, reason):
     if opportunity.stage in {'awarded', 'converted', 'lost', 'no_bid', 'cancelled'}:
         raise ValidationError({'stage': 'This opportunity is already closed.'})
     if outcome not in {'lost', 'cancelled'}:
-        raise ValidationError({'outcome': 'Use lost or cancelled. No-bid is controlled by the bid decision.'})
+        raise ValidationError({'outcome': 'Use lost or cancelled. No-Go is controlled by the Go decision.'})
     if not reason:
         raise ValidationError({'reason': 'A close or loss reason is required.'})
     old = opportunity.stage
@@ -547,21 +547,21 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
     opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
     # Validate opportunity state
     if opportunity.stage not in {'proposal', 'no_bid'}:
-        raise ValidationError({'stage': 'Letter preparation is only available after bid decision.'})
+        raise ValidationError({'stage': 'Letter preparation is only available after Go decision.'})
     
     # Validate letter type against bid decision
     bid_decision = opportunity.bid_decision
     
     if letter_type == 'eoi':
         if bid_decision not in {'bid', 'conditional_bid'}:
-            raise ValidationError({'letter_type': 'EOI letter requires a Bid or Conditional Bid decision.'})
+            raise ValidationError({'letter_type': 'EOI letter requires a Go or Conditional Go decision.'})
         if opportunity.stage != 'proposal':
             raise ValidationError({'stage': 'EOI letter requires opportunity in Proposal stage.'})
     elif letter_type in {'regret_expertise', 'regret_manpower'}:
         if bid_decision != 'no_bid':
-            raise ValidationError({'letter_type': 'Regret letters require a No-Bid decision.'})
+            raise ValidationError({'letter_type': 'Regret letters require a No-Go decision.'})
         if opportunity.stage != 'no_bid':
-            raise ValidationError({'stage': 'Regret letters require opportunity in No-Bid stage.'})
+            raise ValidationError({'stage': 'Regret letters require opportunity in No-Go stage.'})
     else:
         raise ValidationError({'letter_type': 'Invalid letter type.'})
     

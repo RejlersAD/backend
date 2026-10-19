@@ -27,9 +27,9 @@ def require_bid_decision_access(actor, opportunity):
         pk=getattr(actor, 'pk', None), is_active=True,
     ).select_related('rbac_profile').first()
     if not module_action_allowed(current, 'sales_opportunities', 'read'):
-        raise PermissionDenied('Current Opportunity module access is required to record a bid decision.')
+        raise PermissionDenied('Current Opportunity module access is required to record a Go decision.')
     if not record_workflow_not_denied(current, 'sales_opportunities', 'approve'):
-        raise PermissionDenied('Bid decisions are explicitly denied for your account.')
+        raise PermissionDenied('Go decisions are explicitly denied for your account.')
 
     # Reuse Sales' current record/organization scope after the command locks Deal.
     from .bid_preparation import visible_deals

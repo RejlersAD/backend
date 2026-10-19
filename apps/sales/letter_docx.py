@@ -127,7 +127,7 @@ def generate_letter_docx(letter, custom_data=None):
     _strip_table_borders(meta)
     rows = [
         ('From:', [lh['sender_name'], lh['sender_company']]),
-        ('Bid Focal Contact:', [lh['focal_contact']]),
+        ('Go Focal Contact:', [lh['focal_contact']]),
         ('Contact Number:', [lh['contact_number']]),
         ('Fax:', [lh['fax']]),
         ('Email:', [lh['email']]),
