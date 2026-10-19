@@ -22,3 +22,14 @@ this display-only change. Baseline proof and final run are in frontend
 `artifacts/go-baseline-scope.log` and `artifacts/go-terminology-backend-verified.log`.
 The executable structure of workflow, preparation, readiness and access modules
 is unchanged after excluding display strings (`artifacts/go-contract-check.log`).
+
+Push preparation: merge fetched development/main updates without conflicts,
+including the concurrent upstream Equipment List/project-organizer work. Remove
+the orphaned marker line in `.gitignore` while preserving its rules. Local normal
+`manage.py migrate --check --noinput` exits 0: `radai_dev` has 629 applied records,
+including all 32 Sales migrations through `0032_letter_fingerprints`. This patch
+introduces no schema changes. Production database state was not queried.
+
+Frontend release checks add 36 passing helper tests and seven passing Analysis
+journeys. Existing dialog and Analysis contrast failures are disclosed in the
+frontend note; no application styling or access policy is changed by this patch.
