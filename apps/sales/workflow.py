@@ -113,6 +113,7 @@ def _notify_sales_qualification(opportunity, actor, special_note=''):
 
 @transaction.atomic
 def submit_qualification(opportunity, actor, special_note=''):
+    opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
     if opportunity.stage != 'lead':
         raise ValidationError({'stage': 'Only a lead can be submitted for qualification.'})
     note = str(special_note or '').strip()

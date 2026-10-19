@@ -12,7 +12,6 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from apps.rbac.action_policy import module_action_allowed
-from apps.rbac.models import RolePermission
 from apps.sales.email_permissions import visible_email_clients
 from apps.sales.models import Client, Deal, OpportunityNumberSequence
 from apps.sales.opportunity_registration import (
@@ -22,7 +21,7 @@ from apps.sales.serializers import (
     ClientDetailSerializer, ClientListSerializer, DealCreateSerializer,
     DealDetailSerializer, DealListSerializer,
 )
-from apps.sales.tests.access_fixtures import grant_sales_actions
+from apps.sales.tests.access_fixtures import grant_sales_actions, deny_sales_action
 
 
 class VFRegistrationCoreTests(TestCase):
@@ -213,9 +212,7 @@ class VFRegistrationCoreTests(TestCase):
 
     def test_visible_client_requires_independent_client_read_permission(self):
         existing = self.register()
-        RolePermission.objects.filter(
-            permission__module__code='sales_clients', permission__action='read',
-        ).delete()
+        deny_sales_action(self.actor, 'sales_clients', 'read')
         self.assertTrue(module_action_allowed(self.actor, 'sales_opportunities', 'create'))
         self.assertFalse(module_action_allowed(self.actor, 'sales_clients', 'read'))
         self.assertTrue(visible_email_clients(self.actor).filter(pk=self.client.pk).exists())

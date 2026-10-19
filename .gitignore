@@ -463,6 +463,8 @@ _tmp_*.py
 !docs/SALES_OPPORTUNITY_ANALYSIS.md
 !docs/SALES_BID_JUSTIFICATION.md
 !apps/sales/tests/test_proposal_readiness.py
+!apps/sales/tests/test_opportunity_proposal_flow.py
+!docs/SALES_OPPORTUNITY_PROPOSAL_RELEASE.md
 !apps/sales/tests/test_proposal_readiness_postgresql.py
 !apps/sales/tests/test_proposal_draft_ai.py
 !docs/SALES_PROPOSAL_READINESS.md

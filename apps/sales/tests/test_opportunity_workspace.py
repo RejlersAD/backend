@@ -1,5 +1,5 @@
 """Synthetic storage transport: no tenant, network share or application DB writes."""
-from datetime import timedelta
+from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from types import SimpleNamespace
@@ -17,7 +17,8 @@ from rest_framework.test import APIClient
 from apps.rbac.action_policy import operation_action
 from apps.rbac.models import RolePermission
 from apps.rbac.route_guard import ModuleActionGuardMixin
-from apps.sales.models import Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload
+from apps.sales.models import (Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload,
+                               ProposalReviewCommand, ProposalReviewComment, ProposalReviewDocument, Quote)
 from apps.sales.opportunity_registration import create_registered_opportunity
 from apps.sales.opportunity_workspace import (
     FOLDERS, WorkspaceAPIError, _claim, delete_opportunity_with_workspace_guard, due_workspace_ids,
@@ -145,6 +146,29 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.assertEqual(self.api.delete(f'/api/v1/sales/deals/{replacement.pk}/').status_code, 204)
         self.assertFalse(OpportunityWorkspace.objects.exists())
         self.assertFalse(Deal.objects.filter(pk=replacement.pk).exists())
+
+    def test_delete_purges_proposal_review_evidence(self):
+        workspace = self.ready()
+        upload = OpportunityWorkspaceUpload.objects.create(
+            workspace=workspace, request_id=uuid4(), actor=self.actor, folder_key='proposal',
+            name='Proposal.pdf', size=5, sha256='a' * 64, status='complete')
+        quote = Quote.objects.create(quote_number='Q-PURGE-1', deal=self.opportunity,
+            client=self.client_record, subtotal='100.00', total_amount='100.00',
+            valid_until=date.today() + timedelta(days=30))
+        document = ProposalReviewDocument.objects.create(quote=quote, attachment=upload, revision=1,
+            name='Proposal.pdf', sha256='a' * 64, size=5, page_count=2, created_by=self.actor)
+        parent = ProposalReviewComment.objects.create(document=document, body='Check the scope')
+        ProposalReviewComment.objects.create(document=document, parent=parent, body='Scope confirmed')
+        ProposalReviewCommand.objects.create(quote=quote, document=document, actor=self.actor,
+            request_id=uuid4(), action='comment', payload_hash='b' * 64)
+        result = self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/')
+        self.assertEqual(result.status_code, 204)
+        self.assertFalse(Deal.objects.filter(pk=self.opportunity.pk).exists())
+        self.assertFalse(OpportunityWorkspace.objects.exists())
+        self.assertFalse(OpportunityWorkspaceUpload.objects.exists())
+        self.assertFalse(ProposalReviewDocument.objects.exists())
+        self.assertFalse(ProposalReviewComment.objects.exists())
+        self.assertFalse(ProposalReviewCommand.objects.exists())
 
     def test_client_cascade_cannot_erase_linked_workspace(self):
         workspace = self.ready()

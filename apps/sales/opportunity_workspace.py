@@ -20,6 +20,8 @@ from .attachment_streams import configured_limit, prepare_upload
 from .classification_models import (OpportunityDocumentClassification,
                                     OpportunityDocumentClassificationCommand,
                                     OpportunityDocumentClassificationRun)
+from .proposal_review_models import (ProposalReviewComment, ProposalReviewCommand,
+                                     ProposalReviewDocument)
 from .workflow import _audit
 from .workspace_graph import (
     WorkspaceError, WorkspaceGraph, file_projection, version_projection, workspace_config,
@@ -159,6 +161,10 @@ def _purge_workspace_storage(workspace):
         Q(document__workspace=workspace) | Q(upload__workspace=workspace)).delete()
     OpportunityDocumentClassificationRun.objects.filter(upload__workspace=workspace).delete()
     OpportunityDocumentClassification.objects.filter(document__workspace=workspace).delete()
+    # Proposal review artifacts PROTECT their upload and quote; remove them first.
+    ProposalReviewCommand.objects.filter(document__attachment__workspace=workspace).delete()
+    ProposalReviewComment.objects.filter(document__attachment__workspace=workspace).delete()
+    ProposalReviewDocument.objects.filter(attachment__workspace=workspace).delete()
     # Documents and uploads reference each other with PROTECT; clear one side.
     uploads.update(document=None, previous_upload=None)
     OpportunityDocument.objects.filter(workspace=workspace).delete()
