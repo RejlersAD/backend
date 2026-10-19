@@ -184,7 +184,7 @@ def bid_projection(deal_id, actor):
     if not row and not (create or attach):
         reason = (scope_reason if scope_reason else 'This client is not currently permitted for new proposals.'
                   if not client_permits_proposal_preparation(deal.client)
-                  else 'An approved bid decision is required before connecting preparation.'
+                  else 'An approved Go decision is required before connecting preparation.'
                   if deal.stage not in {'proposal', 'negotiation'} or deal.bid_decision not in {'bid', 'conditional_bid'}
                   else 'Your current access does not permit connecting preparation.')
     return {'opportunity': {'id': str(deal.pk), 'code': deal.deal_code, 'name': deal.deal_name,
@@ -252,7 +252,7 @@ def connect_preparation(deal_id, actor, data):
     if not client_permits_proposal_preparation(deal.client):
         raise ValidationError({'client': 'This client is not currently permitted for new proposals.'})
     if not _allowed_to_connect(deal, actor):
-        raise PreparationConflict('An approved bid decision and active proposal stage are required.')
+        raise PreparationConflict('An approved Go decision and active proposal stage are required.')
     planning_action = 'create' if mode == 'create' else 'update'
     if not all(module_action_allowed(actor, 'planning_package', action) for action in ('read', planning_action)):
         raise PermissionDenied('You do not have access to connect Planning preparation.')

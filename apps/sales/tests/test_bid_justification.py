@@ -97,6 +97,8 @@ class BidJustificationTests(TestCase):
                 response = self.ask(decision=decision)
                 self.assertEqual(response.status_code, 200, response.data)
                 self.assertEqual(response.data['source_context']['decision'], decision)
+                self.assertIn({'bid': 'Go', 'conditional_bid': 'Conditional Go', 'no_bid': 'No-Go'}[decision], response.data['text'])
+                self.assertEqual(self.provider.call_args.args[0]['selected_decision'], decision)
         self.assert_no_business_write()
 
     def test_missing_or_unknown_saved_type_is_not_inferred_from_title(self):
@@ -226,6 +228,7 @@ class BidJustificationTests(TestCase):
             {**base, 'text': ''}, {**base, 'text': 'x' * 4001},
             {**base, 'text': '<script>run()</script>'}, {**base, 'text': 'Go to https://untrusted.test'},
             {**base, 'text': 'No bid is recommended.'},
+            {**base, 'text': 'No-Go is recommended.'},
             {**base, 'text': 'The client has approved the work and sufficient capacity is available.'},
             {**base, 'evidence': [{'field': 'opportunity_type', 'excerpt': 'EOI'}]},
             {**base, 'evidence': [{'field': 'unknown', 'excerpt': 'RFQ'}]},
@@ -310,7 +313,7 @@ class BidJustificationTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         arguments = provider.chat.completions.create.call_args.kwargs
         system, user = arguments['messages']
-        self.assertIn('Write or rewrite a concise bid-decision justification', system['content'])
+        self.assertIn('Write or rewrite a concise Go-decision justification', system['content'])
         self.assertNotIn('Extract reviewable commercial email', system['content'])
         self.assertNotIn('Classify a document', system['content'])
         self.assertIn('verbatim, including its negation and', system['content'])
@@ -322,5 +325,5 @@ class BidJustificationTests(TestCase):
         self.assertFalse(arguments['store'])
         self.assertFalse(arguments['stream'])
         self.assertNotIn('tools', arguments)
-        self.assertEqual(response.data['text'], proposal['text'])
+        self.assertEqual(response.data['text'], 'Go is proposed for the RFQ; the decision grounds require review.')
         self.assert_no_business_write()

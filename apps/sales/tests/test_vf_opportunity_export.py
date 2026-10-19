@@ -15,11 +15,11 @@ from rest_framework.routers import DefaultRouter
 from rest_framework.test import APIClient
 
 from apps.rbac.action_policy import module_action_allowed
-from apps.rbac.models import Permission, RolePermission, UserPermissionOverride
+from apps.rbac.models import Permission, UserPermissionOverride
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.models import Client, Deal
 from apps.sales.views import DealViewSet
-from .access_fixtures import grant_sales_actions
+from .access_fixtures import grant_sales_actions, deny_sales_action
 
 
 router = DefaultRouter()
@@ -85,7 +85,7 @@ class OpportunityRegisterExportTests(TestCase):
         self.assertEqual(rows[1]['Currency'], 'AED')
         self.assertEqual(rows[1]['Win probability (%)'], '10')
         self.assertEqual(rows[1]['Stage'], 'Open')
-        self.assertEqual(rows[1]['Bid decision'], 'Pending')
+        self.assertEqual(rows[1]['Go decision'], 'Pending')
         self.assertEqual(rows[1]['Next action'], 'Review scope')
         self.assertEqual(len(rows[1]), 13)
         self.assertNotIn('NOT_AN_EXPORT_COLUMN', response.content.decode('utf-8-sig'))
@@ -104,25 +104,19 @@ class OpportunityRegisterExportTests(TestCase):
         self.assertEqual(self.csv_rows(self.export())[0]['Estimated value'], '0.00')
 
     def test_export_grant_is_required_independently_of_read(self):
-        RolePermission.objects.filter(
-            permission__module__code='sales_opportunities', permission__action='export',
-        ).delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'export')
         self.assertTrue(module_action_allowed(self.actor, 'sales_opportunities', 'read'))
         response = self.export()
         self.assertEqual(response.status_code, 403)
         self.assertNotIn('Content-Disposition', response)
 
     def test_read_grant_is_required_independently_of_export(self):
-        RolePermission.objects.filter(
-            permission__module__code='sales_opportunities', permission__action='read',
-        ).delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'read')
         self.assertTrue(module_action_allowed(self.actor, 'sales_opportunities', 'export'))
         self.assertEqual(self.export().status_code, 403)
 
     def test_post_export_does_not_require_create_permission(self):
-        RolePermission.objects.filter(
-            permission__module__code='sales_opportunities', permission__action='create',
-        ).delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'create')
         self.assertFalse(module_action_allowed(self.actor, 'sales_opportunities', 'create'))
         self.assertEqual(self.export().status_code, 200)
 
@@ -169,7 +163,7 @@ class OpportunityRegisterExportTests(TestCase):
             currency='=CURRENCY', stage='+STAGE', bid_decision='-DECISION', next_action=' \t=NEXT',
         )
         row = self.csv_rows(self.export())[0]
-        for field in ('VF code', 'Client', 'Type', 'Service line', 'Owner', 'Currency', 'Stage', 'Bid decision', 'Next action'):
+        for field in ('VF code', 'Client', 'Type', 'Service line', 'Owner', 'Currency', 'Stage', 'Go decision', 'Next action'):
             self.assertTrue(row[field].startswith("'"), (field, row[field]))
 
     def test_invalid_empty_duplicate_and_excessive_ids_are_rejected(self):

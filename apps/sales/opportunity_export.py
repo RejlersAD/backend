@@ -1,6 +1,7 @@
 """CSV projection of an explicit, fully authorized opportunity selection."""
 
 import csv
+from .decision_terminology import decision_text
 from datetime import date
 from decimal import Decimal
 from io import StringIO
@@ -87,7 +88,7 @@ def opportunity_export_response(queryset, identifiers):
     writer.writerow((
         'VF code', 'Title', 'Client', 'Type', 'Service line', 'Submission deadline',
         'Owner', 'Estimated value', 'Currency', 'Win probability (%)', 'Stage',
-        'Bid decision', 'Next action',
+        'Go decision', 'Next action',
     ))
     types = dict(OPPORTUNITY_TYPE_CHOICES)
     decisions = dict(BID_DECISION_CHOICES)
@@ -100,8 +101,8 @@ def opportunity_export_response(queryset, identifiers):
             types.get(row['opportunity_type'], row['opportunity_type']),
             _service_lines(row['service_categories']), row['submission_due_date'],
             owner, row['estimated_value'], row['currency'], row['probability'],
-            DEAL_STAGES.get(row['stage'], {}).get('name', row['stage']),
-            decisions.get(row['bid_decision'], row['bid_decision']), row['next_action'],
+            decision_text(DEAL_STAGES.get(row['stage'], {}).get('name', row['stage'])),
+            decision_text(decisions.get(row['bid_decision'], row['bid_decision'])), row['next_action'],
         ))
     response = HttpResponse(content.getvalue(), content_type='text/csv; charset=utf-8')
     filename = f'opportunities-{timezone.localdate().isoformat()}.csv'

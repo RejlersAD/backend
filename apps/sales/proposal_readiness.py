@@ -59,7 +59,7 @@ def _creation_blocker(deal, *, can_create, client_visible, internal_notified, ce
     if not can_create:
         return 'access', 'Proposal create access is required to start a draft.'
     if deal.stage != 'proposal' or deal.bid_decision not in GO_DECISIONS:
-        return 'deal', 'A recorded Bid or Conditional Bid in the Proposal stage is required.'
+        return 'deal', 'A recorded Go or Conditional Go in the Proposal stage is required.'
     if not internal_notified:
         return 'workflow', 'A Sales team member must act on the internal qualification notification before proposal drafting.'
     if not ceo_approved:

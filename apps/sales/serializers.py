@@ -3,6 +3,7 @@ Sales Serializers
 DRF serializers for Sales Management API
 """
 
+from .decision_terminology import decision_text
 from .saved_email_analysis import analyze_saved_email
 from .email_customer_matching import enrich_customer_match
 from .email_permissions import (
@@ -335,7 +336,7 @@ class DealListSerializer(serializers.ModelSerializer):
     
     def get_stage_display(self, obj):
         from .models import DEAL_STAGES
-        return DEAL_STAGES.get(obj.stage, {}).get('name', obj.stage)
+        return decision_text(DEAL_STAGES.get(obj.stage, {}).get('name', obj.stage))
 
     def get_created_by_name(self, obj):
         return _opportunity_creator_name(obj)
