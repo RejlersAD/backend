@@ -163,6 +163,12 @@ def _purge_workspace_storage(workspace):
     OpportunityDocumentClassification.objects.filter(document__workspace=workspace).delete()
     # Proposal review artifacts PROTECT their upload and quote; remove them first.
     ProposalReviewCommand.objects.filter(document__attachment__workspace=workspace).delete()
+    # Thread parents are protected. Unlink only relationships within this
+    # workspace before purging its comments; foreign children remain protected.
+    ProposalReviewComment.objects.filter(
+        document__attachment__workspace=workspace,
+        parent__document__attachment__workspace=workspace,
+    ).update(parent=None)
     ProposalReviewComment.objects.filter(document__attachment__workspace=workspace).delete()
     ProposalReviewDocument.objects.filter(attachment__workspace=workspace).delete()
     # Documents and uploads reference each other with PROTECT; clear one side.

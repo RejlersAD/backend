@@ -11,7 +11,8 @@ from django.db import close_old_connections, connection
 from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from apps.rbac.models import RolePermission
+from apps.rbac.models import UserPermissionOverride
+from apps.sales.tests.access_fixtures import deny_sales_action
 from apps.rbac.route_guard import ModuleActionGuardMixin
 from apps.sales.attachment_storage import attachment_storage
 from apps.sales.models import (Deal, OpportunityAuditEvent, OpportunityDocument, OpportunityWorkspaceUpload,
@@ -148,12 +149,10 @@ class DocumentVersionTests(VersionFixtures, TestCase):
         first, request_id = self.upload(), uuid4()
         self.version(first, request_id=request_id)
         for action in ('create', 'update', 'read'):
-            permission = RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action=action).first()
-            old_pk = permission.pk
-            permission.delete()
+            deny_sales_action(self.actor, 'sales_opportunities', action)
             self.assertEqual(self.version(first, request_id=request_id).status_code, 403)
-            permission.pk = old_pk
-            permission.save(force_insert=True)
+            UserPermissionOverride.objects.filter(user_profile=self.actor.rbac_profile,
+                permission__module__code='sales_opportunities', permission__action=action).delete()
 
     def test_history_and_exact_download_keep_record_folder_and_export_scope(self):
         first = self.upload()
@@ -165,7 +164,7 @@ class DocumentVersionTests(VersionFixtures, TestCase):
                 for suffix in ('', 'versions/', 'download/'):
                     self.assertEqual(self.api.get(candidate + suffix).status_code, 404)
             self.assertEqual(self.api.get(url + 'versions/', {'cursor': 'forged'}).status_code, 400)
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='export').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'export')
         self.assertEqual(self.api.get(self.file_url(first) + 'versions/').status_code, 200)
         self.assertEqual(self.api.get(self.file_url(first) + 'download/').status_code, 403)
 
@@ -378,7 +377,7 @@ class DocumentVersionDurabilityTests(VersionFixtures, TransactionTestCase):
 
     def test_guarded_version_endpoint_denies_missing_create_without_side_effects(self):
         first = self.upload()
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='create').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'create')
         guarded = type('DealViewSet', (ModuleActionGuardMixin, DealViewSet), {'__module__': 'apps.sales.views'})
         request = APIRequestFactory().post(self.file_url(first) + 'versions/upload/', {
             'file': SimpleUploadedFile('Scope.pdf', b'revision two'), 'upload_request_id': str(uuid4()),

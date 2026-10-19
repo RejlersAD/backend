@@ -238,6 +238,7 @@ def delete_private_file(opportunity, actor, key, file_id):
 
 def _delete_upload_tree(opportunity, actor, key, upload, document):
     """Delete a file outright, including its document when no ready version remains."""
+    document_id = str(document.pk) if document else None
     _delete_stored_radai_objects(OpportunityWorkspaceUpload.objects.filter(pk=upload.pk))
     if document:
         OpportunityDocumentClassificationCommand.objects.filter(
@@ -255,11 +256,11 @@ def _delete_upload_tree(opportunity, actor, key, upload, document):
     upload.save(update_fields=['status', 'error_code', 'updated_at'])
     _audit(opportunity, actor, 'workspace_file_deleted', data={
         'upload_id': str(upload.pk), 'folder_key': key, 'storage_provider': 'radai',
-        'document_id': str(document.pk) if document else None, 'version': upload.version_number,
+        'document_id': document_id, 'version': upload.version_number,
         'head_upload_id': None, 'document_removed': bool(document),
     })
     return {'deleted_id': 'radai-' + str(upload.pk),
-            'document_id': str(document.pk) if document else None, 'current': None}
+            'document_id': document_id, 'current': None}
 
 
 def private_file_versions(opportunity, actor, key, file_id, cursor=None):

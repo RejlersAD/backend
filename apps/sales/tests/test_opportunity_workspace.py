@@ -15,7 +15,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.rbac.action_policy import operation_action
-from apps.rbac.models import RolePermission
+from apps.sales.tests.access_fixtures import deny_sales_action
 from apps.rbac.route_guard import ModuleActionGuardMixin
 from apps.sales.models import (Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload,
                                ProposalReviewCommand, ProposalReviewComment, ProposalReviewDocument, Quote)
@@ -279,7 +279,7 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.assertIn(self.api.post(self.url + 'setup/', {}, format='json').status_code, (403, 404))
 
     def test_explicit_read_permission_required_even_for_setup(self):
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='read').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'read')
         self.assertEqual(self.api.get(self.url).status_code, 403)
         self.assertEqual(self.api.post(self.url + 'setup/', {}, format='json').status_code, 403)
 
@@ -298,7 +298,7 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.ready()
         for action in ('read', 'create', 'update'):
             with self.subTest(action=action), transaction.atomic():
-                RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action=action).delete()
+                deny_sales_action(self.actor, 'sales_opportunities', action)
                 result = self.api.post(self.url + 'folders/tender/upload/', {
                     'upload_request_id': str(uuid4()), 'file': SimpleUploadedFile('scope.pdf', b'bytes'),
                 })
@@ -309,7 +309,7 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
 
     def test_active_requester_losing_update_grant_stops_worker(self):
         workspace = setup_workspace(self.opportunity, self.actor)
-        RolePermission.objects.filter(permission__module__code='sales_opportunities', permission__action='update').delete()
+        deny_sales_action(self.actor, 'sales_opportunities', 'update')
         self.assertEqual(run_workspace_setup(workspace.pk)['code'], 'authority_changed')
         self.assertFalse(self.graph.created)
 

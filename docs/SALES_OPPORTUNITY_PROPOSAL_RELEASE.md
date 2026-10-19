@@ -1,5 +1,25 @@
 # Opportunity to saved proposal draft — 19 October 2026
 
+## Development push preparation
+
+The user requests publishing all pending backend/frontend changes after remote
+development alignment. Both repositories also incorporate current main to keep
+the main-base PRs aligned; all merges completed without conflicts. Existing
+single-version/legacy attachment deletion and opportunity workspace purge work
+is retained. Release checks corrected two exposed deletion defects: preserve
+the document ID before Django clears it on deletion, and unlink internal comment
+threads before purging their protected parent/reply records. Cross-workspace
+references remain protected. Explicit-deny fixtures cover inherited Sales grants.
+
+After alignment, the local `migrate --check --noinput` command exited 0. Local
+PostgreSQL has 629 applied records and all 32 Sales migrations through 0032.
+This release adds no migrations or schema changes; production DB state is not
+claimed. The expanded regression suite ran 222 tests successfully (five
+PostgreSQL-only skips); document-version checks ran 23 successfully (three
+PostgreSQL-only skips). Logs are in frontend `artifacts/sales-release-backend-final.log`
+and `artifacts/sales-release-document-versions-final.log`. Frontend checks are
+documented in its `docs/SALES_RELEASE_20261019.md` release note.
+
 Scope: SAL-FLOW-01 in the shared workspace decision register. Preserve existing
 Sales access, department owner rules, CEO business authority and client gates.
 
