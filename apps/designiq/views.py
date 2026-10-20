@@ -819,6 +819,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
         pms_file = request.FILES.get('pms_file')
         nace_file = request.FILES.get('nace_file')
         stress_criticality_file = request.FILES.get('stress_criticality_file')  # NEW: 5th document for stress criticality
+        process_line_list_file = request.FILES.get('process_line_list_file')  # Optional 6th document: Process Line List (Excel)
         
         if not pid_file:
             return Response({
@@ -932,6 +933,14 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     'filename': stress_criticality_file.name,
                     'content': stress_content,
                     'size': len(stress_content)
+                }
+            if process_line_list_file:
+                logger.info(f"📑 Process Line List document attached: {process_line_list_file.name}")
+                pll_content = process_line_list_file.read()
+                enrichment_files['process_line_list'] = {
+                    'filename': process_line_list_file.name,
+                    'content': pll_content,
+                    'size': len(pll_content)
                 }
             
             # Queue Celery task for async processing (or execute immediately if EAGER mode)
@@ -1647,6 +1656,19 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 # Status columns (2)
                 'Status', 'Validated'
             ]
+
+            # Process Line List columns (soft-coded add-on) — appended only when
+            # a PLL Excel was uploaded for this document, so legacy exports keep
+            # their exact 46-column layout.
+            from .tasks import PROCESS_LINE_LIST_CONFIG, PROCESS_LINE_LIST_OUTPUT_KEYS
+            pll_keys = [
+                k for k in PROCESS_LINE_LIST_OUTPUT_KEYS
+                if any(k in item.data for item in items[:1])
+            ]
+            headers += [
+                PROCESS_LINE_LIST_CONFIG['header_labels'].get(k, k)
+                for k in pll_keys
+            ]
             
             ws.append(headers)
             
@@ -1710,7 +1732,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     # Status columns (2)
                     item.status,
                     'Yes' if item.is_validated else 'No'
-                ])
+                # Process Line List columns (soft-coded add-on, empty when absent)
+                ] + [item.data.get(k, '') for k in pll_keys])
             
             # Auto-size columns
             for col_num in range(1, len(headers) + 1):

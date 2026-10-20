@@ -105,8 +105,10 @@ class EnrichmentService:
         
         MANDATORY STRATEGY:
         - Base 17 columns ALWAYS filled from P&ID (locked logic from commit 9b4d837)
-        - Enrichment columns require ALL 3 documents (HMB + PMS + NACE)
-        - If any document missing, returns base extraction only
+        - HMB / PMS / NACE are individually OPTIONAL: enrichment runs when at
+          least one source document is provided. Missing documents are marked
+          "NOT PROVIDED" in the prompt and their fields are inferred from
+          piping class / fluid service.
         
         Args:
             base_lines: Lines from base P&ID extraction (UNCHANGED - 17 columns from locked logic)
@@ -126,15 +128,20 @@ class EnrichmentService:
         logger.info(f"Base lines: {len(base_lines)}")
         logger.info("="*80)
         
-        # MANDATORY: All 3 documents required for enrichment
-        if not (hmb_text and pms_text and nace_text):
-            missing = []
-            if not hmb_text: missing.append("HMB")
-            if not pms_text: missing.append("PMS")
-            if not nace_text: missing.append("NACE")
-            logger.info(f"Enrichment skipped - Missing documents: {', '.join(missing)}")
+        # SOFT GATE: enrichment runs when at least one source document is
+        # provided. Missing documents are handled by the prompt ("NOT PROVIDED"
+        # → infer from piping class / fluid service), so HMB/NACE uploads are
+        # optional per the Process discipline workflow.
+        if not (hmb_text or pms_text or nace_text):
+            logger.info("Enrichment skipped - No enrichment documents provided")
             logger.info("Returning base 8 columns from P&ID extraction")
             return base_lines
+        missing = []
+        if not hmb_text: missing.append("HMB")
+        if not pms_text: missing.append("PMS")
+        if not nace_text: missing.append("NACE")
+        if missing:
+            logger.info(f"Enrichment running with optional documents missing: {', '.join(missing)}")
         
         # DEBUG: Log document sizes
         logger.info(f"Document text sizes: HMB={len(hmb_text)} chars, PMS={len(pms_text)} chars, NACE={len(nace_text)} chars")

@@ -110,6 +110,152 @@ def extract_section_7(document_text):
     return document_text[:2000]
 
 
+# ---------------------------------------------------------------------------
+# PROCESS LINE LIST (optional Excel upload) — soft-coded add-on.
+# Merges process-discipline columns into each P&ID-extracted line WITHOUT
+# touching the locked base extraction or the HMB/PMS/NACE enrichment path.
+# All output keys carry the 'pll_' prefix so core columns are never
+# overwritten.
+# ---------------------------------------------------------------------------
+PROCESS_LINE_LIST_CONFIG = {
+    'enabled': True,
+    # Header aliases (matched case-insensitively via "contains") per canonical key
+    'column_aliases': {
+        'service':           ['line service', 'service description', 'service', 'fluid description'],
+        'operating_pressure': ['operating pressure', 'op. pressure', 'op pressure', 'normal pressure'],
+        'operating_temp':    ['operating temperature', 'op. temp', 'op temp', 'operating temp', 'normal temp'],
+        'design_pressure':   ['design pressure', 'design press'],
+        'design_temp':       ['design temperature', 'design temp'],
+        'flow_rate':         ['flow rate', 'flowrate', 'flow'],
+        'test_medium':       ['test medium'],
+        'tracing':           ['tracing'],
+        'insulation':        ['insulation'],
+        'remarks':           ['remarks', 'remark', 'notes', 'note'],
+    },
+    # Candidate header names for the line-number key column
+    'line_no_aliases': ['line no', 'line number', 'line tag', 'line designation', 'line'],
+    'field_prefix': 'pll_',
+    'match_flag_field': 'pll_match',
+    # Display labels for export/table headers (keyed by prefixed output key)
+    'header_labels': {
+        'pll_service':           'PLL Service',
+        'pll_operating_pressure': 'PLL Operating Pressure',
+        'pll_operating_temp':    'PLL Operating Temp',
+        'pll_design_pressure':   'PLL Design Pressure',
+        'pll_design_temp':       'PLL Design Temp',
+        'pll_flow_rate':         'PLL Flow Rate',
+        'pll_test_medium':       'PLL Test Medium',
+        'pll_tracing':           'PLL Tracing',
+        'pll_insulation':        'PLL Insulation',
+        'pll_remarks':           'PLL Remarks',
+        'pll_match':             'PLL Match',
+    },
+}
+
+# Ordered output keys (canonical order = column_aliases order + match flag)
+PROCESS_LINE_LIST_OUTPUT_KEYS = (
+    [PROCESS_LINE_LIST_CONFIG['field_prefix'] + k
+     for k in PROCESS_LINE_LIST_CONFIG['column_aliases']]
+    + [PROCESS_LINE_LIST_CONFIG['match_flag_field']]
+)
+
+
+def _normalize_pll_line_no(value):
+    """Normalize a line number for cross-document matching (PLL ↔ P&ID)."""
+    import re
+    if value is None:
+        return ''
+    text = str(value).upper().replace('"', '').replace('”', '').replace('“', '')
+    return re.sub(r'[\s_]+', '', text).strip()
+
+
+def parse_process_line_list(file_data):
+    """
+    Parse an Excel Process Line List into {normalized_line_no: {pll_*: value}}.
+    Header mapping is soft-coded via PROCESS_LINE_LIST_CONFIG.
+    Returns {} when the file cannot be parsed or no header row is found.
+    """
+    import openpyxl
+    cfg = PROCESS_LINE_LIST_CONFIG
+    try:
+        workbook = openpyxl.load_workbook(BytesIO(file_data['content']), data_only=True)
+    except Exception as e:
+        logger.error(f"PLL: unable to open Excel '{file_data['filename']}': {e}")
+        return {}
+
+    def _match_headers(header_cells):
+        col_for_key, line_col = {}, None
+        for idx, cell in enumerate(header_cells):
+            header = str(cell).strip().lower() if cell is not None else ''
+            if not header:
+                continue
+            if line_col is None and any(alias in header for alias in cfg['line_no_aliases']):
+                line_col = idx
+                continue
+            for key, aliases in cfg['column_aliases'].items():
+                if key not in col_for_key and any(alias in header for alias in aliases):
+                    col_for_key[key] = idx
+        return line_col, col_for_key
+
+    for sheet in workbook:
+        rows = list(sheet.iter_rows(values_only=True))
+        # Header row: first row (within the first 10) exposing a line-number column
+        header_idx, line_col, col_for_key = None, None, {}
+        for r_idx, row in enumerate(rows[:10]):
+            lc, cfk = _match_headers(row)
+            if lc is not None:
+                header_idx, line_col, col_for_key = r_idx, lc, cfk
+                break
+        if header_idx is None:
+            continue
+        result = {}
+        for row in rows[header_idx + 1:]:
+            if line_col >= len(row):
+                continue
+            key = _normalize_pll_line_no(row[line_col])
+            if not key:
+                continue
+            entry = {}
+            for field, c_idx in col_for_key.items():
+                if c_idx < len(row) and row[c_idx] not in (None, ''):
+                    entry[cfg['field_prefix'] + field] = str(row[c_idx]).strip()
+            if entry:
+                result[key] = entry
+        if result:
+            logger.info(f"PLL: parsed {len(result)} rows from sheet '{sheet.title}'")
+            return result
+    logger.warning(f"PLL: no line-number header row found in '{file_data['filename']}'")
+    return {}
+
+
+def merge_process_line_list(enriched_data, pll_lookup):
+    """
+    Merge Process Line List values into extracted lines by line number.
+    Only ADDS pll_* keys — existing base/enrichment columns are never removed
+    or overwritten.
+    """
+    cfg = PROCESS_LINE_LIST_CONFIG
+    flag = cfg['match_flag_field']
+    matched = 0
+    for line in enriched_data:
+        key = _normalize_pll_line_no(line.get('line_number') or line.get('original_detection'))
+        values = pll_lookup.get(key)
+        if values is None and key:
+            # Fallback: unique containment match (tolerates extra suffixes such
+            # as insulation codes present on only one side)
+            candidates = [k for k in pll_lookup if key in k or k in key]
+            if len(candidates) == 1:
+                values = pll_lookup[candidates[0]]
+        if values:
+            line.update(values)
+            line[flag] = 'Yes'
+            matched += 1
+        else:
+            line.setdefault(flag, 'No')
+    logger.info(f"PLL: matched {matched}/{len(enriched_data)} lines")
+    return enriched_data
+
+
 def determine_stress_criticality_table_7_1(size_str, max_design_temp_str):
     """
     Determine stress criticality per Table 7.1 (Section 7.6.1 - Piping Criticality Diagram)
@@ -435,7 +581,7 @@ def process_pid_upload_async(
     
     try:
         # SYSTEMATIC PROCESSING: Log the workflow
-        has_enrichment = enrichment_files and len(enrichment_files) == 3
+        has_enrichment = bool(enrichment_files)
         if has_enrichment:
             logger.info("=" * 80)
             logger.info("🚀 SYSTEMATIC 4-DOCUMENT PROCESSING:")
@@ -495,6 +641,7 @@ def process_pid_upload_async(
         pms_file = enrichment_files.get('pms') if enrichment_files else None
         nace_file = enrichment_files.get('nace') if enrichment_files else None
         stress_criticality_file = enrichment_files.get('stress_criticality') if enrichment_files else None
+        process_line_list_file = enrichment_files.get('process_line_list') if enrichment_files else None
         
         if hmb_file or pms_file or nace_file:
             try:
@@ -642,6 +789,25 @@ def process_pid_upload_async(
             for line_item in enriched_data:
                 line_item['criticality_stress'] = 'N/A'
         
+        # 🚀 STEP 3B: PROCESS LINE LIST (optional Excel) — soft-coded add-on.
+        # Runs after stress criticality, only ADDS pll_* columns per matched line.
+        if PROCESS_LINE_LIST_CONFIG['enabled'] and process_line_list_file:
+            try:
+                logger.info("=" * 80)
+                logger.info("📑 STEP 3B: Merging Process Line List (Excel)")
+                logger.info("=" * 80)
+                pll_lookup = parse_process_line_list(process_line_list_file)
+                if pll_lookup:
+                    enriched_data = merge_process_line_list(enriched_data, pll_lookup)
+                else:
+                    for line_item in enriched_data:
+                        line_item.setdefault(PROCESS_LINE_LIST_CONFIG['match_flag_field'], 'No')
+            except Exception as pll_err:
+                logger.error(f"❌ Process Line List merge failed: {pll_err}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                logger.info("→ Continuing without Process Line List columns")
+
         # Use enriched data for database saving
         table_data = enriched_data
         
@@ -704,6 +870,8 @@ def process_pid_upload_async(
                     'piping_rated_pressure', 'test_pressure', 'test_medium',
                     'pid_no', 'pid_rev', 'date', 'criticality_code', 'criticality_stress'
                 ]
+                # Optional Process Line List columns (soft-coded; empty unless PLL Excel uploaded)
+                enrichment_keys += PROCESS_LINE_LIST_OUTPUT_KEYS
                 # Initialize ALL enrichment columns (even if empty) to guarantee 35-column structure
                 for key in enrichment_keys:
                     data_dict[key] = line_data.get(key, '')
