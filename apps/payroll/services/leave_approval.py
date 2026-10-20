@@ -1,18 +1,65 @@
 """Leave-specific routing and authorization shared by queues and decisions."""
+import logging
+
+from decouple import config
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.workflows import HRWorkflowService
 from apps.rbac.approval_eligibility import approval_access, has_business_position, position_users
 
+logger = logging.getLogger(__name__)
+
 HR_ROLES = ('hr_manager', 'hr_admin', 'super_admin', 'superadmin', 'admin')
 HR_APPROVAL_POSITIONS = ('hr_manager', 'hr_admin', 'head_hr_administration')
+
+# SOFT-CODED fallback (env: LEAVE_HR_APPROVER_ROLE_FALLBACK, default on).
+# When NO active user currently holds an HR approval designation (EmployeeMaster
+# designation) with a payroll approve grant, leave submission dead-blocks with
+# "No active HR approver is assigned". The fallback promotes active HR-role /
+# superuser accounts with payroll approve access so leave keeps flowing while
+# HR completes the designation assignment. Set the env var to false to restore
+# strict designation-only routing.
+LEAVE_HR_APPROVER_ROLE_FALLBACK = config('LEAVE_HR_APPROVER_ROLE_FALLBACK', default=True, cast=bool)
 
 def is_hr(user):
     return bool(user.is_active and (user.is_superuser or set(HR_ROLES) & HRWorkflowService._role_codes(user)))
 
+
+def _role_based_hr_approvers():
+    """Active HR-role / superuser accounts with payroll approve access."""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    ids = [u.pk for u in User.objects.filter(is_active=True)
+           if (u.is_superuser or is_hr(u)) and approval_access(u, 'payroll')]
+    if not ids:
+        # Last resort: any active superuser, so submission is never dead-blocked
+        ids = list(User.objects.filter(is_active=True, is_superuser=True).values_list('pk', flat=True))
+    return User.objects.filter(pk__in=ids)
+
+
 def active_hr_approvers(employee_user_id=None):
-    return position_users(HR_APPROVAL_POSITIONS, 'payroll').exclude(pk=employee_user_id)
+    approvers = position_users(HR_APPROVAL_POSITIONS, 'payroll')
+    if not approvers.exists() and LEAVE_HR_APPROVER_ROLE_FALLBACK:
+        logger.warning(
+            'Leave approvals: no designation-matched HR approver found — '
+            'using role-based fallback (set LEAVE_HR_APPROVER_ROLE_FALLBACK=false to disable)'
+        )
+        approvers = _role_based_hr_approvers()
+    return approvers.exclude(pk=employee_user_id)
+
+
+def is_hr_approver(user):
+    """Designation-based HR approver, with the soft-coded role fallback."""
+    if has_business_position(user, HR_APPROVAL_POSITIONS):
+        return True
+    if not LEAVE_HR_APPROVER_ROLE_FALLBACK:
+        return False
+    return bool(
+        user and user.is_active
+        and (user.is_superuser or is_hr(user))
+        and approval_access(user, 'payroll')
+    )
 
 
 def employee_for_request(request):
@@ -64,7 +111,7 @@ def can_review(request, user):
         if request.workflow_instance_id and request.workflow_instance.current_stage.code != 'manager_review':
             return False
         return bool(manager.user_id == user.pk and user.is_active)
-    if request.status == 'PENDING' or not has_business_position(user, HR_APPROVAL_POSITIONS):
+    if request.status == 'PENDING' or not is_hr_approver(user):
         return False
     if request.workflow_instance_id:
         instance = request.workflow_instance
