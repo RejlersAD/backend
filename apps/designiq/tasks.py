@@ -186,11 +186,12 @@ PROCESS_LINE_LIST_CONFIG = {
     },
 }
 
-# Ordered output keys (canonical order = column_aliases order + match flag)
+# Ordered output keys (canonical order = column_aliases order + raw line no + match flag)
 PROCESS_LINE_LIST_OUTPUT_KEYS = (
     [PROCESS_LINE_LIST_CONFIG['field_prefix'] + k
      for k in PROCESS_LINE_LIST_CONFIG['column_aliases']]
-    + [PROCESS_LINE_LIST_CONFIG['match_flag_field']]
+    + [PROCESS_LINE_LIST_CONFIG['field_prefix'] + 'line_number_full',
+       PROCESS_LINE_LIST_CONFIG['match_flag_field']]
 )
 
 
@@ -348,6 +349,8 @@ def parse_process_line_list(file_data):
                 if c_idx < len(row) and row[c_idx] not in (None, ''):
                     entry[cfg['field_prefix'] + field] = str(row[c_idx]).strip()
             if entry:
+                # Keep the raw (un-normalized) full line number for output rows
+                entry[cfg['field_prefix'] + 'line_number_full'] = str(row[line_col]).strip()
                 result[key] = entry
         if result:
             logger.info(f"PLL: parsed {len(result)} rows from sheet '{sheet.title}'")
@@ -356,32 +359,93 @@ def parse_process_line_list(file_data):
     return {}
 
 
+# Base keys the DB-save loop indexes directly — PLL-only lines must provide them
+_PLL_BASE_DEFAULTS = {
+    'fluid_code': '', 'fluid_description': '', 'size': '', 'sequence_no': '',
+    'pipr_class': '', 'insulation': '', 'area': '', 'from_equipment': '',
+    'to_equipment': '', 'from_line': '', 'to_line': '',
+    'flow_detection_method': '', 'flow_confidence': '', 'page': 1,
+    'confidence': 'medium',
+}
+
+# PLL field → base-key fallback when synthesizing PLL-only lines
+_PLL_TO_BASE_MAP = {
+    'fluid_code': 'pll_fluid',
+    'size': 'pll_line_size',
+    'pipr_class': 'pll_material_class',
+    'insulation': 'pll_insulation',
+    'from_line': 'pll_from',
+    'to_line': 'pll_to',
+}
+
+
 def merge_process_line_list(enriched_data, pll_lookup):
     """
     Merge Process Line List values into extracted lines by line number.
-    Only ADDS pll_* keys — existing base/enrichment columns are never removed
-    or overwritten.
+
+    ALIGNMENT RULE (soft-coded): the final register covers EVERY Process Line
+    List record 1:1 —
+      1. P&ID lines matched to a PLL row get the pll_* values (pll_match=Yes)
+      2. PLL rows with no P&ID match are APPENDED as new lines (PLL only)
+      3. P&ID lines with no PLL row are kept at the end (pll_match=No)
+    Output ordering follows the Process Line List row order.
+    Only ADDS keys — existing base/enrichment columns are never removed or
+    overwritten.
     """
     cfg = PROCESS_LINE_LIST_CONFIG
     flag = cfg['match_flag_field']
+    prefix = cfg['field_prefix']
     matched = 0
+    line_by_pll_key = {}   # pll lookup key -> P&ID line it matched
+
     for line in enriched_data:
         key = _normalize_pll_line_no(line.get('line_number') or line.get('original_detection'))
         values = pll_lookup.get(key)
+        src_key = key if values is not None else None
         if values is None and key:
             # Fallback: unique containment match (tolerates extra suffixes such
             # as insulation codes present on only one side)
             candidates = [k for k in pll_lookup if key in k or k in key]
             if len(candidates) == 1:
-                values = pll_lookup[candidates[0]]
-        if values:
+                src_key = candidates[0]
+                values = pll_lookup[src_key]
+        if values is not None:
             line.update(values)
             line[flag] = 'Yes'
+            line_by_pll_key[src_key] = line
             matched += 1
         else:
             line.setdefault(flag, 'No')
-    logger.info(f"PLL: matched {matched}/{len(enriched_data)} lines")
-    return enriched_data
+
+    # Append PLL-only lines so every Process Line List record appears in the
+    # final output (with a criticality level — the application's main purpose)
+    added = 0
+    for lk, values in pll_lookup.items():
+        if lk in line_by_pll_key:
+            continue
+        new_line = dict(_PLL_BASE_DEFAULTS)
+        for base_key, pll_key in _PLL_TO_BASE_MAP.items():
+            if values.get(pll_key):
+                new_line[base_key] = values[pll_key]
+        new_line.update(values)
+        full_no = values.get(prefix + 'line_number_full') or lk
+        new_line['line_number'] = full_no
+        new_line['original_detection'] = full_no
+        new_line[flag] = 'PLL only'
+        line_by_pll_key[lk] = new_line
+        added += 1
+
+    # Order: all PLL records in PLL row order, then P&ID-only lines
+    pll_ordered = [line_by_pll_key[lk] for lk in pll_lookup]
+    pid_only = [l for l in enriched_data if l.get(flag) == 'No']
+    result = pll_ordered + pid_only
+
+    logger.info(
+        f"PLL: matched {matched} P&ID lines, added {added} PLL-only lines, "
+        f"{len(pid_only)} P&ID-only lines → total {len(result)} "
+        f"(PLL records: {len(pll_lookup)})"
+    )
+    return result
 
 
 def determine_stress_criticality_table_7_1(size_str, max_design_temp_str):
@@ -927,6 +991,28 @@ def process_pid_upload_async(
                 pll_lookup = parse_process_line_list(process_line_list_file)
                 if pll_lookup:
                     enriched_data = merge_process_line_list(enriched_data, pll_lookup)
+
+                    # Every output record MUST carry a criticality level.
+                    # PLL-only lines were appended after STEP 3, so compute
+                    # their stress criticality with the same deterministic
+                    # Table 7.1 lookup (Size × Design Temp) used by the core.
+                    filled = 0
+                    for line_item in enriched_data:
+                        if line_item.get('criticality_stress'):
+                            continue
+                        pipe_size = line_item.get('size', '')
+                        design_temp = (
+                            line_item.get('max_design_temp')
+                            or line_item.get('pll_design_temp')
+                            or line_item.get('pll_operating_temp')
+                            or line_item.get('normal_temp')
+                            or ''
+                        )
+                        crit = determine_stress_criticality_table_7_1(pipe_size, design_temp)
+                        line_item['criticality_stress'] = f"L{int(crit)}" if crit else 'L1'
+                        filled += 1
+                    if filled:
+                        logger.info(f"   ⚡ Criticality computed via Table 7.1 for {filled} PLL-only lines")
                 else:
                     for line_item in enriched_data:
                         line_item.setdefault(PROCESS_LINE_LIST_CONFIG['match_flag_field'], 'No')
