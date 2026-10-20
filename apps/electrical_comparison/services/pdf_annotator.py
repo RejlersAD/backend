@@ -65,14 +65,28 @@ _STATUS_HEX = {
 
 # 'missing' tags the targeted Vision locator pass (tag_extractor.
 # locate_tags_on_drawing) managed to find on the scanned drawing anyway.
-_LOCATED_HEX = '#7c3aed'   # purple
+_LOCATED_HEX = '#7c3aed'   # purple (unused fallback now — kept for any
+                           # other caller; get_annotated_pages below uses
+                           # _LOCATED_STATUS_HEX/_LOCATED_FALLBACK_HEX)
+
+# Status colors for located_boxes hits specifically (targeted Vision
+# locator pass) — tag_statuses (passed alongside located) lets each hit
+# be colored by its REAL comparison status instead of always purple.
+# Distinct literal hex values from _STATUS_HEX/_LOCATED_HEX above, per
+# explicit spec for this feature.
+_LOCATED_STATUS_HEX = {
+    'matched': '#00C851',
+    'missing': '#FF4444',
+    'extra': '#FFD700',
+}
+_LOCATED_FALLBACK_HEX = '#9B59B6'   # unknown tag / no tag_statuses entry
 
 # Cap the rendered page image's longest side so a big A1/A0 SLD drawing
 # stays a manageable payload for the in-browser canvas viewer.
 _MAX_PAGE_PIXELS = 2400
 
 
-def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located=None):
+def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located=None, tag_statuses=None):
     """Canvas-viewer variant of annotate_sld_pdf — instead of returning a
     modified PDF, renders each page of the original drawing to a PNG and
     returns the box coordinates alongside it, so the frontend can draw
@@ -80,10 +94,17 @@ def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located
     them without a server round-trip).
 
     located: optional {tag: [{'page': 1-based, 'x0','y0','x1','y1'}]}
-    from tag_extractor.locate_tags_on_drawing — 'missing' tags the
-    targeted Vision pass managed to find on a scanned drawing after all.
-    Drawn with their own 'located' status (purple) so the user can tell
-    "verified absent" apart from "actually there, main scan missed it".
+    from tag_extractor.locate_tags_on_drawing — now covers every tag
+    (matched/missing/extra), not just 'missing' ones; see tasks.py's own
+    locator-pass comment. Each hit keeps 'status': 'located' (so the
+    frontend's existing "located" canvas-filter toggle still groups them
+    together), but its 'color' now reflects the tag's REAL comparison
+    status via tag_statuses, instead of always being purple.
+
+    tag_statuses: optional {tag_number: status} — same job.tag_statuses
+    snapshot tasks.py saves alongside located_boxes. Looked up per hit;
+    falls back to _LOCATED_FALLBACK_HEX (purple) for a tag with no entry
+    (e.g. older jobs saved before tag_statuses existed).
 
     Returns:
     [{'page': 1-based int,
@@ -105,6 +126,7 @@ def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located
     doc = fitz.open(stream=pdf_bytes, filetype='pdf')
     try:
         located = located or {}
+        tag_statuses = tag_statuses or {}
         pages = []
         for page_index, page in enumerate(doc):
             zoom = min(max_pixels / page.rect.width, max_pixels / page.rect.height, 3.0)
@@ -127,14 +149,26 @@ def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located
             # Targeted-locator boxes (scanned drawings have no text layer
             # for search_for — these coordinates came from the Vision
             # model itself, in PDF points like search_for's rects).
+            # Colored by the tag's real comparison status (via
+            # tag_statuses) rather than always purple — see this
+            # function's own docstring.
             for tag_number, hits in located.items():
+                real_status = tag_statuses.get(tag_number)
+                if real_status == 'matched':
+                    located_color = _LOCATED_STATUS_HEX['matched']
+                elif real_status == 'missing':
+                    located_color = _LOCATED_STATUS_HEX['missing']
+                elif real_status == 'extra':
+                    located_color = _LOCATED_STATUS_HEX['extra']
+                else:
+                    located_color = _LOCATED_FALLBACK_HEX
                 for hit in hits:
                     if hit.get('page') != page_index + 1:
                         continue
                     boxes.append({
                         'tag_number': tag_number,
                         'status': 'located',
-                        'color': _LOCATED_HEX,
+                        'color': located_color,
                         'x0': hit['x0'] * zoom,
                         'y0': hit['y0'] * zoom,
                         'x1': hit['x1'] * zoom,
