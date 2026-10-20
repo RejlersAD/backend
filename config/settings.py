@@ -1108,6 +1108,18 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
+# SOFT-CODED: Worker-crash resilience. When a Celery worker is killed mid-task
+# (Railway OOM SIGTERM, container restart, deploy), the task message is
+# returned to the broker and re-executed once the worker is back, instead of
+# surfacing "WorkerLostError: Worker exited prematurely (SIGTERM)" to the user.
+#   CELERY_TASK_ACKS_LATE             → ack the message only after the task
+#                                       finishes (default: True)
+#   CELERY_TASK_REJECT_ON_WORKER_LOST → requeue the task when its worker dies
+#                                       (default: True)
+CELERY_TASK_ACKS_LATE = config('CELERY_TASK_ACKS_LATE', default=True, cast=bool)
+CELERY_TASK_REJECT_ON_WORKER_LOST = config('CELERY_TASK_REJECT_ON_WORKER_LOST', default=True, cast=bool)
+print(f"[CELERY] acks_late={CELERY_TASK_ACKS_LATE} reject_on_worker_lost={CELERY_TASK_REJECT_ON_WORKER_LOST}")
+
 # SOFT-CODED: Broker transport options — ensures .delay() fails fast when
 # the Redis broker is unreachable (slow timeout vs immediate ERRNO 111).
 # Values come from environment variables with safe defaults.
