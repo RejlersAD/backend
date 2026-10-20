@@ -54,6 +54,15 @@ class ElectricalComparisonJob(models.Model):
     # after all. Consumed by AnnotatedPagesView to draw [LOCATED] boxes
     # on the Drawing canvas.
     located_boxes = models.JSONField(default=dict, blank=True)
+    # Per-tag comparison status at the time of the locator pass above —
+    # {tag_number: status} (e.g. 'matched'/'missing'/'extra') — so
+    # AnnotatedPagesView/get_annotated_pages can color a located_boxes hit
+    # by its REAL status instead of always drawing it purple. Snapshotted
+    # once at save time (tasks.py) rather than re-derived from
+    # ElectricalComparisonResult on every read, since a tag's status is
+    # fixed at job-completion time and this avoids an extra query/join on
+    # every annotated-pages request.
+    tag_statuses = models.JSONField(default=dict, blank=True)
     # AGPS-SP-EDS-002 drafting-standard check results
     # (services/drafting_check.run_drafting_check):
     # {'pages': [{'page', 'checks': [{'rule_id','rule','status',
