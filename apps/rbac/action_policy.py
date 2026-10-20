@@ -114,6 +114,17 @@ SELF_SERVICE_ACTIONS = {
     'PermissionViewSet': {'check_permission', 'my_permissions'},
     'ModuleViewSet': {'my_modules'},
     'AccessRequestViewSet': {'mine', 'create'},
+    # Leave self-service (Employee Profile / ESS page). Every queryset below
+    # already self-scopes to the requester — non-HR users only ever see or
+    # touch their OWN records (LeaveRequestViewSet.get_queryset,
+    # EmployeeLeaveRecordViewSet mine-scoping) — so authentication alone is
+    # sufficient for these operations. Approval actions (approve / reject /
+    # rm_approve / rm_reject) and HR carryforward edits (partial_update) stay
+    # module-gated, as do the all-employee aggregates leave_calendar /
+    # annual_leave_balance.
+    'LeaveTypeViewSet': {'list', 'retrieve'},
+    'LeaveRequestViewSet': {'list', 'retrieve', 'create', 'cancel', 'pending_for_me'},
+    'EmployeeLeaveRecordViewSet': {'list', 'retrieve'},
 }
 
 # These operations perform their own requester/stage-assignee checks. They do
