@@ -119,34 +119,68 @@ def extract_section_7(document_text):
 # ---------------------------------------------------------------------------
 PROCESS_LINE_LIST_CONFIG = {
     'enabled': True,
-    # Header aliases (matched case-insensitively via "contains") per canonical key
+    # Header aliases per canonical key. Matching is case-insensitive with
+    # whitespace collapsed; exact matches win over "contains" matches.
+    # Order matters for contains-matching: more specific aliases come first
+    # (e.g. 'line_size' before 'line_short').
+    # Covers the project PLL template (Process_Line_List.xlsx, Phase 2).
     'column_aliases': {
+        'line_size':         ['line size', 'size (in)', 'size(in)', 'nb'],
+        'line_short':        ['line'],
         'service':           ['line service', 'service description', 'service', 'fluid description'],
-        'operating_pressure': ['operating pressure', 'op. pressure', 'op pressure', 'normal pressure'],
-        'operating_temp':    ['operating temperature', 'op. temp', 'op temp', 'operating temp', 'normal temp'],
+        'fluid':             ['fluid'],
+        'from':              ['from'],
+        'to':                ['to'],
+        'material_class':    ['material class', 'piping class', 'pipe class'],
+        'stress_analysis':   ['stress analysis'],
+        'operating_pressure': ['operating pressure', 'operating press', 'op. pressure', 'op. press', 'op pressure', 'op press', 'normal pressure'],
+        'operating_temp':    ['operating temperature', 'operating temp', 'op. temp', 'op temp', 'normal temp'],
         'design_pressure':   ['design pressure', 'design press'],
         'design_temp':       ['design temperature', 'design temp'],
+        'phase':             ['phase'],
         'flow_rate':         ['flow rate', 'flowrate', 'flow'],
-        'test_medium':       ['test medium'],
+        'test_pressure':     ['test pressure', 'test press'],
+        'test_medium':       ['test medium', 'test media'],
+        'insulation':        ['insul code', 'insulation', 'insul'],
+        'thk':               ['thk', 'thickness'],
+        'paint_code':        ['paint code', 'paint'],
+        'criticality_rating': ['criticality rating'],
+        'pid_number':        ['p&id number', 'pid number', 'p&id no', 'p&id'],
+        'nde_class':         ['nde'],
+        'rev':               ['rev'],
         'tracing':           ['tracing'],
-        'insulation':        ['insulation'],
         'remarks':           ['remarks', 'remark', 'notes', 'note'],
     },
     # Candidate header names for the line-number key column
-    'line_no_aliases': ['line no', 'line number', 'line tag', 'line designation', 'line'],
+    'line_no_aliases': ['line no', 'line number', 'line tag', 'line designation'],
     'field_prefix': 'pll_',
     'match_flag_field': 'pll_match',
     # Display labels for export/table headers (keyed by prefixed output key)
     'header_labels': {
+        'pll_line_size':         'PLL Line Size',
+        'pll_line_short':        'PLL Line',
         'pll_service':           'PLL Service',
+        'pll_fluid':             'PLL Fluid',
+        'pll_from':              'PLL From',
+        'pll_to':                'PLL To',
+        'pll_material_class':    'PLL Material Class',
+        'pll_stress_analysis':   'PLL Stress Analysis',
         'pll_operating_pressure': 'PLL Operating Pressure',
         'pll_operating_temp':    'PLL Operating Temp',
         'pll_design_pressure':   'PLL Design Pressure',
         'pll_design_temp':       'PLL Design Temp',
+        'pll_phase':             'PLL Phase',
         'pll_flow_rate':         'PLL Flow Rate',
+        'pll_test_pressure':     'PLL Test Pressure',
         'pll_test_medium':       'PLL Test Medium',
+        'pll_insulation':        'PLL Insul Code',
+        'pll_thk':               'PLL THK (mm)',
+        'pll_paint_code':        'PLL Paint Code',
+        'pll_criticality_rating': 'PLL Criticality Rating',
+        'pll_pid_number':        'PLL P&ID Number',
+        'pll_nde_class':         'PLL NDE Class',
+        'pll_rev':               'PLL Rev',
         'pll_tracing':           'PLL Tracing',
-        'pll_insulation':        'PLL Insulation',
         'pll_remarks':           'PLL Remarks',
         'pll_match':             'PLL Match',
     },
@@ -158,6 +192,62 @@ PROCESS_LINE_LIST_OUTPUT_KEYS = (
      for k in PROCESS_LINE_LIST_CONFIG['column_aliases']]
     + [PROCESS_LINE_LIST_CONFIG['match_flag_field']]
 )
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL LINE LIST — FINAL OUTPUT FORMAT (soft-coded).
+# Mirrors the project Process Line List template
+# (Documents/Piping/Critical Line List/Phase 2/Process_Line_List.xlsx)
+# plus ONE extra column "CRITICAL STRESS LINE" carrying the stress
+# criticality level (L1/L2/L3) for every record.
+# Each entry: (header, sources) — sources are tried in order against the
+# line dict (pll_* values first, core/base fallbacks after).
+# Used only when a Process Line List was uploaded; legacy 46-column export
+# stays untouched otherwise.
+# ---------------------------------------------------------------------------
+CRITICAL_LINE_LIST_EXPORT_FORMAT = [
+    ('LINE NUMBER',               ['item_tag', 'line_number', 'original_detection']),
+    ('LINE',                      ['pll_line_short', 'line_number', 'original_detection']),
+    ('FLUID',                     ['pll_fluid', 'fluid_code']),
+    ('FROM',                      ['pll_from', 'from_line', 'from_equipment']),
+    ('TO',                        ['pll_to', 'to_line', 'to_equipment']),
+    ('LINE SIZE (IN)',            ['pll_line_size', 'size']),
+    ('MATERIAL CLASS',            ['pll_material_class', 'pipr_class']),
+    ('STRESS ANALYSIS',           ['pll_stress_analysis']),
+    ('OPERATING PRESS.(kg/cm2g)', ['pll_operating_pressure', 'normal_pressure']),
+    ('OPERATING TEMP. (deg C)',   ['pll_operating_temp', 'normal_temp']),
+    ('DESIGN PRESS.(kg/cm2g)',    ['pll_design_pressure', 'design_pressure']),
+    ('DESIGN TEMP(deg C)',        ['pll_design_temp', 'max_design_temp']),
+    ('PHASE',                     ['pll_phase']),
+    ('TEST PRESS. (kg/cm2g)',     ['pll_test_pressure', 'test_pressure']),
+    ('TEST MEDIA',                ['pll_test_medium', 'test_medium']),
+    ('INSUL CODE',                ['pll_insulation', 'insulation']),
+    ('THK.(MM)',                  ['pll_thk', 'schedule_wall_thk']),
+    ('PAINT CODE',                ['pll_paint_code']),
+    ('CRITICALITY RATING',        ['pll_criticality_rating', 'criticality_code']),
+    ('P&ID NUMBER',               ['pll_pid_number', 'pid_no']),
+    ('NDE CLASS NOTE',            ['pll_nde_class']),
+    ('REV',                       ['pll_rev', 'pid_rev']),
+    # The one extra column vs the PLL template
+    ('CRITICAL STRESS LINE',      ['criticality_stress']),
+]
+
+
+def format_critical_line_list_row(row):
+    """
+    Resolve one output row per CRITICAL_LINE_LIST_EXPORT_FORMAT.
+    Sources are tried in order; first non-empty value wins.
+    """
+    out = []
+    for _header, sources in CRITICAL_LINE_LIST_EXPORT_FORMAT:
+        value = ''
+        for key in sources:
+            v = row.get(key)
+            if v not in (None, ''):
+                value = v
+                break
+        out.append(value)
+    return out
 
 
 def _normalize_pll_line_no(value):
@@ -180,14 +270,51 @@ def parse_process_line_list(file_data):
     try:
         workbook = openpyxl.load_workbook(BytesIO(file_data['content']), data_only=True)
     except Exception as e:
-        logger.error(f"PLL: unable to open Excel '{file_data['filename']}': {e}")
-        return {}
+        # Some project templates carry corrupt custom document properties that
+        # break openpyxl's reader — retry with docProps/custom.xml stripped.
+        logger.warning(f"PLL: standard open failed ({e}); retrying without custom doc properties")
+        try:
+            import re as _re
+            import zipfile
+            src = zipfile.ZipFile(BytesIO(file_data['content']))
+            buf = BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as dst:
+                for name in src.namelist():
+                    if name == 'docProps/custom.xml':
+                        continue
+                    data = src.read(name)
+                    if name == '[Content_Types].xml':
+                        data = _re.sub(rb'<Override[^>]*docProps/custom\.xml[^>]*/>', b'', data)
+                    dst.writestr(name, data)
+            buf.seek(0)
+            workbook = openpyxl.load_workbook(buf, data_only=True)
+        except Exception as e2:
+            logger.error(f"PLL: unable to open Excel '{file_data['filename']}': {e2}")
+            return {}
 
     def _match_headers(header_cells):
+        import re as _re
+        # Normalize: lowercase + collapse whitespace/newlines (template headers
+        # contain line breaks, e.g. 'OPERATING \nTEMP. (deg C)')
+        cells = [_re.sub(r'\s+', ' ', str(c).strip().lower()) if c is not None else ''
+                 for c in header_cells]
         col_for_key, line_col = {}, None
-        for idx, cell in enumerate(header_cells):
-            header = str(cell).strip().lower() if cell is not None else ''
+
+        # Pass 1 — exact matches (prevents 'LINE' from swallowing 'LINE SIZE (IN)')
+        for idx, header in enumerate(cells):
             if not header:
+                continue
+            if line_col is None and header in cfg['line_no_aliases']:
+                line_col = idx
+                continue
+            for key, aliases in cfg['column_aliases'].items():
+                if key not in col_for_key and header in aliases:
+                    col_for_key[key] = idx
+                    break
+
+        # Pass 2 — contains matches for anything still unmapped
+        for idx, header in enumerate(cells):
+            if not header or idx == line_col or idx in col_for_key.values():
                 continue
             if line_col is None and any(alias in header for alias in cfg['line_no_aliases']):
                 line_col = idx
@@ -195,6 +322,7 @@ def parse_process_line_list(file_data):
             for key, aliases in cfg['column_aliases'].items():
                 if key not in col_for_key and any(alias in header for alias in aliases):
                     col_for_key[key] = idx
+                    break
         return line_col, col_for_key
 
     for sheet in workbook:
@@ -967,8 +1095,18 @@ def process_pid_upload_async(
                             'confidence': _conf or 'medium',
                         }
 
-            # Generate Excel file from enriched data
-            df = pd.DataFrame(enriched_data)
+            # Generate Excel file from enriched data.
+            # FINAL OUTPUT FORMAT (soft-coded): when a Process Line List was
+            # uploaded, emit the PLL template column layout + the extra
+            # "CRITICAL STRESS LINE" column; otherwise keep the legacy layout.
+            if any(PROCESS_LINE_LIST_CONFIG['match_flag_field'] in _it for _it in enriched_data):
+                df = pd.DataFrame(
+                    [format_critical_line_list_row(_it) for _it in enriched_data],
+                    columns=[h for h, _s in CRITICAL_LINE_LIST_EXPORT_FORMAT],
+                )
+                logger.info("📑 Excel output using Process Line List format (+ CRITICAL STRESS LINE)")
+            else:
+                df = pd.DataFrame(enriched_data)
             excel_buffer = BytesIO()
             df.to_excel(excel_buffer, index=False, engine='openpyxl')
             excel_buffer.seek(0)

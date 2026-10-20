@@ -1657,18 +1657,23 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 'Status', 'Validated'
             ]
 
-            # Process Line List columns (soft-coded add-on) — appended only when
-            # a PLL Excel was uploaded for this document, so legacy exports keep
-            # their exact 46-column layout.
-            from .tasks import PROCESS_LINE_LIST_CONFIG, PROCESS_LINE_LIST_OUTPUT_KEYS
-            pll_keys = [
-                k for k in PROCESS_LINE_LIST_OUTPUT_KEYS
-                if any(k in item.data for item in items[:1])
-            ]
-            headers += [
-                PROCESS_LINE_LIST_CONFIG['header_labels'].get(k, k)
-                for k in pll_keys
-            ]
+            # PROCESS LINE LIST OUTPUT FORMAT (soft-coded): when a PLL Excel was
+            # uploaded for this document, the export mirrors the project PLL
+            # template column layout plus the extra "CRITICAL STRESS LINE"
+            # column. Without PLL data the legacy 46-column layout is untouched.
+            from .tasks import (
+                PROCESS_LINE_LIST_CONFIG,
+                CRITICAL_LINE_LIST_EXPORT_FORMAT,
+                format_critical_line_list_row,
+            )
+            has_pll = any(
+                PROCESS_LINE_LIST_CONFIG['match_flag_field'] in item.data
+                for item in items[:1]
+            )
+            pll_keys = []  # legacy tail-append disabled; PLL mode replaces the layout
+            if has_pll:
+                headers = [h for h, _s in CRITICAL_LINE_LIST_EXPORT_FORMAT] + ['Status', 'Validated']
+                logger.info("📑 Exporting in Process Line List format (+ CRITICAL STRESS LINE)")
             
             ws.append(headers)
             
@@ -1681,6 +1686,14 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             
             # Add data rows
             for item in items:
+                if has_pll:
+                    row_dict = dict(item.data)
+                    row_dict.setdefault('item_tag', item.item_tag)
+                    ws.append(format_critical_line_list_row(row_dict) + [
+                        item.status,
+                        'Yes' if item.is_validated else 'No'
+                    ])
+                    continue
                 ws.append([
                     # Base columns (17)
                     item.item_tag,
