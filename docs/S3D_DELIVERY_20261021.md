@@ -47,3 +47,40 @@ and CRLF checkouts. This prevents Git newline normalization from invalidating
 existing snapshots; dictionary data and historical hashes were not replaced.
 The reference probe now recognizes already-applied 0014 when later migrations
 are present, without planning a downgrade of 0015/0016.
+
+## Restored-database migration repair and release follow-up
+
+The supplied deployment trace fails inside 0014 because the physical workbook
+ID key is absent, although 0004 declares it. Migration 0014 now invokes the
+existing PostgreSQL reference-key preflight before adding fields or models.
+It covers MatchingWorkbookSet, PaperSpecExtractionJob and the configured user
+model. Healthy primary/unique keys are preserved; missing keys are restored
+under transaction-held locks after checking for null and duplicate IDs.
+Conflicting identities abort atomically without deleting or renumbering rows.
+The migration graph and model/API contracts are unchanged. Already-applied
+0014 is not rerun; reversal retains repaired identity keys.
+
+The five new PostgreSQL regression tests execute the entire migration,
+including deferred foreign keys, in temporary schemas with rollback. They
+pass for missing keys, healthy primary keys, existing unique indexes, repeat
+preflight, FK enforcement, and null/duplicate IDs at each of the three targets.
+The original missing-key FK failure is reproduced before testing the repair.
+
+Current local verification: all migration history is consistent, the full
+registry has no pending migrations, and Spec Customization has no model-state
+drift. Direct PostgreSQL inspection confirms applied 0014-0016 and physical
+primary/foreign keys. The focused reference-intelligence suite passes 11 tests.
+These are local results; the database in the supplied deployment trace has
+not been accessed or migrated. The initialization-time DB warning remains
+a separate issue.
+
+Both remote branches were fetched explicitly. Development already matched
+origin/development; the latest origin/main was then integrated by fast-forward
+without conflicts. No force push or main merge is part of this release.
+
+Final backend suite: 118 tests, OK, six skipped (the existing skip plus the
+five PostgreSQL-only tests, which passed separately on local PostgreSQL).
+The suite uses config.settings_release_test and isolated SQLite; it does not
+replace the separate PostgreSQL migration regression and live-schema audit.
+git diff --check passes. Logs are in parent workspace artifacts under
+release-20261021-{backend-all,key-regression,all-migration-check}.log.
