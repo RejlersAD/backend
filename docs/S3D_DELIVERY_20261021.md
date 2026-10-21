@@ -23,3 +23,27 @@ shape. Real reference-pack and engineering/pilot acceptance remain open gates.
 Alignment, migration verification, final checks and PR evidence are recorded
 below before publication. Local PostgreSQL verification and disposable replay
 are distinct from production migration/deployment evidence.
+
+Verification on 21 October 2026:
+
+- Merged current `origin/development` and the equipment fixes on `origin/main`
+  without conflicts, retaining the existing shared configuration changes.
+- Isolated S3D suite: 112 tests, OK, with one existing skip. A subsequent
+  focused BUHASA suite passes all 11 tests, including newline portability.
+- S3D model migration drift check: no changes detected.
+- Disposable PostgreSQL: fresh migrate through S3D 0016, reverse 0016–0014
+  back to 0013, and reapply all three passed. Disposable database was dropped.
+- Local PostgreSQL reference probe passes matching, pinning, ambiguity,
+  review/rerun uniqueness and freeze protection; synthetic rows rolled back.
+- All six local PostgreSQL controlled-release probes passed, including actual
+  reviewed codes in generated workbooks, frozen bytes, override invalidation,
+  access controls and pilot reconciliation; synthetic rows rolled back.
+- Local `radai_dev` has S3D 0014–0016 applied. Pulled electrical migration
+  0009 and PID migrations 0013/0014 were applied successfully. Final migration
+  audit: no pending migrations, no conflicts and no missing S3D tables/columns.
+
+The dictionary fingerprint preserves its original Windows value on both LF
+and CRLF checkouts. This prevents Git newline normalization from invalidating
+existing snapshots; dictionary data and historical hashes were not replaced.
+The reference probe now recognizes already-applied 0014 when later migrations
+are present, without planning a downgrade of 0015/0016.
