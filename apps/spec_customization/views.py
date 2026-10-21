@@ -45,6 +45,7 @@ from .models import (
     PipingClass,
     WorkbookCellOverride,
 )
+from .services.controlled_release import mutation as release_mutation
 from .project_models import SpecProject
 from .serializers import (
     PaperSpecDocumentSerializer,
@@ -279,12 +280,13 @@ def _ingest_paper_spec_file(
         if existing and not _can_access_document(request_user, existing):
             existing = None
         if existing:
-            latest_completed = (
-                existing.jobs
-                .filter(status=PaperSpecExtractionJob.STATUS_COMPLETED)
-                .order_by('-completed_at')
-                .first()
-            )
+            # Historical runs may say completed despite saving no components.
+            # Re-uploading those inputs must permit a new extraction attempt.
+            latest_completed = next((candidate for candidate in existing.jobs.filter(
+                status=PaperSpecExtractionJob.STATUS_COMPLETED,
+                piping_classes__components__isnull=False,
+            ).distinct().order_by('-completed_at')
+                if extraction_completeness(candidate)['state'] not in {'empty', 'partial'}), None)
             if latest_completed:
                 return Response({
                     "deduped": True,
@@ -682,6 +684,8 @@ def save_job(request, job_id):
             job.save(update_fields=['saved_at', 'saved_by'])
             logger.info('[SpecExtraction] Saved job %s to project %s by user %s',
                         job.pk, project.pk, request.user.pk)
+    from .services.controlled_release import audit
+    audit(job, 'extraction_save', request.user)
     return Response(PaperSpecExtractionJobSerializer(job).data)
 
 
@@ -832,34 +836,52 @@ def _smartplant_response(buf, filename: str) -> HttpResponse:
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def export_smartplant_spec(request, job_id):
     """Export SmartPlant 3D SPEC workbook (rule sheets)."""
     job = _get_accessible_job(request, job_id)
+    job = PaperSpecExtractionJob.objects.select_for_update(of=('self',)).select_related('document', 'reference_workbook_set').get(pk=job.pk)
     if job.status != PaperSpecExtractionJob.STATUS_COMPLETED or extraction_completeness(job)['state'] == 'partial':
         return Response({'error': 'A completed extraction without failed or missing chunks is required for SPEC export.'}, status=status.HTTP_409_CONFLICT)
+    if request.query_params.get('draft') != '1':
+        from .release_views import frozen_export
+        return frozen_export(request, job, 'spec')
     try:
         buf = build_spec_workbook(job)
     except Exception as e:
         logger.exception("[SmartPlantExport] SPEC build failed for job %s", job_id)
         return Response({"error": f"Failed to build SPEC workbook: {e}"},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    return _smartplant_response(buf, SPEC_OUTPUT_FILENAME_TPL.format(job_id=job.id))
+    from .services.controlled_release import audit
+    audit(job, 'draft_export', request.user, workbook='spec')
+    response = _reference_export_response(job, buf, 'DRAFT_' + SPEC_OUTPUT_FILENAME_TPL.format(job_id=job.id))
+    response['X-Spec-Export-State'] = 'draft'
+    return response
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def export_smartplant_cat(request, job_id):
     """Export SmartPlant 3D Catalog workbook (component part sheets)."""
     job = _get_accessible_job(request, job_id)
+    job = PaperSpecExtractionJob.objects.select_for_update(of=('self',)).select_related('document', 'reference_workbook_set').get(pk=job.pk)
     if job.status != PaperSpecExtractionJob.STATUS_COMPLETED or extraction_completeness(job)['state'] == 'partial':
         return Response({'error': 'A completed extraction without failed or missing chunks is required for CAT export.'}, status=status.HTTP_409_CONFLICT)
+    if request.query_params.get('draft') != '1':
+        from .release_views import frozen_export
+        return frozen_export(request, job, 'cat')
     try:
         buf = build_cat_workbook(job)
     except Exception as e:
         logger.exception("[SmartPlantExport] CAT build failed for job %s", job_id)
         return Response({"error": f"Failed to build CAT workbook: {e}"},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    return _smartplant_response(buf, CAT_OUTPUT_FILENAME_TPL.format(job_id=job.id))
+    from .services.controlled_release import audit
+    audit(job, 'draft_export', request.user, workbook='cat')
+    response = _reference_export_response(job, buf, 'DRAFT_' + CAT_OUTPUT_FILENAME_TPL.format(job_id=job.id))
+    response['X-Spec-Export-State'] = 'draft'
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1058,6 +1080,7 @@ def workbook_preview(request, job_id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@release_mutation('chatbot')
 def workbook_chatbot_edit(request, job_id):
     """Create a preview, then apply only a user-approved preview token."""
     job = _get_accessible_job(request, job_id)
@@ -1138,9 +1161,11 @@ def workbook_chatbot_edit(request, job_id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def workbook_validate(request, job_id):
     """Validate already-extracted workbook rows (SPEC/CAT) using deterministic rules."""
     job = _get_accessible_job(request, job_id)
+    PaperSpecExtractionJob.objects.select_for_update().get(pk=job.pk)
     payload = request.data or {}
     workbook_scope = str(payload.get('workbook_scope') or 'auto').strip().lower()
     active_workbook = str(payload.get('active_workbook') or WORKBOOK_SPEC).strip().lower()
@@ -1158,11 +1183,14 @@ def workbook_validate(request, job_id):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    return Response(result, status=status.HTTP_200_OK)
+    from .services.controlled_release import persist_validation
+    run = persist_validation(job, result, request.user, 'canvas')
+    return Response({**result, 'validation_run_id': str(run.pk)}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
+@release_mutation('cell_override')
 def workbook_cell(request, job_id):
     """Save (POST) or clear (DELETE) a single cell override.
 
@@ -1239,6 +1267,7 @@ def workbook_cell(request, job_id):
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@release_mutation('batch_save')
 def workbook_batch_save(request, job_id):
     """
     Batch save multiple cell overrides at once.
@@ -1309,6 +1338,7 @@ def workbook_batch_save(request, job_id):
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
+@release_mutation('row_delete')
 def workbook_delete_row(request, job_id):
     """
     Delete all cell overrides for a specific row.
@@ -1367,6 +1397,7 @@ def workbook_delete_row(request, job_id):
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
+@release_mutation('rows_delete')
 def workbook_bulk_delete_rows(request, job_id):
     """
     Delete multiple rows at once.
@@ -1427,3 +1458,13 @@ def workbook_bulk_delete_rows(request, job_id):
             {"error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+def _reference_export_response(job, buf, filename):
+    # Add traceability without changing the bulk-load sheet contract.
+    from .services.reference_intelligence import reference_hash
+    response = _smartplant_response(buf, filename)
+    if job.reference_workbook_set_id:
+        response['X-Reference-Set-ID'] = str(job.reference_workbook_set_id)
+        response['X-Reference-Hash'] = reference_hash(job.reference_workbook_set)
+    return response

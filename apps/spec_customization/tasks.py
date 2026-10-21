@@ -350,12 +350,25 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
 
         # Calculate final accuracy estimate
         accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
-        total_components = sum(len(cls.get("components", [])) for cls in cleaned_classes)
+        total_components = PipingClassComponent.objects.filter(piping_class__job=job).count()
+        has_records = saved > 0 and total_components > 0
+        job.config_snapshot['extraction_outcome'].update({
+            'classes_saved': saved,
+            'components_saved': total_components,
+            'empty_result': not has_records,
+            'validation_status': validation_report['overall_status'],
+        })
+        if not has_records:
+            job.error_message = (job.error_message + ' ' if job.error_message else '') + (
+                'No component records were extracted. Check the configured AI provider/model '
+                'and source tables, then upload the document again to start a new extraction. '
+                'Any detected class headers have been retained for review.'
+            )
         
         # Extract token usage and cost from service (BACKWARD COMPATIBLE)
         # Only set these fields if migration 0005 has been applied
         usage_data = service.get_usage_and_cost()
-        update_fields = ["status", "progress_percent", "completed_at", "current_phase"]
+        update_fields = ["status", "progress_percent", "completed_at", "current_phase", "config_snapshot", "error_message"]
         
         # Conditionally set cost tracking fields (soft-coded for migration 0005)
         if hasattr(job, 'gemini_prompt_tokens'):
@@ -374,13 +387,12 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             job.cost_usd = usage_data["cost_usd"]
             update_fields.append("cost_usd")
         
-        job.status = PaperSpecExtractionJob.STATUS_COMPLETED
+        job.status = PaperSpecExtractionJob.STATUS_COMPLETED if has_records else PaperSpecExtractionJob.STATUS_FAILED
         job.progress_percent = 100
         job.completed_at = timezone.now()
         job.current_phase = (
-            f"Completed · {saved} classes · {total_components} components · "
-            f"{accuracy_pct:.1f}% accuracy · "
-            f"{quality_report['duplicates_removed']} dupes removed"
+            f"{'Completed' if has_records else 'Failed: no components extracted'} · "
+            f"{saved} classes · {total_components} components"
         )
         
         # SECURITY: Wipe user-supplied API keys now that extraction is complete
@@ -400,8 +412,8 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
 
         _write_progress(
             str(job.id),
-            state="SUCCESS",
-            status=job.current_phase,
+            state="SUCCESS" if has_records else "FAILURE",
+            status=job.current_phase if has_records else job.error_message,
             percent=100,
             chunks_total=len(chunks),
             chunks_done=len(chunks),
@@ -414,7 +426,8 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         )
 
         return {
-            "success": True,
+            "success": has_records,
+            "error": job.error_message if not has_records else '',
             "job_id": str(job.id),
             "classes": saved,
             "total_components": total_components,

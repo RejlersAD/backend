@@ -2224,6 +2224,7 @@ def _rows_piping_commodity_matl_control_data(cls):
             first_size = _normalize_npd(npd)
             rows.append({
                 # ── Identification ───────────────────────────────────────────────────
+                '_source_component_id':           str(c.id),
                 'ContractorCommodityCode':        icc,
                 # Reference uses identical first-size bounds for fixed-size parts;
                 # reducers/multisize would populate SecondSize* via overrides.
@@ -3324,6 +3325,7 @@ def _rows_piping_commodity_filter(cls):
             first_size = _normalize_npd(npd)
             base_row = {
                 # ── Identification (canonical SPEC↔CAT join key) ──────────
+                '_source_component_id': str(c.id),
                 'SpecName':            spec_name,
                 'CommodityCode':       commodity_code_override or icc,
                 'ShortCode':           short_code,

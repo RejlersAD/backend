@@ -53,11 +53,24 @@ class PipingClassComponentAdmin(admin.ModelAdmin):
 # ─────────────────────────────────────────────────────────────────────────────
 # Matching Workbook Admin
 # ─────────────────────────────────────────────────────────────────────────────
+def _reference_locked(ws):
+    return bool(ws and (ws.frozen_at or ws.pinned_jobs.exists()))
+
+
 class MatchingRuleInline(admin.TabularInline):
     model = MatchingRule
     extra = 0
     fields = ('pdf_component_name', 'catalog_component_name', 'cat_sheet_name', 'row_number')
     readonly_fields = ('row_number', 'created_at')
+
+    def has_add_permission(self, request, obj=None):
+        return not _reference_locked(obj) and super().has_add_permission(request, obj)
+
+    def has_change_permission(self, request, obj=None):
+        return not _reference_locked(obj) and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return not _reference_locked(obj) and super().has_delete_permission(request, obj)
 
 
 @admin.register(MatchingWorkbookSet)
@@ -67,6 +80,18 @@ class MatchingWorkbookSetAdmin(admin.ModelAdmin):
     search_fields = ('project__name', 'version_label', 'match_file_name', 'spec_file_name', 'cat_file_name')
     readonly_fields = ('created_at', 'updated_at', 'rules_count', 'spec_sheets_count', 'cat_sheets_count')
     inlines = [MatchingRuleInline]
+
+    def has_change_permission(self, request, obj=None):
+        return not _reference_locked(obj) and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return not _reference_locked(obj) and super().has_delete_permission(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        from django.core.exceptions import PermissionDenied
+        if any(_reference_locked(ws) for ws in queryset):
+            raise PermissionDenied('Frozen or pinned reference sets cannot be deleted.')
+        return super().delete_queryset(request, queryset)
     
     fieldsets = (
         ('Project', {
@@ -90,6 +115,24 @@ class MatchingRuleAdmin(admin.ModelAdmin):
     list_filter = ('workbook_set', 'created_at')
     search_fields = ('pdf_component_name', 'catalog_component_name', 'cat_sheet_name')
     readonly_fields = ('created_at', 'updated_at')
+
+
+    def has_change_permission(self, request, obj=None):
+        return not (obj and _reference_locked(obj.workbook_set)) and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return not (obj and _reference_locked(obj.workbook_set)) and super().has_delete_permission(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        from django.core.exceptions import PermissionDenied
+        if any(_reference_locked(rule.workbook_set) for rule in queryset.select_related('workbook_set')):
+            raise PermissionDenied('Frozen or pinned reference rules cannot be deleted.')
+        return super().delete_queryset(request, queryset)
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == 'workbook_set':
+            kwargs['queryset'] = MatchingWorkbookSet.objects.filter(frozen_at__isnull=True, pinned_jobs__isnull=True)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 
 @admin.register(ComponentMatchingResult)

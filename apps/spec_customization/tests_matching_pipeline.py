@@ -29,9 +29,23 @@ def xlsx(sheet, headers, rows):
     return buffer.getvalue()
 
 
+def spec_xlsx():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = 'PipeNominalDiameters'
+    sheet.append(['Npd'])
+    sheet.append([2])
+    sheet = workbook.create_sheet('MaterialsData')
+    sheet.append(['MaterialsGrade'])
+    sheet.append(['A105'])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 class RemoteMemoryStorage(InMemoryStorage):
     def _relative_path(self, name):
-        return name.lstrip('/')
+        return str(name).lstrip('/')
 
     def path(self, name):
         raise NotImplementedError('No local path')
@@ -48,6 +62,7 @@ class MatchingPipelineTests(TestCase):
         self.reference = MatchingWorkbookSet.objects.create(
             project=self.project, uploaded_by=self.owner, is_active=True,
             match_file=ContentFile(xlsx('Mappings', ['PDF', 'B', 'C', 'Catalog'], [['GATE VALVE', '', '', 'Gate Valve']]), name='Match.xlsx'),
+            spec_file=ContentFile(spec_xlsx(), name='SPEC.xlsx'),
             cat_file=ContentFile(xlsx('GateValve', ['IndustryCommodityCode', 'Npd[1]', 'PressureRating[1]', 'MaterialGrade'], [
                 ['WRONG-SIZE', 4, 150, 'A105'], ['VLV-2', 2, 150, 'A105'], ['WRONG-RATING', 2, 300, 'A105'],
             ]), name='CAT.xlsx'))
@@ -113,14 +128,14 @@ class MatchingPipelineTests(TestCase):
         response = self.client.post('/api/v1/spec-customization/matching/upload/', {
             'project_id': str(self.project.pk),
             'match_file': SimpleUploadedFile('Match.xlsx', xlsx('Mappings', ['PDF', 'B', 'C', 'Catalog'], [['GATE VALVE', '', '', 'Gate Valve']])),
-            'spec_file': SimpleUploadedFile('SPEC.xlsx', xlsx('MaterialsData', ['Material'], [['A105']])),
-            'cat_file': SimpleUploadedFile('CAT.xlsx', xlsx('GateValve', ['IndustryCommodityCode'], [['VLV-2']])),
+            'spec_file': SimpleUploadedFile('SPEC.xlsx', spec_xlsx()),
+            'cat_file': SimpleUploadedFile('CAT.xlsx', xlsx('GateValve', ['IndustryCommodityCode', 'Npd[1]', 'PressureRating[1]', 'MaterialGrade'], [['VLV-2', 2, 150, 'A105']])),
         }, format='multipart')
         self.assertEqual(response.status_code, 201)
         current = MatchingWorkbookSet.objects.get(project=self.project, is_active=True)
         self.assertTrue(current.is_parsed)
         self.assertEqual(current.rules_count, 1)
-        self.assertEqual((current.spec_sheets_count, current.cat_sheets_count), (1, 1))
+        self.assertEqual((current.spec_sheets_count, current.cat_sheets_count), (2, 1))
 
     def test_activation_leaves_one_active_set_for_project(self):
         replacement = MatchingWorkbookSet.objects.create(project=self.project, uploaded_by=self.owner)
@@ -150,8 +165,11 @@ class ExportReadinessTests(TestCase):
         self.job.status = 'completed'
         self.job.save(update_fields=['status'])
         with patch('apps.spec_customization.views.build_spec_workbook', return_value=BytesIO(b'test workbook')):
-            response = self.client.get(f'/api/v1/spec-customization/paper-spec/jobs/{self.job.id}/export-spec/')
+            response = self.client.get(f'/api/v1/spec-customization/paper-spec/jobs/{self.job.id}/export-spec/?draft=1')
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['X-Spec-Export-State'], 'draft')
+        self.assertIn('DRAFT_', response['Content-Disposition'])
+        self.assertEqual(self.client.get(f'/api/v1/spec-customization/paper-spec/jobs/{self.job.id}/export-spec/').status_code, 409)
 
     def test_completed_but_partial_job_is_reviewable_not_bulkload_exportable(self):
         self.job.status = 'completed'

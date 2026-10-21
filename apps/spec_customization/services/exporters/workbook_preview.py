@@ -261,10 +261,12 @@ def _enumerate_spec_rows(job):
                     if not row:
                         continue
                     row_key = f'cls:{cls.id}:b{b_idx}:{seq}'
+                    row = dict(row)
+                    component_id = row.pop('_source_component_id', None)
                     source = {
                         'class_id':     str(cls.id),
                         'class_code':   _clean_workbook_text(cls.class_code),
-                        'component_id': None,
+                        'component_id': component_id,
                     }
                     yield sheet_name, row_key, source, dict(row)
                     seq += 1
@@ -419,13 +421,19 @@ def build_preview(job, workbook: str) -> dict:
         except Exception:
             logger.exception("[WorkbookPreview] apply_passthrough_defaults failed for %s/%s",
                              sheet_name, row_key)
+        provenance = {key: 'inferred' for key in cells}
+        for key in merged:
+            if merged[key] and not cells.get(key):
+                provenance[key] = 'default'
         for k, v in sheet_overrides.items():
+            provenance[k] = 'override'
             merged[k] = _clean_workbook_text(v)
         rows_by_sheet[sheet_name].append({
             'row_key':    row_key,
             'cells':      merged,
             'overridden': sorted(sheet_overrides.keys()),
             'source':     source,
+            'provenance': provenance,
         })
 
     # Build the final shape with template-driven column order.
@@ -509,7 +517,8 @@ def build_preview(job, workbook: str) -> dict:
                 'row_count': len(ur_rows),
                 'rows':      ur_rows,
             })
-    return result
+    from ..release_provenance import apply_reference_bindings
+    return apply_reference_bindings(job, result)
 
 
 def apply_overrides_to_row(

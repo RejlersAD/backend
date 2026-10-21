@@ -553,7 +553,8 @@ class PaperSpecExtractionService:
             message = client.messages.create(
                 model=model,
                 max_tokens=self.config["claude_max_tokens"],
-                temperature=self.config["claude_temperature"],
+                # Anthropic Python SDK 1.x removed sampling parameters from
+                # Messages methods. Omit them for both new and legacy SDKs.
                 system=SYSTEM_PROMPT,
                 messages=[
                     {"role": "user", "content": content},

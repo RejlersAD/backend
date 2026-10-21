@@ -1,7 +1,7 @@
 """Spec Customization — URL routing."""
 from django.urls import path
 
-from . import views, project_views, matching_views
+from . import views, project_views, matching_views, release_views
 
 app_name = 'spec_customization'
 
@@ -45,6 +45,20 @@ urlpatterns = [
     path('matching/sets/<uuid:set_id>/rules/',                    matching_views.list_matching_rules,            name='matching-rules'),
     path('matching/match/',                                       matching_views.match_component_endpoint,       name='matching-match'),
     path('matching/results/',                                     matching_views.list_matching_results,          name='matching-results'),
+
+    # Additive reference intelligence contracts (legacy matching routes retained).
+    path('matching-set-freeze/', matching_views.matching_set_freeze, name='matching-set-freeze'),
+    path('matching-run/', matching_views.matching_run, name='matching-run'),
+    path('matching-decisions/', matching_views.matching_decisions, name='matching-decisions'),
+    path('matching-decision-review/', matching_views.matching_decision_review, name='matching-decision-review'),
+
+    path('paper-spec/jobs/<uuid:job_id>/releases/', release_views.releases, name='release-list'),
+    path('paper-spec/jobs/<uuid:job_id>/releases/validate/', release_views.validate, name='release-validate'),
+    path('paper-spec/jobs/<uuid:job_id>/releases/<uuid:release_id>/freeze/', release_views.freeze, name='release-freeze'),
+    path('paper-spec/jobs/<uuid:job_id>/release-history/', release_views.history, name='release-history'),
+    path('paper-spec/jobs/<uuid:job_id>/import-attempts/', release_views.import_attempts, name='import-attempts'),
+
+    path('paper-spec/jobs/<uuid:job_id>/import-attempts/<uuid:attempt_id>/report/', release_views.import_report, name='import-report'),
 
     # Config
     path('config/', views.config_view, name='config'),

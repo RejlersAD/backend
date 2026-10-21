@@ -295,6 +295,7 @@ def _create_project(request):
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def project_detail(request, project_id):
     try:
         p = SpecProject.objects.get(project_id=project_id)
@@ -317,7 +318,10 @@ def project_detail(request, project_id):
         p.save()
         return Response(_serialize_project(p, counts=_count_for_project(p.project_id)))
 
-    # DELETE
+    # Retain reference evidence used by matching/release history.
+    p = SpecProject.objects.select_for_update().get(pk=p.pk)
+    if p.matching_workbook_sets.filter(frozen_at__isnull=False).exists() or p.matching_workbook_sets.filter(pinned_jobs__isnull=False).exists():
+        return Response({'error': 'Projects with frozen or pinned reference evidence cannot be deleted.'}, status=409)
     p.delete()
     return Response({'deleted': True, 'project_id': str(project_id)})
 

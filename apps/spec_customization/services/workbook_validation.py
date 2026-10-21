@@ -197,7 +197,7 @@ def _validate_sheet(workbook: str, sheet: dict[str, Any], issues: list[dict[str,
     return checked
 
 
-def validate_extracted_workbook(*, job, workbook_scope: str = "auto", active_workbook: str = WORKBOOK_SPEC) -> dict[str, Any]:
+def validate_extracted_workbook(*, job, workbook_scope: str = "auto", active_workbook: str = WORKBOOK_SPEC, previews=None) -> dict[str, Any]:
     scope = (workbook_scope or "auto").strip().lower()
     if scope in _VALID_WORKBOOKS:
         workbooks = [scope]
@@ -211,7 +211,7 @@ def validate_extracted_workbook(*, job, workbook_scope: str = "auto", active_wor
     checked_sheets = 0
 
     for wb in workbooks:
-        preview = build_preview(job, wb)
+        preview = previews[wb] if previews is not None else build_preview(job, wb)
         for sheet in preview.get("sheets", []):
             checked_sheets += 1
             checked_rows += _validate_sheet(wb, sheet, issues)
@@ -235,6 +235,7 @@ def validate_extracted_workbook(*, job, workbook_scope: str = "auto", active_wor
         "checked_sheets": checked_sheets,
         "checked_rows": checked_rows,
         "issues_total": len(issues),
+        "truncated": len(issues) >= _MAX_ISSUES,
         "severity_counts": by_severity,
         "issues": issues,
     }
