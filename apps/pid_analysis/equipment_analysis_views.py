@@ -1758,6 +1758,38 @@ _DATABOX_VALUE_STOPS = re.compile(
     r'|\s{3,}'                         # 3+ spaces = OCR column gap
     r'|\s*\\\s'                       # backslash-space OCR artifact (e.g. \ 82106)
     r'|\s+(?:[A-Z]{1,3}\d{4,}[A-Z]?|\d{4,}[A-Z]+)\b'  # ref tags with letter (8210A, Re21084) — NOT bare 1412/1219
+    r'|[\"“”¥][A-Z]{2,4}-'   # pipe tag starting with inch mark (incl. mojibake)
+    r'|\s+\d+[\"“”¥]\s*-\s*[A-Z]'  # N"-PIPETAG inline (e.g. 6"-SG-)
+    r')',
+    re.IGNORECASE,
+)
+# Same as _DATABOX_VALUE_STOPS but WITHOUT the '//' alternative — used when
+# the matched alias's own custom separator (databox_label_map's optional
+# 3rd list element) is '//', so a genuine "DISCHARGE PRESSURE // TEMP:
+# 143.5 psig// 127.4F" value isn't truncated at the very separator the
+# alias is relying on to split pressure from temperature (BUG FIX, found
+# via live trace: '//' was being stripped as "dual-condition" noise before
+# the split-on-separator logic in _build_databox_index ever ran on it).
+_DATABOX_VALUE_STOPS_KEEP_DBLSLASH = re.compile(
+    r'(?:'
+    r'\s+\d+\.\s+[A-Z]{3,}'
+    r'|\bSLOPE\b'
+    r'|\bSOUR\s+GAS\b'
+    r'|\bIN\s+SCOPE\b'
+    r'|\bWILL\s+BE\b'
+    r'|\bSHALL\b'
+    r'|\bSCOPE\b'
+    r'|\bHEADER\b'
+    r'|\bPRESSURIZED\b'
+    r'|\bINTERLOCK\b'
+    r'|\bELIMINATOR\b'
+    r'|\bVORTEX\b'
+    r'|>\s*FL\b'
+    r'|\s*>'
+    r'|[;|]'
+    r'|\s{3,}'                         # 3+ spaces = OCR column gap
+    r'|\s*\\\s'                       # backslash-space OCR artifact (e.g. \ 82106)
+    r'|\s+(?:[A-Z]{1,3}\d{4,}[A-Z]?|\d{4,}[A-Z]+)\b'  # ref tags with letter (8210A, Re21084) — NOT bare 1412/1219
     r'|[\"\u201c\u201d\u00a5][A-Z]{2,4}-'   # pipe tag starting with inch mark (incl. mojibake)
     r'|\s+\d+[\"\u201c\u201d\u00a5]\s*-\s*[A-Z]'  # N"-PIPETAG inline (e.g. 6"-SG-)
     r')',
@@ -1773,7 +1805,45 @@ _DATABOX_LABEL_STARTS_RE = re.compile(
 )
 
 
-def _clean_databox_value(raw: str) -> str:
+def _split_temp_min_max(temp_part: str):
+    """Given the temperature half of a combined 'DESIGN PRESSURE // TEMP'
+    value — e.g. '29°F/185°F(-4°C/85°C)' — split it into (min, max).
+
+    BUG FIX (explicit request, found via live trace): this half used to be
+    stored whole in design_temp_max, with no min/max split at all. This
+    drawing format pairs a leading Fahrenheit pair with a parenthesised
+    Celsius pair at the end — e.g. '29°F/185°F(-4°C/85°C)' means 29°F ==
+    -4°C (the low end) and 185°F == 85°C (the high end). The parenthesised
+    pair is preferred (matches the requested '-4°C'/'85°C' output) since
+    it's this format's own authoritative secondary-unit pairing; when no
+    parenthesised pair exists, the leading pair is used instead so a
+    simpler 'X°F/Y°F' value (no Celsius annotation) still splits correctly.
+
+    Returns (min_str, max_str) — ordered by actual numeric value, not by
+    position, so it's correct regardless of which value the drawing lists
+    first. Returns (None, temp_part) when it can't confidently find two
+    numeric values to compare — caller then keeps the original behaviour
+    (whole string in design_temp_max, design_temp_min left empty) rather
+    than guessing.
+    """
+    if not temp_part:
+        return None, temp_part
+    paren_m = re.search(r'\(([^)]+)\)\s*$', temp_part)
+    pair_text = paren_m.group(1) if paren_m else temp_part
+    parts = re.split(r'\s*/\s*', pair_text, maxsplit=1)
+    if len(parts) != 2:
+        return None, temp_part
+    n0 = re.search(r'-?\d+(?:\.\d+)?', parts[0])
+    n1 = re.search(r'-?\d+(?:\.\d+)?', parts[1])
+    if not (n0 and n1):
+        return None, temp_part
+    f0, f1 = float(n0.group()), float(n1.group())
+    if f0 <= f1:
+        return parts[0].strip(), parts[1].strip()
+    return parts[1].strip(), parts[0].strip()
+
+
+def _clean_databox_value(raw: str, keep_double_slash: bool = False) -> str:
     """
     Truncate a raw data-box extracted value at the first noise/stop pattern.
 
@@ -1783,13 +1853,22 @@ def _clean_databox_value(raw: str) -> str:
     - Column separators (spaces, pipes, semicolons)
 
     Soft-coded via _DATABOX_VALUE_STOPS and _DATABOX_LABEL_STARTS_RE.
+
+    keep_double_slash: pass True when the caller's own alias is about to
+    split this value on a '//' separator (databox_label_map's optional
+    3rd list element) — otherwise this function's default stop-pattern
+    treats '//' as "dual-condition" noise and truncates the value right
+    there, before the caller's split ever gets a chance to see the second
+    half (e.g. the temperature side of "143.5 psig// 127.4F").
+
     Returns the cleaned, stripped value or '' if nothing useful remains.
     """
     if not raw:
         return ''
 
     # Truncate at first stop pattern
-    stop_m = _DATABOX_VALUE_STOPS.search(raw)
+    _stops = _DATABOX_VALUE_STOPS_KEEP_DBLSLASH if keep_double_slash else _DATABOX_VALUE_STOPS
+    stop_m = _stops.search(raw)
     if stop_m:
         raw = raw[:stop_m.start()]
 
@@ -1799,7 +1878,14 @@ def _clean_databox_value(raw: str) -> str:
     if len(label_hits) >= 2:
         raw = raw[:label_hits[1].start()]
 
-    raw = raw.strip(' .,;:()')
+    # BUG FIX (explicit request, found via live trace): stripping '()' off
+    # the edges here was eating the trailing ')' of a secondary-unit
+    # annotation that legitimately belongs to the value — e.g. a split half
+    # like "143.5 psig(10 barg)" or "1800 mm (ID)" would lose its closing
+    # paren. keep_double_slash callers (custom-separator split halves) want
+    # that annotation preserved, so only strip plain whitespace for them;
+    # every other caller keeps the original, stricter punctuation strip.
+    raw = raw.strip() if keep_double_slash else raw.strip(' .,;:()')
     # Reject values that are pure punctuation or very short after cleaning.
     # Minimum 2 chars: allows valid 2-char engineering codes (CS, SS, FV)
     # while rejecting single-character OCR noise ('J', 'X', etc.).
@@ -1830,7 +1916,11 @@ def _clean_databox_value(raw: str) -> str:
     # result is e.g. "5.0 M iN" or "15.0 M LONG".  Strip trailing alphabetic
     # junk that is not a recognised pressure/temperature/flow unit.
     # Triggered only when the value starts with a digit (not e.g. "CS + LINING").
-    if raw and raw[0].isdigit():
+    # Skipped when keep_double_slash is set — same reasoning as the unit-
+    # boundary-truncation skip above (BUG FIX, found via live trace): a
+    # combined "1800 mm (ID)x4000 mm (T/T)" value was being cut down to
+    # "1800 MM" right here, before the caller's own 'x' split ever ran.
+    if raw and raw[0].isdigit() and not keep_double_slash:
         _dim_m = re.match(
             r'^(-?\d+(?:\.\d+)?)\s*(mm|M|NB|DN)\b',
             raw, re.IGNORECASE,
@@ -1849,20 +1939,27 @@ def _clean_databox_value(raw: str) -> str:
     # When OCR merges junk text after a recognised engineering unit
     # (e.g. "1412 psig Lezi0 Re21084"), truncate at the end of the unit.
     # Cannot use lookbehind (variable length) — use re.match with capture.
-    _unit_trunc_m = re.match(
-        r'^(-?[\d][\d,.\s]*'
-        r'(?:psig|psia|psi|barg|bara|kpag|mpa|'
-        r'ft3/h(?:r)?|m3/h(?:r)?|kw|mw|gpm|bbl/d|'
-        r'°\s*[fc]|deg[fc]|degf|degc|f\b|c\b))',
-        raw, re.IGNORECASE,
-    )
-    if _unit_trunc_m and len(_unit_trunc_m.group(1)) < len(raw):
-        _after_unit = raw[len(_unit_trunc_m.group(1)):].strip()
-        # Don't truncate if followed by '/' — that may be a MIN/MAX pair separator
-        # (e.g. "-13.2 F / 185 F" or "1219 psig / 1412 psig").
-        # Use lstrip() since OCR often leaves a space before the slash.
-        if not _after_unit.lstrip().startswith('/'):
-            raw = _unit_trunc_m.group(1).strip()
+    # Skipped entirely when keep_double_slash is set (BUG FIX, found via
+    # live trace): a combined "143.5 psig(10 barg)// 127.4°F(53°C)" value
+    # was being cut down to just "143.5 psig" right here — BEFORE the
+    # caller's own '//' split ever ran — because the secondary unit in
+    # parens, "(10 barg)", doesn't start with '/' (only a bare slash was
+    # exempted, not '(' or '//'), so this step truncated it anyway.
+    if not keep_double_slash:
+        _unit_trunc_m = re.match(
+            r'^(-?[\d][\d,.\s]*'
+            r'(?:psig|psia|psi|barg|bara|kpag|mpa|'
+            r'ft3/h(?:r)?|m3/h(?:r)?|kw|mw|gpm|bbl/d|'
+            r'°\s*[fc]|deg[fc]|degf|degc|f\b|c\b))',
+            raw, re.IGNORECASE,
+        )
+        if _unit_trunc_m and len(_unit_trunc_m.group(1)) < len(raw):
+            _after_unit = raw[len(_unit_trunc_m.group(1)):].strip()
+            # Don't truncate if followed by '/' — that may be a MIN/MAX pair separator
+            # (e.g. "-13.2 F / 185 F" or "1219 psig / 1412 psig").
+            # Use lstrip() since OCR often leaves a space before the slash.
+            if not _after_unit.lstrip().startswith('/'):
+                raw = _unit_trunc_m.group(1).strip()
 
     # ── MOC trailing noise cleanup ─────────────────────────────────────────
     # Strip OCR junk that follows a known material spec, e.g.
@@ -1883,7 +1980,13 @@ def _clean_databox_value(raw: str) -> str:
     # ── Full-vacuum code truncation ──────────────────────────────────────
     # 'FV' = full vacuum; any text following it is OCR noise from adjacent
     # annotation (e.g. 'FV SUG CACHER V_803-TE').  Truncate to bare 'FV'.
-    if re.match(r'^FV\b', raw, re.IGNORECASE) and len(raw) > 2:
+    # Skipped when keep_double_slash is set (BUG FIX, found via live
+    # trace): a combined 'FV/180psig (FV/12.41barg)//29°F/185°F(-4°C/85°C)'
+    # value was being cut down to just 'FV' right here — the SAME
+    # truncate-after-a-recognised-token pattern as the unit-boundary and
+    # dimension-normaliser steps above, just specific to the 'FV' code,
+    # and it had no keep_double_slash guard at all until now.
+    if not keep_double_slash and re.match(r'^FV\b', raw, re.IGNORECASE) and len(raw) > 2:
         raw = 'FV'
 
     return raw
@@ -1943,8 +2046,17 @@ def _build_databox_index(text: str, config: dict) -> dict:
         except re.error:
             continue
 
+        # This alias's own custom separator (if any) — computed once per
+        # alias so the raw-value cleanup below knows to preserve the FULL
+        # value (skip its early-truncation heuristics) for ANY custom
+        # separator, not just '//' — the same truncation problem was found
+        # live-testing both the '//' pressure//temp case AND the 'x'
+        # diameter-x-length case. See _clean_databox_value's own docstring.
+        _alias_sep = field_or_pair[2] if isinstance(field_or_pair, list) and len(field_or_pair) == 3 else None
+        _keep_dblslash = bool(_alias_sep)
+
         for m in pat.finditer(text):
-            raw_value = _clean_databox_value(m.group(1))
+            raw_value = _clean_databox_value(m.group(1), keep_double_slash=_keep_dblslash)
             if not raw_value:
                 continue
 
@@ -1962,18 +2074,106 @@ def _build_databox_index(text: str, config: dict) -> dict:
             if tag not in index:
                 index[tag] = {}
 
-            if isinstance(field_or_pair, list) and len(field_or_pair) == 2:
-                parts = re.split(r'\s*/\s*', raw_value, maxsplit=1)
+            print(
+                f'[EQ-DIAG][PressTemp] {tag!r} Pass-B alias_matched={label_variant!r} '
+                f'-> field_or_pair={field_or_pair!r} raw_value={raw_value!r}',
+                flush=True,
+            )
+
+            if isinstance(field_or_pair, list) and len(field_or_pair) in (2, 3):
+                # BUG FIX (explicit request): every list-valued alias used to
+                # split its raw value on a single '/', unconditionally. That's
+                # correct for a genuine MIN/MAX pair (e.g. "150/50"), but wrong
+                # for a combined-but-different-parameter label like "DISCHARGE
+                # PRESSURE // TEMP" — splitting "143.5 psig(10 barg)// 127.4°F
+                # (53°C)" on a single '/' leaves a stray leading '/' on the
+                # second part (re.split matches only the FIRST '/' in "//",
+                # with maxsplit=1). An optional 3rd list element now lets a
+                # specific alias declare its own separator (e.g. '//' for
+                # pressure//temp labels, 'x' for a diameter x length label)
+                # instead of the hardcoded single '/'. Treated as a raw regex
+                # fragment (not auto-escaped) so a caller can also supply an
+                # alternation like 'x|×' if needed — '/' and '//' and 'x' have
+                # no special regex meaning so this is safe for the common case.
+                _split_sep = field_or_pair[2] if len(field_or_pair) == 3 else '/'
+                _split_pat = r'\s*(?:' + _split_sep + r')\s*'
+                try:
+                    parts = re.split(_split_pat, raw_value, maxsplit=1)
+                except re.error:
+                    parts = re.split(r'\s*/\s*', raw_value, maxsplit=1)
+                print(
+                    f'[EQ-DIAG][PressTemp] {tag!r} Pass-B separator={_split_sep!r} parts={parts!r}',
+                    flush=True,
+                )
+                # BUG FIX (explicit request, found via live trace): a
+                # custom-separator alias (3-element list) is a DELIBERATE,
+                # specific config entry for a combined label — e.g.
+                # "internal diameter & t/t length" with separator 'x'. The
+                # live trace showed Pass A's own generic dimension scan
+                # (same "largest value in a 60-char window" heuristic for
+                # BOTH diameter and length) independently mis-assigns the
+                # LENGTH number to dimension_diameter for exactly this
+                # combined label, and because dimension_diameter/length
+                # don't end in _min/_max, the normal merge rule ("fill
+                # empty only") never lets this alias's correct values
+                # override that wrong guess. Track which fields a 3-element
+                # alias wrote to in '_custom_sep_fields' so the merge step
+                # (equipment_analysis_views._extract_equipment_items) can
+                # give them the same "always override" treatment as a
+                # _min/_max field, regardless of their name.
+                _is_custom_sep = len(field_or_pair) == 3
+                _override_fields = index[tag].setdefault('_custom_sep_fields', set()) if _is_custom_sep else None
                 if len(parts) == 2:
-                    v0 = _clean_databox_value(parts[0])
-                    v1 = _clean_databox_value(parts[1])
+                    # keep_double_slash here (reusing _is_custom_sep) preserves
+                    # a secondary-unit annotation like "(10 barg)"/"(ID)"/"(T/T)"
+                    # on each split half instead of stripping it as noise —
+                    # see _clean_databox_value's own docstring/comment.
+                    v0 = _clean_databox_value(parts[0], keep_double_slash=_is_custom_sep)
+                    v1 = _clean_databox_value(parts[1], keep_double_slash=_is_custom_sep)
+                    print(
+                        f'[EQ-DIAG][PressTemp] {tag!r} Pass-B split -> {field_or_pair[0]}={v0!r}  {field_or_pair[1]}={v1!r}',
+                        flush=True,
+                    )
+                    # ── Design-pressure // temp special case ─────────────────
+                    # BUG FIX (explicit request, found via live trace): this
+                    # alias's two target fields are design_pressure_max and
+                    # design_temp_max — BOTH end in '_max', which used to make
+                    # the generic "smart min/max" logic below treat them as a
+                    # genuine min/max PAIR and numerically compare a pressure
+                    # number against a temperature number — meaningless, and
+                    # only happened to look right by coincidence on some
+                    # inputs. Handled explicitly instead, before that generic
+                    # logic ever runs: the pressure half goes straight to
+                    # field_or_pair[0], and the temperature half gets its OWN
+                    # min/max split via _split_temp_min_max (see its own
+                    # docstring) instead of staying one lump value.
+                    _f0, _f1 = field_or_pair[0], field_or_pair[1]
+                    if _is_custom_sep and _f1 == 'design_temp_max':
+                        if v0 and _f0 not in index[tag]:
+                            index[tag][_f0] = v0
+                            if _override_fields is not None:
+                                _override_fields.add(_f0)
+                        _t_min, _t_max = _split_temp_min_max(v1)
+                        print(
+                            f'[EQ-DIAG][PressTemp] {tag!r} Pass-B design-temp sub-split '
+                            f'{v1!r} -> min={_t_min!r} max={_t_max!r}',
+                            flush=True,
+                        )
+                        if _t_max and 'design_temp_max' not in index[tag]:
+                            index[tag]['design_temp_max'] = _t_max
+                            if _override_fields is not None:
+                                _override_fields.add('design_temp_max')
+                        if _t_min and 'design_temp_min' not in index[tag]:
+                            index[tag]['design_temp_min'] = _t_min
+                            if _override_fields is not None:
+                                _override_fields.add('design_temp_min')
+                        continue
                     # ── Smart numerical min/max assignment ──────────────────
                     # When both target fields end with _min / _max, use numeric
                     # ordering rather than position so that a box labelled
                     # (MAX/MIN) with "185 F / -13.2 F" and one labelled (MIN/MAX)
                     # with "-13.2 F / 185 F" both map correctly regardless of
                     # the order in which the values appear in the cell.
-                    _f0, _f1 = field_or_pair[0], field_or_pair[1]
                     _is_minmax = (
                         (_f0.endswith('_min') or _f0.endswith('_max')) and
                         (_f1.endswith('_min') or _f1.endswith('_max'))
@@ -1999,11 +2199,17 @@ def _build_databox_index(text: str, config: dict) -> dict:
                     else:
                         if v0 and field_or_pair[0] not in index[tag]:
                             index[tag][field_or_pair[0]] = v0
+                            if _override_fields is not None:
+                                _override_fields.add(field_or_pair[0])
                         if v1 and field_or_pair[1] not in index[tag]:
                             index[tag][field_or_pair[1]] = v1
+                            if _override_fields is not None:
+                                _override_fields.add(field_or_pair[1])
                 else:
                     if field_or_pair[0] not in index[tag]:
                         index[tag][field_or_pair[0]] = raw_value
+                        if _override_fields is not None:
+                            _override_fields.add(field_or_pair[0])
             else:
                 if field_or_pair not in index[tag]:
                     index[tag][field_or_pair] = raw_value
@@ -2644,8 +2850,34 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _flow_bare_pat  = ext_cfg.get('flowrate_bare_value_pattern',
                            r'(\d+(?:[,.]\d+)?)\s*(M3/H|M3/HR|NM3/H|NM3/HR|SM3/D|MMSCFD|BBL/D|GPM|T/H|KG/H|MW|KW|MMBTU/H)')
         _flow_ctx_chars = int(ext_cfg.get('flowrate_context_chars', 500))
-        _op_press_lbl   = ext_cfg.get('oper_pressure_label_pattern',
+        _op_press_lbl_cfg = ext_cfg.get('oper_pressure_label_pattern',
                            r'(?:OPER(?:ATING)?|OP\.?)\s*PRESS(?:URE)?\.?\s*[-:=/(]')
+        # BUG FIX (explicit request, found via live trace): "DISCHARGE
+        # PRESSURE" (and combined "DISCHARGE PRESSURE // TEMP" labels) was
+        # never recognized by this pattern — neither OPER/OP nor the
+        # separate DES/SET design-pressure pattern matches "DISCHARGE", so
+        # Pass A fell through to its own no-label "any bare pressure value"
+        # fallback and wrote the number into design_pressure_max instead of
+        # oper_pressure (see the merge-step clearing logic further down,
+        # which is still kept as a safety net for any OTHER unrecognized
+        # pressure-label wording this doesn't cover).
+        # Wrapped rather than just editing the inline default above:
+        # 'oper_pressure_label_pattern' is explicitly set in
+        # equipment_type_config.json (out of this change's file scope —
+        # only equipment_analysis_views.py), which would otherwise override
+        # a default-only change and make it silently ineffective. This
+        # guarantees DISCHARGE is recognized regardless of what that config
+        # value currently is.
+        _op_press_lbl = (
+            _op_press_lbl_cfg if re.search(r'DISCHARGE', _op_press_lbl_cfg, re.IGNORECASE)
+            else r'(?:' + _op_press_lbl_cfg + r'|DISCHARGE\s*PRESS(?:URE)?\.?\s*[-:=/(])'
+        )
+        # TEMPORARY DEBUG (explicit request) — do not remove yet.
+        print(f"[DEBUG-DISCHARGE] tag = {tag!r}")
+        print(f"[DEBUG-DISCHARGE] _op_press_lbl_cfg = {_op_press_lbl_cfg}")
+        print(f"[DEBUG-DISCHARGE] final _op_press_lbl = {_op_press_lbl}")
+        print(f"[DEBUG-DISCHARGE] context window = {_pp_ctx[:200]}")
+        print(f"[DEBUG-DISCHARGE] oper_pressure match = {bool(re.search(_op_press_lbl, _pp_ctx, re.IGNORECASE))}")
         _des_press_lbl  = ext_cfg.get('design_pressure_label_pattern',
                            r'(?:DES(?:IGN)?\.?(?:\s*/\s*SET)?|SET)\s*PRESS(?:URE)?\.?\s*[-:=/(]')
         _op_temp_lbl    = ext_cfg.get('oper_temp_label_pattern',
@@ -2687,10 +2919,21 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     _pv2 = re.search(_press_val_pat, _after_colon.group(1), re.IGNORECASE)
                     if _pv2:
                         oper_pressure = f'{_pv2.group(1)} {_pv2.group(2)}'
+        print(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A oper_pressure_label_match={bool(_op_lbl_m)} -> oper_pressure={oper_pressure!r}', flush=True)
 
         # ── Design Pressure min / max ─────────────────────────────────────
         design_pressure_min = ''
         design_pressure_max = ''
+        # Tracks whether design_pressure_max below was set by the no-label
+        # "any bare pressure value nearby" fallback (line ~2760) rather than
+        # a genuine DES/SET-PRESS label match. A fallback value has zero
+        # label confirmation — it is explicitly a last resort — so if the
+        # databox-alias pass (see _build_databox_index) later finds this
+        # SAME tag's pressure genuinely belongs to oper_pressure (e.g. a
+        # combined "DISCHARGE PRESSURE // TEMP" label), the merge step
+        # below is allowed to clear this fallback value instead of leaving
+        # a misattributed number sitting in Design Pressure MAX.
+        design_pressure_is_fallback = False
         _dp_lbl_ms = list(re.finditer(_des_press_lbl, _pp_ctx, re.IGNORECASE))
         _dp_vals   = []   # list of (numeric_value, unit_string)
         for _dlm in _dp_lbl_ms:
@@ -2739,6 +2982,13 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _bare_pv = re.search(_press_val_pat, _pp_ctx, re.IGNORECASE)
             if _bare_pv:
                 design_pressure_max = f'{_bare_pv.group(1)} {_bare_pv.group(2)}'
+                design_pressure_is_fallback = True
+        print(
+            f'[EQ-DIAG][PressTemp] {tag!r} Pass-A design_press_label_matches={len(_dp_lbl_ms)} '
+            f'-> design_pressure_min={design_pressure_min!r} design_pressure_max={design_pressure_max!r} '
+            f'is_fallback={design_pressure_is_fallback}',
+            flush=True,
+        )
 
         # ── Oper. Temperature ─────────────────────────────────────────────
         oper_temperature = ''
@@ -2771,6 +3021,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                         oper_temperature = f'{_bare_t.group(1)} °{_ot_unit}'
         # Normalise dual-temperature values e.g. "105/60 °F" → "60 – 105 °F"
         oper_temperature = _normalize_oper_temp(oper_temperature)
+        print(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A oper_temp_label_match={bool(_ot_lbl_m)} -> oper_temperature={oper_temperature!r} (no bare-value fallback exists for temperature)', flush=True)
 
         # ── Design Temp min / max ─────────────────────────────────────────
         design_temp_min = ''
@@ -2796,6 +3047,11 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             else:
                 design_temp_min = f'{min(_dt_vals)} °F'
                 design_temp_max = f'{max(_dt_vals)} °F'
+        print(
+            f'[EQ-DIAG][PressTemp] {tag!r} Pass-A design_temp_label_matches={len(_dt_lbl_ms)} '
+            f'-> design_temp_min={design_temp_min!r} design_temp_max={design_temp_max!r}',
+            flush=True,
+        )
 
         # ── Design Flowrate ───────────────────────────────────────────────
         # Use a wider context window than the general _pp_ctx (soft-coded via
@@ -2891,6 +3147,37 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 # (e.g. 82106 = "8" merged with "2106"/"106" page-y-offset noise)
                 # contains the tag serial as a substring. Anchored to exact
                 # serial-length match only to avoid rejecting legitimate 500mm etc.
+        # ── Combined "DIAMETER & T/T LENGTH" box ──────────────────────────
+        # BUG FIX (explicit request, found via live trace): the generic
+        # "Length / Height" and "Diameter / Width" blocks below each
+        # independently pick the LARGEST number in their own 60-char window
+        # — correct for picking a real vessel dimension over stray pipe-size
+        # noise, but wrong for a genuinely combined label like "INTERNAL
+        # DIAMETER & T/T LENGTH: 1800 mm (ID)x4000 mm (T/T)", where both
+        # blocks end up looking at the SAME two numbers and both pick the
+        # larger one (4000) — so dimension_diameter was wrongly set to the
+        # LENGTH value. Detected directly here instead: a "DIAMETER ...
+        # LENGTH : value1 x value2" box has its two numbers in a fixed,
+        # unambiguous position (first = diameter, second = length), so this
+        # is tried BEFORE the generic largest-value scan and, when it
+        # matches, both fields are set from it directly and the generic
+        # blocks are skipped for this tag (same values the databox-alias
+        # merge step would otherwise have had to correct afterward).
+        _combined_dia_len_m = re.search(
+            r'DIAMETER\b.{0,30}?LENGTH\b[^:\n]{0,20}:\s*'
+            r'(\d+(?:\.\d+)?\s*(?:MM|M)\s*\([^)]{1,20}\))\s*[xX×]\s*'
+            r'(\d+(?:\.\d+)?\s*(?:MM|M)\s*\([^)]{1,20}\))',
+            _dim_ctx, re.IGNORECASE,
+        )
+        if _combined_dia_len_m:
+            dimension_diameter = _combined_dia_len_m.group(1).strip()
+            dimension_length   = _combined_dia_len_m.group(2).strip()
+            print(
+                f'[EQ-DIAG][PressTemp] {tag!r} Pass-A combined diameter&length box matched '
+                f'-> dimension_diameter={dimension_diameter!r} dimension_length={dimension_length!r}',
+                flush=True,
+            )
+
         # ── Length / Height ──────────────────────────────────────────────
         # OCR artefact: P&ID pipe annotations such as  2"-FL-ACIN-xxxx  are
         # often read as  "2 M"  or  "2 MM"  by Tesseract, and re.search would
@@ -2898,7 +3185,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # Fix: collect ALL value matches in the scan window, apply soft-coded
         # minimum thresholds (DIMENSION_LENGTH_MIN_M / _MIN_MM) and take the
         # LARGEST passing value — the vessel length always wins over pipe sizes.
-        _len_lbl_m = re.search(_dim_len_lbl, _dim_ctx, re.IGNORECASE)
+        _len_lbl_m = None if _combined_dia_len_m else re.search(_dim_len_lbl, _dim_ctx, re.IGNORECASE)
         if _len_lbl_m:
             _win = _dim_ctx[_len_lbl_m.end():_len_lbl_m.end() + _dim_val_win]
             _best_len_val, _best_len_str = 0.0, ''
@@ -2917,7 +3204,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     _best_len_str = f'{_raw_num} {_unit or "MM"}'
             dimension_length = _best_len_str
         # ── Diameter / Width ─────────────────────────────────────────────
-        _dia_lbl_m = re.search(_dim_dia_lbl, _dim_ctx, re.IGNORECASE)
+        _dia_lbl_m = None if _combined_dia_len_m else re.search(_dim_dia_lbl, _dim_ctx, re.IGNORECASE)
         if _dia_lbl_m:
             _win = _dim_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + _dim_val_win]
             _best_dia_val, _best_dia_str = 0.0, ''
@@ -3073,6 +3360,9 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             'motor_rating':        motor_rating,
             'quality_required':    quantity_required,
             'remarks':             quality_spec,
+            # Internal-only; popped below before this item is ever returned.
+            # See design_pressure_is_fallback's own comment above.
+            '_design_pressure_is_fallback': design_pressure_is_fallback,
         })
 
         # ── Merge data-box index values (fill empty fields only) ──────────
@@ -3090,8 +3380,34 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     if re.sub(r'^\d{2,4}-', '', _ik.upper()) == _tag_norm:
                         _db_vals = _iv
                         break
+        _last = results[-1]
+        # Internal-only flag set above (Pass A) — pop it unconditionally so
+        # it never leaks into the item actually returned to the caller,
+        # regardless of whether a databox match exists below.
+        _dp_was_fallback = _last.pop('_design_pressure_is_fallback', False)
+        print(
+            f'[EQ-DIAG][PressTemp] {tag!r} Pass-B databox_vals={_db_vals!r} '
+            f'design_pressure_was_fallback={_dp_was_fallback}',
+            flush=True,
+        )
+        if _dp_was_fallback and _db_vals.get('oper_pressure'):
+            # FIX: a design_pressure_max value with zero label confirmation
+            # (the Pass-A bare-value fallback) is strictly lower-confidence
+            # than a databox match that positively identifies this SAME
+            # number's real owner as oper_pressure (e.g. a combined
+            # "DISCHARGE PRESSURE // TEMP" / "OPERATING PRESSURE // TEMP"
+            # label). Clear the stale fallback value here so it isn't left
+            # sitting in Design Pressure MAX alongside the now-correct
+            # Oper. Pressure — the per-field merge loop below still runs
+            # normally afterward, so a genuine databox design_pressure_max
+            # for this tag (if any) is applied as usual.
+            print(
+                f'[EQ-DIAG][PressTemp] {tag!r} clearing stale fallback design_pressure_max={_last.get("design_pressure_max")!r} '
+                f'(databox confirmed oper_pressure={_db_vals.get("oper_pressure")!r})',
+                flush=True,
+            )
+            _last['design_pressure_max'] = ''
         if _db_vals:
-            _last = results[-1]
             # Soft-coded: 'description_databox_override_pattern' — when the
             # context-window description is a recognised placeholder (default:
             # the box header "TAG NUMBER" itself), let the data-box
@@ -3099,14 +3415,36 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             # empty fields.
             _desc_ovr = ext_cfg.get('description_databox_override_pattern',
                                     r'^tag\s*(number|no)?\.?$')
+            # BUG FIX (found via live trace): fields written by a custom-
+            # separator (3-element) databox alias — e.g. dimension_diameter/
+            # dimension_length from "internal diameter & t/t length" — get
+            # the same "always override" treatment as _min/_max fields,
+            # regardless of their name. Pass A's own generic dimension scan
+            # (equipment_analysis_views._extract_equipment_items's "Length /
+            # Height" and "Diameter / Width" blocks) independently picks the
+            # LARGEST number in its own 60-char window after EACH label —
+            # for a combined "DIAMETER & T/T LENGTH" box this means Pass A's
+            # "diameter" scan wrongly grabs the LENGTH number (it's larger),
+            # and since dimension_diameter doesn't end in _min/_max, the
+            # normal "fill empty only" rule would never let this alias's
+            # correct value override that wrong guess.
+            _override_fields = _db_vals.get('_custom_sep_fields') or set()
             for _fk, _fv in _db_vals.items():
+                if _fk == '_custom_sep_fields':
+                    continue
                 if _fk in _last:
                     # For _min/_max fields the explicit databox label extraction
                     # (e.g. "DESIGN TEMP (MAX/MIN): 185 F / -13.2 F") is more
                     # reliable than the narrow context scan — always override
                     # so a wrong single-value pickup from context is corrected.
-                    if _fk.endswith(('_min', '_max')):
+                    if _fk.endswith(('_min', '_max')) or _fk in _override_fields:
                         if _fv:  # only write a non-empty databox value
+                            if _fk in _override_fields and _last[_fk] and _last[_fk] != _fv:
+                                print(
+                                    f'[EQ-DIAG][PressTemp] {tag!r} custom-sep override: '
+                                    f'{_fk} Pass-A={_last[_fk]!r} -> databox={_fv!r}',
+                                    flush=True,
+                                )
                             _last[_fk] = _fv
                     elif _fk == 'description' and _fv and _desc_ovr and \
                             re.match(_desc_ovr, str(_last.get('description', '')), re.IGNORECASE):
