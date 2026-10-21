@@ -66,7 +66,7 @@ SPEC_EXTRACTION_CONFIG = {
     # ── Claude models (BYOK support) ─────────────────────────────────────
     "claude_model":            "claude-3-5-sonnet-20241022",  # Default Claude model
     "claude_max_tokens":        16000,
-    "claude_temperature":       0.1,
+    "claude_temperature":       0.1,  # Legacy snapshot key; SDK 1.x Messages calls omit sampling parameters.
 
     # ── Cost guard rails ────────────────────────────────────────────────
     # If a page already has ≥ this many chars from PyMuPDF text-layer,

@@ -1754,3 +1754,12 @@ LOGGING = {
     },
 }
 print("=" * 60 + "\n")
+
+
+# S3D controlled release: explicit local/operator configuration, no inferred grants.
+import json as _s3d_json
+S3D_RELEASE_AUTHORITY_USER_IDS = _s3d_json.loads(config('S3D_RELEASE_AUTHORITY_USER_IDS', default='[]'))
+S3D_APPROVED_REFERENCE_SET_IDS = _s3d_json.loads(config('S3D_APPROVED_REFERENCE_SET_IDS', default='[]'))
+S3D_DISPOSABLE_PILOT_TARGETS = _s3d_json.loads(config('S3D_DISPOSABLE_PILOT_TARGETS', default='[]'))
+if not all(isinstance(value, list) for value in (S3D_RELEASE_AUTHORITY_USER_IDS, S3D_APPROVED_REFERENCE_SET_IDS, S3D_DISPOSABLE_PILOT_TARGETS)):
+    raise ValueError('S3D governance configuration must use JSON arrays.')

@@ -154,60 +154,35 @@ def normalize_catalog_name_to_sheet(catalog_name: str) -> str:
 # Helper: Normalize size values
 # ─────────────────────────────────────────────────────────────────────────────
 def normalize_size(size: str) -> str:
-    """
-    Normalize size to standard format.
-    
-    Examples:
-        '2"' → '2'
-        'DN50' → '50' (if strip_units enabled)
-        '1.5' → '1.5'
-    """
-    if not size:
+    """Normalize numeric spelling without converting DN to NPS or rounding."""
+    from fractions import Fraction
+    if size is None or str(size).strip() == '':
         return ''
-    
-    cfg = COMPONENT_MATCHING_CONFIG['size_normalization']
-    
-    # Strip common units
-    if cfg['strip_units']:
-        size = str(size).replace('"', '').replace('DN', '').replace('NPS', '').strip()
-    
-    # Try to convert to float and format
+    raw = str(size).strip().upper()
+    metric = raw.startswith('DN')
+    raw = raw.removeprefix('DN').removeprefix('NPS').replace('"', '').strip()
     try:
-        val = float(size)
-        if cfg.get('decimal_precision'):
-            return f"{val:.{cfg['decimal_precision']}f}".rstrip('0').rstrip('.')
-        return str(val)
-    except (ValueError, TypeError):
-        return str(size).strip()
+        numeric = str(float(sum(Fraction(part) for part in raw.split())))
+        numeric = numeric.rstrip('0').rstrip('.') if '.' in numeric else numeric
+        return ('DN' if metric else '') + numeric
+    except (ValueError, ZeroDivisionError):
+        return ('DN' if metric else '') + raw
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: Normalize pressure rating
-# ─────────────────────────────────────────────────────────────────────────────
 def normalize_pressure(pressure: str) -> str:
-    """
-    Normalize pressure rating to standard format.
-    
-    Examples:
-        '150#' → '150'
-        '300 lbs' → '300'
-        'PN16' → '16'
-    """
-    if not pressure:
+    """Preserve PN vs class identity; no service pressure/rating conversions."""
+    if pressure is None:
         return ''
-    
-    cfg = COMPONENT_MATCHING_CONFIG['pressure_normalization']
-    
-    # Strip symbols
-    if cfg['strip_symbols']:
-        pressure = str(pressure).replace('#', '').replace('lbs', '').replace('PN', '').strip()
-    
-    # Extract numeric part
-    match = re.search(r'\d+', str(pressure))
-    if match:
-        return match.group(0)
-    
-    return str(pressure).strip()
+    raw = str(pressure).strip().upper()
+    metric = raw.startswith('PN')
+    raw = re.sub(r'^(PN|CLASS)\s*', '', raw)
+    raw = re.sub(r'\s*(#|LBS?)$', '', raw).strip()
+    try:
+        from decimal import Decimal
+        normalized = format(Decimal(raw).normalize(), 'f')
+        return ('PN' if metric else '') + normalized
+    except Exception:
+        return ('PN' if metric else '') + raw
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,14 +199,15 @@ def parse_match_xlsx(
         (rules_count, error_message)
     """
     from ..matching_models import MatchingRule
+    if workbook_set.frozen_at or workbook_set.pinned_jobs.exists():
+        return 0, 'Frozen or pinned reference sets cannot be reparsed.'
     
     cfg = COMPONENT_MATCHING_CONFIG['match_xlsx']
     
     try:
         # Read Excel file
         df = _read_excel(
-            file_path,
-            sheet_name=cfg['sheet_name'],
+            file_path, sheet_name=cfg['sheet_name'],
             header=cfg['header_row'] if cfg['header_row'] >= 0 else None,
             skiprows=cfg['skip_rows'] if cfg['skip_rows'] > 0 else None,
         )
@@ -301,7 +277,8 @@ def load_cat_sheet(
         DataFrame or None if sheet not found
     """
     try:
-        df = _read_excel(cat_file_path, sheet_name=sheet_name)
+        from .reference_intelligence import read_reference_sheet
+        df = read_reference_sheet(cat_file_path, sheet_name)
         logger.info(f"[CATLoader] Loaded sheet '{sheet_name}' with {len(df)} rows")
         return df
     except Exception as e:
@@ -323,7 +300,8 @@ def load_spec_sheet(
         DataFrame or None if sheet not found
     """
     try:
-        df = _read_excel(spec_file_path, sheet_name=sheet_name)
+        from .reference_intelligence import read_reference_sheet
+        df = read_reference_sheet(spec_file_path, sheet_name)
         logger.info(f"[SPECLoader] Loaded sheet '{sheet_name}' with {len(df)} rows")
         return df
     except Exception as e:
@@ -334,153 +312,248 @@ def load_spec_sheet(
 # ─────────────────────────────────────────────────────────────────────────────
 # Service: Match component to CAT commodity code
 # ─────────────────────────────────────────────────────────────────────────────
-def match_component(
-    pdf_component_name: str,
-    nominal_size: str,
-    pressure_rating: str,
-    material_grade: str,
-    workbook_set,
-) -> Dict[str, Any]:
-    """
-    Match a PDF component to CAT commodity code.
-    
-    Args:
-        pdf_component_name: Component name from PDF (e.g., "GATE VALVE")
-        nominal_size: Pipe size (e.g., "2", "4", "DN50")
-        pressure_rating: Pressure class (e.g., "150#", "300#")
-        material_grade: Material (e.g., "A105", "316SS")
-        workbook_set: MatchingWorkbookSet instance
-    
-    Returns:
-        {
-            'matched': bool,
-            'commodity_code': str,
-            'description': str,
-            'match_score': float,
-            'match_method': str,
-            'error': str,
-        }
-    """
-    from ..matching_models import MatchingRule, ComponentMatchingResult
-    
-    result = {
-        'matched': False,
-        'commodity_code': '',
-        'description': '',
-        'match_score': 0.0,
-        'match_method': '',
-        'error': '',
-        'status': 'unmatched',
-        'candidate_count': 0,
-    }
-    
-    try:
-        # Step 1: Lookup in Match.xlsx
-        rule = MatchingRule.objects.filter(
-            workbook_set=workbook_set,
-            pdf_component_name__iexact=pdf_component_name
-        ).first()
-        
-        if not rule:
-            result['error'] = f"No matching rule found for '{pdf_component_name}'"
-            return result
-        
-        catalog_name = rule.catalog_component_name
-        cat_sheet_name = rule.cat_sheet_name
-        
-        # Step 2: Load CAT sheet
-        if not workbook_set.cat_file:
-            result['error'] = "CAT workbook not uploaded"
-            return result
-        
-        cat_df = load_cat_sheet(workbook_set.cat_file, cat_sheet_name)
-        if cat_df is None or cat_df.empty:
-            result['error'] = f"CAT sheet '{cat_sheet_name}' not found or empty"
-            return result
-        
-        # Step 3: Normalize input criteria
-        norm_size = normalize_size(nominal_size)
-        norm_pressure = normalize_pressure(pressure_rating)
-        norm_material = str(material_grade).strip().upper()
-        
-        # Step 4: Filter CAT data by criteria
-        cfg = COMPONENT_MATCHING_CONFIG['cat_xlsx']
-        if norm_material and cfg['material_grade_col'] not in cat_df.columns:
-            result['status'] = 'invalid_reference'
-            result['error'] = 'CAT sheet is missing the material column required by these matching criteria.'
-            return result
-        
-        matches = cat_df.copy()
-        
-        # Filter by size (check both Npd[1] and Npd[2])
-        if norm_size:
-            size_matches = pd.Series(False, index=matches.index)
-            for npd_col in cfg['npd_cols']:
-                if npd_col in matches.columns:
-                    size_matches |= matches[npd_col].astype(str).apply(normalize_size) == norm_size
-            matches = matches[size_matches]
-        
-        # Filter by pressure rating (check both PressureRating[1] and PressureRating[2])
-        if norm_pressure:
-            pressure_matches = pd.Series(False, index=matches.index)
-            for pr_col in cfg['pressure_rating_cols']:
-                if pr_col in matches.columns:
-                    pressure_matches |= matches[pr_col].astype(str).apply(normalize_pressure) == norm_pressure
-            matches = matches[pressure_matches]
-        
-        # Filter by material grade
-        if norm_material and cfg['material_grade_col'] in matches.columns:
-            matches = matches[
-                matches[cfg['material_grade_col']].astype(str).str.upper().str.contains(norm_material, na=False, regex=False)
-            ]
-        
-        # Step 5: Return best match
-        if matches.empty:
-            result['error'] = f"No matching component found in CAT for criteria: size={norm_size}, rating={norm_pressure}, material={norm_material}"
-            return result
-        
-        matches = matches.drop_duplicates()
-        result['candidate_count'] = len(matches)
-        if len(matches) > 1:
-            result['status'] = 'ambiguous'
-            result['error'] = 'Multiple catalog candidates satisfy the supplied criteria. Review or refine the criteria.'
-            code_column = cfg['commodity_code_col']
-            result['candidate_commodity_codes'] = list(dict.fromkeys(
-                str(value).strip() for value in matches.get(code_column, pd.Series(dtype=str)).dropna()
-            ))[:20]
-            return result
-        best_match = matches.iloc[0]
+def _clean(value):
+    return '' if pd.isna(value) else str(value).strip()
 
-        code = best_match.get(cfg['commodity_code_col'], '')
-        if pd.isna(code) or not str(code).strip():
-            result['error'] = 'The matching catalog row has no commodity code.'
-            return result
-        
-        result['matched'] = True
-        result['status'] = 'unique_match'
-        result['commodity_code'] = str(code).strip()
-        result['description'] = str(best_match.get(cfg['description_col'], catalog_name))
-        result['match_score'] = 1.0  # Exact match
-        result['match_method'] = 'rule-based'
-        
-        # Save result to database (optional)
+
+def _spec_eligibility(workbook_set, nominal_size, material_grade, spec_name=''):
+    """Conservative eligibility; never treat missing reference evidence as a pass."""
+    evidence = {}
+    if not workbook_set.spec_file:
+        return 'invalid_reference', {'error': 'SPEC workbook not uploaded.'}
+    sizes = load_spec_sheet(workbook_set.spec_file, 'PipeNominalDiameters')
+    limits = None
+    if sizes is not None and 'Npd' in sizes.columns and not sizes.empty:
+        if spec_name and 'SpecName' in sizes.columns:
+            sizes = sizes[sizes.SpecName.str.casefold() == spec_name.casefold()]
+        allowed = [normalize_size(v) for v in sizes.Npd if _clean(v)]
+        evidence['nominal_size'] = {'requested': nominal_size, 'allowed': allowed}
+        if nominal_size and normalize_size(nominal_size) not in allowed:
+            return 'ineligible', evidence
+    else:
+        limits = load_spec_sheet(workbook_set.spec_file, 'ServiceLimits')
+        cols = {'NominalPipingDiameterFrom', 'NominalPipingDiameterTo'}
+        if limits is None or not cols.issubset(limits.columns) or limits.empty:
+            return 'invalid_reference', {'error': 'No populated SPEC diameter eligibility data.'}
+        if spec_name and 'SpecName' in limits.columns:
+            limits = limits[limits.SpecName.str.casefold() == spec_name.casefold()]
+        ranges = []
+        try:
+            for _, row in limits.iterrows():
+                ranges.append([float(normalize_size(row.NominalPipingDiameterFrom)), float(normalize_size(row.NominalPipingDiameterTo))])
+            size = float(normalize_size(nominal_size)) if nominal_size else None
+        except ValueError:
+            return 'invalid_reference', {'error': 'Unsupported SPEC diameter value; unit/range conversion requires review.'}
+        evidence['nominal_size'] = {'requested': nominal_size, 'ranges': ranges}
+        if size is not None and not any(lo <= size <= hi for lo, hi in ranges):
+            return 'ineligible', evidence
+    if material_grade:
+        materials = load_spec_sheet(workbook_set.spec_file, 'MaterialsData')
+        if materials is None or 'MaterialsGrade' not in materials.columns or materials.empty:
+            return 'invalid_reference', {'error': 'No populated SPEC MaterialsData.MaterialsGrade.'}
+        allowed = [_clean(v).casefold() for v in materials.MaterialsGrade if _clean(v)]
+        evidence['material_grade'] = {'requested': material_grade, 'allowed': allowed}
+        if material_grade.strip().casefold() not in allowed:
+            return 'ineligible', evidence
+    return '', evidence
+
+
+def match_component(pdf_component_name, nominal_size, pressure_rating, material_grade,
+                    workbook_set, sub_type='', end_connection='', spec_name='', codelists=None):
+    """Return an explicit state. Scores rank discriminators, not probabilities."""
+    from ..matching_models import MatchingRule, ComponentMatchingResult
+    result = dict(matched=False, commodity_code='', description='', match_score=0.0,
+                  match_method='rule-based', error='', status='unmatched', state='unmatched',
+                  candidate_count=0, candidates=[], discriminators_matched={},
+                  score_description='Ranking aid only; not calibrated probability.')
+
+    def outcome(state, error=''):
+        result.update(status=state, state=state, error=error)
+        return result
+
+    try:
+        if '..' in nominal_size:
+            return outcome('unmatched', 'Extracted size interval requires engineering expansion into nominal sizes before commodity selection.')
+        blocked, evidence = _spec_eligibility(workbook_set, nominal_size, '' if codelists else material_grade, spec_name)
+        result['discriminators_matched']['spec_eligibility'] = evidence
+        if blocked:
+            return outcome(blocked, evidence.get('error', 'Component is outside SPEC eligibility.'))
+        if codelists:
+            from .buhasa_codelists import resolve
+            requested = codelists['attributes']['MaterialsGrade']
+            if requested['candidates']:
+                materials = load_spec_sheet(workbook_set.spec_file, 'MaterialsData')
+                if materials is None or 'MaterialsGrade' not in materials.columns or materials.empty:
+                    return outcome('invalid_reference', 'No populated SPEC MaterialsData.MaterialsGrade.')
+                allowed = {entry['code'] for value in materials.MaterialsGrade for entry in resolve('MaterialsGrade', _clean(value), catalog=True)['candidates']}
+                if not allowed.intersection(entry['code'] for entry in requested['candidates']):
+                    return outcome('ineligible', 'Material is outside BUHASA-normalized SPEC eligibility.')
+        rules = MatchingRule.objects.filter(workbook_set=workbook_set, pdf_component_name__iexact=pdf_component_name)
+        if rules.count() > 1:
+            return outcome('invalid_reference', 'Multiple name mappings require reference correction.')
+        rule = rules.first()
+        if not rule:
+            return outcome('unmatched', f"No mapping for '{pdf_component_name}'.")
+        if not workbook_set.cat_file:
+            return outcome('invalid_reference', 'CAT workbook not uploaded.')
+        cat = load_cat_sheet(workbook_set.cat_file, rule.cat_sheet_name)
+        if cat is None or cat.empty:
+            return outcome('invalid_reference', 'Mapped CAT sheet is missing or empty.')
+        if codelists:
+            from .buhasa_codelists import match_catalog
+            return match_catalog(result, cat, codelists, nominal_size, sub_type, rule.catalog_component_name,
+                                 normalize_size, _clean)
+        cfg = COMPONENT_MATCHING_CONFIG['cat_xlsx']
+        criteria = {
+            'size': (nominal_size, cfg['npd_cols'], normalize_size),
+            'pressure': (pressure_rating, cfg['pressure_rating_cols'], normalize_pressure),
+            'material': (material_grade, [cfg['material_grade_col']], lambda v: v.casefold()),
+            'end_connection': (end_connection, cfg['end_prep_cols'], lambda v: v.casefold()),
+            'sub_type': (sub_type, [cfg['commodity_type_col']], lambda v: v.casefold()),
+        }
+        # A mapped component sheet supplies subtype evidence when it has no
+        # CommodityType column. Never invent a subtype from catalog row order.
+        if sub_type and cfg['commodity_type_col'] not in cat.columns:
+            criteria['sub_type'] = (sub_type, [], lambda v: v.casefold())
+        for key, (wanted, columns, _) in criteria.items():
+            if wanted and columns and not any(c in cat.columns for c in columns):
+                return outcome('invalid_reference', f'CAT sheet lacks {key} discriminator columns.')
+        if cfg['commodity_code_col'] not in cat.columns:
+            return outcome('invalid_reference', 'CAT sheet lacks commodity codes.')
+        viable = []
+        for _, row in cat.drop_duplicates().iterrows():
+            details = {}
+            for key, (wanted, columns, normalize) in criteria.items():
+                actual = [_clean(row.get(c, '')) for c in columns if c in cat.columns]
+                matches = None if not wanted else (re.sub(r'[^a-z0-9]', '', wanted.casefold()) in re.sub(r'[^a-z0-9]', '', rule.catalog_component_name.casefold()) if not columns else any(normalize(v) == normalize(wanted.strip()) for v in actual))
+                details[key] = {'requested': wanted, 'values': actual or ([rule.catalog_component_name] if key == 'sub_type' else []), 'matched': matches}
+            score = sum(d['matched'] is True for d in details.values()) / len(criteria)
+            candidate = {'commodity_code': _clean(row.get(cfg['commodity_code_col'])),
+                         'description': _clean(row.get(cfg['description_col'], rule.catalog_component_name)),
+                         'discriminators': details, 'ranking_score': score}
+            if all(d['matched'] is not False for d in details.values()):
+                if not candidate['commodity_code']:
+                    return outcome('invalid_reference', 'Matching CAT row lacks a commodity code.')
+                viable.append(candidate)
+        result['candidates'] = sorted(viable, key=lambda c: (-c['ranking_score'], c['commodity_code']))
+        result['candidate_count'] = len(viable)
+        result['candidate_commodity_codes'] = list(dict.fromkeys(c['commodity_code'] for c in viable))
+        if not viable:
+            return outcome('unmatched', 'No CAT candidates satisfy the supplied discriminators.')
+        if len(viable) > 1:
+            return outcome('ambiguous', 'Engineering review must select a candidate; no automatic resolution.')
+        candidate = viable[0]
+        result.update(matched=True, commodity_code=candidate['commodity_code'], description=candidate['description'], match_score=candidate['ranking_score'])
+        result['discriminators_matched'].update(candidate['discriminators'])
+        outcome('unique_match')
         ComponentMatchingResult.objects.create(
-            workbook_set=workbook_set,
-            pdf_component_name=pdf_component_name,
-            nominal_size=nominal_size,
-            pressure_rating=pressure_rating,
-            material_grade=material_grade,
-            matched_commodity_code=result['commodity_code'],
-            matched_description=result['description'],
-            match_score=result['match_score'],
-            match_method=result['match_method'],
-            result_data=result,
-        )
-        
+            workbook_set=workbook_set, pdf_component_name=pdf_component_name,
+            nominal_size=nominal_size, pressure_rating=pressure_rating, material_grade=material_grade,
+            matched_commodity_code=result['commodity_code'], matched_description=result['description'],
+            match_score=result['match_score'], match_method=result['match_method'], result_data=result)
         return result
-        
-    except Exception as e:
-        error_msg = f"Error matching component: {str(e)}"
-        logger.exception(f"[ComponentMatcher] {error_msg}")
-        result['error'] = error_msg
-        return result
+    except Exception:
+        logger.exception('Reference matching failed')
+        return outcome('invalid_reference', 'Reference matching failed; inspect the reference workbook.')
+
+
+def run_job_matching(job, workbook_set, codelist_profile=None, selection_updates=None):
+    """Pin on matching and upsert evidence without changing extracted records."""
+    from django.db import transaction
+    from ..models import PaperSpecExtractionJob, PipingClassComponent
+    from ..matching_models import MatchingWorkbookSet, ComponentMatchDecision
+    from .reference_intelligence import file_sha256
+    with transaction.atomic():
+        from ..project_models import SpecProject
+        SpecProject.objects.select_for_update().get(pk=workbook_set.project_id)
+        job = PaperSpecExtractionJob.objects.select_for_update().select_related('document').get(pk=job.pk)
+        workbook_set = MatchingWorkbookSet.objects.select_for_update().get(pk=workbook_set.pk)
+        existing = list(job.match_decisions.filter(workbook_set=workbook_set))
+        profiled = any(d.discriminators_matched.get('codelists', {}).get('profile') == 'BUHASA' for d in existing)
+        if codelist_profile is None and profiled:
+            codelist_profile = 'BUHASA'
+        if profiled and codelist_profile != 'BUHASA':
+            raise ValueError('An existing BUHASA batch cannot downgrade to legacy matching.')
+        if codelist_profile not in (None, 'BUHASA'):
+            raise ValueError('Unsupported codelist profile.')
+        if job.status != 'completed':
+            raise ValueError('Matching requires a completed extraction job.')
+        if str(job.document.project_id) != str(workbook_set.project_id):
+            raise ValueError('Job and reference set must belong to the same project.')
+        if job.reference_workbook_set_id and job.reference_workbook_set_id != workbook_set.pk:
+            raise ValueError('Job is already pinned to another reference revision.')
+        if not workbook_set.schema_valid or not workbook_set.is_parsed:
+            raise ValueError('Reference schema validation and parsing must succeed before matching.')
+        for kind in ('match', 'spec', 'cat'):
+            if file_sha256(getattr(workbook_set, f'{kind}_file')) != getattr(workbook_set, f'{kind}_file_hash'):
+                raise ValueError('Reference file integrity check failed.')
+        job.reference_workbook_set = workbook_set
+        job.save(update_fields=['reference_workbook_set'])
+        summary = {state: 0 for state, _ in ComponentMatchDecision.STATE_CHOICES}
+        for component in PipingClassComponent.objects.filter(piping_class__job=job).select_related('piping_class'):
+            pc = component.piping_class
+            names = [f'{component.sub_type} {component.component_type}'.strip(), component.sub_type, component.component_type]
+            name = next((n for n in names if workbook_set.rules.filter(pdf_component_name__iexact=n).exists()), names[0]).upper()
+            # Preserve ranges verbatim: an extracted interval is not a single part.
+            size = component.size_from
+            if component.size_to and normalize_size(component.size_to) != normalize_size(size):
+                size = f'{size}..{component.size_to}'
+            criteria = dict(job=job, workbook_set=workbook_set, pdf_component_name=name,
+                            nominal_size=size, pressure_rating=pc.pressure_rating,
+                            material_grade=component.material_standard or pc.material_grade)
+            if len(criteria['material_grade']) > 64 or len(criteria['pressure_rating']) > 32 or len(size) > 32:
+                raise ValueError('Extracted criteria exceed decision field limits; engineering normalization is required.')
+            previous = ComponentMatchDecision.objects.filter(**criteria).first()
+            codelists = None
+            if codelist_profile == 'BUHASA':
+                from .buhasa_codelists import normalize, raw_attributes, dictionary
+                old = previous.discriminators_matched.get('codelists', {}) if previous else {}
+                attributes = raw_attributes(component)
+                # A changed source invalidates any prior canonical selections.
+                selections = old.get('selections', {}) if old.get('raw_attributes') == attributes and old.get('dictionary_hash') == dictionary()[2] else {}
+                if previous and selection_updates and str(previous.pk) in selection_updates:
+                    selections = {**selections, **selection_updates[str(previous.pk)]}
+                codelists = normalize(attributes, selections)
+                codelists['raw_attributes'] = attributes
+                codelists['component_id'] = str(component.pk)
+            result = match_component(name, size, criteria['pressure_rating'], criteria['material_grade'], workbook_set,
+                                     component.sub_type, component.end_connection, pc.class_code, codelists=codelists)
+            if codelists:
+                # Attach evidence even when SPEC eligibility stops before CAT.
+                result['discriminators_matched']['codelists'] = codelists
+            defaults = dict(sub_type=component.sub_type, end_connection=component.end_connection,
+                            state=result['state'], matched_commodity_code=result['commodity_code'],
+                            matched_description=result['description'], match_score=result['match_score'],
+                            candidates=result['candidates'], discriminators_matched={**result['discriminators_matched'], 'reason': result['error']})
+            decision, created = ComponentMatchDecision.objects.get_or_create(**criteria, defaults=defaults)
+            if not created:
+                if codelists:
+                    old = decision.discriminators_matched.get('codelists', {})
+                    if old.get('component_id') not in (None, str(component.pk)):
+                        raise ValueError('BUHASA source rows share a decision key; normalize source records before matching.')
+                    # Retain a reviewed row selection only for unchanged evidence.
+                    selected = old.get('selected_candidate_id')
+                    if selected:
+                        proposed = defaults['discriminators_matched']['codelists']
+                        comparable = {k: v for k, v in old.items() if k != 'selected_candidate_id'}
+                        if comparable == proposed and defaults['candidates'] == decision.candidates:
+                            proposed['selected_candidate_id'] = selected
+                old_evidence = decision.discriminators_matched
+                if old_evidence.get('source_reference') and {k: v for k, v in old_evidence.items() if k != 'source_reference'} == defaults['discriminators_matched'] and decision.candidates == defaults['candidates']:
+                    defaults['discriminators_matched']['source_reference'] = old_evidence['source_reference']
+                changed = any(getattr(decision, k) != v for k, v in defaults.items())
+                # The requested key omits subtype/end. Do not silently combine conflicting criteria.
+                if decision.sub_type != component.sub_type or decision.end_connection != component.end_connection:
+                    defaults.update(state='invalid_reference', candidates=[], matched_commodity_code='',
+                                    discriminators_matched={'reason': 'Duplicate criteria have conflicting subtype or end connection; normalize source records.'})
+                    changed = True
+                if changed:
+                    for key, value in defaults.items():
+                        setattr(decision, key, value)
+                    decision.review_decision = decision.final_commodity_code = decision.review_notes = ''
+                    decision.reviewed_by = decision.reviewed_at = None
+                    decision.save()
+        from collections import Counter
+        for state, count in Counter(job.match_decisions.filter(workbook_set=workbook_set).values_list('state', flat=True)).items():
+            summary[state] = count
+        return {'job_id': str(job.pk), 'workbook_set_id': str(workbook_set.pk), 'summary': summary, 'count': sum(summary.values())}

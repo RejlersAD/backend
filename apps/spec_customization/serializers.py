@@ -46,7 +46,7 @@ class PaperSpecExtractionJobSerializer(serializers.ModelSerializer):
             'status', 'progress_percent', 'current_phase',
             'pages_processed', 'chunks_total', 'chunks_done',
             'celery_task_id', 'error_message',
-            'extraction_completeness',
+            'extraction_completeness', 'reference_workbook_set',
             'created_at', 'started_at', 'completed_at', 'saved_at', 'saved_by',
         ]
         read_only_fields = fields

@@ -151,14 +151,16 @@ def _write_spec_sheet(ws, classes: Iterable, builders: list):
     return len(all_rows)
 
 
-def build_spec_workbook(job) -> io.BytesIO:
+def build_spec_workbook(job, preview_data=None, export_state='draft') -> io.BytesIO:
     """Build the SPEC workbook for a completed extraction `job`.  Returns a
     BytesIO ready to stream as an HTTP attachment."""
     wb = load_workbook(cfg.SPEC_TEMPLATE_PATH)
+    wb.properties.title = f'RADAI {export_state.upper()} SPEC workbook'
+    wb.properties.subject = 'Engineering review draft' if export_state == 'draft' else 'Frozen engineering release'
 
     # Build the preview JSON (with overrides already merged in) and write
     # it sheet-by-sheet — this guarantees the canvas and the xlsx agree.
-    preview_data = preview.build_preview(job, preview.WORKBOOK_SPEC)
+    preview_data = preview_data if preview_data is not None else preview.build_preview(job, preview.WORKBOOK_SPEC)
     summary = {}
     for sheet in preview_data['sheets']:
         sheet_name = sheet['name']
@@ -211,11 +213,13 @@ def _write_cat_sheet(ws, items: list[tuple], builder):
     return len(all_rows)
 
 
-def build_cat_workbook(job) -> io.BytesIO:
+def build_cat_workbook(job, preview_data=None, export_state='draft') -> io.BytesIO:
     """Build the CAT workbook for a completed extraction `job`."""
     wb = load_workbook(cfg.CAT_TEMPLATE_PATH)
+    wb.properties.title = f'RADAI {export_state.upper()} CAT workbook'
+    wb.properties.subject = 'Engineering review draft' if export_state == 'draft' else 'Frozen engineering release'
 
-    preview_data = preview.build_preview(job, preview.WORKBOOK_CAT)
+    preview_data = preview_data if preview_data is not None else preview.build_preview(job, preview.WORKBOOK_CAT)
     summary = {}
     ur_cfg = getattr(cfg, 'CAT_UNROUTED_EXPORT_CONFIG', {}) or {}
     for sheet in preview_data['sheets']:

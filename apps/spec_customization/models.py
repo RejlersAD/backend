@@ -265,6 +265,16 @@ class PaperSpecExtractionJob(models.Model):
         related_name='saved_spec_extractions',
     )
 
+    override_revision = models.PositiveIntegerField(default=0)
+
+    # Reference revision pinning — the workbook set pinned during matching
+    reference_workbook_set = models.ForeignKey(
+        'spec_customization.MatchingWorkbookSet',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='pinned_jobs',
+    )
+
 
 
     class Meta:
@@ -631,4 +641,12 @@ class WorkbookCellOverride(models.Model):
 # Project organiser (additive — see project_models.py)
 # ---------------------------------------------------------------------------
 from .project_models import SpecProject, ProjectCreationRequest  # noqa: E402,F401
-from .matching_models import MatchingWorkbookSet, MatchingRule, ComponentMatchingResult  # noqa: E402,F401
+from .matching_models import (  # noqa: E402,F401
+    MatchingWorkbookSet,
+    MatchingRule,
+    ComponentMatchingResult,
+    ComponentMatchDecision,
+)
+
+# Controlled release and pilot evidence (additive).
+from .release_models import ValidationRun, SpecRelease, SpecAuditEvent, ImportAttempt  # noqa: E402,F401
