@@ -8,11 +8,19 @@ CATEGORIES = ('EndPreparation', 'FlangeFacing', 'PressureRating', 'ScheduleThick
 DATA = Path(__file__).resolve().parent.parent / 'data'
 
 
+def dictionary_fingerprint(raw, aliases):
+    # Preserve the original Windows generator's fingerprint across Git/Docker
+    # LF checkouts; transport line endings are not a new engineering revision.
+    def original_newlines(content):
+        return content.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    return hashlib.sha256(original_newlines(raw) + original_newlines(aliases)).hexdigest()
+
+
 @lru_cache(maxsize=1)
 def dictionary():
     raw = (DATA / 'buhasa_codelists.json').read_bytes()
     aliases = (DATA / 'buhasa_codelist_aliases.json').read_bytes()
-    return json.loads(raw), json.loads(aliases), hashlib.sha256(raw + aliases).hexdigest()
+    return json.loads(raw), json.loads(aliases), dictionary_fingerprint(raw, aliases)
 
 
 @lru_cache(maxsize=1)

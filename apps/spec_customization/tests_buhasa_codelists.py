@@ -6,12 +6,20 @@ from . import tests_controlled_release as release_tests
 from unittest.mock import patch
 from .tests_matching_pipeline import xlsx
 from .matching_models import ComponentMatchDecision
-from .services.buhasa_codelists import dictionary, resolve, normalize
+from .services.buhasa_codelists import dictionary, resolve, normalize, dictionary_fingerprint
 from .services.reference_intelligence import file_sha256
 from .services.controlled_release import codelist_release_blockers
 
 
 class ResolutionTests(SimpleTestCase):
+    def test_dictionary_fingerprint_preserves_original_crlf_across_lf_checkouts(self):
+        import hashlib
+        raw = b'{"FlangeFacing":[]}\r\n'
+        aliases = b'{"RF":[]}\r\n'
+        original = hashlib.sha256(raw + aliases).hexdigest()
+        self.assertEqual(dictionary_fingerprint(raw, aliases), original)
+        self.assertEqual(dictionary_fingerprint(raw.replace(b'\r\n', b'\n'), aliases.replace(b'\r\n', b'\n')), original)
+
     def test_exact_alias_unmapped_and_thread_gender(self):
         self.assertEqual(resolve('FlangeFacing', 'RF')['code'], 5)
         self.assertEqual(resolve('FlangeFacing', ' raised FACE ')['code'], 5)

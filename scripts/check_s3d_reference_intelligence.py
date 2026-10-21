@@ -36,12 +36,12 @@ assert connection.settings_dict['NAME'] == 'radai_dev'
 assert connection.settings_dict['HOST'] in {'postgres_local', 'radai_postgres_local', 'localhost', '127.0.0.1'}
 executor = MigrationExecutor(connection)
 target = [('spec_customization', '0014_reference_intelligence')]
-plan = executor.migration_plan(target)
+plan = [] if all(node in executor.loader.applied_migrations for node in target) else executor.migration_plan(target)
 assert all(m.app_label == 'spec_customization' and m.name == '0014_reference_intelligence' and not backwards for m, backwards in plan)
 if plan:
     assert '--apply' in sys.argv, '0014 pending; pass --apply to apply only this migration on radai_dev.'
     executor.migrate(target)
-assert not MigrationExecutor(connection).migration_plan(target)
+assert all(node in MigrationExecutor(connection).loader.applied_migrations for node in target)
 print('PASS: 0014 applied on local radai_dev.', flush=True)
 
 storage = RemoteMemoryStorage()
