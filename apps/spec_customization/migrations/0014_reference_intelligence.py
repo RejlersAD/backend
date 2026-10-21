@@ -7,8 +7,20 @@ pinning during matching.
 """
 from django.conf import settings
 from django.db import migrations, models
+from importlib import import_module
 import django.db.models.deletion
 import uuid
+
+
+def ensure_reference_intelligence_keys(apps, schema_editor):
+    """Restore FK target keys on restored databases without changing identities."""
+    import_module('apps.project_control.migrations.0007_epc_foundation').ensure_reference_keys(
+        apps, schema_editor, (
+            ('spec_customization', 'MatchingWorkbookSet'),
+            ('spec_customization', 'PaperSpecExtractionJob'),
+            tuple(settings.AUTH_USER_MODEL.split('.')),
+        ),
+    )
 
 
 class Migration(migrations.Migration):
@@ -18,6 +30,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_reference_intelligence_keys, migrations.RunPython.noop),
         # ── MatchingWorkbookSet extensions ──────────────────────────────
         migrations.AddField(
             model_name='matchingworkbookset',
