@@ -116,6 +116,181 @@ def _build_prompt(deep_cfg: dict, drawing_ref: str, page_no: int) -> str:
         'Drawing: {drawing_ref}, page {page_no}.\n'
         'Return ONLY a JSON array. Each element is an object with these keys '
         '(use "" when not visible on the drawing):\n{fields}\n'
+        '\n'
+        'Field mapping rules for this drawing format:\n'
+        '\n'
+        'COMBINED PRESSURE // TEMP labels:\n'
+        'When a data box row has label like:\n'
+        "'DISCHARGE PRESSURE // TEMP',\n"
+        "'OPERATING PRESSURE // TEMP',\n"
+        "'DISCHARGE PRESSURE / TEMP':\n"
+        "→ Split the value on '//' or '/'\n"
+        '→ First part (pressure) → oper_pressure\n'
+        '→ Second part (temperature) → oper_temperature\n'
+        '\n'
+        "DISCHARGE PRESSURE // TEMP: 145 psig // 27.4°F\n"
+        "→ oper_pressure = '145 psig(10 barg)'\n"
+        "→ oper_temperature = '27.4°F(53°C)'\n"
+        'The temperature value NEVER goes into oper_pressure!\n'
+        "Keep the FULL temperature value including its parenthesised "
+        "annotation — '27.4°F(53°C)', never truncate to just '27.4°F'.\n"
+        '\n'
+        "When label is 'DESIGN PRESSURE // TEMP':\n"
+        '→ First part (pressure) → design_pressure_max\n'
+        '→ Second part (temperature) → design_temp_max\n'
+        '\n'
+        'DESIGN PRESSURE // TEMP label:\n'
+        '→ design_pressure_max = pressure part only\n'
+        '→ design_temp_max = temperature part only\n'
+        'Never put temperature value in pressure field!\n'
+        '\n'
+        'DESIGN PRESSURE // TEMP examples:\n'
+        'Value: FV/180psig (FV/12.41barg)//29°F/185°F(-4°C/85°C)\n'
+        "→ design_pressure_max: 'FV/180psig (FV/12.41barg)'\n"
+        "→ design_temp_max: '29°F/185°F(-4°C/85°C)'\n"
+        'Split ONLY on the // between pressure and temp.\n'
+        'Do NOT split on the / inside FV/180psig!\n'
+        '\n'
+        'design_temp_min = minimum temperature value\n'
+        'design_temp_max = maximum temperature value\n'
+        'When DESIGN PRESSURE // TEMP label:\n'
+        'temperature part goes to design_temp_max only.\n'
+        'design_temp_min comes from a separate\n'
+        'MIN temperature row if present.\n'
+        '\n'
+        'COMBINED DIAMETER & LENGTH labels:\n'
+        "When label is 'INTERNAL DIAMETER & T/T LENGTH'\n"
+        "or 'INTERNAL DIAMETER & T/T':\n"
+        "Value format: '1800 mm (ID)x4000 mm (T/T)'\n"
+        "→ First part before 'x' → dimension_diameter\n"
+        '→ Second part after \'x\' → dimension_length\n'
+        '\n'
+        'OTHER FIELD MAPPINGS:\n'
+        "'DISCHARGE PRESSURE' alone → oper_pressure\n"
+        "'OPERATING PRESS' alone → oper_pressure\n"
+        "'OPERATING TEMP (MAX/MIN)' → oper_temperature\n"
+        "  (value like \"105/86 °F\" goes as-is into oper_temperature)\n"
+        "  (keep combined value, do not split)\n"
+        "'RATED FLOW @ T&P' or 'RATED CAPACITY' → design_flowrate\n"
+        "'NOMINAL CAPACITY' → design_flowrate\n"
+        "'GROSS CAPACITY' → design_flowrate\n"
+        "'HEIGHT (T/T)' → dimension_length\n"
+        "'DIAMETER (ID)' → dimension_diameter\n"
+        "'MOTOR POWER' → motor_rating\n"
+        "'INSULATION TYPE / THICKNESS' → insulation\n"
+        "'TRIM' → remarks (append to existing remarks)\n"
+        "'MATERIAL : SHELL INTERNALS' → moc\n"
+        "'MATERIAL OF SHELL/INTERNAL' → moc\n"
+        "'MATERIAL : SHELL / INTERNALS' → moc\n"
+        '\n'
+        'MAX/MIN dual-value labels:\n'
+        'When label has (MAX/MIN) qualifier\n'
+        'with two values separated by /:\n'
+        '\n'
+        "'DESIGN PRESS (MAX/MIN): 195 psig / FV'\n"
+        "→ design_pressure_max: '195 psig'\n"
+        "→ design_pressure_min: 'FV'\n"
+        '\n'
+        "'DESIGN TEMP (MAX/MIN): 185°F / -13.2°F'\n"
+        "→ design_temp_max: '185°F'\n"
+        "→ design_temp_min: '-13.2°F'\n"
+        '\n'
+        "'OPERATING TEMP (MAX/MIN): 105/86°F'\n"
+        "→ oper_temperature: '105/86°F' (keep as-is)\n"
+        '\n'
+        'IMPORTANT: For (MAX/MIN) labels:\n'
+        'First value before / → MAX field\n'
+        'Second value after / → MIN field\n'
+        '\n'
+        'DESIGN TEMP extraction rules:\n'
+        '\n'
+        'When DESIGN PRESSURE // TEMP label:\n'
+        "Temperature part: '29°F/185°F(-4°C/85°C)'\n"
+        "→ design_temp_min: '-4°C' (lowest temperature)\n"
+        "→ design_temp_max: '85°C' (highest temperature)\n"
+        '\n'
+        'When DESIGN TEMP (MAX/MIN) standalone label:\n'
+        "Value: '185°F/-13.2°F'\n"
+        "→ design_temp_max: '185°F' (first value)\n"
+        "→ design_temp_min: '-13.2°F' (second value)\n"
+        '\n'
+        'IMPORTANT:\n'
+        'design_temp_min = LOWEST/COLDEST temperature\n'
+        'design_temp_max = HIGHEST/WARMEST temperature\n'
+        '\n'
+        'EXAMPLE:\n'
+        "Temperature part '29°F/185°F(-4°C/85°C)':\n"
+        'Minimum = -4°C (29°F)\n'
+        'Maximum = 85°C (185°F)\n'
+        "→ design_temp_min: '-4°C'\n"
+        "→ design_temp_max: '85°C'\n"
+        '\n'
+        'EXAMPLE — V-803-TF drawing:\n'
+        'OPERATING PRESS: 150 psig\n'
+        "→ oper_pressure: '150 psig'\n"
+        '\n'
+        'OPERATING TEMP (MAX/MIN): 105/86 °F\n'
+        "→ oper_temperature: '105/86 °F'\n"
+        '\n'
+        'DESIGN PRESS (MAX/MIN): 195 psig / FV\n'
+        "→ design_pressure_max: '195 psig'\n"
+        "→ design_pressure_min: 'FV'\n"
+        '\n'
+        'DESIGN TEMP (MAX/MIN): 185 °F / -13.2 °F\n'
+        "→ design_temp_max: '185 °F'\n"
+        "→ design_temp_min: '-13.2 °F'\n"
+        '\n'
+        'NOMINAL CAPACITY: 327 M3\n'
+        "→ design_flowrate: '327 M3'\n"
+        '\n'
+        'MATERIAL OF SHELL/INTERNAL: CS + LINING\n'
+        "→ moc: 'CS + LINING'\n"
+        '\n'
+        'EXAMPLES from real drawings:\n'
+        'Label: DISCHARGE PRESSURE // TEMP\n'
+        'Value: 145 psig(10 barg)// 27.4°F(53°C)\n'
+        "→ oper_pressure: '145 psig(10 barg)'\n"
+        "→ oper_temperature: '27.4°F(53°C)'\n"
+        '\n'
+        'Label: OPERATING PRESSURE // TEMP\n'
+        'Value: 143.5 psig(10 barg)// 127.4°F(53°C)\n'
+        "→ oper_pressure: '143.5 psig(10 barg)'\n"
+        "→ oper_temperature: '127.4°F(53°C)'\n"
+        '\n'
+        'Label: DESIGN PRESSURE // TEMP\n'
+        'Value: FV/180psig (FV/12.41barg)//29°F/185°F(-4°C/85°C)\n'
+        "→ design_pressure_max: 'FV/180psig (FV/12.41barg)'\n"
+        "→ design_temp_max: '29°F/185°F(-4°C/85°C)'\n"
+        '\n'
+        'Label: INTERNAL DIAMETER & T/T LENGTH\n'
+        'Value: 1800 mm (ID)x4000 mm (T/T)\n'
+        "→ dimension_diameter: '1800 mm (ID)'\n"
+        "→ dimension_length: '4000 mm (T/T)'\n"
+        '\n'
+        'EXAMPLE — V-806-TF drawing:\n'
+        'GROSS CAPACITY: 4.24 m3\n'
+        "→ design_flowrate: '4.24 m3'\n"
+        '\n'
+        'HEIGHT (T/T): 3350 mm\n'
+        "→ dimension_length: '3350 mm'\n"
+        '\n'
+        'DIAMETER (ID): 1200 mm\n'
+        "→ dimension_diameter: '1200 mm'\n"
+        '\n'
+        'OPERATING TEMP (MAX/MIN): 120°F/110°F\n'
+        "→ oper_temperature: '120°F/110°F'\n"
+        '(keep both values as-is, do not split)\n'
+        '\n'
+        'DESIGN TEMP (MAX/MIN): 185°F/-29.8°F\n'
+        "→ design_temp_max: '185°F'\n"
+        "→ design_temp_min: '-29.8°F'\n"
+        '(first value = MAX, second value = MIN)\n'
+        '\n'
+        'Always extract the COMPLETE value\n'
+        'including units and annotations like\n'
+        '(10 barg), (ID), (T/T), (53°C).\n'
+        'Do not truncate values.\n'
+        '\n'
         'No markdown fences, no commentary.'
     )
     return template.format(

@@ -589,7 +589,7 @@ class EquipmentItem(models.Model):
     dimension_length = models.CharField(max_length=64, blank=True, default='')
     dimension_diameter = models.CharField(max_length=64, blank=True, default='')
     motor_rating = models.CharField(max_length=64, blank=True, default='')
-    pid_no = models.CharField(max_length=300, blank=True, default='')
+    pid_no = models.CharField(max_length=2000, blank=True, default='')
     quality_required = models.CharField(max_length=64, blank=True, default='')
     phase = models.CharField(max_length=64, blank=True, default='')
     remarks = models.CharField(max_length=500, blank=True, default='')
