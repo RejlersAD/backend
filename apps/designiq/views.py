@@ -819,6 +819,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
         pms_file = request.FILES.get('pms_file')
         nace_file = request.FILES.get('nace_file')
         stress_criticality_file = request.FILES.get('stress_criticality_file')  # NEW: 5th document for stress criticality
+        process_line_list_file = request.FILES.get('process_line_list_file')  # Optional 6th document: Process Line List (Excel)
         
         if not pid_file:
             return Response({
@@ -932,6 +933,14 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     'filename': stress_criticality_file.name,
                     'content': stress_content,
                     'size': len(stress_content)
+                }
+            if process_line_list_file:
+                logger.info(f"📑 Process Line List document attached: {process_line_list_file.name}")
+                pll_content = process_line_list_file.read()
+                enrichment_files['process_line_list'] = {
+                    'filename': process_line_list_file.name,
+                    'content': pll_content,
+                    'size': len(pll_content)
                 }
             
             # Queue Celery task for async processing (or execute immediately if EAGER mode)
@@ -1647,6 +1656,24 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 # Status columns (2)
                 'Status', 'Validated'
             ]
+
+            # PROCESS LINE LIST OUTPUT FORMAT (soft-coded): when a PLL Excel was
+            # uploaded for this document, the export mirrors the project PLL
+            # template column layout plus the extra "CRITICAL STRESS LINE"
+            # column. Without PLL data the legacy 46-column layout is untouched.
+            from .tasks import (
+                PROCESS_LINE_LIST_CONFIG,
+                CRITICAL_LINE_LIST_EXPORT_FORMAT,
+                format_critical_line_list_row,
+            )
+            has_pll = any(
+                PROCESS_LINE_LIST_CONFIG['match_flag_field'] in item.data
+                for item in items[:1]
+            )
+            pll_keys = []  # legacy tail-append disabled; PLL mode replaces the layout
+            if has_pll:
+                headers = [h for h, _s in CRITICAL_LINE_LIST_EXPORT_FORMAT] + ['Status', 'Validated']
+                logger.info("📑 Exporting in Process Line List format (+ CRITICAL STRESS LINE)")
             
             ws.append(headers)
             
@@ -1659,6 +1686,14 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             
             # Add data rows
             for item in items:
+                if has_pll:
+                    row_dict = dict(item.data)
+                    row_dict.setdefault('item_tag', item.item_tag)
+                    ws.append(format_critical_line_list_row(row_dict) + [
+                        item.status,
+                        'Yes' if item.is_validated else 'No'
+                    ])
+                    continue
                 ws.append([
                     # Base columns (17)
                     item.item_tag,
@@ -1710,7 +1745,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     # Status columns (2)
                     item.status,
                     'Yes' if item.is_validated else 'No'
-                ])
+                # Process Line List columns (soft-coded add-on, empty when absent)
+                ] + [item.data.get(k, '') for k in pll_keys])
             
             # Auto-size columns
             for col_num in range(1, len(headers) + 1):

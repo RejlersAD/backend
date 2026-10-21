@@ -16,6 +16,16 @@ from .models import (
 )
 
 
+def _leave_hr_fallback_exists(stage, instance):
+    """Soft-coded: the leave HR-review stage may use the role-based approver
+    fallback (LEAVE_HR_APPROVER_ROLE_FALLBACK in payroll.leave_approval) so a
+    missing HR designation assignment does not dead-block the stage."""
+    if stage.code != 'hr_review' or instance.subject_type != 'payroll.leave_request':
+        return False
+    from apps.payroll.services.leave_approval import active_hr_approvers
+    return active_hr_approvers().exists()
+
+
 class HRWorkflowService:
     @classmethod
     def actionable_instance_ids(cls, user):
@@ -81,7 +91,10 @@ class HRWorkflowService:
         if assigned_to is not None:
             if not approval_access(assigned_to, module):
                 raise ValidationError({'workflow': 'The designated approver needs active approval access before this stage can open.'})
-        elif not role_code or not position_users(positions, module).exists():
+        elif not role_code or (
+            not position_users(positions, module).exists()
+            and not _leave_hr_fallback_exists(stage, instance)
+        ):
             raise ValidationError({'workflow': 'Configure an active business approver with approval access before this stage can open.'})
         now = timezone.now()
         task, _ = HRWorkflowTask.objects.get_or_create(

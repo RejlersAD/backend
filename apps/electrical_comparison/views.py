@@ -1255,7 +1255,7 @@ class AnnotatedPagesView(APIView):
                     'pages': get_annotated_pages(read_field(job.pid_file), [
                         {'tag_number': r.tag_number, 'status': r.status, 'equipment_type': r.equipment_type}
                         for r in all_results
-                    ], located=job.located_boxes or {}),
+                    ], located=job.located_boxes or {}, tag_statuses=job.tag_statuses or {}),
                 }
             if job.equipment_file:
                 doc = build_list_document(job.equipment_file, 'equipment_list')

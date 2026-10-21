@@ -718,21 +718,30 @@ def _process_electrical_comparison_inner(job_id: str, context: dict = None):
         if results_to_save:
             ElectricalComparisonResult.objects.bulk_create(results_to_save)
 
-        # Targeted locator pass — for every 'missing' tag (in a reference
-        # list but not found on the P&ID by the main extraction), ask the
-        # Vision model to find exactly those tags on the drawing. Scanned
-        # P&IDs have no text layer, so this is the only way to get their
+        # Targeted locator pass — for every tag (matched, missing AND
+        # extra), ask the Vision model to find it on the drawing. Scanned
+        # P&IDs have no text layer, so this is the only way to get
         # coordinates for the canvas viewer. Best-effort: a failure here
         # must never fail an otherwise-completed job.
-        missing_tags = sorted({r.tag_number for r in results_to_save if r.status == 'missing'})
-        if pid_file_path and resolved_key and missing_tags:
+        #
+        # BUG FIX (explicit request): this used to only locate 'missing'
+        # tags — correct for verifying "is this reference-list tag really
+        # absent from the drawing", but incomplete for the canvas viewer's
+        # own purposes, which wants a box for every tag regardless of
+        # status. tag_statuses is saved alongside located_boxes so
+        # get_annotated_pages (pdf_annotator.py) can color each located
+        # hit by its REAL status instead of always drawing it purple.
+        all_tags = sorted({r.tag_number for r in results_to_save if r.tag_number})
+        tag_statuses = {r.tag_number: r.status for r in results_to_save if r.tag_number}
+        if pid_file_path and resolved_key and all_tags:
             try:
                 from .services.tag_extractor import locate_tags_on_drawing
                 with open(pid_file_path, 'rb') as f:
                     pid_bytes = f.read()
-                located = locate_tags_on_drawing(pid_bytes, missing_tags, resolved_key, provider, model)
+                located = locate_tags_on_drawing(pid_bytes, all_tags, resolved_key, provider, model)
                 if located:
                     job.located_boxes = located
+                    job.tag_statuses = tag_statuses
             except Exception:
                 logger.exception('[ElecCompareTask] Locate pass failed for job_id=%s (non-fatal)', job_id)
 

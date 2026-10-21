@@ -110,6 +110,344 @@ def extract_section_7(document_text):
     return document_text[:2000]
 
 
+# ---------------------------------------------------------------------------
+# PROCESS LINE LIST (optional Excel upload) — soft-coded add-on.
+# Merges process-discipline columns into each P&ID-extracted line WITHOUT
+# touching the locked base extraction or the HMB/PMS/NACE enrichment path.
+# All output keys carry the 'pll_' prefix so core columns are never
+# overwritten.
+# ---------------------------------------------------------------------------
+PROCESS_LINE_LIST_CONFIG = {
+    'enabled': True,
+    # Header aliases per canonical key. Matching is case-insensitive with
+    # whitespace collapsed; exact matches win over "contains" matches.
+    # Order matters for contains-matching: more specific aliases come first
+    # (e.g. 'line_size' before 'line_short').
+    # Covers the project PLL template (Process_Line_List.xlsx, Phase 2).
+    'column_aliases': {
+        'line_size':         ['line size', 'size (in)', 'size(in)', 'nb'],
+        'line_short':        ['line'],
+        'service':           ['line service', 'service description', 'service', 'fluid description'],
+        'fluid':             ['fluid'],
+        'from':              ['from'],
+        'to':                ['to'],
+        'material_class':    ['material class', 'piping class', 'pipe class'],
+        'stress_analysis':   ['stress analysis'],
+        'operating_pressure': ['operating pressure', 'operating press', 'op. pressure', 'op. press', 'op pressure', 'op press', 'normal pressure'],
+        'operating_temp':    ['operating temperature', 'operating temp', 'op. temp', 'op temp', 'normal temp'],
+        'design_pressure':   ['design pressure', 'design press'],
+        'design_temp':       ['design temperature', 'design temp'],
+        'phase':             ['phase'],
+        'flow_rate':         ['flow rate', 'flowrate', 'flow'],
+        'test_pressure':     ['test pressure', 'test press'],
+        'test_medium':       ['test medium', 'test media'],
+        'insulation':        ['insul code', 'insulation', 'insul'],
+        'thk':               ['thk', 'thickness'],
+        'paint_code':        ['paint code', 'paint'],
+        'criticality_rating': ['criticality rating'],
+        'pid_number':        ['p&id number', 'pid number', 'p&id no', 'p&id'],
+        'nde_class':         ['nde'],
+        'rev':               ['rev'],
+        'tracing':           ['tracing'],
+        'remarks':           ['remarks', 'remark', 'notes', 'note'],
+    },
+    # Candidate header names for the line-number key column
+    'line_no_aliases': ['line no', 'line number', 'line tag', 'line designation'],
+    'field_prefix': 'pll_',
+    'match_flag_field': 'pll_match',
+    # Display labels for export/table headers (keyed by prefixed output key)
+    'header_labels': {
+        'pll_line_size':         'PLL Line Size',
+        'pll_line_short':        'PLL Line',
+        'pll_service':           'PLL Service',
+        'pll_fluid':             'PLL Fluid',
+        'pll_from':              'PLL From',
+        'pll_to':                'PLL To',
+        'pll_material_class':    'PLL Material Class',
+        'pll_stress_analysis':   'PLL Stress Analysis',
+        'pll_operating_pressure': 'PLL Operating Pressure',
+        'pll_operating_temp':    'PLL Operating Temp',
+        'pll_design_pressure':   'PLL Design Pressure',
+        'pll_design_temp':       'PLL Design Temp',
+        'pll_phase':             'PLL Phase',
+        'pll_flow_rate':         'PLL Flow Rate',
+        'pll_test_pressure':     'PLL Test Pressure',
+        'pll_test_medium':       'PLL Test Medium',
+        'pll_insulation':        'PLL Insul Code',
+        'pll_thk':               'PLL THK (mm)',
+        'pll_paint_code':        'PLL Paint Code',
+        'pll_criticality_rating': 'PLL Criticality Rating',
+        'pll_pid_number':        'PLL P&ID Number',
+        'pll_nde_class':         'PLL NDE Class',
+        'pll_rev':               'PLL Rev',
+        'pll_tracing':           'PLL Tracing',
+        'pll_remarks':           'PLL Remarks',
+        'pll_match':             'PLL Match',
+    },
+}
+
+# Ordered output keys (canonical order = column_aliases order + raw line no + match flag)
+PROCESS_LINE_LIST_OUTPUT_KEYS = (
+    [PROCESS_LINE_LIST_CONFIG['field_prefix'] + k
+     for k in PROCESS_LINE_LIST_CONFIG['column_aliases']]
+    + [PROCESS_LINE_LIST_CONFIG['field_prefix'] + 'line_number_full',
+       PROCESS_LINE_LIST_CONFIG['match_flag_field']]
+)
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL LINE LIST — FINAL OUTPUT FORMAT (soft-coded).
+# Mirrors the project Process Line List template
+# (Documents/Piping/Critical Line List/Phase 2/Process_Line_List.xlsx)
+# plus ONE extra column "CRITICAL STRESS LINE" carrying the stress
+# criticality level (L1/L2/L3) for every record.
+# Each entry: (header, sources) — sources are tried in order against the
+# line dict (pll_* values first, core/base fallbacks after).
+# Used only when a Process Line List was uploaded; legacy 46-column export
+# stays untouched otherwise.
+# ---------------------------------------------------------------------------
+CRITICAL_LINE_LIST_EXPORT_FORMAT = [
+    ('LINE NUMBER',               ['item_tag', 'line_number', 'original_detection']),
+    ('LINE',                      ['pll_line_short', 'line_number', 'original_detection']),
+    ('FLUID',                     ['pll_fluid', 'fluid_code']),
+    ('FROM',                      ['pll_from', 'from_line', 'from_equipment']),
+    ('TO',                        ['pll_to', 'to_line', 'to_equipment']),
+    ('LINE SIZE (IN)',            ['pll_line_size', 'size']),
+    ('MATERIAL CLASS',            ['pll_material_class', 'pipr_class']),
+    ('STRESS ANALYSIS',           ['pll_stress_analysis']),
+    ('OPERATING PRESS.(kg/cm2g)', ['pll_operating_pressure', 'normal_pressure']),
+    ('OPERATING TEMP. (deg C)',   ['pll_operating_temp', 'normal_temp']),
+    ('DESIGN PRESS.(kg/cm2g)',    ['pll_design_pressure', 'design_pressure']),
+    ('DESIGN TEMP(deg C)',        ['pll_design_temp', 'max_design_temp']),
+    ('PHASE',                     ['pll_phase']),
+    ('TEST PRESS. (kg/cm2g)',     ['pll_test_pressure', 'test_pressure']),
+    ('TEST MEDIA',                ['pll_test_medium', 'test_medium']),
+    ('INSUL CODE',                ['pll_insulation', 'insulation']),
+    ('THK.(MM)',                  ['pll_thk', 'schedule_wall_thk']),
+    ('PAINT CODE',                ['pll_paint_code']),
+    ('CRITICALITY RATING',        ['pll_criticality_rating', 'criticality_code']),
+    ('P&ID NUMBER',               ['pll_pid_number', 'pid_no']),
+    ('NDE CLASS NOTE',            ['pll_nde_class']),
+    ('REV',                       ['pll_rev', 'pid_rev']),
+    # The one extra column vs the PLL template
+    ('CRITICAL STRESS LINE',      ['criticality_stress']),
+]
+
+
+def format_critical_line_list_row(row):
+    """
+    Resolve one output row per CRITICAL_LINE_LIST_EXPORT_FORMAT.
+    Sources are tried in order; first non-empty value wins.
+    """
+    out = []
+    for _header, sources in CRITICAL_LINE_LIST_EXPORT_FORMAT:
+        value = ''
+        for key in sources:
+            v = row.get(key)
+            if v not in (None, ''):
+                value = v
+                break
+        out.append(value)
+    return out
+
+
+def _normalize_pll_line_no(value):
+    """Normalize a line number for cross-document matching (PLL ↔ P&ID)."""
+    import re
+    if value is None:
+        return ''
+    text = str(value).upper().replace('"', '').replace('”', '').replace('“', '')
+    return re.sub(r'[\s_]+', '', text).strip()
+
+
+def parse_process_line_list(file_data):
+    """
+    Parse an Excel Process Line List into {normalized_line_no: {pll_*: value}}.
+    Header mapping is soft-coded via PROCESS_LINE_LIST_CONFIG.
+    Returns {} when the file cannot be parsed or no header row is found.
+    """
+    import openpyxl
+    cfg = PROCESS_LINE_LIST_CONFIG
+    try:
+        workbook = openpyxl.load_workbook(BytesIO(file_data['content']), data_only=True)
+    except Exception as e:
+        # Some project templates carry corrupt custom document properties that
+        # break openpyxl's reader — retry with docProps/custom.xml stripped.
+        logger.warning(f"PLL: standard open failed ({e}); retrying without custom doc properties")
+        try:
+            import re as _re
+            import zipfile
+            src = zipfile.ZipFile(BytesIO(file_data['content']))
+            buf = BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as dst:
+                for name in src.namelist():
+                    if name == 'docProps/custom.xml':
+                        continue
+                    data = src.read(name)
+                    if name == '[Content_Types].xml':
+                        data = _re.sub(rb'<Override[^>]*docProps/custom\.xml[^>]*/>', b'', data)
+                    dst.writestr(name, data)
+            buf.seek(0)
+            workbook = openpyxl.load_workbook(buf, data_only=True)
+        except Exception as e2:
+            logger.error(f"PLL: unable to open Excel '{file_data['filename']}': {e2}")
+            return {}
+
+    def _match_headers(header_cells):
+        import re as _re
+        # Normalize: lowercase + collapse whitespace/newlines (template headers
+        # contain line breaks, e.g. 'OPERATING \nTEMP. (deg C)')
+        cells = [_re.sub(r'\s+', ' ', str(c).strip().lower()) if c is not None else ''
+                 for c in header_cells]
+        col_for_key, line_col = {}, None
+
+        # Pass 1 — exact matches (prevents 'LINE' from swallowing 'LINE SIZE (IN)')
+        for idx, header in enumerate(cells):
+            if not header:
+                continue
+            if line_col is None and header in cfg['line_no_aliases']:
+                line_col = idx
+                continue
+            for key, aliases in cfg['column_aliases'].items():
+                if key not in col_for_key and header in aliases:
+                    col_for_key[key] = idx
+                    break
+
+        # Pass 2 — contains matches for anything still unmapped
+        for idx, header in enumerate(cells):
+            if not header or idx == line_col or idx in col_for_key.values():
+                continue
+            if line_col is None and any(alias in header for alias in cfg['line_no_aliases']):
+                line_col = idx
+                continue
+            for key, aliases in cfg['column_aliases'].items():
+                if key not in col_for_key and any(alias in header for alias in aliases):
+                    col_for_key[key] = idx
+                    break
+        return line_col, col_for_key
+
+    for sheet in workbook:
+        rows = list(sheet.iter_rows(values_only=True))
+        # Header row: first row (within the first 10) exposing a line-number column
+        header_idx, line_col, col_for_key = None, None, {}
+        for r_idx, row in enumerate(rows[:10]):
+            lc, cfk = _match_headers(row)
+            if lc is not None:
+                header_idx, line_col, col_for_key = r_idx, lc, cfk
+                break
+        if header_idx is None:
+            continue
+        result = {}
+        for row in rows[header_idx + 1:]:
+            if line_col >= len(row):
+                continue
+            key = _normalize_pll_line_no(row[line_col])
+            if not key:
+                continue
+            entry = {}
+            for field, c_idx in col_for_key.items():
+                if c_idx < len(row) and row[c_idx] not in (None, ''):
+                    entry[cfg['field_prefix'] + field] = str(row[c_idx]).strip()
+            if entry:
+                # Keep the raw (un-normalized) full line number for output rows
+                entry[cfg['field_prefix'] + 'line_number_full'] = str(row[line_col]).strip()
+                result[key] = entry
+        if result:
+            logger.info(f"PLL: parsed {len(result)} rows from sheet '{sheet.title}'")
+            return result
+    logger.warning(f"PLL: no line-number header row found in '{file_data['filename']}'")
+    return {}
+
+
+# Base keys the DB-save loop indexes directly — PLL-only lines must provide them
+_PLL_BASE_DEFAULTS = {
+    'fluid_code': '', 'fluid_description': '', 'size': '', 'sequence_no': '',
+    'pipr_class': '', 'insulation': '', 'area': '', 'from_equipment': '',
+    'to_equipment': '', 'from_line': '', 'to_line': '',
+    'flow_detection_method': '', 'flow_confidence': '', 'page': 1,
+    'confidence': 'medium',
+}
+
+# PLL field → base-key fallback when synthesizing PLL-only lines
+_PLL_TO_BASE_MAP = {
+    'fluid_code': 'pll_fluid',
+    'size': 'pll_line_size',
+    'pipr_class': 'pll_material_class',
+    'insulation': 'pll_insulation',
+    'from_line': 'pll_from',
+    'to_line': 'pll_to',
+}
+
+
+def merge_process_line_list(enriched_data, pll_lookup):
+    """
+    Merge Process Line List values into extracted lines by line number.
+
+    ALIGNMENT RULE (soft-coded): the final register covers EVERY Process Line
+    List record 1:1 —
+      1. P&ID lines matched to a PLL row get the pll_* values (pll_match=Yes)
+      2. PLL rows with no P&ID match are APPENDED as new lines (PLL only)
+      3. P&ID lines with no PLL row are kept at the end (pll_match=No)
+    Output ordering follows the Process Line List row order.
+    Only ADDS keys — existing base/enrichment columns are never removed or
+    overwritten.
+    """
+    cfg = PROCESS_LINE_LIST_CONFIG
+    flag = cfg['match_flag_field']
+    prefix = cfg['field_prefix']
+    matched = 0
+    line_by_pll_key = {}   # pll lookup key -> P&ID line it matched
+
+    for line in enriched_data:
+        key = _normalize_pll_line_no(line.get('line_number') or line.get('original_detection'))
+        values = pll_lookup.get(key)
+        src_key = key if values is not None else None
+        if values is None and key:
+            # Fallback: unique containment match (tolerates extra suffixes such
+            # as insulation codes present on only one side)
+            candidates = [k for k in pll_lookup if key in k or k in key]
+            if len(candidates) == 1:
+                src_key = candidates[0]
+                values = pll_lookup[src_key]
+        if values is not None:
+            line.update(values)
+            line[flag] = 'Yes'
+            line_by_pll_key[src_key] = line
+            matched += 1
+        else:
+            line.setdefault(flag, 'No')
+
+    # Append PLL-only lines so every Process Line List record appears in the
+    # final output (with a criticality level — the application's main purpose)
+    added = 0
+    for lk, values in pll_lookup.items():
+        if lk in line_by_pll_key:
+            continue
+        new_line = dict(_PLL_BASE_DEFAULTS)
+        for base_key, pll_key in _PLL_TO_BASE_MAP.items():
+            if values.get(pll_key):
+                new_line[base_key] = values[pll_key]
+        new_line.update(values)
+        full_no = values.get(prefix + 'line_number_full') or lk
+        new_line['line_number'] = full_no
+        new_line['original_detection'] = full_no
+        new_line[flag] = 'PLL only'
+        line_by_pll_key[lk] = new_line
+        added += 1
+
+    # Order: all PLL records in PLL row order, then P&ID-only lines
+    pll_ordered = [line_by_pll_key[lk] for lk in pll_lookup]
+    pid_only = [l for l in enriched_data if l.get(flag) == 'No']
+    result = pll_ordered + pid_only
+
+    logger.info(
+        f"PLL: matched {matched} P&ID lines, added {added} PLL-only lines, "
+        f"{len(pid_only)} P&ID-only lines → total {len(result)} "
+        f"(PLL records: {len(pll_lookup)})"
+    )
+    return result
+
+
 def determine_stress_criticality_table_7_1(size_str, max_design_temp_str):
     """
     Determine stress criticality per Table 7.1 (Section 7.6.1 - Piping Criticality Diagram)
@@ -435,7 +773,7 @@ def process_pid_upload_async(
     
     try:
         # SYSTEMATIC PROCESSING: Log the workflow
-        has_enrichment = enrichment_files and len(enrichment_files) == 3
+        has_enrichment = bool(enrichment_files)
         if has_enrichment:
             logger.info("=" * 80)
             logger.info("🚀 SYSTEMATIC 4-DOCUMENT PROCESSING:")
@@ -495,6 +833,7 @@ def process_pid_upload_async(
         pms_file = enrichment_files.get('pms') if enrichment_files else None
         nace_file = enrichment_files.get('nace') if enrichment_files else None
         stress_criticality_file = enrichment_files.get('stress_criticality') if enrichment_files else None
+        process_line_list_file = enrichment_files.get('process_line_list') if enrichment_files else None
         
         if hmb_file or pms_file or nace_file:
             try:
@@ -642,6 +981,47 @@ def process_pid_upload_async(
             for line_item in enriched_data:
                 line_item['criticality_stress'] = 'N/A'
         
+        # 🚀 STEP 3B: PROCESS LINE LIST (optional Excel) — soft-coded add-on.
+        # Runs after stress criticality, only ADDS pll_* columns per matched line.
+        if PROCESS_LINE_LIST_CONFIG['enabled'] and process_line_list_file:
+            try:
+                logger.info("=" * 80)
+                logger.info("📑 STEP 3B: Merging Process Line List (Excel)")
+                logger.info("=" * 80)
+                pll_lookup = parse_process_line_list(process_line_list_file)
+                if pll_lookup:
+                    enriched_data = merge_process_line_list(enriched_data, pll_lookup)
+
+                    # Every output record MUST carry a criticality level.
+                    # PLL-only lines were appended after STEP 3, so compute
+                    # their stress criticality with the same deterministic
+                    # Table 7.1 lookup (Size × Design Temp) used by the core.
+                    filled = 0
+                    for line_item in enriched_data:
+                        if line_item.get('criticality_stress'):
+                            continue
+                        pipe_size = line_item.get('size', '')
+                        design_temp = (
+                            line_item.get('max_design_temp')
+                            or line_item.get('pll_design_temp')
+                            or line_item.get('pll_operating_temp')
+                            or line_item.get('normal_temp')
+                            or ''
+                        )
+                        crit = determine_stress_criticality_table_7_1(pipe_size, design_temp)
+                        line_item['criticality_stress'] = f"L{int(crit)}" if crit else 'L1'
+                        filled += 1
+                    if filled:
+                        logger.info(f"   ⚡ Criticality computed via Table 7.1 for {filled} PLL-only lines")
+                else:
+                    for line_item in enriched_data:
+                        line_item.setdefault(PROCESS_LINE_LIST_CONFIG['match_flag_field'], 'No')
+            except Exception as pll_err:
+                logger.error(f"❌ Process Line List merge failed: {pll_err}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                logger.info("→ Continuing without Process Line List columns")
+
         # Use enriched data for database saving
         table_data = enriched_data
         
@@ -704,6 +1084,8 @@ def process_pid_upload_async(
                     'piping_rated_pressure', 'test_pressure', 'test_medium',
                     'pid_no', 'pid_rev', 'date', 'criticality_code', 'criticality_stress'
                 ]
+                # Optional Process Line List columns (soft-coded; empty unless PLL Excel uploaded)
+                enrichment_keys += PROCESS_LINE_LIST_OUTPUT_KEYS
                 # Initialize ALL enrichment columns (even if empty) to guarantee 35-column structure
                 for key in enrichment_keys:
                     data_dict[key] = line_data.get(key, '')
@@ -799,8 +1181,18 @@ def process_pid_upload_async(
                             'confidence': _conf or 'medium',
                         }
 
-            # Generate Excel file from enriched data
-            df = pd.DataFrame(enriched_data)
+            # Generate Excel file from enriched data.
+            # FINAL OUTPUT FORMAT (soft-coded): when a Process Line List was
+            # uploaded, emit the PLL template column layout + the extra
+            # "CRITICAL STRESS LINE" column; otherwise keep the legacy layout.
+            if any(PROCESS_LINE_LIST_CONFIG['match_flag_field'] in _it for _it in enriched_data):
+                df = pd.DataFrame(
+                    [format_critical_line_list_row(_it) for _it in enriched_data],
+                    columns=[h for h, _s in CRITICAL_LINE_LIST_EXPORT_FORMAT],
+                )
+                logger.info("📑 Excel output using Process Line List format (+ CRITICAL STRESS LINE)")
+            else:
+                df = pd.DataFrame(enriched_data)
             excel_buffer = BytesIO()
             df.to_excel(excel_buffer, index=False, engine='openpyxl')
             excel_buffer.seek(0)
