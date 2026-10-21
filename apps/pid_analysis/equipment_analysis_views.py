@@ -3988,6 +3988,26 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         try:
             from apps.pid_analysis.multi_model_service import MultiModelAIService
             ai = MultiModelAIService()
+            # BUG FIX (explicit request): standard (non-"Boost with AI") P&ID
+            # extraction was silently using an ADMIN-configured Gemini key
+            # (resolved via provider_api_key('gemini', ...) inside
+            # MultiModelAIService, never a user-supplied BYOK key) and
+            # producing garbled, unreliable field values (e.g. descriptions
+            # like "Shall Remain", "Safe Sn Fee", "Lt Rarer"). Gemini must
+            # only ever run for "Boost with AI" (equipment_deep_extract.py),
+            # where the user explicitly picks a model and supplies their own
+            # key. Disabling it here can't be done via a constructor
+            # argument — MultiModelAIService() takes none, and its own
+            # provider mode comes from the AI_MODEL_PROVIDER env var, out of
+            # this function's control — so the client is neutralised
+            # directly on the instance instead. This also blocks
+            # MultiModelAIService.chat_completion's OWN internal "OpenAI
+            # quota exceeded -> fall back to Gemini" path (that fallback is
+            # gated on `if self.gemini_client:`), not just the explicit
+            # "Pass 2: Gemini second-opinion" call below — simply skipping
+            # that call alone would NOT have stopped the quota-triggered
+            # fallback from still reaching Gemini.
+            ai.gemini_client = None
         except Exception as _e:
             print(f'[EQ-DIAG][AI-FILL] Service init failed: {_e}', flush=True)
 
@@ -4077,17 +4097,23 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
 
                 prompt = _build_prompt(tag, query_fields, ctx)
 
-                # ── Pass 1: primary provider (GPT-4o, with auto Gemini fallback) ──
+                # ── Pass 1: primary provider (GPT-4o only) ──
+                # Gemini is disabled for standard extraction (see the
+                # ai.gemini_client = None note above) — GPT-4o's own
+                # internal quota-exceeded fallback to Gemini is blocked by
+                # that same neutralised client, so this call can never
+                # reach Gemini either.
                 gpt_result = {}
                 if provider in ('openai', 'both'):
                     gpt_result = _call_ai(prompt, 'openai')
 
-                # ── Pass 2: Gemini second-opinion (fills any fields GPT-4o left null) ──
+                # ── Pass 2: Gemini second-opinion — REMOVED (explicit request) ──
+                # Was: a second AI call using an admin-configured Gemini key
+                # to fill fields GPT-4o left null, producing garbled values
+                # (e.g. descriptions like "Shall Remain", "Safe Sn Fee",
+                # "Lt Rarer"). Gemini now only ever runs for "Boost with AI"
+                # (equipment_deep_extract.py), with a user-supplied key.
                 gem_result = {}
-                if provider in ('gemini', 'both'):
-                    still_empty = [f for f in query_fields if not gpt_result.get(f)]
-                    if still_empty:
-                        gem_result = _call_ai(_build_prompt(tag, still_empty, ctx), 'gemini')
 
                 # ── Merge: OpenAI wins over Gemini.
                 # Authoritative fields: AI always overrides regex.
