@@ -45,9 +45,11 @@ directory checks passed. Changed-source lint has no errors; both full page
 dependency graphs compile with esbuild. Protected Sidebar/shared-shell hashes
 match the task baseline. No migration or schema change.
 
-The broader profile-sync suite was attempted with config.settings_rbac_test:
-six cases failed on signal/deferred-field expectations; these are not reported
-as passing. The later aligned release passed 93 domain regressions using
+The initial profile-sync run used config.settings_rbac_test and failed six
+cases because its registry omitted lifecycle relations and HR signals. All 15
+profile-sync tests subsequently passed with config.settings_console_test,
+which includes those relations and enables the actual HR signals.
+The later aligned release also passed 93 domain regressions using
 config.settings_candidate_forms_test and verified all local migrations. The
 paired frontend also passed its production-mode Vite/PWA build; see
 HR_RELEASE_20261022.md for the release verification boundary.

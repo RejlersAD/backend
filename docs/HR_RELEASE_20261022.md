@@ -15,6 +15,12 @@ talent acquisition, HR leave enhancements, employee import and business approval
 External delivery is mocked/isolated. These SQLite tests do not claim PostgreSQL
 concurrency or deployment verification.
 
+All 15 employee-profile synchronization regressions also passed using the
+existing config.settings_console_test registry, which enables actual HR signals
+and lifecycle relations. An earlier run used isolated registries that disable
+these signals; those failures were configuration-related and were resolved by
+using the correct registry without changing application behavior.
+
 ## Local PostgreSQL migrations
 
 The complete migration plan was inspected after alignment. Existing local
