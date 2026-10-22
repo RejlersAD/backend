@@ -103,6 +103,9 @@ def transition(run: PayrollRun, target_status: str, *, user=None, note: str = ''
     audit log row, persists the run. Returns the saved run.
     """
     locked = PayrollRun.objects.select_for_update().get(pk=run.pk)
+    if target_status != Status.DRAFT:
+        from apps.hr_core.organization import require_payroll_eligible_run
+        require_payroll_eligible_run(locked)
     _check_transition(locked.status, target_status)
     _check_role(user, target_status)
     if not can_transition(locked, user, target_status):

@@ -64,6 +64,9 @@ class HRWorkflowService:
     @classmethod
     def _assignment(cls, stage, instance):
         if stage.approver_type == 'employee_manager':
+            if instance.subject_type == 'payroll.leave_request' and instance.context.get('leave_manager_user_id'):
+                from django.contrib.auth import get_user_model
+                return get_user_model().objects.filter(pk=instance.context['leave_manager_user_id'], is_active=True).first(), ''
             manager = instance.employee.manager if instance.employee and instance.employee.manager_id else None
             if instance.subject_type in {'payroll.leave_request', 'hr.overtime_request'}:
                 from apps.payroll.services.leave_approval import manager_for_employee
@@ -132,9 +135,12 @@ class HRWorkflowService:
         first_stage = definition.stages.order_by('sequence').first()
         if not first_stage:
             raise ValidationError({'workflow': 'Workflow definition has no stages.'})
-        if subject_type in {'payroll.leave_request', 'hr.overtime_request'}:
+        if subject_type in {'payroll.leave_request', 'hr.overtime_request'} and first_stage.approver_type == 'employee_manager':
             from apps.payroll.services.leave_approval import manager_for_employee
             manager = manager_for_employee(employee)
+            if subject_type == 'payroll.leave_request' and (context or {}).get('leave_manager_user_id'):
+                from .models import EmployeeMaster
+                manager = EmployeeMaster.objects.select_related('user').filter(user_id=context['leave_manager_user_id']).first()
             if not manager or not manager.user_id or manager.user_id == employee.user_id or not manager.user.is_active:
                 raise ValidationError({'manager': 'Assign an active reporting manager before submitting this request.'})
         instance, created = HRWorkflowInstance.objects.get_or_create(

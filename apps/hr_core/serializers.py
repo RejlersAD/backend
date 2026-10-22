@@ -122,6 +122,7 @@ class EmployeeMasterDetailSerializer(serializers.ModelSerializer):
             
             # Employment
             'join_date',
+            'probation_start_date',
             'probation_end_date',
             'confirmation_date',
             'exit_date',
@@ -134,6 +135,7 @@ class EmployeeMasterDetailSerializer(serializers.ModelSerializer):
             # Contact
             'phone_number',
             'country',
+            'nationality',
             'city',
             'address',
             'postal_code',
@@ -176,6 +178,14 @@ class EmployeeMasterDetailSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
     
+    def validate(self, attrs):
+        if self.instance and {'probation_start_date', 'probation_end_date'} & attrs.keys():
+            start = attrs.get('probation_start_date', self.instance.probation_start_date) or self.instance.join_date
+            end = attrs.get('probation_end_date', self.instance.probation_end_date)
+            if start and end and end < start:
+                raise serializers.ValidationError({'probation_end_date': 'End date must be on or after probation start date.'})
+        return attrs
+
     def create(self, validated_data):
         """Not used - employee creation goes through EmployeeService."""
         raise NotImplementedError("Use EmployeeService.create_employee() instead")

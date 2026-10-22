@@ -132,6 +132,8 @@ def apply_external_file(
     """
     import openpyxl
     from django.db import transaction
+    from apps.hr_core.organization import require_payroll_eligible_run
+    require_payroll_eligible_run(run)
 
     from .. import catalog as _cat
     from ..models import PayrollRunUpload, Payslip
