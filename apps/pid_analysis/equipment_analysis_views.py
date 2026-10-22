@@ -3969,6 +3969,7 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
       ai_gap_fill_min_empty_fields : minimum empty fields before AI is called
     """
     import json as _json
+    import time as _time
 
     ext_cfg     = config.get('extraction', {})
     enabled     = bool(ext_cfg.get('ai_gap_fill_enabled', True))
@@ -3982,6 +3983,29 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         # Fields where AI result ALWAYS overrides regex — ensures deterministic,
         # consistent output across users regardless of OCR noise (e.g. description).
         authoritative_fields = set(ext_cfg.get('ai_authoritative_fields', []))
+
+        # BUG FIX (explicit request): disabling Gemini (see ai.gemini_client
+        # = None below) removed the fast "OpenAI failed -> instant Gemini
+        # fallback" escape hatch that chat_completion used to have. Without
+        # it, EVERY OpenAI failure (quota exhausted, bad admin key, network
+        # issue) now pays the full client timeout/retry cost
+        # (MultiModelAIService's own openai_client is built with
+        # timeout=180.0, max_retries=2) with nothing to short-circuit it —
+        # across many equipment items in one extraction, that's enough to
+        # make the whole synchronous gap-fill phase (and therefore the
+        # whole Celery task, since set_progress(70, 'Running AI gap-fill…')
+        # in tasks.py fires BEFORE this function is even called, then
+        # nothing updates again until it returns) look stuck for a very
+        # long time, or exceed the task's own time_limit outright. Two
+        # independent, soft-coded circuit breakers bound this function's
+        # worst case regardless of how badly the AI provider is failing —
+        # when either trips, remaining items simply keep their regex-only
+        # values (the function always returns normally, never hangs or
+        # raises out of this gap-fill phase).
+        ai_deadline          = _time.monotonic() + float(ext_cfg.get('ai_gap_fill_max_seconds', 120))
+        max_consec_failures  = int(ext_cfg.get('ai_gap_fill_max_consecutive_failures', 3))
+        consecutive_failures = 0
+        ai_gap_fill_aborted  = False
 
         # Lazy-import to avoid circular imports and keep startup fast
         ai = None
@@ -4051,8 +4075,17 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                     f'TEXT EXCERPT:\n{ctx}'
                 )
 
-            def _call_ai(prompt: str, model_hint: str) -> dict:
-                """Call the AI and return parsed dict, or {} on failure."""
+            def _call_ai(prompt: str, model_hint: str) -> tuple:
+                """Call the AI and return (parsed_dict, call_failed).
+
+                call_failed is True only when ai.chat_completion() itself
+                raised (timeout, quota, auth, network, etc.) — the one
+                failure mode the circuit breakers below need to count.
+                A malformed/non-JSON response is NOT a call_failed (the
+                provider is reachable, it just didn't answer usefully for
+                this one item) — it returns ({}, False) instead, so it
+                never trips the breaker.
+                """
                 try:
                     raw = ai.chat_completion(
                         messages=[{'role': 'user', 'content': prompt}],
@@ -4060,18 +4093,43 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                         max_tokens=max_tokens,
                         temperature=temperature,
                     )
+                except Exception as _e:
+                    print(f'[EQ-DIAG][AI-FILL] call error ({model_hint}): {_e}', flush=True)
+                    return {}, True
+                try:
                     # Strip markdown code fences if present
                     cleaned = re.sub(r'^```[a-z]*\s*', '', raw.strip(), flags=re.IGNORECASE)
                     cleaned = re.sub(r'\s*```$', '', cleaned.strip())
                     parsed  = _json.loads(cleaned)
                     if isinstance(parsed, dict):
-                        return parsed
+                        return parsed, False
                 except Exception as _e:
-                    print(f'[EQ-DIAG][AI-FILL] parse/call error ({model_hint}): {_e}', flush=True)
-                return {}
+                    print(f'[EQ-DIAG][AI-FILL] parse error ({model_hint}): {_e}', flush=True)
+                return {}, False
 
             # ── Per-item gap fill ────────────────────────────────────────────────────
             for item in items:
+                # Circuit breakers — see their own setup comment above. Checked
+                # once per item (not per AI call) so a single slow/failing call
+                # can't still blow past the time budget before the next check.
+                if _time.monotonic() >= ai_deadline:
+                    print(
+                        f'[EQ-DIAG][AI-FILL] time budget ({ext_cfg.get("ai_gap_fill_max_seconds", 120)}s) '
+                        f'exceeded — skipping AI gap-fill for remaining items (regex results kept).',
+                        flush=True,
+                    )
+                    ai_gap_fill_aborted = True
+                    break
+                if consecutive_failures >= max_consec_failures:
+                    print(
+                        f'[EQ-DIAG][AI-FILL] {consecutive_failures} consecutive call failures — '
+                        f'AI provider looks unavailable, skipping AI gap-fill for remaining items '
+                        f'(regex results kept).',
+                        flush=True,
+                    )
+                    ai_gap_fill_aborted = True
+                    break
+
                 tag = item.get('tag', '')
                 if not tag:
                     continue
@@ -4105,7 +4163,8 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                 # reach Gemini either.
                 gpt_result = {}
                 if provider in ('openai', 'both'):
-                    gpt_result = _call_ai(prompt, 'openai')
+                    gpt_result, _call_failed = _call_ai(prompt, 'openai')
+                    consecutive_failures = consecutive_failures + 1 if _call_failed else 0
 
                 # ── Pass 2: Gemini second-opinion — REMOVED (explicit request) ──
                 # Was: a second AI call using an admin-configured Gemini key
@@ -4134,6 +4193,14 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
 
                 if filled:
                     print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
+
+            if ai_gap_fill_aborted:
+                print(
+                    '[EQ-DIAG][AI-FILL] Gap-fill pass ended early via a circuit '
+                    'breaker — remaining items kept their regex-only values; '
+                    'extraction itself still completes normally.',
+                    flush=True,
+                )
 
             # ── Uppercase normalization for material/abbreviation fields ─────────
             # Applied again here so AI-filled MOC / insulation values also render in

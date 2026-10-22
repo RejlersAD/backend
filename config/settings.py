@@ -234,6 +234,7 @@ INSTALLED_APPS = [
     'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
     'apps.instrument_io_workflow',  # Instrument IO List Workflow — CRS-style multi-revision IO List doc handling
     'apps.valve_mto',            # Valve MTO — server-side persistence for the Piping Valve MTO workspace
+    'apps.critical_line_list',   # Critical Line List — per-project CLL workspace persistence (DB or S3)
     'apps.electrical_comparison', # Electrical Comparison — P&ID electrical tag vs Equipment/Load List comparison
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.project_organizer',    # Project Organizer — shared, cross-tool project registry (additive)
