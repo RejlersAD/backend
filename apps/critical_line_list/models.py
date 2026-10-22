@@ -20,6 +20,22 @@ class CllProject(models.Model):
         (STORAGE_S3, 'AWS S3'),
     ]
 
+    LOCATION_ONSHORE = 'onshore'
+    LOCATION_OFFSHORE = 'offshore'
+    LOCATION_CHOICES = [
+        (LOCATION_ONSHORE, 'Onshore'),
+        (LOCATION_OFFSHORE, 'Offshore'),
+    ]
+
+    # Null for projects created before the location requirement existed;
+    # the frontend blocks analysis until it is set.
+    location_type = models.CharField(
+        max_length=20,
+        choices=LOCATION_CHOICES,
+        null=True,
+        blank=True,
+    )
+
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

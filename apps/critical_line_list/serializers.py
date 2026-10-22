@@ -10,7 +10,7 @@ class CllProjectSerializer(serializers.ModelSerializer):
         model = CllProject
         fields = [
             'id', 'name', 'unit', 'client', 'description', 'storage',
-            'created_at', 'updated_at', 'summary',
+            'location_type', 'created_at', 'updated_at', 'summary',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

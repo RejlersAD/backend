@@ -69,6 +69,50 @@ class CllProjectViewSet(viewsets.ModelViewSet):
             return self._data_s3(request, project)
         return self._data_db(request, project)
 
+    @action(detail=True, methods=['get', 'put'], url_path='criteria')
+    def criteria(self, request, pk=None):
+        """GET/PUT the project's stress-criticality CriteriaTable (stored as
+        the ``criteria`` key of the CllProjectData payload)."""
+        project = self.get_object()
+        if project.storage == CllProject.STORAGE_S3:
+            return self._criteria_s3(request, project)
+        data = CllProjectData.objects.filter(project=project).first()
+        if request.method == 'GET':
+            return Response({'criteria': (data.payload or {}).get('criteria') if data else None})
+        payload = data.payload if data and isinstance(data.payload, dict) else {}
+        payload['criteria'] = request.data.get('criteria')
+        CllProjectData.objects.update_or_create(project=project, defaults={'payload': payload})
+        return Response({'ok': True})
+
+    def _criteria_s3(self, request, project):
+        try:
+            client, bucket = _s3_client()
+        except Exception as exc:
+            logger.warning('[CLL] S3 client init failed: %s', exc)
+            return Response(S3_NOT_CONFIGURED, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if client is None:
+            return Response(S3_NOT_CONFIGURED, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        key = _s3_key(project)
+        try:
+            body = {}
+            try:
+                obj = client.get_object(Bucket=bucket, Key=key)
+                body = json.loads(obj['Body'].read().decode('utf-8'))
+            except client.exceptions.NoSuchKey:
+                body = {}
+            if request.method == 'GET':
+                return Response({'criteria': body.get('criteria') if isinstance(body, dict) else None})
+            if not isinstance(body, dict):
+                body = {}
+            body['criteria'] = request.data.get('criteria')
+            client.put_object(Bucket=bucket, Key=key,
+                              Body=json.dumps(body).encode('utf-8'),
+                              ContentType='application/json')
+            return Response({'ok': True})
+        except Exception as exc:
+            logger.warning('[CLL] S3 criteria failed for project %s: %s', project.id, exc)
+            return Response(S3_NOT_CONFIGURED, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
     def _data_db(self, request, project):
         if request.method == 'GET':
             data = CllProjectData.objects.filter(project=project).first()
