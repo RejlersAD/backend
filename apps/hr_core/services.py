@@ -38,6 +38,19 @@ def calculate_probation_end_date(join_date, months=6):
     return join_date.replace(year=target_year, month=target_month, day=target_day)
 
 
+def probation_dates(join_date, start=None, end=None):
+    from datetime import date
+    from django.core.exceptions import ValidationError
+    try:
+        start = date.fromisoformat(start) if isinstance(start, str) and start else start or join_date
+        end = date.fromisoformat(end) if isinstance(end, str) and end else end or calculate_probation_end_date(start)
+    except (ValueError, TypeError, AttributeError):
+        raise ValidationError('Enter valid probation start and end dates.')
+    if end < start:
+        raise ValidationError('Probation end date must be on or after its start date.')
+    return start, end
+
+
 class EmployeeService:
     """
     Centralized employee data access layer.
@@ -420,8 +433,8 @@ class EmployeeService:
         first_name = first_name or user.first_name or ''
         last_name = last_name or user.last_name or ''
         join_date = join_date or timezone.now().date()
-        if not additional_fields.get('probation_end_date'):
-            additional_fields['probation_end_date'] = calculate_probation_end_date(join_date)
+        additional_fields['probation_start_date'], additional_fields['probation_end_date'] = probation_dates(
+            join_date, additional_fields.get('probation_start_date'), additional_fields.get('probation_end_date'))
         
         # Generate unique identifiers if not provided
         if not employee_number:

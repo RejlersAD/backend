@@ -141,6 +141,7 @@ urlpatterns = [
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
     path('api/v1/hr/', include('apps.hr_core.urls')),  # Canonical employee master + shared HR workflows
+    path('api/v1/candidate-forms/', include('apps.hr_core.candidate_form_urls')),
     path('api/v1/timesheet/', include('apps.timesheet.urls')),  # Time Sheet Analytics (SQL Server)
     path('api/v1/enquiry/', include('apps.core.urls_enquiry')),  # Public enquiry endpoint
     

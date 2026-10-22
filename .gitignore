@@ -482,3 +482,9 @@ _tmp_*.py
 # Legend model training intermediates (runtime needs only data/*/export)
 ai/legend_models/data/_extracted/
 ai/legend_models/data/_router/
+
+# HR-ENH-01 standalone implementation notes.
+!docs/HR_DEPARTMENT_ENHANCEMENTS.md
+!docs/HR_TALENT_ACQUISITION.md
+!docs/HR_CANDIDATE_ONLINE_FORMS.md
+!docs/HR_CAREERS_PUBLIC_LINKS.md

@@ -593,6 +593,22 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                  if can_review(item, request.user)]
         return Response({'count': len(items), 'results': self.get_serializer(items, many=True).data})
 
+    @action(detail=False, methods=['get'], url_path='manager-options')
+    def manager_options(self, request):
+        from apps.hr_core.models import EmployeeMaster
+        from apps.rbac.approval_eligibility import approval_access
+        from .services.leave_approval import allows_manual_manager, manager_for_employee
+        employee = EmployeeMaster.objects.filter(user=request.user).first()
+        allowed = bool(employee and allows_manual_manager(employee) and not manager_for_employee(employee))
+        candidates = []
+        if allowed:
+            for manager in EmployeeMaster.objects.select_related('user').filter(
+                employment_status__in=['active', 'probation', 'notice_period'], user__is_active=True,
+            ).exclude(pk=employee.pk).order_by('first_name', 'last_name'):
+                if approval_access(manager.user, 'payroll'):
+                    candidates.append({'id': str(manager.pk), 'name': manager.get_full_name(), 'department': manager.department})
+        return Response({'manual_selection_required': allowed, 'results': candidates})
+
     def get_queryset(self):
         qs = (
             LeaveRequest.objects
@@ -691,8 +707,19 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             if not self._is_hr_or_admin(user):
                 raise PermissionDenied('Only HR can submit leave for another employee.')
             employee = EmployeeMaster.objects.filter(Q(employee_code=code) | Q(emp_code=code) | Q(employee_number=code)).first()
-        require_manager(employee)
-        require_approval_route(employee)
+        from .services.leave_approval import validate_leave_eligibility, workflow_code
+        if not employee:
+            raise ValidationError({'employee': 'An employee master record is required.'})
+        validate_leave_eligibility(employee, data['leave_type'])
+        manager = None
+        if data['leave_type'].code != 'FU':
+            manager = require_manager(employee, data.get('selected_manager'))
+            from apps.rbac.approval_eligibility import approval_access
+            if not approval_access(manager.user, 'payroll'):
+                raise ValidationError({'selected_manager': 'The manager needs active payroll approval access.'})
+        elif data.get('selected_manager'):
+            raise ValidationError({'selected_manager': 'Flex Utilization follows its own approval route.'})
+        require_approval_route(employee, data['leave_type'])
         # Serialize submissions for the same employee to prevent overlapping concurrent requests.
         EmployeeMaster.objects.select_for_update().get(pk=employee.pk)
         start, end = data['start_date'], data['end_date']
@@ -717,16 +744,19 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         )
         if leave.days_requested <= 0:
             raise ValidationError({'start_date': 'The selected dates contain no working days.'})
+        leave.requested_start_date, leave.requested_end_date = start, end
+        leave.requested_days = leave.days_requested
         from .services.leave_approval import validate_annual_balance
         validate_annual_balance(leave)
         workflow = HRWorkflowService.start(
-            'leave_request_v1', 'payroll.leave_request', leave.pk,
+            workflow_code(leave.leave_type), 'payroll.leave_request', leave.pk,
             employee=employee, requested_by=user,
             context={'employee_name': leave.employee_name, 'days_requested': str(leave.days_requested),
-                     'start_date': str(start), 'end_date': str(end), 'leave_type': leave.leave_type.name},
+                     'start_date': str(start), 'end_date': str(end), 'leave_type': leave.leave_type.name,
+                     'leave_manager_user_id': manager.user_id if data.get('selected_manager') else None},
         )
         leave.workflow_instance = workflow
-        leave.save(update_fields=['workflow_instance', 'updated_at'])
+        leave.save(update_fields=['workflow_instance', 'requested_start_date', 'requested_end_date', 'requested_days', 'updated_at'])
 
     FINAL_APPROVABLE_STATUSES = (LeaveRequestStatus.RM_APPROVED,)
 
@@ -744,8 +774,8 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             )
         if not can_review(req, request.user):
             raise PermissionDenied('This leave request is not awaiting your approval.')
-        from .services.leave_approval import validate_annual_balance
-        validate_annual_balance(req)
+        from .services.leave_approval import prepare_hr_approval
+        prepare_hr_approval(req, request.data, request.user)
         if req.workflow_instance_id:
             prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
@@ -754,7 +784,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                     {'error': 'Reporting-manager approval is required before HR final approval.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            HRWorkflowService.decide(
+            req.workflow_instance = HRWorkflowService.decide(
                 req.workflow_instance, request.user, 'approve', request.data.get('note', '')
             )
         req.status       = LeaveRequestStatus.APPROVED
@@ -763,6 +793,8 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req.reviewer_note = request.data.get('note', '')
         req.save()
         notify_employee(req)
+        from .services.leave_approval import notify_department_head
+        notify_department_head(req)
         return Response(self.get_serializer(req).data)
 
     @action(detail=True, methods=['post'], url_path='reject')
@@ -805,6 +837,9 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     def rm_approve(self, request, pk=None):
         """Stage 1: Direct Reporting Manager approval (PENDING → RM_APPROVED)."""
         req = self.get_object()
+        from .services.leave_approval import HR_OVERRIDE_FIELDS
+        if HR_OVERRIDE_FIELDS.intersection(request.data):
+            raise PermissionDenied('Only final HR approval may change approved dates or override the leave balance.')
         from .services.leave_approval import can_review, notify_employee, manager_for_request, prepare_review_workflow
 
         if req.status != LeaveRequestStatus.PENDING:
@@ -812,15 +847,17 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {'error': f'Cannot approve a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if manager_for_request(req) is None or not can_review(req, request.user):
+        if (req.leave_type.code != 'FU' and manager_for_request(req) is None) or not can_review(req, request.user):
             raise PermissionDenied('This leave request is not awaiting your approval.')
         if req.workflow_instance_id:
             prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
-            HRWorkflowService.decide(
+            req.workflow_instance = HRWorkflowService.decide(
                 req.workflow_instance, request.user, 'approve', request.data.get('note', '')
             )
-        req.status         = LeaveRequestStatus.RM_APPROVED
+        req.status = (LeaveRequestStatus.PENDING if req.leave_type.code == 'FU'
+                      and req.workflow_instance.current_stage.code != 'hr_review'
+                      else LeaveRequestStatus.RM_APPROVED)
         req.rm_reviewed_by = request.user
         req.rm_reviewed_at = timezone.now()
         req.rm_note        = request.data.get('note', '')
@@ -843,7 +880,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {'error': f'Cannot reject a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if manager_for_request(req) is None or not can_review(req, request.user):
+        if (req.leave_type.code != 'FU' and manager_for_request(req) is None) or not can_review(req, request.user):
             raise PermissionDenied('This leave request is not awaiting your approval.')
         if not str(request.data.get('note', '')).strip():
             raise ValidationError({'note': 'A rejection reason is required.'})
@@ -2396,7 +2433,11 @@ def generate_master_payroll(request):
 
     # ── 5. Build final rows ───────────────────────────────────────────────────
     rows = []
+    from apps.hr_core.organization import edc_employee_codes
+    excluded_edc = edc_employee_codes()
     for code, r in master.items():
+        if str(code).strip().lower() in excluded_edc:
+            continue
         # Compute estimated gross / net including other_pay
         basic      = _safe_dec(r.get('basic_salary', 0))
         allow      = _safe_dec(r.get('total_allowances', 0))

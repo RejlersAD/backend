@@ -123,7 +123,7 @@ SELF_SERVICE_ACTIONS = {
     # module-gated, as do the all-employee aggregates leave_calendar /
     # annual_leave_balance.
     'LeaveTypeViewSet': {'list', 'retrieve'},
-    'LeaveRequestViewSet': {'list', 'retrieve', 'create', 'cancel', 'pending_for_me'},
+    'LeaveRequestViewSet': {'list', 'retrieve', 'create', 'cancel', 'pending_for_me', 'manager_options'},
     'EmployeeLeaveRecordViewSet': {'list', 'retrieve'},
 }
 

@@ -89,6 +89,8 @@ def manager_for_employee(employee, user_id=None):
 
 
 def manager_for_request(request):
+    if request.selected_manager_id:
+        return request.selected_manager
     return manager_for_employee(employee_for_request(request), request.employee_id)
 
 
@@ -106,6 +108,10 @@ def can_review(request, user):
         ).select_related('stage', 'instance').first()
         if not task or not HRWorkflowService.task_is_current(task):
             return False
+        if request.leave_type.code == 'FU':
+            if task.stage.code == 'hr_review':
+                return is_hr_approver(user) and request.status == 'RM_APPROVED'
+            return bool(task.stage.approver_type == 'user' and task.assigned_to_id == user.pk and user.is_active)
     manager = manager_for_request(request)
     if request.status == 'PENDING' and manager:
         if request.workflow_instance_id and request.workflow_instance.current_stage.code != 'manager_review':
@@ -129,6 +135,9 @@ def prepare_review_workflow(request):
     instance = HRWorkflowInstance.objects.select_for_update().get(pk=request.workflow_instance_id)
     if instance.status != 'pending':
         raise ValidationError({'workflow': 'This workflow is no longer pending.'})
+    if request.leave_type.code == 'FU':
+        request.workflow_instance = instance
+        return
     manager = manager_for_request(request)
     if request.status == 'PENDING' and not manager:
         raise ValidationError({'manager': 'Configure the reporting manager before review.'})
@@ -137,15 +146,86 @@ def prepare_review_workflow(request):
     request.workflow_instance = instance
 
 
-def require_manager(employee):
+def require_manager(employee, selected_manager=None):
     if not employee:
         raise ValidationError({'employee': 'An employee master record is required. Ask HR to complete your employee profile.'})
     manager = manager_for_employee(employee)
+    if selected_manager:
+        if manager is not None or not allows_manual_manager(employee):
+            raise ValidationError({'selected_manager': 'Manual selection is only available to Sales/Finance employees without an assigned manager.'})
+        manager = selected_manager
+        if manager.employment_status not in {'active', 'probation', 'notice_period'}:
+            raise ValidationError({'selected_manager': 'Select an active employee as the approving manager.'})
     if manager is None:
         raise ValidationError({'manager': 'Assign an active reporting manager before submitting leave.'})
     if not manager.user_id or not manager.user.is_active or manager.user_id == employee.user_id:
         raise ValidationError({'manager': 'An active line manager must be assigned before leave can be submitted. Contact HR.'})
     return manager
+
+
+def allows_manual_manager(employee):
+    department = (employee.department or employee.business_area or '').strip().casefold()
+    return department in {'sales', 'finance', 'finance & it', 'business development & sales', 'business development and sales'}
+
+
+def validate_leave_eligibility(employee, leave_type):
+    if leave_type.code == 'NSL' and (not employee or employee.nationality.strip().casefold() not in {
+        'ae', 'are', 'uae', 'emirati', 'united arab emirates', 'uae national',
+    }):
+        raise ValidationError({'leave_type': 'National Service Leave is available only to employees with verified UAE nationality. Ask HR to update nationality.'})
+
+
+def workflow_code(leave_type):
+    return 'flex_utilization_v1' if leave_type.code == 'FU' else 'leave_request_v1'
+
+
+HR_OVERRIDE_FIELDS = {'approved_start_date', 'approved_end_date', 'allow_negative_balance', 'override_reason'}
+
+
+def prepare_hr_approval(request, payload, actor):
+    """Validate final HR dates and an explicit balance exception under employee/ledger locks."""
+    from decimal import Decimal
+    from rest_framework import serializers
+    from apps.payroll.models import LeaveRequest
+    employee = employee_for_request(request)
+    if employee:
+        employee = EmployeeMaster.objects.select_for_update().get(pk=employee.pk)
+    validate_leave_eligibility(employee, request.leave_type)
+    original_start, original_end = request.start_date, request.end_date
+    request.requested_start_date = request.requested_start_date or original_start
+    request.requested_end_date = request.requested_end_date or original_end
+    if request.requested_days is None:
+        request.requested_days = request.days_requested
+    request.start_date = serializers.DateField().run_validation(payload.get('approved_start_date', original_start))
+    request.end_date = serializers.DateField().run_validation(payload.get('approved_end_date', original_end))
+    allow_negative = serializers.BooleanField().run_validation(payload.get('allow_negative_balance', False))
+    changed = (request.start_date, request.end_date) != (original_start, original_end)
+    reason = str(payload.get('override_reason', '')).strip()
+    if (changed or allow_negative) and not reason:
+        raise ValidationError({'override_reason': 'HR must record a reason for changing approved dates or allowing a negative balance.'})
+    if request.end_date < request.start_date or (request.half_day and request.start_date != request.end_date):
+        raise ValidationError({'approved_end_date': 'Select a valid approved date range; half-day leave must cover one working day.'})
+    days = working_days_by_year(request)
+    request.days_requested = sum(days.values(), Decimal('0'))
+    if request.days_requested <= 0:
+        raise ValidationError({'approved_start_date': 'The approved dates contain no working days.'})
+    identity = Q(canonical_employee_id=request.canonical_employee_id) if request.canonical_employee_id else Q(employee_code=request.employee_code)
+    if changed and LeaveRequest.objects.filter(identity, status__in=['PENDING', 'RM_APPROVED', 'APPROVED'],
+            start_date__lte=request.end_date, end_date__gte=request.start_date).exclude(pk=request.pk).exists():
+        raise ValidationError({'approved_start_date': 'The approved dates overlap another pending or approved request.'})
+    if allow_negative and request.leave_type.category != 'annual':
+        raise ValidationError({'allow_negative_balance': 'The balance exception applies to annual leave only.'})
+    validate_annual_balance(request, allow_negative=allow_negative)
+    request.hr_balance_override = allow_negative
+    request.hr_override_reason = reason if changed or allow_negative else ''
+    if (changed or allow_negative) and request.workflow_instance_id:
+        from apps.hr_core.models import HRWorkflowEvent
+        HRWorkflowEvent.objects.create(instance=request.workflow_instance, actor=actor,
+            event_type='hr_leave_override', stage_code='hr_review', note=reason,
+            metadata={'requested_start_date': str(request.requested_start_date),
+                'requested_end_date': str(request.requested_end_date), 'requested_days': str(request.requested_days),
+                'approved_start_date': str(request.start_date), 'approved_end_date': str(request.end_date),
+                'approved_days': str(request.days_requested), 'allow_negative_balance': allow_negative})
 
 def notify_employee(request):
     if not request.employee_id:
@@ -194,7 +274,7 @@ def working_days_by_year(request):
     return days
 
 
-def validate_annual_balance(request):
+def validate_annual_balance(request, allow_negative=False):
     """Reserve pending days without deducting the ledger until final approval."""
     from decimal import Decimal
     from apps.payroll.models import EmployeeLeaveRecord, LeaveRequest
@@ -209,16 +289,92 @@ def validate_annual_balance(request):
         if not record:
             raise ValidationError({'balance': f'HR must configure the annual leave balance for {year} before submission.'})
         reserved = sum((working_days_by_year(item).get(year, Decimal('0')) for item in pending), Decimal('0'))
-        if days > record.leave_balance - reserved:
+        if not allow_negative and days > record.leave_balance - reserved:
             raise ValidationError({'balance': f'Insufficient annual leave balance for {year}, including pending requests.'})
 
 
-def require_approval_route(employee):
+def require_approval_route(employee, leave_type=None):
     from django.contrib.auth import get_user_model
     from apps.hr_core.models import HRWorkflowDefinition
-    definition = HRWorkflowDefinition.objects.filter(code='leave_request_v1', is_active=True).order_by('-version').first()
+    code = workflow_code(leave_type) if leave_type else 'leave_request_v1'
+    definition = HRWorkflowDefinition.objects.filter(code=code, is_active=True).order_by('-version').first()
     stages = list(definition.stages.order_by('sequence')) if definition else []
-    if len(stages) != 2 or [(stage.code, stage.approver_type) for stage in stages] != [('manager_review', 'employee_manager'), ('hr_review', 'role')]:
+    expected = [('jemal_review', 'user'), ('rafat_review', 'user'), ('mohammed_review', 'user'), ('hr_review', 'role')] if code == 'flex_utilization_v1' else [('manager_review', 'employee_manager'), ('hr_review', 'role')]
+    if [(stage.code, stage.approver_type) for stage in stages] != expected:
         raise ValidationError({'workflow': 'HR must configure the manager-to-HR leave approval workflow before submission.'})
+    if code == 'flex_utilization_v1':
+        from django.contrib.auth import get_user_model
+        ids = []
+        for stage in stages[:-1]:
+            user = get_user_model().objects.filter(pk=stage.approver_value).first() if str(stage.approver_value).isdigit() else None
+            if not user or user.pk == employee.user_id or not approval_access(user, 'payroll'):
+                raise ValidationError({'workflow': 'Configure active, distinct Jemal, Rafat and Mohammed approvers with payroll approval access.'})
+            ids.append(user.pk)
+        if len(set(ids)) != 3:
+            raise ValidationError({'workflow': 'The three FU approvers must be distinct accounts.'})
     if not active_hr_approvers(employee.user_id).exists():
         raise ValidationError({'workflow': 'No active HR approver is assigned. Contact HR to configure leave approvals.'})
+
+
+def notify_department_head(request):
+    """Informational in-app notification, delivered only after final commit."""
+    import json
+    from django.db import transaction
+    from django.contrib.auth import get_user_model
+    from apps.notifications.services import NotificationService
+    from apps.hr_core.models import HRWorkflowDefinition
+    definition = HRWorkflowDefinition.objects.filter(code='leave_request_v1', is_active=True).order_by('-version').first()
+    mapping = (definition.configuration or {}).get('department_heads', {}) if definition else {}
+    try:
+        mapping = mapping or json.loads(config('LEAVE_DEPARTMENT_HEADS', default='{}'))
+    except (ValueError, TypeError):
+        logger.error('Invalid LEAVE_DEPARTMENT_HEADS configuration; no recipient selected')
+        return
+    if not isinstance(mapping, dict):
+        logger.error('Department-head configuration must be a department-to-email mapping')
+        return
+    email = next((value for department, value in mapping.items()
+                  if isinstance(department, str) and department.strip().casefold() == request.department.strip().casefold()), None)
+    recipient = None
+    if email:
+        matches = list(get_user_model().objects.filter(email__iexact=email, is_active=True)[:2])
+        recipient = matches[0] if len(matches) == 1 else None
+    else:
+        # The catalog identifies the department's head position. Resolve its
+        # actual current holder from employee records, never the chart's sample names.
+        from apps.rbac.organization_catalog import DEPARTMENTS, resolve_department_code
+        code = resolve_department_code(request.department)
+        employee = employee_for_request(request)
+        area = employee.business_area if employee else ''
+        code = code or resolve_department_code(area) or {
+            'Business Development & Sales': 'sales', 'Finance & IT': 'finance', 'Project Delivery': 'operations',
+        }.get(area)
+        role = next((item['head_role_code'] for item in DEPARTMENTS if item['code'] == code), None)
+        if role:
+            candidates = [user for user in get_user_model().objects.filter(is_active=True, employee_master__isnull=False)
+                          if has_business_position(user, (role,))]
+            recipient = candidates[0] if len(candidates) == 1 else None
+    from apps.hr_core.models import HRWorkflowEvent
+    event = HRWorkflowEvent.objects.create(instance=request.workflow_instance, event_type='department_head_notice',
+        stage_code='hr_review', metadata={'status': 'scheduled' if recipient else 'unconfigured',
+                                         'recipient_id': recipient.pk if recipient else None}) if request.workflow_instance_id else None
+    if not recipient:
+        logger.warning('Leave department-head recipient is missing or ambiguous for department %s', request.department)
+        return
+    if recipient:
+        def deliver():
+            try:
+                NotificationService.create_notification(
+                    recipient=recipient, title='Leave approved — for information', category='APPROVAL',
+                    message=f'{request.employee_name}: {request.leave_type.name}, {request.start_date} to {request.end_date}, {request.days_requested} days. HR final approval recorded.',
+                    action_url='/hr/leave', action_label='Leave calendar',
+                    metadata={'leave_request_id': str(request.pk), 'requires_action': False})
+                if event:
+                    HRWorkflowEvent.objects.create(instance=request.workflow_instance, event_type='department_head_notice_result',
+                        stage_code='hr_review', metadata={'status': 'created', 'recipient_id': recipient.pk, 'source_event_id': str(event.pk)})
+            except Exception:
+                if event:
+                    HRWorkflowEvent.objects.create(instance=request.workflow_instance, event_type='department_head_notice_result',
+                        stage_code='hr_review', metadata={'status': 'failed', 'recipient_id': recipient.pk, 'source_event_id': str(event.pk)})
+                logger.exception('Unable to create department-head leave notification')
+        transaction.on_commit(deliver, robust=True)

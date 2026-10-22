@@ -33,6 +33,12 @@ class ModuleActionGuardMixin:
         if request.method == 'POST' and (self.__class__.__module__, self.__class__.__name__) == (
                 'apps.finance.sharepoint_views', 'FinanceReceivablesRefreshView'):
             return super().dispatch(request, *args, **kwargs)
+        # HR-REC-02 persists the email attempt before external SMTP I/O. Its
+        # handler owns the short row transaction; all action/HR checks below run.
+        if request.method == 'POST' and (self.__class__.__module__, self.__class__.__name__) in {
+                ('apps.hr_core.recruitment_forms', 'RecruitmentInvitationCommandView'),
+                ('apps.hr_core.recruitment_sync', 'RecruitmentPositionSyncView')}:
+            return super().dispatch(request, *args, **kwargs)
         # Keep eligibility checks and the ensuing decision in one transaction.
         # DRF converts exceptions to responses; explicitly roll back those too.
         with transaction.atomic():
