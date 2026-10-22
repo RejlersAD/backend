@@ -47,8 +47,10 @@ match the task baseline. No migration or schema change.
 
 The broader profile-sync suite was attempted with config.settings_rbac_test:
 six cases failed on signal/deferred-field expectations; these are not reported
-as passing. Full PWA packaging remains subject to the previously documented
-shared bundle-size limitation and was not repeated.
+as passing. The later aligned release passed 93 domain regressions using
+config.settings_candidate_forms_test and verified all local migrations. The
+paired frontend also passed its production-mode Vite/PWA build; see
+HR_RELEASE_20261022.md for the release verification boundary.
 
 ## Local import committed, 22 October 2026
 
