@@ -87,16 +87,33 @@ RE_NC = re.compile(r'\bNC\b', re.I)
 
 def engine_status() -> dict:
     """Stage-3 health check. Configured = at least one server-side vision
-    key present. Never exposes the key itself."""
+    key present. Never exposes the key itself. Also advertises the
+    selectable vision models per provider (soft-coded from the
+    extractor's own tables) so the frontend dropdown never hardcodes
+    model IDs."""
     providers = []
     if getattr(settings, 'OPENAI_API_KEY', ''):
         providers.append('openai')
     if getattr(settings, 'ANTHROPIC_API_KEY', ''):
         providers.append('anthropic')
+    models = {}
+    try:
+        from apps.pid_verification.services.piping_valve_mto_extractor import (
+            COST_PER_1K_TOKENS, VISION_MODELS,
+        )
+        for provider, default_model in VISION_MODELS.items():
+            ids = [m for m in COST_PER_1K_TOKENS if m.startswith('gpt') == (provider == 'openai')]
+            models[provider] = {
+                'default': default_model,
+                'options': sorted(ids, key=lambda m: (m != default_model, m)),
+            }
+    except Exception:
+        models = {}
     return {
         'configured': bool(providers),
         'providers': providers,
         'methods': ['vector-vision', 'vision-only'],
+        'models': models,
     }
 
 
@@ -164,12 +181,14 @@ def _type_from_rules(tag: str, text_near: str, tag_rules, note_rules):
     return 'UNIDENTIFIED', 'unidentified'
 
 
-def run_extraction(job: ValveMTOJob, vision_provider: str = None, vision_api_key: str = None) -> dict:
+def run_extraction(job: ValveMTOJob, vision_provider: str = None, vision_api_key: str = None,
+                   vision_model: str = None) -> dict:
     """Execute the extraction pipeline for job.project. Synchronous —
     Celery wiring can wrap this unchanged (the job row carries progress).
 
     vision_provider/vision_api_key: optional per-run BYOK credential from
-    Stage 3 — used for this run only, never persisted.
+    Stage 3 — used for this run only, never persisted. vision_model:
+    optional caller-chosen model override (None = provider default).
 
     Returns the result summary dict (also stored on job.result)."""
     from .models import ValveMTOProjectSettings
@@ -219,6 +238,7 @@ def run_extraction(job: ValveMTOJob, vision_provider: str = None, vision_api_key
         rows_out, extra = _run_vision_extraction(
             job, pdf_bytes, parsed, settings_obj, mark,
             vision_provider=vision_provider, vision_api_key=vision_api_key,
+            vision_model=vision_model,
         )
         mark(3, 'done', f'{len(rows_out)} valves associated')
         mark(4, 'done', 'scope applied')
@@ -402,11 +422,12 @@ _VISION_CONFIDENCE_SCORE = {'HIGH': 0.9, 'MEDIUM': 0.7, 'LOW': 0.4}
 
 
 def _run_vision_extraction(job, pdf_bytes, parsed, settings_obj, mark,
-                           vision_provider=None, vision_api_key=None):
+                           vision_provider=None, vision_api_key=None, vision_model=None):
     """Steps 2–3 via the vision pipeline (apps.pid_verification's
     piping_valve_mto_extractor). Uses central server credentials by
     default; a per-run BYOK key (credential_mode='byok') takes priority
-    and is never persisted. Returns (rows_out, extra_result_fields)."""
+    and is never persisted. vision_model overrides the provider default
+    for this run. Returns (rows_out, extra_result_fields)."""
     from apps.pid_verification.services.piping_valve_mto_extractor import (
         extract_valve_mto_streaming,
     )
@@ -438,6 +459,7 @@ def _run_vision_extraction(job, pdf_bytes, parsed, settings_obj, mark,
             user_id=project.created_by_id,
             vision_provider=vision_provider,
             vision_api_key=vision_api_key,
+            vision_model=vision_model,
             credential_mode='byok' if vision_api_key else 'central',
             pms_data=pms_list or None,
         )

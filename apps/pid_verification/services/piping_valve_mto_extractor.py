@@ -1677,15 +1677,19 @@ def _call_vision_batch_json(provider: str, api_key: str, prompt: str, batch_imgs
         raise
 
 
-def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
+def test_api_key(provider: str, api_key: str, model: Optional[str] = None) -> Tuple[bool, str]:
     """One minimal call to confirm a BYOK key actually works — tests
     EXACTLY the key passed in, never an admin-managed substitute (unlike
     a quirk in apps.instrument_io_workflow's own test_api_key, which can
     silently test the admin key instead when one is configured — that
     would defeat the purpose of a "Test Connection" button for a key the
-    user just typed, so this does not replicate that behaviour)."""
+    user just typed, so this does not replicate that behaviour).
+
+    model: optional caller-chosen model override (frontend BYOK dropdown);
+    None/empty falls back to VISION_MODELS[provider], unchanged."""
     provider = (provider or '').strip().lower()
     api_key = (api_key or '').strip()
+    model = (model or '').strip() or None
     if provider not in SUPPORTED_PROVIDERS:
         return False, f"Unsupported provider '{provider}'."
     if not api_key:
@@ -1700,14 +1704,14 @@ def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
             # explicit `thinking` kwarg is sent for any Claude model here.
             test_kwargs: Dict[str, Any] = {}
             client.messages.create(
-                model=VISION_MODELS['claude'], max_tokens=TEST_CONNECTION_MAX_TOKENS,
+                model=model or VISION_MODELS['claude'], max_tokens=TEST_CONNECTION_MAX_TOKENS,
                 messages=[{'role': 'user', 'content': 'Hi'}], **test_kwargs,
             )
         else:
             from openai import OpenAI
             client = personal_provider_client('openai', OpenAI, api_key=api_key, timeout=20, max_retries=0)
             client.chat.completions.create(
-                model=VISION_MODELS['openai'],
+                model=model or VISION_MODELS['openai'],
                 max_tokens=TEST_CONNECTION_MAX_TOKENS,
                 messages=[{'role': 'user', 'content': 'Hi'}],
             )
@@ -1716,6 +1720,8 @@ def test_api_key(provider: str, api_key: str) -> Tuple[bool, str]:
         http_status = getattr(exc, 'status_code', None) or getattr(exc, 'http_status', None)
         if http_status in (401, 403):
             return False, 'Invalid API key. Please check and try again.'
+        if http_status == 404:
+            return False, f"Model '{model}' is not available on this key. Pick another model."
         return False, f'Connection test failed: {exc}'
 
 

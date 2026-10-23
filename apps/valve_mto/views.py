@@ -448,6 +448,7 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
         # never stored on the job, settings, or anywhere server-side.
         vision_provider = (request.data.get('vision_provider') or '').strip().lower() or None
         vision_api_key = (request.data.get('vision_api_key') or '').strip() or None
+        vision_model = (request.data.get('vision_model') or '').strip() or None
         # Async execution — a daemon thread keeps the dev-server flow
         # dependency-free (Celery wiring can replace this unchanged; the
         # job row carries all progress either way).
@@ -461,6 +462,7 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
                 run_extraction(
                     ValveMTOJob.objects.get(id=job_id),
                     vision_provider=vision_provider, vision_api_key=vision_api_key,
+                    vision_model=vision_model,
                 )
             except Exception as exc:
                 logging.getLogger(__name__).exception('valve mto extraction failed')
