@@ -50,6 +50,14 @@ class ExecutiveDashboardTests(TestCase):
             module, _ = Module.objects.get_or_create(code=code, defaults={'name': code})
             ensure_module_actions(Module, Permission, module_ids=[module.pk])
             RoleModule.objects.get_or_create(role=self.role, module=module)
+            # These regression fixtures represent readers with all three tab grants.
+            if code == 'executive_dashboard':
+                for action in ('view_overview', 'view_financial', 'view_portfolio'):
+                    permission, _ = Permission.objects.get_or_create(
+                        module=module, code=f'{code}.{action}',
+                        defaults={'action': action, 'name': action},
+                    )
+                    RolePermission.objects.get_or_create(role=self.role, permission=permission)
             for permission in module.permissions.filter(action='read', is_active=True):
                 RolePermission.objects.get_or_create(role=self.role, permission=permission)
 

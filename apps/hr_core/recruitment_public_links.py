@@ -10,7 +10,7 @@ from rest_framework.response import Response
 
 from .governance import audit
 from .models import RecruitmentApplicationLink, RecruitmentFormInvitation, RecruitmentOpening
-from .recruitment_forms import HRFormsView, PublicFormView, digest, invitation_link, summary
+from .recruitment_forms import ClosedCVLink, HRFormsView, PublicFormView, digest, invitation_link, summary
 
 
 def public_link_summary(link):
@@ -25,6 +25,8 @@ def active_link(link):
         raise PermissionDenied('This application link has expired or was revoked. Please contact HR.')
     if link.opening_id and not link.opening.is_open:
         raise PermissionDenied('This position is closed. Please contact HR.')
+    if link.kind == 'cv' and link.applications.filter(submissions__isnull=False).exists():
+        raise ClosedCVLink()
 
 
 class RecruitmentApplicationLinksView(HRFormsView):

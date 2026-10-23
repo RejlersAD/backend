@@ -141,6 +141,9 @@ class Permission(TimeStampedModel):
         ('export', 'Export'),
         ('import', 'Import'),
         ('execute', 'Execute'),
+        ('view_overview', 'View Executive Overview'),
+        ('view_financial', 'View Executive Financial performance'),
+        ('view_portfolio', 'View Executive Project portfolio'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

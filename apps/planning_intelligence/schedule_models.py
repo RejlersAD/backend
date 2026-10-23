@@ -1,4 +1,4 @@
-"""Relational scheduling domain for CPM calculation and controlled baselines."""
+﻿"""Relational scheduling domain for CPM calculation and controlled baselines."""
 from decimal import Decimal
 
 from django.conf import settings
@@ -25,7 +25,7 @@ class WorkCalendar(BaseModel):
         unique_together = [('project', 'name')]
 
     def __str__(self):
-        return f'{self.project_id} · {self.name}'
+        return f'{self.project_id} Â· {self.name}'
 
 
 class CalendarException(BaseModel):
@@ -66,7 +66,7 @@ class Schedule(BaseModel):
         unique_together = [('project', 'code')]
 
     def __str__(self):
-        return f'{self.code} · {self.name}'
+        return f'{self.code} Â· {self.name}'
 
 
 class ScheduleVersion(BaseModel):
@@ -468,8 +468,7 @@ class ScheduleControlSnapshot(BaseModel):
         ordering = ['-data_date', '-revision', '-created_at', '-id']
         unique_together = [('version', 'data_date', 'revision')]
         indexes = [models.Index(fields=['version', '-data_date'])]
-        constraints = [models.CheckConstraint(
-            check=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
+        constraints = [models.CheckConstraint(check=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
         )]
 
     def save(self, *args, **kwargs):
@@ -479,3 +478,4 @@ class ScheduleControlSnapshot(BaseModel):
 
     def delete(self, *args, **kwargs):
         raise ValueError('Schedule control observations cannot be deleted.')
+

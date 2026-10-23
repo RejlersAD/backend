@@ -1,4 +1,4 @@
-"""Governed operational observations, separate from the immutable planning baseline."""
+﻿"""Governed operational observations, separate from the immutable planning baseline."""
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -79,3 +79,4 @@ class OperationalControlReport(ApprovedControlRecord):
         ordering = ['-created_at', '-pk']
         constraints = [models.UniqueConstraint(fields=['baseline', 'reporting_period'],
             condition=models.Q(status__in=['draft', 'submitted']), name='one_open_operational_report')]
+

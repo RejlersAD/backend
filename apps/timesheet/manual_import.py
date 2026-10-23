@@ -1,4 +1,4 @@
-"""Validated Excel/CSV import for temporary manual daily attendance entry."""
+﻿"""Validated Excel/CSV import for temporary manual daily attendance entry."""
 from __future__ import annotations
 
 import csv
@@ -314,7 +314,7 @@ def import_daily_attendance(upload, *, year=None, month=None) -> dict:
     full_day = float(RULES.get('full_day_hours', 9.0))
     with transaction.atomic():
         for offset in range(0, len(zero), 250):
-            condition = Q()
+            check = Q()
             for item in zero[offset:offset + 250]:
                 condition |= Q(employee_code=item.employee_code, date=item.date)
             if condition:
@@ -370,3 +370,4 @@ def import_daily_attendance(upload, *, year=None, month=None) -> dict:
         'created': created, 'updated': updated, 'removed': removed,
         'skipped': len(errors), 'errors': errors[:50],
     }
+

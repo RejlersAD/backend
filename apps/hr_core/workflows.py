@@ -255,11 +255,17 @@ class HRWorkflowService:
             from .overtime import recipients
             return recipients(task)
         if task.instance.subject_type == 'payroll.leave_request' and task.stage.code == 'hr_review':
-            from apps.payroll.services.leave_approval import active_hr_approvers
+            from apps.payroll.services.leave_approval import active_hr_approvers, task_was_referred
+            if task_was_referred(task):
+                return [task.assigned_to] if task.assigned_to and cls.can_act(task, task.assigned_to) else []
             employee_user_id = task.instance.employee.user_id if task.instance.employee else None
             return [user for user in active_hr_approvers(employee_user_id) if cls.can_act(task, user)]
         if task.assigned_to_id:
             if task.stage.approver_type == 'employee_manager':
+                if task.instance.subject_type == 'payroll.leave_request':
+                    from apps.payroll.services.leave_approval import task_was_referred
+                    if task_was_referred(task):
+                        return [task.assigned_to] if cls.can_act(task, task.assigned_to) else []
                 manager = cls._assignment(task.stage, task.instance)[0]
                 return [manager] if manager and cls.can_act(task, manager) else []
             return [task.assigned_to] if cls.can_act(task, task.assigned_to) else []

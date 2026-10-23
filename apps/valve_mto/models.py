@@ -1,27 +1,27 @@
-"""
-Valve MTO — Server-side persistence
+﻿"""
+Valve MTO â€” Server-side persistence
 ====================================
 
 Until this app existed, the Valve MTO workspace (frontend:
-src/pages/Engineering/Piping/ValveMTO.jsx) was ENTIRELY client-persisted —
+src/pages/Engineering/Piping/ValveMTO.jsx) was ENTIRELY client-persisted â€”
 project headers and extracted rows lived only in browser localStorage
 (`radai.valveMTO.state.v1`), so closing the browser (or switching
 devices) silently lost a user's extracted/hand-corrected MTO data. This
 app adds a real, durable, server-side copy alongside that (the frontend
-keeps localStorage too, as an offline-friendly cache/backup — see its
+keeps localStorage too, as an offline-friendly cache/backup â€” see its
 own comment), so the data survives regardless of the browser.
 
 Two models, mirroring the frontend's own project/row split
 (src/config/valveMTO.config.js's VALVE_COLUMNS and
 src/config/valveMTOProjects.js's project shape):
 
-    ValveMTOProject — one saved "project" (a named MTO workspace, usually
+    ValveMTOProject â€” one saved "project" (a named MTO workspace, usually
     one per source P&ID/valve schedule).
-    ValveMTORow — one valve/line row belonging to a project, in the
+    ValveMTORow â€” one valve/line row belonging to a project, in the
     canonical 17-field schema the extractor/frontend already use.
 
 Does NOT touch the actual extraction pipeline (apps.pid_verification's
-piping_valve_mto_view.py / services/piping_valve_mto_extractor.py) — this
+piping_valve_mto_view.py / services/piping_valve_mto_extractor.py) â€” this
 app is pure storage; the frontend calls the existing extraction endpoint
 first, then POSTs the resulting rows here to persist them.
 """
@@ -55,7 +55,7 @@ class ValveMTOProject(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     # The PDF (or spreadsheet) the rows were originally extracted/imported
-    # from — filename only, not a stored file (the extraction pipeline in
+    # from â€” filename only, not a stored file (the extraction pipeline in
     # apps.pid_verification already handles the transient upload/job
     # lifecycle; duplicating file storage here isn't this app's job).
     source_pdf_name = models.CharField(max_length=255, blank=True, default='')
@@ -74,10 +74,10 @@ class ValveMTOProject(models.Model):
 
 
 class ValveMTORow(models.Model):
-    """One valve/line row — the canonical schema shared by the extractor
+    """One valve/line row â€” the canonical schema shared by the extractor
     (piping_valve_mto_extractor.py's ROW_KEYS) and the frontend table
     (valveMTO.config.js's VALVE_COLUMNS), so every field the extractor can
-    populate has a real column here — nothing gets dropped on save. `tab`
+    populate has a real column here â€” nothing gets dropped on save. `tab`
     records which of the frontend's ISLAND/FIELD/COMBINED tabs this row
     was showing under. Installation allocation is independent of `area`,
     which stores the complete source drawing title.
@@ -92,17 +92,17 @@ class ValveMTORow(models.Model):
     rating = models.CharField(max_length=64, blank=True, default='')
     size_primary = models.CharField(max_length=32, blank=True, default='')
     # BUG FIX: the frontend's local row shape (VALVE_COLUMNS) has THREE
-    # size-related columns — size_1, size_2, AND bore — but this model
+    # size-related columns â€” size_1, size_2, AND bore â€” but this model
     # originally only had one ('size_secondary', mapped from 'bore') to
     # match the field list this app was first built to. That silently
-    # dropped 'size_2' on every save — a real, confirmed data-loss gap.
+    # dropped 'size_2' on every save â€” a real, confirmed data-loss gap.
     # size_secondary_2 now covers it; size_secondary (bore) is unchanged.
     size_secondary = models.CharField(max_length=32, blank=True, default='')  # bore (FB/RB)
     size_secondary_2 = models.CharField(max_length=32, blank=True, default='')  # size_2 (NB)
     line_number = models.CharField(max_length=255, blank=True, default='')
     line_list_ref = models.CharField(max_length=255, blank=True, default='')
     # P&ID drawing sheet number (AD111-XXX-D-XXXXX format) the valve
-    # appears ON — distinct from line_number (the valve's own line/piping
+    # appears ON â€” distinct from line_number (the valve's own line/piping
     # tag). Added alongside 'facing' below so the extractor's two newer
     # fields (see piping_valve_mto_extractor.py's MANDATORY FIELDS rules
     # for pid_number/facing) have real columns here; without them both
@@ -110,7 +110,7 @@ class ValveMTORow(models.Model):
     # size_secondary_2 fixed for 'size_2' above.
     pid_number = models.CharField(max_length=255, blank=True, default='')
     # Valve facing: RF (Raised Face) / FF (Flat Face) / RTJ (Ring-Type
-    # Joint) — kept as its own field (not folded into 'rating') so it
+    # Joint) â€” kept as its own field (not folded into 'rating') so it
     # round-trips independently even though the standard Excel template
     # displays it combined with rating under one "RATING / FACING" column
     # (see valveMTOExporter.js).
@@ -144,7 +144,7 @@ class ValveMTORow(models.Model):
         return f'{self.tag_number or "(untagged)"} [{self.project_id}]'
 
 
-# Deliberately its OWN tuple, not imported from apps.pid_checker_v2 —
+# Deliberately its OWN tuple, not imported from apps.pid_checker_v2 â€”
 # same cross-app isolation convention this codebase already uses
 # elsewhere (e.g. apps.instrument_io_workflow's own independent legend/
 # vision reimplementations). Matches ValveMTO.jsx's own
@@ -157,16 +157,16 @@ VALVE_MTO_LEGEND_SECTION_CHOICES = tuple((s, s.replace('_', ' ').title()) for s 
 
 
 class ValveMTOLegend(models.Model):
-    """Valve MTO's OWN legend/reference-data table — fully isolated from
+    """Valve MTO's OWN legend/reference-data table â€” fully isolated from
     apps.pid_checker_v2's PidCheckerV2LegendSheet (used by P&ID
     Verification V1/V2). Architectural fix for a real, confirmed bug this
     session: that shared table has only ONE active legend per (user,
     section), with no per-module dimension at all, so Valve MTO's own
-    auto-created defaults (needed active to feed its Vision prompt — see
+    auto-created defaults (needed active to feed its Vision prompt â€” see
     piping_valve_mto_extractor.py's _build_legend_context) kept silently
     becoming the active legend in P&ID V1/V2 too, since both modules read
     the exact same row. Giving Valve MTO its own table removes the shared
-    state entirely — no amount of activating here can ever affect P&ID.
+    state entirely â€” no amount of activating here can ever affect P&ID.
 
     Same (legend_id UUID distinct from PK, section, name, description,
     definition JSON, is_active, created_by, timestamps) shape as
@@ -198,8 +198,8 @@ class ValveMTOLegend(models.Model):
         constraints = [
             # Mirrors PidCheckerV2LegendSheet's own
             # uniq_pidv2_active_legend_per_user_section_project constraint
-            # (minus the project dimension — Valve MTO legends aren't
-            # project-scoped) — exactly one active legend per user+section.
+            # (minus the project dimension â€” Valve MTO legends aren't
+            # project-scoped) â€” exactly one active legend per user+section.
             models.UniqueConstraint(
                 fields=['created_by', 'section'],
                 condition=models.Q(is_active=True),
@@ -209,3 +209,4 @@ class ValveMTOLegend(models.Model):
 
     def __str__(self) -> str:
         return f'{self.name} [{self.section}] ({"active" if self.is_active else "inactive"})'
+

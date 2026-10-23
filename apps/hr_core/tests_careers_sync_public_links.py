@@ -108,7 +108,7 @@ class CareersSyncPublicLinksTests(TestCase):
         self.assertEqual(RecruitmentCandidate.objects.count(), before + 1)
         self.assertEqual(self.public.post(self.session_url, {'action': 'submit', 'revision': 1, 'data': data}, format='json').status_code, 409)
         self.public.credentials(HTTP_AUTHORIZATION=f"Bearer {second['session']}")
-        self.assertEqual(self.public.get(self.session_url).data['data']['candidate']['name'], 'Different Applicant')
+        self.assertEqual(self.public.get(self.session_url).status_code, 409)
         details = self.hr_client.get('/api/v1/hr/recruitment-application-links/', {'link': link['id']})
         self.assertEqual(details.data['submitted_applications'], 1)
         self.assertEqual(details.data['applications'][0]['candidate_name'], 'New Applicant')
@@ -166,7 +166,7 @@ class CareersSyncPublicLinksTests(TestCase):
         self.public.credentials(HTTP_AUTHORIZATION=f"Bearer {first.data['session']}")
         self.upload_photo()
         form = self.public.get(self.session_url)
-        self.assertEqual(form.data['data'], {'candidate': {}})
+        self.assertEqual(form.data['data'], {'candidate': {'position_applied': '', 'nationality': ''}})
         self.assertEqual(form.data['position'], '')
         self.assertIn('expires_at', form.data)
         submitted = self.public.post(self.session_url, {'action': 'submit', 'revision': 0, 'data': self.cv_data()}, format='json')
@@ -179,7 +179,7 @@ class CareersSyncPublicLinksTests(TestCase):
         reviewed = self.hr_client.post(f'/api/v1/hr/recruitment-forms/{invitation.pk}/review/', {'action': 'verify', 'version': 1}, format='json')
         self.assertEqual(reviewed.status_code, 200, reviewed.data)
         self.public.credentials(HTTP_AUTHORIZATION=f"Bearer {second.data['session']}")
-        self.assertEqual(self.public.get(self.session_url).data['data'], {'candidate': {}})
+        self.assertEqual(self.public.get(self.session_url).status_code, 409)
 
     def test_both_link_types_expire_in_three_days_and_block_live_sessions(self):
         for kind in ('cv', 'pre_onboarding'):

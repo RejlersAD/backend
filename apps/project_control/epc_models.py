@@ -1,4 +1,4 @@
-"""Explicit EPC source links and immutable integrated baseline evidence."""
+﻿"""Explicit EPC source links and immutable integrated baseline evidence."""
 from django.conf import settings
 from django.db import models
 
@@ -96,3 +96,4 @@ class IntegratedBaseline(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValueError('Integrated baselines cannot be deleted.')
+

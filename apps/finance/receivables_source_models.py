@@ -1,4 +1,4 @@
-"""Immutable workbook facts for reporting, separate from operational invoices."""
+﻿"""Immutable workbook facts for reporting, separate from operational invoices."""
 from django.db import models
 from django.utils import timezone
 
@@ -111,3 +111,4 @@ class ReceivablesSourceIdentity(models.Model):
     )
     canonical_identity_basis = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+

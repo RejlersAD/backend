@@ -488,3 +488,7 @@ ai/legend_models/data/_router/
 !docs/HR_TALENT_ACQUISITION.md
 !docs/HR_CANDIDATE_ONLINE_FORMS.md
 !docs/HR_CAREERS_PUBLIC_LINKS.md
+
+# HR-LEAVE-REFER-01 contract and regression coverage.
+!docs/LEAVE_REFERRAL.md
+!apps/payroll/tests/test_leave_referral.py

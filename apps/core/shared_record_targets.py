@@ -1,4 +1,4 @@
-"""Minimal canonical lookups; linking does not grant access to another domain."""
+﻿"""Minimal canonical lookups; linking does not grant access to another domain."""
 from django.db.models import Q
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -101,7 +101,7 @@ def search_targets(user, kind, search='', project=None):
     else:
         fields, order = ('employee_code', 'employee_number', 'first_name', 'last_name'), ('first_name', 'last_name', 'pk')
     if search:
-        condition = Q()
+        check = Q()
         for field in fields:
             condition |= Q(**{f'{field}__icontains': search})
         queryset = queryset.filter(condition)
@@ -124,3 +124,4 @@ def visible_payload(user, kind, row, project=None):
     if row is None or not target_queryset(user, kind, project).filter(pk=row.pk).exists():
         return None
     return candidate_payload(row, kind)
+

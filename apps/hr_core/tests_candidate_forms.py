@@ -161,7 +161,7 @@ class CandidateFormsTests(TestCase):
         self.assertEqual(stored.data['dependants'][0]['name'], 'Child')
         self.assertIn('Family Member', stored.declaration_text)
 
-    def test_hr_correction_preserves_versions_and_verification_is_explicit(self):
+    def test_cv_correction_requires_fresh_link_and_keeps_original_evidence(self):
         invitation = self.invite()
         self.assertEqual(self.submit_cv(invitation).status_code, 200)
         review_url = f"{self.url}{invitation['id']}/review/"
@@ -169,11 +169,19 @@ class CandidateFormsTests(TestCase):
         self.assertEqual(correction.status_code, 200, correction.data)
         data = self.cv_data(); data['summary'] = {'text': 'Updated experience'}
         updated = self.public.post(self.session_url, {'action': 'submit', 'revision': 1, 'data': data}, format='json')
+        self.assertEqual(updated.status_code, 409)
+        reopened = APIClient().post(self.access, {'token': invitation['token']}, format='json')
+        self.assertTrue(reopened.data['closed'])
+        fresh = self.invite()
+        current = self.session(fresh)
+        updated = self.public.post(self.session_url, {'action': 'submit', 'revision': current['revision'], 'data': data}, format='json')
         self.assertEqual(updated.status_code, 200, updated.data)
         self.assertEqual(RecruitmentFormSubmission.objects.count(), 2)
-        stale = self.hr_client.post(review_url, {'action': 'verify', 'version': 1}, format='json')
+        self.assertEqual(RecruitmentFormSubmission.objects.filter(invitation_id=invitation['id']).count(), 1)
+        review_url = f"{self.url}{fresh['id']}/review/"
+        stale = self.hr_client.post(review_url, {'action': 'verify', 'version': 2}, format='json')
         self.assertEqual(stale.status_code, 409)
-        checked = self.hr_client.post(review_url, {'action': 'verify', 'version': 2}, format='json')
+        checked = self.hr_client.post(review_url, {'action': 'verify', 'version': 1}, format='json')
         self.assertEqual(checked.status_code, 200, checked.data)
         self.assertEqual(checked.data['state'], 'verified')
 

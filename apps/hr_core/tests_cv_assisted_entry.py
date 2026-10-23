@@ -62,7 +62,7 @@ class CVAssistedEntryTests(TestCase):
         self.assertEqual(submitted.status_code, 200, submitted.data)
         first = RecruitmentFormSubmission.objects.get(invitation_id=invitation['id'])
         self.assertEqual(first.attachments.count(), 2)
-        self.assertEqual(self.public.post('/api/v1/candidate-forms/uploads/', {'kind': 'cv', 'file': self.cv_file()}, format='multipart').status_code, 403)
+        self.assertEqual(self.public.post('/api/v1/candidate-forms/uploads/', {'kind': 'cv', 'file': self.cv_file()}, format='multipart').status_code, 409)
         download = self.hr_client.get(f"/api/v1/hr/recruitment-forms/{invitation['id']}/attachments/{cv['id']}/")
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download['X-Content-Type-Options'], 'nosniff')
@@ -72,6 +72,8 @@ class CVAssistedEntryTests(TestCase):
             self.assertTrue(any(name.startswith('word/media/') for name in archive.namelist()))
         corrected = self.hr_client.post(f"/api/v1/hr/recruitment-forms/{invitation['id']}/review/", {'action': 'correction', 'version': 1, 'note': 'Update photo'}, format='json')
         self.assertEqual(corrected.status_code, 200)
+        self.assertEqual(self.public.post('/api/v1/candidate-forms/uploads/', {'kind': 'cv', 'file': self.cv_file()}, format='multipart').status_code, 409)
+        self.session(self.invite())
         next_photo = self.upload_photo()
         self.assertNotEqual(next_photo['id'], first_photo.pk)
         self.assertEqual(first.attachments.filter(kind='photo').get().pk, first_photo.pk)
@@ -168,6 +170,8 @@ class CVAssistedEntryTests(TestCase):
         self.assertEqual(self.hr_client.get(f'/api/v1/hr/recruitment-candidates/{record.pk}/').data['education'], record.education)
         # Draft-only replacement files must not appear in the confirmed register.
         self.hr_client.post(f"/api/v1/hr/recruitment-forms/{invitation['id']}/review/", {'action': 'correction', 'version': 1, 'note': 'Update'}, format='json')
+        self.assertEqual(self.public.post('/api/v1/candidate-forms/uploads/', {'kind': 'cv', 'file': self.cv_file()}, format='multipart').status_code, 409)
+        self.session(self.invite())
         newer = self.upload_cv()
         current = self.hr_client.get(f'/api/v1/hr/recruitment-candidates/{record.pk}/').data
         self.assertIn(cv['id'], [item['id'] for item in current['documents']])

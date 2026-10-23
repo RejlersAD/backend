@@ -1,4 +1,4 @@
-"""
+﻿"""
 HR Core Models - Unified Employee Master System
 
 This module consolidates employee data from:
@@ -1023,7 +1023,7 @@ class WorkShift(TimeStampedModel):
         ordering = ['start_time', 'code']
 
     def __str__(self):
-        return f'{self.code} — {self.name}'
+        return f'{self.code} â€” {self.name}'
 
 
 class ShiftRoster(TimeStampedModel):
@@ -1384,3 +1384,4 @@ class OvertimeConversionAllocation(models.Model):
             models.UniqueConstraint(fields=['conversion', 'request'], name='ot_conversion_request_unique'),
             models.CheckConstraint(check=models.Q(hours__gt=0), name='ot_allocation_positive'),
         ]
+

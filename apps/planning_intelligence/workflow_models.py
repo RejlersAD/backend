@@ -1,4 +1,4 @@
-"""Versioned workflow and engineering-logic configuration for schedule generation."""
+﻿"""Versioned workflow and engineering-logic configuration for schedule generation."""
 from django.conf import settings as django_settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -44,15 +44,14 @@ class WorkflowTemplate(BaseModel):
                 fields=['code', 'version'], condition=Q(project__isnull=True),
                 name='uniq_system_workflow_template_version',
             ),
-            models.CheckConstraint(
-                check=Q(is_system=False) | Q(project__isnull=True),
+            models.CheckConstraint(check=Q(is_system=False) | Q(project__isnull=True),
                 name='system_workflow_template_has_no_project',
             ),
         ]
 
     def __str__(self):
         scope = 'SYSTEM' if self.project_id is None else f'PROJECT {self.project_id}'
-        return f'{scope} · {self.code} · v{self.version}'
+        return f'{scope} Â· {self.code} Â· v{self.version}'
 
 
 class WorkflowStage(BaseModel):
@@ -98,7 +97,7 @@ class WorkflowStage(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.template.code} · {self.sequence} · {self.name}'
+        return f'{self.template.code} Â· {self.sequence} Â· {self.name}'
 
 
 class EngineeringDependencyTemplate(BaseModel):
@@ -136,14 +135,13 @@ class EngineeringDependencyTemplate(BaseModel):
                 fields=['code', 'version'], condition=Q(project__isnull=True),
                 name='uniq_system_dependency_template_version',
             ),
-            models.CheckConstraint(
-                check=Q(is_system=False) | Q(project__isnull=True),
+            models.CheckConstraint(check=Q(is_system=False) | Q(project__isnull=True),
                 name='system_dependency_template_has_no_project',
             ),
         ]
 
     def __str__(self):
-        return f'{self.discipline} · {self.code} · v{self.version}'
+        return f'{self.discipline} Â· {self.code} Â· v{self.version}'
 
 
 class EngineeringDependencyRule(BaseModel):
@@ -180,14 +178,13 @@ class EngineeringDependencyRule(BaseModel):
                 ],
                 name='uniq_engineering_dependency_gate',
             ),
-            models.CheckConstraint(
-                check=~Q(predecessor_code=models.F('successor_code')),
+            models.CheckConstraint(check=~Q(predecessor_code=models.F('successor_code')),
                 name='dependency_rule_distinct_deliverables',
             ),
         ]
 
     def __str__(self):
-        return f'{self.predecessor_code}:{self.predecessor_stage_code} → {self.successor_code}:{self.successor_stage_code}'
+        return f'{self.predecessor_code}:{self.predecessor_stage_code} â†’ {self.successor_code}:{self.successor_stage_code}'
 
 
 class ProjectScheduleConfiguration(BaseModel):
@@ -217,7 +214,7 @@ class ProjectScheduleConfiguration(BaseModel):
         ordering = ['project_id']
 
     def __str__(self):
-        return f'{self.project_id} · configuration v{self.configuration_version}'
+        return f'{self.project_id} Â· configuration v{self.configuration_version}'
 
 
 class ScheduleDefaultProposal(BaseModel):
@@ -245,7 +242,7 @@ class ScheduleDefaultProposal(BaseModel):
         indexes = [models.Index(fields=['project', 'status', '-created_at'])]
 
     def __str__(self):
-        return f'{self.project_id} · defaults proposal {self.pk} · {self.status}'
+        return f'{self.project_id} Â· defaults proposal {self.pk} Â· {self.status}'
 
 
 class WorkflowTemplateOverride(BaseModel):
@@ -274,4 +271,5 @@ class WorkflowTemplateOverride(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.configuration.project_id} · {self.scope_type}:{self.scope_key}'
+        return f'{self.configuration.project_id} Â· {self.scope_type}:{self.scope_key}'
+

@@ -5,7 +5,7 @@ from django.core.validators import validate_email
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError
 
-VERSION = 'rad-2026-10-v2'
+VERSION = 'rad-2026-10-v3'
 DECLARATION = ('Subject to Article 15 of the Federal Law No. 33/2021, the employee should specify in writing the concerned family member/person who would receive the rights in case of death. '
                'I, {candidate_name}, hereby authorize {beneficiary_name}, relationship: {beneficiary_relationship}, to receive my rights in case of my death during my employment at Rejlers International Engineering Solutions - Abu Dhabi.')
 
@@ -21,7 +21,7 @@ def section(key, title, fields, repeatable=False):
 CONTACT = [field('name', 'Full name', required=True), field('address', 'Address', 'textarea'), field('phone', 'Contact number', required=True), field('relationship', 'Relationship', required=True)]
 SCHEMAS = {
     'cv': [
-        section('candidate', 'Candidate details', [field('name', 'Full name', required=True), field('email', 'Personal email', 'email', True), field('phone', 'Personal contact number', required=True), field('current_position', 'Current position'), field('current_department', 'Current department'), field('birth_year', 'Year of birth (optional)', 'year')]),
+        section('candidate', 'Candidate details', [field('name', 'Full name', required=True), field('position_applied', 'Position Applied'), field('nationality', 'Nationality'), field('email', 'Personal email', 'email', True), field('phone', 'Personal contact number', required=True), field('current_position', 'Current position'), field('current_department', 'Current department'), field('birth_year', 'Year of birth (optional)', 'year')]),
         section('education', 'Education', [field('qualification', 'Qualification', required=True), field('institution', 'Institution'), field('period', 'Period')], True),
         section('languages', 'Languages', [field('language', 'Language', required=True), field('proficiency', 'Proficiency')], True),
         section('competence', 'Fields of competence', [field('projects', 'Projects', 'textarea'), field('technology', 'Technology', 'textarea'), field('techniques', 'Techniques', 'textarea')]),
@@ -50,7 +50,7 @@ def schema_for(kind):
     sections = copy.deepcopy(SCHEMAS[kind])
     if kind == 'cv':
         candidate = sections[0]
-        order = ['name', 'current_position', 'current_department', 'birth_year', 'email', 'phone']
+        order = ['name', 'position_applied', 'nationality', 'current_position', 'current_department', 'birth_year', 'email', 'phone']
         candidate['fields'].sort(key=lambda item: order.index(item['key']))
         for spec in candidate['fields']:
             if spec['key'] in ('email', 'phone'):
@@ -128,6 +128,10 @@ def validate_form(kind, data, final=False):
         result[key] = clean_rows if item['repeatable'] else (clean_rows[0] if clean_rows else {})
     if final and kind == 'pre_onboarding' and result.get('relatives_question', {}).get('has_relatives') and not result.get('relatives'):
         errors['relatives'] = 'Add details for at least one relative.'
+    if kind == 'cv':
+        for name, limit in [('position_applied', 200), ('nationality', 100)]:
+            if len(result.get('candidate', {}).get(name, '')) > limit:
+                errors[f'candidate.{name}'] = f'Use at most {limit} characters.'
     if errors:
         raise ValidationError({'fields': errors})
     return result

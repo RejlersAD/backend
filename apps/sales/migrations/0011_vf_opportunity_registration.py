@@ -1,4 +1,4 @@
-from django.conf import settings
+﻿from django.conf import settings
 from django.db import migrations, models
 import django.db.models.deletion
 
@@ -109,3 +109,4 @@ class Migration(migrations.Migration):
         # Run the reverse guard before removing columns or restoring NOT NULL.
         migrations.RunPython(migrations.RunPython.noop, refuse_loss_of_registration),
     ]
+

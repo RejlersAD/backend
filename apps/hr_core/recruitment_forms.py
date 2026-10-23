@@ -10,14 +10,14 @@ from django.core.mail import EmailMessage, get_connection
 from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
 from .governance import audit
-from .models import RecruitmentCandidate, RecruitmentFormInvitation, RecruitmentFormSubmission, RecruitmentOpening
+from .models import RecruitmentApplicationLink, RecruitmentCandidate, RecruitmentFormInvitation, RecruitmentFormSubmission, RecruitmentOpening
 from .recruitment import RecruitmentHRPermission
 from .recruitment_form_schema import DECLARATION, VERSION, schema_for, validate_form, display_sections
 
@@ -38,15 +38,22 @@ class PrivateResponseMixin:
         return no_store(super().finalize_response(request, response, *args, **kwargs))
 
 
+class ClosedCVLink(APIException):
+    status_code = 409
+    default_detail = {'detail': 'This CV link has already received a submission and is now closed.', 'code': 'cv_link_closed', 'kind': 'cv'}
+
+
 def require_active(invitation):
     if invitation.revoked_at or invitation.expires_at <= timezone.now():
         raise PermissionDenied('This invitation has expired or was revoked. Please contact HR.')
     if invitation.opening_id and not invitation.opening.is_open:
         raise PermissionDenied('This position is closed. Please contact HR.')
     if invitation.application_link_id:
-        parent = invitation.application_link
+        parent = RecruitmentApplicationLink.objects.select_for_update().get(pk=invitation.application_link_id)
         if parent.revoked_at or parent.expires_at <= timezone.now():
             raise PermissionDenied('This application link has expired or was revoked. Please contact HR.')
+        if invitation.kind == 'cv' and invitation.state not in ('submitted', 'verified') and RecruitmentFormSubmission.objects.filter(invitation__application_link=parent).exists():
+            raise ClosedCVLink()
     if invitation.kind == 'pre_onboarding' and not invitation.application_link_id and (not invitation.candidate_id or invitation.candidate.interview_outcome != 'suitable'):
         raise PermissionDenied('Pre-onboarding is not currently available. Please contact HR.')
 
@@ -333,6 +340,8 @@ class CandidateFormAccessView(PublicFormView):
         except RecruitmentFormInvitation.DoesNotExist:
             raise PermissionDenied('Invalid invitation. Please contact HR.')
         require_active(invitation)
+        if invitation.kind == 'cv' and invitation.submissions.exists():
+            return Response({'closed': True, 'kind': 'cv', 'state': 'submitted'})
         if invitation.kind == 'pre_onboarding' and (invitation.recipient or invitation.candidate_id or not invitation.application_link_id):
             result = pre_onboarding_verification(invitation, send_code=request.data.get('send_code') is True, code=request.data.get('code', ''))
             if result is not None:
@@ -354,6 +363,8 @@ def session_invitation(request):
     except RecruitmentFormInvitation.DoesNotExist:
         raise PermissionDenied('Your form session has expired. Reopen your invitation link.')
     require_active(invitation)
+    if request.method != 'GET' and invitation.kind == 'cv' and invitation.submissions.exists():
+        raise ClosedCVLink()
     return invitation
 
 
@@ -367,10 +378,16 @@ class CandidateFormSessionView(PublicFormView):
     @transaction.atomic
     def get(self, request):
         invitation = session_invitation(request)
+        if invitation.kind == 'cv' and invitation.submissions.exists():
+            return Response({'closed': True, 'kind': 'cv', 'state': 'submitted'})
         from .recruitment_cv import latest_attachments, attachment_summary
-        draft = invitation.draft
+        draft = dict(invitation.draft)
         if not draft and invitation.candidate_id:
             draft = {'candidate': {'name': invitation.candidate.name, 'email': invitation.recipient, 'phone': invitation.candidate.mobile}} if invitation.kind == 'cv' else {'contact': {'email': invitation.recipient, 'phone': invitation.candidate.mobile}, 'identity': {'nationality': invitation.candidate.nationality}, 'beneficiary': {'candidate_name': invitation.candidate.name, 'date': timezone.localdate().isoformat()}}
+        if invitation.kind == 'cv':
+            draft['candidate'] = dict(draft.get('candidate', {}))
+            draft['candidate'].setdefault('position_applied', invitation.opening.title if invitation.opening_id else (invitation.candidate.position if invitation.candidate_id else ''))
+            draft['candidate'].setdefault('nationality', invitation.candidate.nationality if invitation.candidate_id else '')
         return Response({'title': invitation.get_kind_display(), 'kind': invitation.kind, 'position': invitation.opening.title if invitation.opening_id else '',
             'expires_at': invitation.expires_at, 'location': invitation.opening.location if invitation.opening_id else '', 'public_application': bool(invitation.application_link_id),
             'department': invitation.opening.department if invitation.opening_id else '', 'schema': schema_for(invitation.kind), 'data': draft,
@@ -406,7 +423,7 @@ class CandidateFormSessionView(PublicFormView):
         if action == 'submit' and invitation.application_link_id and not invitation.candidate_id:
             if invitation.kind == 'cv':
                 identity = data['candidate']
-                name, email, mobile, nationality = identity['name'], identity['email'], identity['phone'], ''
+                name, email, mobile, nationality = identity['name'], identity['email'], identity['phone'], identity.get('nationality', '')
             else:
                 identity, contact = data['identity'], data['contact']
                 name = f"{identity['first_name']} {identity['family_name']}".strip()
@@ -420,11 +437,19 @@ class CandidateFormSessionView(PublicFormView):
             invitation.recipient = email
             invitation.candidate = RecruitmentCandidate.objects.create(name=name, email=email,
                 mobile=mobile if len(mobile) <= 40 else '', nationality=nationality,
-                position=invitation.opening.title if invitation.opening_id else '', department=invitation.opening.department if invitation.opening_id else '', status='Applied',
+                position=(data['candidate'].get('position_applied') or (invitation.opening.title if invitation.opening_id else '')) if invitation.kind == 'cv' else invitation.opening.title if invitation.opening_id else '', department=invitation.opening.department if invitation.opening_id else '', status='Applied',
                 **(cv_projection(data) if invitation.kind == 'cv' else {}))
         invitation.draft = data
         invitation.draft_revision += 1
         if action == 'submit':
+            if invitation.kind == 'cv' and invitation.candidate_id:
+                changed = []
+                for source, target in [('position_applied', 'position'), ('nationality', 'nationality')]:
+                    if data['candidate'].get(source):
+                        setattr(invitation.candidate, target, data['candidate'][source])
+                        changed.append(target)
+                if changed:
+                    invitation.candidate.save(update_fields=[*changed, 'updated_at'])
             declaration = DECLARATION.format(**data['beneficiary']) if invitation.kind == 'pre_onboarding' else ''
             submission = RecruitmentFormSubmission.objects.create(invitation=invitation, version=invitation.submissions.count() + 1, data=data, schema_version=VERSION, declaration_text=declaration)
             submission.attachments.set(attachments)
