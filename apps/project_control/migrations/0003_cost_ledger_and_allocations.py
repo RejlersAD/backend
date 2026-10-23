@@ -1,4 +1,4 @@
-import uuid
+﻿import uuid
 
 import django.db.models.deletion
 from django.conf import settings
@@ -247,3 +247,4 @@ class Migration(migrations.Migration):
         migrations.AddIndex(model_name='costledgerentry', index=models.Index(fields=['project', 'entry_type', 'status'], name='pc_ledger_proj_type_idx')),
         migrations.AddIndex(model_name='costledgerentry', index=models.Index(fields=['project', 'wbs_node', 'status'], name='pc_ledger_proj_wbs_idx')),
     ]
+

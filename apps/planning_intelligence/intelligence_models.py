@@ -1,4 +1,4 @@
-"""Persistent document-intelligence evidence, provenance, and review workflow."""
+﻿"""Persistent document-intelligence evidence, provenance, and review workflow."""
 from django.conf import settings
 from django.db import models
 
@@ -323,3 +323,4 @@ class GenerationDecisionGate(BaseModel):
     class Meta:
         ordering = ['sequence']
         constraints = [models.UniqueConstraint(fields=['plan', 'code'], name='uniq_generation_decision_gate')]
+

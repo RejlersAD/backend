@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from apps.rbac.permissions import HasModuleAccess
 from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.executive_access import HasExecutiveTabAccess
 from .access import CanUploadPortfolioWorkbook
 from .importer import PortfolioSnapshotChanged, import_workbook
 from .models import PortfolioSource
@@ -35,7 +36,8 @@ class WorkbookFilters(serializers.Serializer):
 
 
 class PortfolioWorkbookView(APIView):
-    permission_classes = [IsAuthenticated, HasModuleAccess]
+    permission_classes = [IsAuthenticated, HasModuleAccess, HasExecutiveTabAccess]
+    executive_tabs = ('portfolio',)
     module_required = 'executive_dashboard'
     permission_action = 'read'
     http_method_names = ['get', 'head', 'options']
@@ -132,7 +134,8 @@ def _private_response(data, *, status=200):
 
 
 class _WorkbookUploadView(APIView):
-    permission_classes = [IsAuthenticated, HasModuleAccess, CanUploadPortfolioWorkbook]
+    permission_classes = [IsAuthenticated, HasModuleAccess, HasExecutiveTabAccess, CanUploadPortfolioWorkbook]
+    executive_tabs = ('portfolio',)
     module_required = 'executive_dashboard'
     # The shared route guard checks executive read; the dedicated permission
     # above separately enforces Project Control update for both upload actions.

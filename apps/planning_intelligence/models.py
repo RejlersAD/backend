@@ -1,5 +1,5 @@
-"""
-RADAI Project Planning Application — Models.
+﻿"""
+RADAI Project Planning Application â€” Models.
 
 Deliberately lean: PlanningProject + PlanningFile are relational; the heavy
 generated artefacts (WBS / activities / EDDR / validation / narrative) are
@@ -33,7 +33,7 @@ def _planning_file_upload_path(instance, filename):
 
 def get_planning_file_storage():
     """Return PlanningIntelligenceStorage (S3) when USE_S3 is enabled, otherwise
-    local FileSystemStorage. Must be a *callable* (not a plain string) — Django's
+    local FileSystemStorage. Must be a *callable* (not a plain string) â€” Django's
     FileField only lazily resolves the `storage=` kwarg when it is callable.
     """
     if os.environ.get('USE_S3', 'False').lower() == 'true':
@@ -108,16 +108,16 @@ class PlanningProject(BaseModel):
     planned_end_date = models.DateField(null=True, blank=True)
     duration_months = models.DecimalField(max_digits=8, decimal_places=4, default=10)
 
-    # Calendar & review-cycle overrides — falls back to config.DEFAULT_* when empty.
+    # Calendar & review-cycle overrides â€” falls back to config.DEFAULT_* when empty.
     calendar_overrides = models.JSONField(default=dict, blank=True)
     review_cycle_overrides = models.JSONField(default=dict, blank=True)
 
-    # BYOK (Bring Your Own Key) — optional per-project Claude/Anthropic
+    # BYOK (Bring Your Own Key) â€” optional per-project Claude/Anthropic
     # configuration: {'enabled': bool, 'provider': 'anthropic', 'model': str,
     # 'api_key_encrypted': str, 'key_updated_at': iso str}. The encrypted key
     # is written/read only via services/byok_crypto.py and is never exposed
     # through the API (see serializers.PlanningProjectSerializer). Empty dict
-    # (the default) means "no BYOK configured — deterministic engine only".
+    # (the default) means "no BYOK configured â€” deterministic engine only".
     ai_settings = models.JSONField(default=dict, blank=True)
 
     created_by = models.ForeignKey(
@@ -128,8 +128,7 @@ class PlanningProject(BaseModel):
     class Meta:
         ordering = ['-created_at']
         constraints = [
-            models.CheckConstraint(
-                check=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
+            models.CheckConstraint(check=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
                 name='plan_project_effort_nonnegative',
             ),
         ]
@@ -166,12 +165,12 @@ class PlanningFile(BaseModel):
         indexes = [models.Index(fields=['project', 'category'])]
 
     def __str__(self):
-        return f'{self.project_id} · {self.category} · {self.original_filename}'
+        return f'{self.project_id} Â· {self.category} Â· {self.original_filename}'
 
 
 class PlanningGeneration(BaseModel):
     """
-    One generation run's output — project intelligence + WBS + activities +
+    One generation run's output â€” project intelligence + WBS + activities +
     EDDR + validation + narrative + manhours, all versioned per project.
     """
     project = models.ForeignKey(PlanningProject, on_delete=models.CASCADE, related_name='generations')
@@ -210,7 +209,7 @@ class PlanningGeneration(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.project_id} · v{self.version}'
+        return f'{self.project_id} Â· v{self.version}'
 
 
 class PlanningJob(BaseModel):
@@ -269,7 +268,7 @@ class PlanningJob(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.project_id} · {self.job_type} · {self.status}'
+        return f'{self.project_id} Â· {self.job_type} Â· {self.status}'
 
 
 class PlanningAuditEvent(models.Model):
@@ -293,7 +292,7 @@ class PlanningAuditEvent(models.Model):
         indexes = [models.Index(fields=['project', '-created_at'])]
 
     def __str__(self):
-        return f'{self.project_id} · {self.action} · {self.entity_type}:{self.entity_id}'
+        return f'{self.project_id} Â· {self.action} Â· {self.entity_type}:{self.entity_id}'
 
 
 # Import relational scheduling models so Django registers them under this app.
@@ -341,3 +340,4 @@ from .planning_register_models import PlanningRiskRecord  # noqa: E402,F401
 from .operational_control_models import OperationalControlReport, OperationalEarningPolicy  # noqa: E402,F401
 from .delay_models import DelayAnalysisCase, DelayAnalysisRun, DelayEvent  # noqa: E402,F401
 from .logic_review_models import ScheduleLogicReview  # noqa: E402,F401
+

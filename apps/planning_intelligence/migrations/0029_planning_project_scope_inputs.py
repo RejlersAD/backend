@@ -1,4 +1,4 @@
-from decimal import Decimal
+﻿from decimal import Decimal
 
 import django.core.validators
 from django.db import migrations, models
@@ -26,9 +26,9 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='planningproject',
-            constraint=models.CheckConstraint(
-                check=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
+            constraint=models.CheckConstraint(check=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
                 name='plan_project_effort_nonnegative',
             ),
         ),
     ]
+

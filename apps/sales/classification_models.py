@@ -1,4 +1,4 @@
-"""Reviewable document metadata and durable, exact-source classification work."""
+﻿"""Reviewable document metadata and durable, exact-source classification work."""
 import uuid
 
 from django.conf import settings
@@ -46,8 +46,7 @@ class OpportunityDocumentClassificationRun(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [models.CheckConstraint(
-            check=models.Q(confidence__lte=100), name='sales_doc_classification_confidence_range')]
+        constraints = [models.CheckConstraint(check=models.Q(confidence__lte=100), name='sales_doc_classification_confidence_range')]
 
 
 class OpportunityDocumentClassificationCommand(models.Model):
@@ -61,3 +60,4 @@ class OpportunityDocumentClassificationCommand(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=('actor', 'request_id'), name='sales_doc_classification_request')]
+

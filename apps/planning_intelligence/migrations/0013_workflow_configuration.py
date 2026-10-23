@@ -1,4 +1,4 @@
-# Generated for Phase A workflow configuration.
+﻿# Generated for Phase A workflow configuration.
 import django.core.validators
 import django.db.models.deletion
 from django.conf import settings
@@ -118,3 +118,4 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(model_name='workflowstage', constraint=models.UniqueConstraint(fields=('template', 'code'), name='uniq_workflow_stage_code')),
         migrations.AddConstraint(model_name='workflowtemplateoverride', constraint=models.UniqueConstraint(fields=('configuration', 'scope_type', 'scope_key'), name='uniq_project_workflow_override_scope')),
     ]
+

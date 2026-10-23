@@ -1,5 +1,5 @@
-"""
-P&ID Checker V2 — data models.
+﻿"""
+P&ID Checker V2 â€” data models.
 
 Minimal empty scaffold; a real checker pipeline (file uploads, extraction,
 comparison, findings, ...) will be layered on top later.
@@ -11,7 +11,7 @@ from django.conf import settings
 from django.db import models
 
 
-# ── Soft-coded field configuration ────────────────────────────────────────
+# â”€â”€ Soft-coded field configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PROJECT_NAME_MAX_LEN = 200
 STATUS_MAX_LEN = 32
 
@@ -64,9 +64,9 @@ class PidCheckerV2Project(models.Model):
         return f'{self.name} ({self.status})'
 
 
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # Auto-save: extractions + line-tag rows
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 # Soft-coded field limits
 FILENAME_MAX_LEN = 255
@@ -93,7 +93,7 @@ PROVIDER_CHOICES = (
 
 
 class PidCheckerV2Extraction(models.Model):
-    """One line-tag extraction run — auto-saved after each successful upload."""
+    """One line-tag extraction run â€” auto-saved after each successful upload."""
 
     extraction_id = models.UUIDField(
         default=uuid.uuid4, editable=False, unique=True, db_index=True,
@@ -132,7 +132,7 @@ class PidCheckerV2Extraction(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f'{self.filename} — {self.tag_count} tags ({self.mode})'
+        return f'{self.filename} â€” {self.tag_count} tags ({self.mode})'
 
 
 class PidCheckerV2LineTag(models.Model):
@@ -168,9 +168,9 @@ class PidCheckerV2LineTag(models.Model):
         return self.tag
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Legend Sheets — user-defined per-section extraction rules
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Legend Sheets â€” user-defined per-section extraction rules
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 from .legend_defaults import SECTIONS as LEGEND_SECTIONS, SECTION_LABELS as LEGEND_SECTION_LABELS  # noqa: E402
 
 LEGEND_SECTION_MAX_LEN = 32
@@ -185,7 +185,7 @@ class PidCheckerV2LegendSheet(models.Model):
     """A user-owned rule set for one section (e.g. 'line_list').
 
     Multiple legends per (user, section, project) may be active at the same
-    time — they are merged at resolution time (see
+    time â€” they are merged at resolution time (see
     ``views._resolve_active_legend``), so e.g. a Line List legend and an
     Equipment List legend pack, or two complementary section packs, can apply
     together.
@@ -230,7 +230,7 @@ class PidCheckerV2LegendSheet(models.Model):
         ]
         constraints = [
             # NOTE: the one-active-legend-per-(user, section, project) partial
-            # unique constraint was removed in migration 0026 — multiple active
+            # unique constraint was removed in migration 0026 â€” multiple active
             # legends per section are supported and merged at resolution time.
         ]
 
@@ -239,7 +239,7 @@ class PidCheckerV2LegendSheet(models.Model):
         return f'{self.name} [{self.section}]{marker}'
 
 
-# ─── Master Line List (Excel upload) ──────────────────────────────────
+# â”€â”€â”€ Master Line List (Excel upload) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LINE_LIST_FILENAME_MAX_LEN = 300
 LINE_LIST_TITLE_MAX_LEN = 500
 LINE_LIST_PID_REF_MAX_LEN = 500
@@ -262,13 +262,13 @@ class PidCheckerV2LineListUpload(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_line_lists',
     )
-    # Scopes this upload to one PIDCheckerV2 "project" — PIDCheckerV2 has no
+    # Scopes this upload to one PIDCheckerV2 "project" â€” PIDCheckerV2 has no
     # project model of its own; it reuses apps.pid_verification.PIDVProject
     # (the same project the frontend's pidProjectsService.js already talks
     # to), matching the pattern already used by LegendSymbolImage.project
     # below. Nullable so pre-existing uploads from the brief global-per-user
     # period (see the now-reversed migration 0022) keep their data instead
-    # of being deleted — they simply won't surface under any project filter
+    # of being deleted â€” they simply won't surface under any project filter
     # until re-uploaded within a project.
     owner_project = models.ForeignKey(
         'pid_verification.PIDVProject',
@@ -340,7 +340,7 @@ class PidCheckerV2LineListRow(models.Model):
         return self.tag or f'row {self.excel_row}'
 
 
-# ─── Master Equipment List (Excel upload) ─────────────────────────────
+# â”€â”€â”€ Master Equipment List (Excel upload) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 EQUIPMENT_LIST_FILENAME_MAX_LEN = 300
 EQUIPMENT_LIST_TITLE_MAX_LEN = 500
 EQUIPMENT_LIST_PID_REF_MAX_LEN = 500
@@ -363,7 +363,7 @@ class PidCheckerV2EquipmentListUpload(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_equipment_lists',
     )
-    # See PidCheckerV2LineListUpload.owner_project — same pattern. Named
+    # See PidCheckerV2LineListUpload.owner_project â€” same pattern. Named
     # 'owner_project' (not 'project') because 'project' below is already a
     # free-text CharField holding the project name from the Excel header.
     owner_project = models.ForeignKey(
@@ -475,7 +475,7 @@ class PidCheckerV2InstrumentIndexUpload(models.Model):
         on_delete=models.CASCADE,
         related_name='pid_checker_v2_instrument_indexes',
     )
-    # See PidCheckerV2LineListUpload.owner_project — same pattern. Named
+    # See PidCheckerV2LineListUpload.owner_project â€” same pattern. Named
     # 'owner_project' (not 'project') because 'project' below is already a
     # free-text CharField holding the project name from the Excel header.
     owner_project = models.ForeignKey(
@@ -563,7 +563,7 @@ class PidCheckerV2InstrumentIndexRow(models.Model):
         return self.tag or f'row {self.excel_row}'
 
 
-# ── Token usage log ───────────────────────────────────────────────────────
+# â”€â”€ Token usage log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 USAGE_FEATURE_MAX_LEN = 64
 USAGE_PROVIDER_MAX_LEN = 32
 USAGE_MODEL_MAX_LEN = 128
@@ -608,10 +608,10 @@ class PidCheckerV2UsageLog(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f'{self.feature} · {self.model_name} · {self.total_tokens} tok'
+        return f'{self.feature} Â· {self.model_name} Â· {self.total_tokens} tok'
 
 
-# ─── Legend Symbol Images (BYOK Vision-extracted, project-scoped) ─────
+# â”€â”€â”€ Legend Symbol Images (BYOK Vision-extracted, project-scoped) â”€â”€â”€â”€â”€
 # Cropped picture for one (section, symbol_name) pair, extracted from a
 # project's uploaded Legend PDF (apps.pid_verification.PIDVLegendSheet).
 # Cross-app FKs use string references to avoid import-order issues.
@@ -621,19 +621,19 @@ SYMBOL_IMAGE_CONTENT_TYPE_MAX_LEN = 50
 
 
 def legend_symbol_image_upload_path(instance, filename):
-    """Storage key for a project's custom symbol picture — routed through
+    """Storage key for a project's custom symbol picture â€” routed through
     Django's storage abstraction, so this lands on S3 in any environment
     where ``DEFAULT_FILE_STORAGE`` is the S3 backend (see settings.py) and
     on local disk otherwise, with zero branching here.
 
-    Global *default* pictures are NOT stored this way — see
+    Global *default* pictures are NOT stored this way â€” see
     ``apps/pid_checker_v2/services/default_symbol_images.py``: they're repo
     -committed static files under ``static/default_symbols/``, so a fresh
     server with an empty database still has every default picture without
     needing to seed anything.
     """
     ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'png'
-    # A seeded is_default=True row has no project (see seed_pid_default_symbols) —
+    # A seeded is_default=True row has no project (see seed_pid_default_symbols) â€”
     # route those under a 'defaults' folder instead of a literal 'None'.
     project_segment = instance.project_id or 'defaults'
     return f'legend_symbol_images/{project_segment}/{instance.section}/{uuid.uuid4().hex}.{ext}'
@@ -644,17 +644,17 @@ class LegendSymbolImage(models.Model):
     name. Stored in S3 (or local disk in dev) via ``image_file``.
 
     Re-uploading for the same (project, section, symbol_name) replaces the
-    row rather than accumulating duplicates — see ``unique_together``.
+    row rather than accumulating duplicates â€” see ``unique_together``.
 
-    A second, separate source of rows: ``is_default=True`` (project=None) —
+    A second, separate source of rows: ``is_default=True`` (project=None) â€”
     the repo-committed static/default_symbols/ library, mirrored into this
     table by the ``seed_pid_default_symbols`` management command (run
-    automatically post-migrate — see apps.py) so the shared picture library
+    automatically post-migrate â€” see apps.py) so the shared picture library
     survives independently of the static files on disk too, not just as a
     static-file fallback. ``services/default_symbol_images.py`` still reads
     the static files directly as a second-line fallback for any picture not
     yet (re-)seeded. A project's own upload always takes priority over a
-    default with the same (section, symbol_name) — see SymbolImagesListView.
+    default with the same (section, symbol_name) â€” see SymbolImagesListView.
     """
 
     image_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
@@ -696,4 +696,5 @@ class LegendSymbolImage(models.Model):
 
     def __str__(self) -> str:
         return f'{self.symbol_name} [{self.section}]'
+
 

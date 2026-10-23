@@ -1,4 +1,4 @@
-from django.conf import settings
+﻿from django.conf import settings
 from django.db import migrations, models
 import django.db.models.deletion
 
@@ -90,3 +90,4 @@ class Migration(migrations.Migration):
         migrations.AddIndex(model_name='reportingperiod', index=models.Index(fields=['project', 'status'], name='pc_period_project_status_idx')),
         migrations.AddIndex(model_name='reportingperiodaudit', index=models.Index(fields=['period', 'created_at'], name='pc_period_audit_date_idx')),
     ]
+

@@ -94,6 +94,18 @@ def manager_for_request(request):
     return manager_for_employee(employee_for_request(request), request.employee_id)
 
 
+def task_was_referred(task):
+    return task.instance.events.filter(event_type='referred', stage_code=task.stage.code).exists()
+
+
+def referral_eligible(request, user):
+    employee = employee_for_request(request)
+    if not approval_access(user, 'payroll') or user.pk == request.employee_id or (employee and employee.user_id == user.pk):
+        return False
+    stage = request.workflow_instance.current_stage if request.workflow_instance_id else None
+    return bool(stage and (stage.code != 'hr_review' or is_hr_approver(user)))
+
+
 def can_review(request, user):
     if not approval_access(user, 'payroll'):
         return False
@@ -108,6 +120,8 @@ def can_review(request, user):
         ).select_related('stage', 'instance').first()
         if not task or not HRWorkflowService.task_is_current(task):
             return False
+        if task_was_referred(task):
+            return task.assigned_to_id == user.pk and referral_eligible(request, user)
         if request.leave_type.code == 'FU':
             if task.stage.code == 'hr_review':
                 return is_hr_approver(user) and request.status == 'RM_APPROVED'
@@ -135,6 +149,10 @@ def prepare_review_workflow(request):
     instance = HRWorkflowInstance.objects.select_for_update().get(pk=request.workflow_instance_id)
     if instance.status != 'pending':
         raise ValidationError({'workflow': 'This workflow is no longer pending.'})
+    task = instance.tasks.filter(stage=instance.current_stage, status='pending').first()
+    if task and task_was_referred(task):
+        request.workflow_instance = instance
+        return
     if request.leave_type.code == 'FU':
         request.workflow_instance = instance
         return
