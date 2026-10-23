@@ -1,4 +1,4 @@
-"""Risk management state with immutable source statements and audit history."""
+﻿"""Risk management state with immutable source statements and audit history."""
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -50,3 +50,4 @@ class PlanningRiskRecord(models.Model):
             if previous and any(previous[key] != getattr(self, key) for key in immutable):
                 raise ValidationError('Risk source statements are immutable; record management decisions separately.')
         return super().save(*args, **kwargs)
+

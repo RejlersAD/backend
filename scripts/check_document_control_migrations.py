@@ -1,4 +1,4 @@
-"""Verify real document-control DDL on a fresh disposable PostgreSQL database.
+﻿"""Verify real document-control DDL on a fresh disposable PostgreSQL database.
 
 Reconstructs Sales 0017 from current model state, then exercises 0018/0019.
 This is not a replay of the repository's entire historical migration chain.
@@ -179,3 +179,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

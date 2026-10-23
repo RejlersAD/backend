@@ -556,6 +556,10 @@ class LeaveCategory(models.TextChoices):
     PUBLIC_HOLIDAY = 'public_holiday', 'Public Holiday'
     WORK_OFF       = 'work_off',       'Work Off'
     OTHER          = 'other',          'Other'
+    COMPASSIONATE = 'compassionate', 'Compassionate Leave'
+    NATIONAL_SERVICE = 'national_service', 'National Service Leave'
+    WORK_FROM_HOME = 'work_from_home', 'Work From Home'
+    FLEX_UTILIZATION = 'flex_utilization', 'Flex Utilization'
 
 
 class LeaveType(models.Model):
@@ -633,6 +637,11 @@ class LeaveRequest(models.Model):
         related_name='leave_request',
         help_text='Shared approval workflow runtime for this request.',
     )
+    selected_manager = models.ForeignKey(
+        'hr_core.EmployeeMaster', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='manually_routed_leave_requests',
+        help_text='Request-specific manager for Sales/Finance employees without an assigned manager.',
+    )
     # Denormalised fields — auto-populated from the User FK on save; also
     # allow HR to create requests for employees without RAD AI accounts.
     employee_code    = models.CharField(max_length=30, null=True, blank=True, db_index=True)
@@ -648,6 +657,11 @@ class LeaveRequest(models.Model):
     half_day         = models.BooleanField(default=False)
     # Computed Mon–Fri count stored for fast balance checks
     days_requested   = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('0'))
+    requested_start_date = models.DateField(null=True, blank=True)
+    requested_end_date = models.DateField(null=True, blank=True)
+    requested_days = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    hr_balance_override = models.BooleanField(default=False)
+    hr_override_reason = models.TextField(blank=True)
     reason           = models.TextField(blank=True)
     
     # ═══════════════════════════════════════════════════════════════════════════

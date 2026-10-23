@@ -27,6 +27,12 @@ class RevenueDashboardTests(TestCase):
         module, _ = Module.objects.get_or_create(code=code, defaults={'name': code})
         ensure_module_actions(Module, Permission, module_ids=[module.pk])
         RoleModule.objects.get_or_create(role=self.role, module=module)
+        if code == 'executive_dashboard':
+            permission, _ = Permission.objects.get_or_create(
+                code='executive_dashboard.view_portfolio',
+                defaults={'module': module, 'action': 'view_portfolio', 'name': 'View Project portfolio'},
+            )
+            RolePermission.objects.get_or_create(role=self.role, permission=permission)
         for permission in module.permissions.filter(action=action, is_active=True):
             RolePermission.objects.get_or_create(role=self.role, permission=permission)
 

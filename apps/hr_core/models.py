@@ -1,4 +1,4 @@
-"""
+﻿"""
 HR Core Models - Unified Employee Master System
 
 This module consolidates employee data from:
@@ -16,6 +16,102 @@ import uuid
 from django.db import models
 from django.utils import timezone
 from apps.core.models import TimeStampedModel
+
+
+class RecruitmentOpening(TimeStampedModel):
+    """An explicitly maintained opening; not an employee position assignment."""
+    title = models.CharField(max_length=200)
+    department = models.CharField(max_length=200)
+    is_open = models.BooleanField(default=True)
+    location = models.CharField(max_length=200, blank=True)
+    source = models.CharField(max_length=30, default='manual')
+    source_id = models.PositiveBigIntegerField(null=True, blank=True, unique=True)
+    source_url = models.URLField(max_length=1000, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+
+class RecruitmentPositionSync(models.Model):
+    source = models.CharField(primary_key=True, max_length=40, default='rejlers_ae')
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, default='not_synced')
+    error = models.CharField(max_length=500, blank=True)
+    counts = models.JSONField(default=dict)
+
+
+class RecruitmentApplicationLink(TimeStampedModel):
+    opening = models.ForeignKey(RecruitmentOpening, null=True, blank=True, on_delete=models.PROTECT)
+    owner = models.ForeignKey('users.User', on_delete=models.PROTECT)
+    kind = models.CharField(max_length=20, choices=[('cv', 'Candidate CV Submission Form'), ('pre_onboarding', 'Pre-Onboarding Employee Form')])
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+
+class RecruitmentCandidate(TimeStampedModel):
+    """Pre-employment register. Never creates a User or EmployeeMaster."""
+    STATUS_CHOICES = [(value, value) for value in ('Invited', 'Applied', 'Interview', 'Selected', 'Pending docs', 'Rejected')]
+    name = models.CharField(max_length=200)
+    email = models.EmailField()
+    mobile = models.CharField(max_length=40, blank=True)
+    nationality = models.CharField(max_length=100, blank=True)
+    position = models.CharField(max_length=200)
+    department = models.CharField(max_length=200)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Applied')
+    education = models.TextField(blank=True, max_length=4000)
+    experience = models.TextField(blank=True, max_length=4000)
+    skills = models.CharField(max_length=1000, blank=True)
+    interview_notes = models.TextField(blank=True, max_length=8000)
+    interview_outcome = models.CharField(max_length=20, blank=True, choices=[('suitable', 'Suitable'), ('not_proceeding', 'Not proceeding')])
+
+
+class RecruitmentFormInvitation(TimeStampedModel):
+    candidate = models.ForeignKey(RecruitmentCandidate, null=True, blank=True, on_delete=models.PROTECT, related_name='form_invitations')
+    application_link = models.ForeignKey(RecruitmentApplicationLink, null=True, blank=True, on_delete=models.PROTECT, related_name='applications')
+    opening = models.ForeignKey(RecruitmentOpening, null=True, blank=True, on_delete=models.PROTECT)
+    owner = models.ForeignKey('users.User', on_delete=models.PROTECT)
+    kind = models.CharField(max_length=20, choices=[('cv', 'Candidate CV Submission Form'), ('pre_onboarding', 'Pre-Onboarding Employee Form')])
+    recipient = models.EmailField()
+    verified_email = models.EmailField(blank=True, default='')
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    delivery_status = models.CharField(max_length=20, default='link_created')
+    session_hash = models.CharField(max_length=64, blank=True)
+    session_expires_at = models.DateTimeField(null=True, blank=True)
+    otp_hash = models.CharField(max_length=64, blank=True)
+    otp_expires_at = models.DateTimeField(null=True, blank=True)
+    otp_sent_at = models.DateTimeField(null=True, blank=True)
+    otp_attempts = models.PositiveSmallIntegerField(default=0)
+    draft = models.JSONField(default=dict, blank=True)
+    draft_revision = models.PositiveIntegerField(default=0)
+    state = models.CharField(max_length=24, default='draft', choices=[('draft', 'Draft'), ('submitted', 'Submitted'), ('correction_requested', 'Correction requested'), ('verified', 'Verified')])
+    correction_note = models.TextField(blank=True, max_length=4000)
+
+
+class RecruitmentFormSubmission(TimeStampedModel):
+    invitation = models.ForeignKey(RecruitmentFormInvitation, on_delete=models.PROTECT, related_name='submissions')
+    version = models.PositiveIntegerField()
+    data = models.JSONField()
+    schema_version = models.CharField(max_length=30, default='rad-2026-10-v1')
+    declaration_text = models.TextField(blank=True)
+    attachments = models.ManyToManyField('RecruitmentFormAttachment', blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['invitation', 'version'], name='recruitment_submission_version_unique')]
+
+
+class RecruitmentFormAttachment(TimeStampedModel):
+    invitation = models.ForeignKey(RecruitmentFormInvitation, on_delete=models.PROTECT, related_name='attachments')
+    kind = models.CharField(max_length=10, choices=[('photo', 'Professional photo'), ('cv', 'CV')])
+    name = models.CharField(max_length=200)
+    content_type = models.CharField(max_length=100)
+    content = models.BinaryField()
+    size = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64)
+    extraction = models.JSONField(default=dict, blank=True)
 
 
 class EmployeeMaster(TimeStampedModel):
@@ -192,6 +288,7 @@ class EmployeeMaster(TimeStampedModel):
         help_text='Date of joining the organization'
     )
     
+    probation_start_date = models.DateField(null=True, blank=True, help_text='Probation start; defaults to joining date.')
     probation_end_date = models.DateField(
         null=True,
         blank=True,
@@ -248,6 +345,7 @@ class EmployeeMaster(TimeStampedModel):
     # ========================================
     phone_number = models.CharField(max_length=20, blank=True)
     country = models.CharField(max_length=100, blank=True)
+    nationality = models.CharField(max_length=100, blank=True, help_text='Citizenship; distinct from country of residence.')
     city = models.CharField(max_length=100, blank=True)
     address = models.TextField(blank=True)
     postal_code = models.CharField(max_length=20, blank=True)
@@ -925,7 +1023,7 @@ class WorkShift(TimeStampedModel):
         ordering = ['start_time', 'code']
 
     def __str__(self):
-        return f'{self.code} — {self.name}'
+        return f'{self.code} â€” {self.name}'
 
 
 class ShiftRoster(TimeStampedModel):
@@ -1286,3 +1384,4 @@ class OvertimeConversionAllocation(models.Model):
             models.UniqueConstraint(fields=['conversion', 'request'], name='ot_conversion_request_unique'),
             models.CheckConstraint(check=models.Q(hours__gt=0), name='ot_allocation_positive'),
         ]
+

@@ -118,7 +118,8 @@ def generate_monthly_run(
     run.save(update_fields=['working_days_in_month', 'public_holidays_in_month'])
 
     # Active employees only
-    employees = PayrollEmployee.objects.filter(is_active=True).order_by('full_name')
+    from apps.hr_core.organization import payroll_eligible
+    employees = payroll_eligible(PayrollEmployee.objects.filter(is_active=True)).order_by('full_name')
 
     # Pull live "Total Hours" from the biometric Time Sheet Summary.
     # Keyed by employee_code which matches PayrollEmployee.employee_no.

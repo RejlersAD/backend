@@ -1,5 +1,5 @@
-"""
-AI Champion of the Month — Data Models
+﻿"""
+AI Champion of the Month â€” Data Models
 =======================================
 
 Production-grade tracking + analytics + gamification system for RADAI.
@@ -7,13 +7,13 @@ Production-grade tracking + analytics + gamification system for RADAI.
 Mirrors the AWS reference architecture (DynamoDB activity logs + RDS analytics
 tables) inside Django/PostgreSQL so the same conceptual model runs on:
 
-    Local / Railway PostgreSQL          ←→  AWS RDS (analytics)
-    These models (high-volume tables)   ←→  AWS DynamoDB (activity / ai_usage)
-    Celery beat job                     ←→  AWS EventBridge cron
-    DRF endpoints                       ←→  AWS API Gateway + Lambda
+    Local / Railway PostgreSQL          â†â†’  AWS RDS (analytics)
+    These models (high-volume tables)   â†â†’  AWS DynamoDB (activity / ai_usage)
+    Celery beat job                     â†â†’  AWS EventBridge cron
+    DRF endpoints                       â†â†’  AWS API Gateway + Lambda
 
 All thresholds, weights, and pricing are stored in DB rows or module-level
-constants — never hard-coded inside business logic.
+constants â€” never hard-coded inside business logic.
 """
 import uuid
 from decimal import Decimal
@@ -55,7 +55,7 @@ ACTION_TYPE_CHOICES = [
 
 
 # ---------------------------------------------------------------------------
-# Pricing configuration — editable without code change (Django admin)
+# Pricing configuration â€” editable without code change (Django admin)
 # ---------------------------------------------------------------------------
 class AIPricingConfig(TimeStampedModel):
     """
@@ -192,7 +192,7 @@ class ActivityEvent(TimeStampedModel):
 
 
 # ---------------------------------------------------------------------------
-# Monthly Champion — historical record (the "trophy cabinet")
+# Monthly Champion â€” historical record (the "trophy cabinet")
 # ---------------------------------------------------------------------------
 class MonthlyChampionPublication(models.Model):
     """Immutable reviewed award. Legacy recomputation cannot overwrite it."""
@@ -259,3 +259,4 @@ class MonthlyChampion(TimeStampedModel):
 
     def __str__(self):
         return f"{self.period_year}-{self.period_month:02d} #{self.rank} {self.user_id}"
+

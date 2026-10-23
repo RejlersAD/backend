@@ -1596,6 +1596,24 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         import string
         
         User = get_user_model()
+
+        # HR-IMP-24: reviewed master-register mode; legacy callers retain their contract.
+        if request.data.get('import_mode'):
+            from apps.rbac.employee_import import import_register
+            if 'file' not in request.FILES:
+                return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                data = import_register(
+                    request.FILES['file'], actor=request.user,
+                    preview=str(request.data.get('preview_only', '')).lower() in {'true', '1', 'yes'},
+                    mode=request.data['import_mode'],
+                    update_fields=json.loads(request.data.get('update_fields', '[]')),
+                    organization_id=request.data.get('organization_id'), role_id=request.data.get('role_id'),
+                    audit=create_audit_log,
+                )
+                return Response(data, status=status.HTTP_200_OK)
+            except (ValueError, UnicodeDecodeError, ValidationError) as error:
+                return Response({'error': str(error)}, status=status.HTTP_400_BAD_REQUEST)
         
         if 'file' not in request.FILES:
             return Response(

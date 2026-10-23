@@ -801,6 +801,10 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                     )
                 
                 # Validate inputs before creating any part of the employee identity.
+                from apps.hr_core.organization import BUSINESS_UNITS, BUSINESS_AREAS
+                for field, choices in [('business_unit', BUSINESS_UNITS), ('business_area', BUSINESS_AREAS)]:
+                    if data.get(field) and data[field] not in choices:
+                        return Response({'error': f'Select a valid {field.replace("_", " ")}.', 'errors': {field: list(choices)}}, status=400)
                 photo = request.FILES.get('photo')
                 if photo:
                     if photo.content_type not in {'image/jpeg', 'image/jpg', 'image/png'}:
@@ -813,6 +817,8 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                     joining_date = datetime.strptime(joining_date, '%Y-%m-%d').date()
                 if data.get('branch', 'RAD') not in {'RAD', 'RIN'}:
                     return Response({'error': 'Select a valid branch.'}, status=400)
+                from apps.hr_core.services import probation_dates
+                probation_start, probation_end = probation_dates(joining_date, data.get('probation_start_date'), data.get('probation_end_date'))
                 manager_id = data.get('manager_id')
                 manager_employee = None
                 if manager_id not in (None, ''):
@@ -881,6 +887,9 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                     manager=manager_employee,
                     phone_number=mobile_phone,
                     country=data.get('country', ''),
+                    nationality=data.get('nationality', ''),
+                    probation_start_date=probation_start,
+                    probation_end_date=probation_end,
                     initials=data.get('initials', ''),
                     employee_number=data.get('employee_number') or None,  # Auto-generate if empty
                     employee_code=generated_employee_id,
@@ -1026,10 +1035,13 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                 employee = EmployeeMaster.objects.select_for_update().filter(user_id=instance.user_id).first()
             if employee and employee.join_date != instance.joining_date:
                 fields = ['join_date']
-                if (employee.probation_end_date is None or (employee.join_date and
+                if (employee.probation_start_date in (None, employee.join_date)) and (employee.probation_end_date is None or (employee.join_date and
                         employee.probation_end_date == calculate_probation_end_date(employee.join_date))):
                     employee.probation_end_date = calculate_probation_end_date(instance.joining_date)
                     fields.append('probation_end_date')
+                if employee.probation_start_date in (None, employee.join_date):
+                    employee.probation_start_date = instance.joining_date
+                    fields.append('probation_start_date')
                 employee.join_date = instance.joining_date
                 employee.save(update_fields=fields)
         

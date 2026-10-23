@@ -1,5 +1,10 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+from .recruitment import RecruitmentCandidateViewSet, RecruitmentOpeningViewSet
+from .recruitment_forms import RecruitmentInvitationsView, RecruitmentInvitationCommandView, RecruitmentFormReviewView, RecruitmentFormExportView, RecruitmentFormSchemaView
+from .recruitment_sync import RecruitmentPositionSyncView
+from .recruitment_public_links import RecruitmentApplicationLinksView, RecruitmentApplicationLinkRevokeView
+from .recruitment_cv import RecruitmentAttachmentView, RecruitmentCandidatePhotoView
 
 from .views import (
     ContinuousFeedbackViewSet,
@@ -35,6 +40,8 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.register(r'recruitment-candidates', RecruitmentCandidateViewSet, basename='hr-recruitment-candidate')
+router.register(r'recruitment-openings', RecruitmentOpeningViewSet, basename='hr-recruitment-opening')
 router.register(r'employees', EmployeeMasterViewSet, basename='hr-employee')
 router.register(r'identity-aliases', EmployeeIdentityAliasViewSet, basename='hr-identity-alias')
 router.register(r'workflow-definitions', HRWorkflowDefinitionViewSet, basename='hr-workflow-definition')
@@ -66,4 +73,16 @@ router.register(r'consents', HRConsentRecordViewSet, basename='hr-consent')
 router.register(r'privacy-requests', HRPrivacyRequestViewSet, basename='hr-privacy-request')
 router.register(r'retention-policies', HRRetentionPolicyViewSet, basename='hr-retention-policy')
 
-urlpatterns = [path('', include(router.urls))]
+urlpatterns = [
+    path('recruitment-position-sync/', RecruitmentPositionSyncView.as_view()),
+    path('recruitment-application-links/', RecruitmentApplicationLinksView.as_view()),
+    path('recruitment-application-links/<int:pk>/revoke/', RecruitmentApplicationLinkRevokeView.as_view()),
+    path('recruitment-forms/', RecruitmentInvitationsView.as_view()),
+    path('recruitment-forms/schema/<str:kind>/', RecruitmentFormSchemaView.as_view()),
+    path('recruitment-forms/<int:pk>/attachments/<int:attachment>/', RecruitmentAttachmentView.as_view()),
+    path('recruitment-candidates/<int:pk>/photo/', RecruitmentCandidatePhotoView.as_view()),
+    path('recruitment-forms/<int:pk>/command/', RecruitmentInvitationCommandView.as_view()),
+    path('recruitment-forms/<int:pk>/review/', RecruitmentFormReviewView.as_view()),
+    path('recruitment-forms/<int:pk>/export/<int:version>/', RecruitmentFormExportView.as_view()),
+    path('', include(router.urls)),
+]

@@ -52,7 +52,9 @@ cryptography>=42.0.0  # Wrench integration – Fernet encryption for API key sto
 pillow>=10.1.0
 PyPDF2==3.0.1
 pdf2image==1.17.0
-pymupdf>=1.24.0
+# Keep the tested PDF API: 2.x starts Layout/ONNX during import and exhausted
+# Railway threads while Django loaded URLs (PDF-RUNTIME-01).
+pymupdf==1.28.2
 reportlab==4.0.7
 weasyprint>=60.0
 openpyxl>=3.1.5

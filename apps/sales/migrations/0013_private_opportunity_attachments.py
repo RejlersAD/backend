@@ -1,4 +1,4 @@
-from django.db import migrations, models
+﻿from django.db import migrations, models
 
 
 def preserve_private_attachment_evidence(apps, schema_editor):
@@ -18,3 +18,4 @@ class Migration(migrations.Migration):
             fields=('workspace', 'folder_key', 'normalized_name'), condition=models.Q(provider='radai'), name='sales_private_attachment_name')),
         migrations.RunPython(migrations.RunPython.noop, preserve_private_attachment_evidence),
     ]
+

@@ -211,7 +211,7 @@ class LeaveTypeSerializer(serializers.ModelSerializer):
 
 class LeaveRequestSerializer(serializers.ModelSerializer):
     leave_type_detail    = LeaveTypeSerializer(source='leave_type', read_only=True)
-    status_display       = serializers.CharField(source='get_status_display', read_only=True)
+    status_display       = serializers.SerializerMethodField()
     reviewed_by_name     = serializers.SerializerMethodField()
     rm_reviewed_by_name  = serializers.SerializerMethodField()
     substitute_employee_name = serializers.SerializerMethodField()
@@ -221,13 +221,19 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     review_stage = serializers.SerializerMethodField()
     workflow_status = serializers.SerializerMethodField()
     workflow_stage = serializers.SerializerMethodField()
+    approval_steps = serializers.SerializerMethodField()
+    can_refer = serializers.SerializerMethodField()
+    referral_history = serializers.SerializerMethodField()
+    department_head_notification_status = serializers.SerializerMethodField()
 
     class Meta:
         model  = LeaveRequest
         fields = [
             'id', 'employee', 'canonical_employee', 'employee_code', 'employee_name', 'department',
+            'selected_manager',
             'leave_type', 'leave_type_detail',
             'start_date', 'end_date', 'half_day', 'days_requested', 'reason',
+            'requested_start_date', 'requested_end_date', 'requested_days', 'hr_balance_override', 'hr_override_reason',
             # SOFT-CODED: Additional fields for enhanced leave tracking
             'contact_number', 'substitute_employee', 'substitute_employee_name', 
             'substitute_name', 'attachment',
@@ -237,9 +243,13 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at', 'rm_note',
             'workflow_instance', 'workflow_status', 'workflow_stage', 'can_review', 'line_manager_name', 'review_stage', 'employee_photo_url',
             'created_at', 'updated_at',
+            'approval_steps',
+            'can_refer', 'referral_history',
+            'department_head_notification_status',
         ]
         read_only_fields = [
             'id', 'days_requested', 'status', 'status_display', 'rm_note', 'reviewer_note',
+            'requested_start_date', 'requested_end_date', 'requested_days', 'hr_balance_override', 'hr_override_reason',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at',
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at',
             'canonical_employee', 'workflow_instance', 'workflow_status', 'workflow_stage',
@@ -250,6 +260,43 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         from .services.leave_approval import can_review
         request = self.context.get('request')
         return bool(request and can_review(obj, request.user))
+
+    def get_status_display(self, obj):
+        return 'Pending Approval' if obj.status in ('PENDING', 'RM_APPROVED') else obj.get_status_display()
+
+    def get_can_refer(self, obj):
+        return bool(obj.workflow_instance_id and self.get_can_review(obj))
+
+    def get_referral_history(self, obj):
+        if not obj.workflow_instance_id:
+            return []
+        return [{'id': str(event.pk), 'stage': event.stage_code, 'actor_id': event.actor_id,
+                 'approver_id': event.metadata.get('approver_id'), 'actor': event.metadata.get('actor_name'),
+                 'approver': event.metadata.get('approver_name'), 'at': event.created_at, 'note': event.note}
+                for event in obj.workflow_instance.events.filter(event_type='referred').order_by('created_at', 'pk')]
+
+    def get_approval_steps(self, obj):
+        if not obj.workflow_instance_id:
+            return []
+        instance = obj.workflow_instance
+        tasks = {task.stage_id: task for task in instance.tasks.select_related('assigned_to', 'decided_by')}
+        result = []
+        for stage in instance.definition.stages.order_by('sequence'):
+            task = tasks.get(stage.pk)
+            actor = task.decided_by or task.assigned_to if task else None
+            result.append({'code': stage.code, 'title': stage.name,
+                'detail': actor.get_full_name() or actor.email if actor else stage.name,
+                'at': task.decided_at if task else None, 'note': task.decision_note if task else '',
+                'complete': bool(task and task.status == 'approved'),
+                'rejected': bool(task and task.status == 'rejected'),
+                'active': instance.status == 'pending' and instance.current_stage_id == stage.pk})
+        return result
+
+    def get_department_head_notification_status(self, obj):
+        if not obj.workflow_instance_id:
+            return None
+        event = obj.workflow_instance.events.filter(event_type__in=['department_head_notice', 'department_head_notice_result']).order_by('-created_at').first()
+        return event.metadata.get('status') if event else None
 
     def get_employee_photo_url(self, obj):
         from types import SimpleNamespace
@@ -271,10 +318,21 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         from .services.leave_approval import manager_for_request
         if obj.status not in ('PENDING', 'RM_APPROVED'):
             return None
+        if obj.workflow_instance_id and obj.workflow_instance.current_stage_id:
+            return obj.workflow_instance.current_stage.code
         return 'manager_review' if obj.status == 'PENDING' and manager_for_request(obj) else 'hr_review'
 
     def get_line_manager_name(self, obj):
         from .services.leave_approval import manager_for_request
+        if obj.workflow_instance_id and obj.workflow_instance.current_stage_id:
+            from .services.leave_approval import task_was_referred
+            task = obj.workflow_instance.tasks.filter(stage=obj.workflow_instance.current_stage).select_related('assigned_to').first()
+            if task and task.assigned_to and task_was_referred(task):
+                return task.assigned_to.get_full_name() or task.assigned_to.email or task.assigned_to.username
+        if obj.leave_type.code == 'FU' and obj.workflow_instance_id and obj.workflow_instance.current_stage_id:
+            stage = obj.workflow_instance.current_stage
+            task = obj.workflow_instance.tasks.filter(stage=stage).select_related('assigned_to').first()
+            return (task.assigned_to.get_full_name() or task.assigned_to.email) if task and task.assigned_to else stage.name
         manager = manager_for_request(obj)
         if not manager:
             return None

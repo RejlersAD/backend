@@ -867,6 +867,8 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         return Response(PayrollComplianceCheckSerializer(check).data, status=201)
 
     def _payment_records(self, run):
+        from apps.hr_core.organization import require_payroll_eligible_run
+        require_payroll_eligible_run(run)
         return [{
             'employee_no': slip.employee.employee_no,
             'employee_name': slip.snapshot_full_name,
@@ -928,6 +930,8 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
     def accounting_export(self, request, pk=None):
         self._require_payroll_admin(request)
         run = self.get_object()
+        from apps.hr_core.organization import require_payroll_eligible_run
+        require_payroll_eligible_run(run)
         entries = [
             {'account': 'PAYROLL_EXPENSE', 'description': f'Gross payroll {run.cycle_code}', 'debit': str(run.total_gross), 'credit': '0.00'},
             {'account': 'PAYROLL_DEDUCTIONS_PAYABLE', 'description': f'Deductions {run.cycle_code}', 'debit': '0.00', 'credit': str(run.total_deductions)},

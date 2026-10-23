@@ -672,6 +672,12 @@ PRODUCTION_BACKEND = sanitize_cors_origin(
 FRONTEND_URL = sanitize_cors_origin(
     config('FRONTEND_URL', default='http://localhost:5173')
 ) or 'http://localhost:5173'  # For email links
+RECRUITMENT_FRONTEND_URL = config('RECRUITMENT_FRONTEND_URL', default=FRONTEND_URL).strip()
+RECRUITMENT_INVITATION_DAYS = 3
+RECRUITMENT_PUBLIC_LINK_DAYS = 3
+RECRUITMENT_CV_AI_MODEL = config('RECRUITMENT_CV_AI_MODEL', default='gpt-4o-mini')
+RECRUITMENT_CAREERS_SYNC_ENABLED = config('RECRUITMENT_CAREERS_SYNC_ENABLED', default=True, cast=bool)
+RECRUITMENT_CAREERS_SYNC_INTERVAL_SECONDS = max(300, config('RECRUITMENT_CAREERS_SYNC_INTERVAL_SECONDS', default=3600, cast=int))
 
 # Power Automate HTTP trigger used to deliver approval assignments privately in
 # Microsoft Teams. Leave blank to keep Teams delivery disabled.
@@ -1260,6 +1266,12 @@ CELERY_BEAT_SCHEDULE['sales-opportunity-analyses'] = {
 }
 
 # ==============================================================================
+if RECRUITMENT_CAREERS_SYNC_ENABLED:
+    CELERY_BEAT_SCHEDULE['hr-careers-position-sync'] = {
+        'task': 'hr_core.sync_rejlers_positions',
+        'schedule': float(RECRUITMENT_CAREERS_SYNC_INTERVAL_SECONDS),
+        'options': {'expires': RECRUITMENT_CAREERS_SYNC_INTERVAL_SECONDS},
+    }
 # End of Celery Configuration
 # ==============================================================================
 

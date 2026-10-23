@@ -1,4 +1,4 @@
-"""
+﻿"""
 Sales Management Models
 Comprehensive CRM and Pipeline Management with AI-powered insights
 """
@@ -536,7 +536,7 @@ class OpportunityAuditEvent(models.Model):
         indexes = [models.Index(fields=['opportunity', '-occurred_at'])]
 
     def __str__(self):
-        return f'{self.opportunity.deal_code} · {self.event_type}'
+        return f'{self.opportunity.deal_code} Â· {self.event_type}'
 
 
 class Quote(TimeStampedModel):
@@ -1002,3 +1002,4 @@ class SalesEmailIntake(TimeStampedModel):
 
     def __str__(self):
         return f'{self.sender_email}: {self.subject}'
+

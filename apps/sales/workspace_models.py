@@ -1,4 +1,4 @@
-"""Durable Sales storage work, separate from commercial lifecycle evidence."""
+﻿"""Durable Sales storage work, separate from commercial lifecycle evidence."""
 import uuid
 
 from django.conf import settings
@@ -99,3 +99,4 @@ class OpportunityDocument(models.Model):
         constraints = [
             models.UniqueConstraint(fields=('workspace', 'folder_key', 'normalized_name'), name='sales_document_name_uq'),
         ]
+

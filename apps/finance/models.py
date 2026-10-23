@@ -1,4 +1,4 @@
-"""
+﻿"""
 Finance Invoice Models
 Converted from SQLAlchemy to Django ORM
 """
@@ -225,8 +225,7 @@ class Invoice(models.Model):
             models.Index(fields=['due_date', 'payment_status']),
         ]
         constraints = [
-            models.CheckConstraint(
-                check=models.Q(paid_amount__gte=0),
+            models.CheckConstraint(check=models.Q(paid_amount__gte=0),
                 name='finance_invoice_paid_amount_nonnegative',
             ),
             models.UniqueConstraint(
@@ -392,8 +391,7 @@ class InvoicePurchaseOrderAllocation(models.Model):
                 fields=['invoice', 'purchase_order'],
                 name='finance_invoice_unique_po_allocation',
             ),
-            models.CheckConstraint(
-                check=models.Q(allocated_amount__gte=0),
+            models.CheckConstraint(check=models.Q(allocated_amount__gte=0),
                 name='finance_invoice_allocation_nonnegative',
             ),
         ]
@@ -463,8 +461,7 @@ class PayablePayment(models.Model):
         ordering = ['-created_at']
         indexes = [models.Index(fields=['invoice', 'operation', '-created_at'])]
         constraints = [
-            models.CheckConstraint(
-                check=models.Q(amount__isnull=True) | models.Q(amount__gt=0),
+            models.CheckConstraint(check=models.Q(amount__isnull=True) | models.Q(amount__gt=0),
                 name='finance_payable_payment_positive_amount',
             ),
         ]
@@ -612,3 +609,4 @@ from .salary_models import (
 from .payroll_workflow import PayrollWorkflow, WorkflowNotificationLog
 from .reporting_models import ExecutiveFinancePeriod
 from .receivables_source_models import ReceivablesSourceSnapshot, ReceivablesSourceRow, ReceivablesSyncState, ReceivablesSourceIdentity
+

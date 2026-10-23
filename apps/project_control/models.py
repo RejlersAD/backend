@@ -1,5 +1,5 @@
-"""
-Project Management — domain models layered on top of apps.core.project_models.Project.
+﻿"""
+Project Management â€” domain models layered on top of apps.core.project_models.Project.
 
 These models are deliberately additive: they FK into the existing Project and
 never modify it. Each row also inherits soft-delete and timestamping from
@@ -14,9 +14,9 @@ from apps.core.models import BaseModel
 from apps.core.project_models import Project
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Enum choices (soft-coded — change here, no migrations needed for label text)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Enum choices (soft-coded â€” change here, no migrations needed for label text)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ESTIMATE_KIND_CHOICES = [
     ('estimate', 'Internal Estimate'),
     ('tender',   'Tender Submitted'),
@@ -147,17 +147,17 @@ HOUR_ENTRY_STATUS_CHOICES = [
 
 
 def _document_upload_path(instance, filename):
-    """Storage path resolver — keeps S3 layout soft-coded via config."""
+    """Storage path resolver â€” keeps S3 layout soft-coded via config."""
     from .config import S3_BASE_PREFIX
     project_code = (instance.project.code if instance.project_id else 'UNASSIGNED').replace(' ', '_')
     return f"{S3_BASE_PREFIX}/{project_code}/{instance.kind}/{uuid.uuid4().hex}_{filename}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 1 — Estimate / Variance / WBS / Documents
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Phase 1 â€” Estimate / Variance / WBS / Documents
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class WBSNode(BaseModel):
-    """Work-breakdown structure node — recursive tree per project."""
+    """Work-breakdown structure node â€” recursive tree per project."""
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='wbs_nodes')
     parent  = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='children')
     code = models.CharField(max_length=64, help_text='e.g. 1.2.3')
@@ -171,7 +171,7 @@ class WBSNode(BaseModel):
         indexes = [models.Index(fields=['project', 'level'])]
 
     def __str__(self):
-        return f'{self.project.code} · {self.code} {self.name}'
+        return f'{self.project.code} Â· {self.code} {self.name}'
 
 
 class ControlAccount(BaseModel):
@@ -217,15 +217,14 @@ class ControlAccount(BaseModel):
         ordering = ['project', 'wbs_node__sort_order', 'code']
         constraints = [
             models.UniqueConstraint(fields=['project', 'code'], name='pc_control_account_code_uniq'),
-            models.CheckConstraint(
-                check=models.Q(baseline_finish__gte=models.F('baseline_start')),
+            models.CheckConstraint(check=models.Q(baseline_finish__gte=models.F('baseline_start')),
                 name='pc_control_account_dates_valid',
             ),
         ]
         indexes = [models.Index(fields=['project', 'status'], name='pc_ca_project_status_idx')]
 
     def __str__(self):
-        return f'{self.project.code} · {self.code} {self.name}'
+        return f'{self.project.code} Â· {self.code} {self.name}'
 
 
 class ReportingPeriod(BaseModel):
@@ -272,8 +271,7 @@ class ReportingPeriod(BaseModel):
                 name='pc_period_one_entry_window_uniq',
             ),
             models.CheckConstraint(check=models.Q(end_date__gte=models.F('start_date')), name='pc_period_dates_valid'),
-            models.CheckConstraint(
-                check=models.Q(data_date__gte=models.F('start_date'), data_date__lte=models.F('end_date')),
+            models.CheckConstraint(check=models.Q(data_date__gte=models.F('start_date'), data_date__lte=models.F('end_date')),
                 name='pc_period_data_date_valid',
             ),
         ]
@@ -284,7 +282,7 @@ class ReportingPeriod(BaseModel):
         return self.status in {'open', 'reopened'}
 
     def __str__(self):
-        return f'{self.project.code} · {self.name}'
+        return f'{self.project.code} Â· {self.name}'
 
 
 class ReportingPeriodAudit(models.Model):
@@ -650,7 +648,7 @@ class Estimate(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.project.code} · {self.get_kind_display()} v{self.version}'
+        return f'{self.project.code} Â· {self.get_kind_display()} v{self.version}'
 
 
 class EstimateLineItem(BaseModel):
@@ -675,11 +673,11 @@ class EstimateLineItem(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.estimate_id} · {self.wbs_code or "-"} {self.description[:40]}'
+        return f'{self.estimate_id} Â· {self.wbs_code or "-"} {self.description[:40]}'
 
 
 class ProjectDocument(BaseModel):
-    """Any project artefact stored on S3 (BOQ, tender, contract, change order…)."""
+    """Any project artefact stored on S3 (BOQ, tender, contract, change orderâ€¦)."""
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='control_documents')
     kind = models.CharField(max_length=24, choices=DOCUMENT_KIND_CHOICES, default='other')
     title = models.CharField(max_length=255, blank=True)
@@ -705,14 +703,14 @@ class ProjectDocument(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.project.code} · {self.get_kind_display()} · {self.original_filename or self.file.name}'
+        return f'{self.project.code} Â· {self.get_kind_display()} Â· {self.original_filename or self.file.name}'
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 3 / Phase 4 — model placeholders (tables migrate now, writers added when flag flips)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Phase 3 / Phase 4 â€” model placeholders (tables migrate now, writers added when flag flips)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class CostSnapshot(BaseModel):
-    """Daily/weekly EVM snapshot — filled by Phase 3 forecasting task."""
+    """Daily/weekly EVM snapshot â€” filled by Phase 3 forecasting task."""
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='cost_snapshots')
     period_end = models.DateField()
     planned_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
@@ -730,11 +728,11 @@ class CostSnapshot(BaseModel):
         indexes = [models.Index(fields=['project', '-period_end'])]
 
     def __str__(self):
-        return f'{self.project.code} · {self.period_end}'
+        return f'{self.project.code} Â· {self.period_end}'
 
 
 class ChangeEvent(BaseModel):
-    """A scope/cost change detected from a document — filled by Phase 4."""
+    """A scope/cost change detected from a document â€” filled by Phase 4."""
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='change_events')
     source_document = models.ForeignKey(
         ProjectDocument, on_delete=models.SET_NULL, null=True, blank=True,
@@ -761,12 +759,12 @@ class ChangeEvent(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.project.code} · {self.summary[:60]}'
+        return f'{self.project.code} Â· {self.summary[:60]}'
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Planning Package — Phase-agnostic feature for work package planning
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Planning Package â€” Phase-agnostic feature for work package planning
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PLANNING_PACKAGE_STATUS_CHOICES = [
     ('draft', 'Draft'),
     ('active', 'Active'),
@@ -785,7 +783,7 @@ PLANNING_PACKAGE_PRIORITY_CHOICES = [
 
 class PlanningPackage(BaseModel):
     """
-    Planning Package — work package for project planning and tracking.
+    Planning Package â€” work package for project planning and tracking.
     Enables project managers to break down projects into manageable packages
     with budgets, timelines, and deliverables.
     
@@ -909,7 +907,7 @@ class PlanningPackage(BaseModel):
         ]
 
     def __str__(self):
-        return f'{self.project.code} · {self.package_code} {self.name}'
+        return f'{self.project.code} Â· {self.package_code} {self.name}'
     
     @property
     def budget_variance(self):
@@ -936,3 +934,4 @@ class PlanningPackage(BaseModel):
 # Additive EPC models are registered in the project_control app.
 from .epc_models import IntegratedBaseline, RequisitionWBSLink, WBSActivityLink  # noqa: E402,F401
 from .execution_models import EPCWorkEvent, EPCWorkItem  # noqa: E402,F401
+

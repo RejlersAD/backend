@@ -67,6 +67,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgl1 \
 # ── Layer 2: Application code
 COPY . .
 
+# Fail the image build if a PDF dependency change initializes Layout/ONNX just
+# by importing fitz, before the web server can encounter it during URL loading.
+RUN python scripts/check_pdf_runtime.py
+
 # Create necessary directories
 RUN mkdir -p /app/media /app/staticfiles /app/media/invoices
 
