@@ -21,22 +21,52 @@ import json
 import logging
 from zipfile import BadZipFile
 
+from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import HttpResponse
 
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
+
+class LenientFormatNegotiation(DefaultContentNegotiation):
+    """DRF treats `?format=` as a RENDERER override and 404s when no
+    renderer matches — but Valve MTO's export endpoint (§8) uses
+    `?format=mto|full|order` as a BUSINESS parameter. Fall back to the
+    default renderer set instead of 404ing so the endpoint can read the
+    param itself."""
+    def filter_renderers(self, renderers, format):
+        filtered = [r for r in renderers if r.format == format]
+        return filtered or renderers
+
 from .excel_export import export_project_to_xlsx
 from .fluid_codes import FLUID_CODES
-from .models import ValveMTOLegend, ValveMTOProject, ValveMTORow
-from .serializers import (
-    ValveMTOLegendSerializer,
-    ValveMTOProjectDetailSerializer, ValveMTOProjectSerializer, ValveMTORowSerializer,
+from .models import (
+    ValveMTODrawing, ValveMTOJob, ValveMTOLegend,
+    ValveMTOProject, ValveMTOProjectSettings, ValveMTORow,
 )
+from .serializers import (
+    ValveMTODrawingSerializer,
+    ValveMTOJobSerializer,
+    ValveMTOLegendSerializer,
+    ValveMTOProjectDetailSerializer, ValveMTOProjectSerializer,
+    ValveMTOProjectSettingsSerializer, ValveMTORowSerializer,
+)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def job_detail_view(request, project_id, job_id):
+    """GET …/projects/:projectId/jobs/:jobId — extraction job polling (§8)."""
+    job = ValveMTOJob.objects.filter(
+        id=job_id, project_id=project_id, project__created_by=request.user).first()
+    if not job:
+        return Response({'error': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(ValveMTOJobSerializer(job).data)
 
 
 @api_view(['GET'])
@@ -53,6 +83,7 @@ def fluid_codes_view(request):
 
 class ValveMTOProjectViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
+    content_negotiation_class = LenientFormatNegotiation
     # BUG FIX (real, confirmed): ModelViewSet auto-applies this project's
     # DEFAULT_PAGINATION_CLASS (config/settings.py — PageNumberPagination)
     # unless told not to, wrapping list() responses as
@@ -66,6 +97,9 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
     # result the same way. Disabling pagination here restores the plain-
     # array response both call sites already assume.
     pagination_class = None
+    # Class-level default so @action(permission_action=...) initkwargs are
+    # accepted by as_view() (same pattern as ValveMTOLegendViewSet).
+    permission_action = None
 
     def get_queryset(self):
         return ValveMTOProject.objects.filter(created_by=self.request.user)
@@ -149,6 +183,9 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
             'size_secondary', 'size_secondary_2', 'line_number', 'line_list_ref', 'pid_number',
             'description', 'qty_island', 'qty_field', 'qty_combined', 'qty_observed', 'unit', 'area',
             'operational_status', 'remarks', 'confidence', 'location_hint', 'tab',
+            # §7 staged-flow fields
+            'page', 'pos_x', 'pos_y', 'variant', 'category', 'type_basis', 'symbol_group_id',
+            'scope_status', 'piping_class_source', 'material_source', 'pid_rev', 'confidence_score',
         }
         with transaction.atomic():
             # Serialize full-register replacements, including simultaneous autosaves.
@@ -186,17 +223,285 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
         return Response(ser.data)
 
     # ---- xlsx export -----------------------------------------------------
-    @action(detail=True, methods=['post'], url_path='export')
+    # §6 Export Center: GET …/export/?format=mto|full|order (POST kept for
+    # the legacy caller in valveMtoService.exportXlsx).
+    @action(detail=True, methods=['get', 'post'], url_path='export')
     def export(self, request, pk=None):
         project = self.get_object()
-        data = export_project_to_xlsx(project)
-        filename = f'ValveMTO_{project.project_name or project.id}.xlsx'.replace('/', '-')
+        fmt = (request.query_params.get('format')
+               or request.data.get('format') or 'mto')
+        if fmt not in ('mto', 'full', 'order'):
+            return Response({'error': "format must be one of 'mto', 'full', 'order'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        data = export_project_to_xlsx(project, fmt=fmt)
+        filename = f'ValveMTO_{project.project_name or project.id}_{fmt}.xlsx'.replace('/', '-')
         resp = HttpResponse(
             data,
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
         resp['Content-Disposition'] = f'attachment; filename="{filename}"'
         return resp
+
+    # ─────────────────────────────────────────────────────────────────
+    # Staged extraction flow endpoints (§8)
+    # ─────────────────────────────────────────────────────────────────
+
+    def _settings(self, project) -> ValveMTOProjectSettings:
+        obj, _ = ValveMTOProjectSettings.objects.get_or_create(project=project)
+        return obj
+
+    # ---- Stage 1: upload + parse a P&ID drawing ------------------------
+    @action(detail=True, methods=['post'], url_path='drawings',
+            parser_classes=[MultiPartParser, FormParser], permission_action='create')
+    def drawings(self, request, pk=None):
+        from . import pdf_parse
+
+        project = self.get_object()
+        upload = request.FILES.get('file')
+        if not upload or not upload.name.lower().endswith('.pdf'):
+            return Response({'error': 'Upload a .pdf drawing.'}, status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > 100 * 1024 * 1024:
+            return Response({'error': 'Drawing exceeds the 100 MB limit.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = upload.read()
+        parsed = pdf_parse.parse_drawing(data, upload.name)
+        if parsed.get('error'):
+            return Response({'error': parsed['error']}, status=status.HTTP_400_BAD_REQUEST)
+
+        settings_obj = self._settings(project)
+        pattern = pdf_parse.apply_line_pattern(
+            parsed['line_labels'],
+            settings_obj.line_pattern_preset,
+            settings_obj.line_pattern_regex,
+        )
+        parsed['pattern'] = pattern
+        parsed['classes'] = pattern.get('classes', [])
+
+        # Replacing the Stage-1 PDF sets stages 2 & 4 to needs-recheck (§2).
+        had_previous = project.drawings.exists()
+        drawing = ValveMTODrawing.objects.create(
+            project=project,
+            original_name=upload.name,
+            page_count=parsed['page_count'],
+            pdf_type=parsed['pdf_type'],
+            parsed=parsed,
+            confirmed_drawing_number=parsed['title_block'].get('company_drawing_no', ''),
+            confirmed_rev=parsed['title_block'].get('rev', ''),
+        )
+        drawing.file.save(upload.name, ContentFile(data), save=True)
+
+        if had_previous:
+            stage_state = settings_obj.stage_state or {}
+            for st in ('2', '4'):
+                if stage_state.get(st) == 'complete':
+                    stage_state[st] = 'needs-recheck'
+            settings_obj.stage_state = stage_state
+            settings_obj.extraction_outdated = project.rows.exists()
+            settings_obj.save(update_fields=['stage_state', 'extraction_outdated', 'updated_at'])
+
+        return Response(ValveMTODrawingSerializer(drawing).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='drawings/list')
+    def drawings_list(self, request, pk=None):
+        project = self.get_object()
+        return Response(ValveMTODrawingSerializer(project.drawings.all(), many=True).data)
+
+    # ---- Stage 1 confirm: drawing number + pattern ---------------------
+    @action(detail=True, methods=['post'], url_path=r'drawings/(?P<drawing_id>[^/.]+)/confirm',
+            permission_action='update')
+    def drawing_confirm(self, request, pk=None, drawing_id=None):
+        from . import pdf_parse
+
+        project = self.get_object()
+        drawing = project.drawings.filter(id=drawing_id).first()
+        if not drawing:
+            return Response({'error': 'Drawing not found.'}, status=status.HTTP_404_NOT_FOUND)
+        drawing.confirmed_drawing_number = str(
+            request.data.get('drawing_number') or drawing.confirmed_drawing_number)[:255]
+        drawing.confirmed_rev = str(
+            request.data.get('rev') or drawing.confirmed_rev)[:16]
+
+        preset = request.data.get('pattern_preset')
+        custom_regex = request.data.get('pattern_regex', '')
+        if preset:
+            settings_obj = self._settings(project)
+            settings_obj.line_pattern_preset = preset
+            if custom_regex:
+                settings_obj.line_pattern_regex = custom_regex
+            settings_obj.save(update_fields=['line_pattern_preset', 'line_pattern_regex', 'updated_at'])
+            pattern = pdf_parse.apply_line_pattern(
+                drawing.parsed.get('line_labels', []), preset, custom_regex,
+            )
+            drawing.parsed = {**drawing.parsed, 'pattern': pattern,
+                              'classes': pattern.get('classes', [])}
+        drawing.save()
+        return Response(ValveMTODrawingSerializer(drawing).data)
+
+    # ---- Project settings (Stages 2–4 persist) --------------------------
+    @action(detail=True, methods=['get', 'put'], url_path='settings')
+    def project_settings(self, request, pk=None):
+        project = self.get_object()
+        settings_obj = self._settings(project)
+        if request.method == 'GET':
+            return Response(ValveMTOProjectSettingsSerializer(settings_obj).data)
+        ser = ValveMTOProjectSettingsSerializer(settings_obj, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        # Changing PMS or legend after an extraction marks it outdated (§2).
+        if any(k in request.data for k in ('pms_data', 'pms_skipped', 'legend')) \
+                and project.rows.exists():
+            settings_obj.extraction_outdated = True
+            settings_obj.save(update_fields=['extraction_outdated', 'updated_at'])
+        return Response(ser.data)
+
+    # ---- Stage 2: PMS workbook upload -----------------------------------
+    @action(detail=True, methods=['post'], url_path='pms',
+            parser_classes=[MultiPartParser, FormParser], permission_action='create')
+    def pms(self, request, pk=None):
+        from .pms_parse import coverage_check, parse_pms_workbook
+
+        project = self.get_object()
+        upload = request.FILES.get('file')
+        if not upload or not upload.name.lower().endswith(('.xlsx', '.xlsm')):
+            return Response({'error': 'Upload a .xlsx PMS workbook.'}, status=status.HTTP_400_BAD_REQUEST)
+        result = parse_pms_workbook(upload.read(), upload.name)
+        if result.get('error'):
+            return Response({'error': result['error']}, status=status.HTTP_400_BAD_REQUEST)
+
+        drawing = project.drawings.order_by('-created_at').first()
+        drawing_classes = (drawing.parsed or {}).get('classes', []) if drawing else []
+        coverage = coverage_check(result['classes'], drawing_classes)
+
+        settings_obj = self._settings(project)
+        settings_obj.pms_data = {'classes': result['classes'], 'source': result['source'],
+                                 'sheet': result.get('sheet', '')}
+        settings_obj.pms_skipped = False
+        settings_obj.pms_infer_from_drawing = False
+        settings_obj.save(update_fields=['pms_data', 'pms_skipped', 'pms_infer_from_drawing', 'updated_at'])
+        return Response({
+            'class_count': result['class_count'],
+            'classes': sorted(result['classes'].keys()),
+            'coverage': coverage,
+        })
+
+    # ---- Stage 3: engine connectivity test -------------------------------
+    @action(detail=True, methods=['post'], url_path='engine/test', permission_action='read')
+    def engine_test(self, request, pk=None):
+        self.get_object()  # 404s for other users' projects
+        from .engine import test_engine
+        result = test_engine()
+        return Response(result, status=status.HTTP_200_OK if result['ok'] else status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    # ---- Stage 4: legend ↔ drawing match check ---------------------------
+    @action(detail=True, methods=['post'], url_path='legend/check', permission_action='read')
+    def legend_check(self, request, pk=None):
+        from .engine import detect_symbols
+        from .legend_check import check_legend_against_drawing
+
+        project = self.get_object()
+        legend = ValveMTOLegend.objects.filter(
+            id=request.data.get('legend_id'), created_by=request.user).first()
+        if not legend:
+            return Response({'error': 'Legend not found.'}, status=status.HTTP_404_NOT_FOUND)
+        drawing = project.drawings.filter(
+            id=request.data.get('drawing_id')).first() or project.drawings.order_by('-created_at').first()
+        if not drawing:
+            return Response({'error': 'Upload a drawing first (Stage 1).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Symbol groups from vector detection (grouped counts + evidence).
+        groups = []
+        try:
+            drawing.file.open('rb')
+            import fitz
+            doc = fitz.open(stream=drawing.file.read(), filetype='pdf')
+            drawing.file.close()
+            candidates = detect_symbols(doc)
+            doc.close()
+            by_group: dict = {}
+            for c in candidates:
+                g = by_group.setdefault(c['symbol_group_id'], {'group_id': c['symbol_group_id'],
+                                                               'count': 0, 'evidence': []})
+                g['count'] += 1
+                if len(g['evidence']) < 3:
+                    g['evidence'].append({'page': c['page'], 'x': c['x'], 'y': c['y']})
+            groups = sorted(by_group.values(), key=lambda g: -g['count'])
+        except Exception:
+            logging.getLogger(__name__).exception('legend check: symbol detection failed')
+
+        result = check_legend_against_drawing(legend.definition or {}, drawing, groups)
+        result['legend_id'] = str(legend.id)
+        result['legend_name'] = legend.name
+        return Response(result)
+
+    # ---- Start Extraction -------------------------------------------------
+    @action(detail=True, methods=['post'], url_path='extract', permission_action='create')
+    def extract(self, request, pk=None):
+        project = self.get_object()
+        running = project.mto_jobs.filter(
+            status__in=[ValveMTOJob.STATUS_QUEUED, ValveMTOJob.STATUS_RUNNING]).first()
+        if running:
+            return Response(ValveMTOJobSerializer(running).data, status=status.HTTP_202_ACCEPTED)
+
+        job = ValveMTOJob.objects.create(project=project)
+        # Optional BYOK: a user-supplied vision key is used for THIS run only —
+        # never stored on the job, settings, or anywhere server-side.
+        vision_provider = (request.data.get('vision_provider') or '').strip().lower() or None
+        vision_api_key = (request.data.get('vision_api_key') or '').strip() or None
+        # Async execution — a daemon thread keeps the dev-server flow
+        # dependency-free (Celery wiring can replace this unchanged; the
+        # job row carries all progress either way).
+        import threading
+        from django.db import close_old_connections
+
+        def _run(job_id):
+            close_old_connections()
+            try:
+                from .engine import run_extraction
+                run_extraction(
+                    ValveMTOJob.objects.get(id=job_id),
+                    vision_provider=vision_provider, vision_api_key=vision_api_key,
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).exception('valve mto extraction failed')
+                try:
+                    j = ValveMTOJob.objects.get(id=job_id)
+                    j.status = ValveMTOJob.STATUS_FAILED
+                    j.error = str(exc)
+                    j.save(update_fields=['status', 'error', 'updated_at'])
+                except Exception:
+                    pass
+            finally:
+                close_old_connections()
+
+        threading.Thread(target=_run, args=(job.id,), daemon=True).start()
+        return Response(ValveMTOJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+    # ---- Register views (§6) ----------------------------------------------
+    @action(detail=True, methods=['get'], url_path='register')
+    def register(self, request, pk=None):
+        project = self.get_object()
+        view = (request.query_params.get('view') or 'combined').lower()
+        rows = project.rows.all()
+        if view == 'island':
+            rows = rows.filter(qty_island__gt=0)
+        elif view == 'field':
+            rows = rows.filter(qty_field__gt=0)
+        elif view == 'order':
+            rows = rows.filter(qty_combined__gt=0)
+        elif view == 'review':
+            from django.db.models import Q
+            threshold = self._settings(project).engine_review_threshold
+            rows = rows.filter(
+                Q(type_basis='unidentified')
+                | Q(size_primary='') | Q(line_number='Not traced') | Q(piping_class='Class not shown')
+                | Q(confidence_score__lt=threshold)
+            ).distinct()
+        elif view != 'combined':
+            return Response({'error': "view must be island|field|combined|order|review"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ser = ValveMTORowSerializer(rows, many=True, context={'request': request})
+        return Response({'view': view, 'count': rows.count(), 'rows': ser.data})
 
 
 class ValveMTOLegendViewSet(viewsets.ModelViewSet):

@@ -129,6 +129,22 @@ class ValveMTORow(models.Model):
     tab = models.CharField(max_length=16, blank=True, default='')  # island / field / combined
     row_order = models.IntegerField(default=0)
 
+    # ── §7 data-contract fields (staged extraction flow) ─────────────
+    # All additive/nullable so existing rows/imports keep working.
+    page = models.PositiveIntegerField(null=True, blank=True)
+    pos_x = models.FloatField(null=True, blank=True)
+    pos_y = models.FloatField(null=True, blank=True)
+    variant = models.CharField(max_length=32, blank=True, default='')  # open | normally-closed | locked-open | actuated
+    category = models.CharField(max_length=32, blank=True, default='')  # manual|control|actuated-onoff|psv|solenoid
+    type_basis = models.CharField(max_length=32, blank=True, default='')  # tag-rule|legend-symbol|note-rule|unidentified
+    symbol_group_id = models.CharField(max_length=64, blank=True, default='')
+    scope_status = models.CharField(max_length=32, blank=True, default='')  # new-in-scope|existing-reused|existing-outside|vendor-package
+    piping_class_source = models.CharField(max_length=32, blank=True, default='')  # line-number|spec-break|not-shown
+    material_source = models.CharField(max_length=16, blank=True, default='')  # pms|inferred|per-pms
+    pid_rev = models.CharField(max_length=16, blank=True, default='')
+    confidence_score = models.FloatField(null=True, blank=True)  # 0..1
+    evidence_crop = models.FileField(upload_to='valve_mto/evidence/', null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -209,3 +225,126 @@ class ValveMTOLegend(models.Model):
 
     def __str__(self) -> str:
         return f'{self.name} [{self.section}] ({"active" if self.is_active else "inactive"})'
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Staged extraction flow (§7 data contract)
+# ─────────────────────────────────────────────────────────────────────────
+
+# Line-number pattern presets (§3) — kept in sync with
+# pdf_parse.LINE_PATTERN_PRESETS; stored on the settings row as the preset id.
+LINE_PATTERN_PRESET_CHOICES = [
+    ('service-seq-size-class-insul', 'SERVICE-SEQ-SIZE-CLASS-INSUL'),
+    ('size-unit-fluid-seq-class-insul', 'SIZE-UNIT-FLUID-SEQ-CLASS-INSUL'),
+    ('unit-fluid-seq-class-insul', 'UNIT-FLUID-SEQ-CLASS-INSUL'),
+    ('size-fluid-class-seq-insul', 'SIZE-FLUID-CLASS-SEQ-INSUL'),
+    ('custom', 'Custom (regex)'),
+]
+
+
+class ValveMTOProjectSettings(models.Model):
+    """Per-project settings for the staged extraction flow (§2/§7):
+    stages 2–4 choices persist here so a new P&ID in the same project
+    pre-fills them. One row per ValveMTOProject, created lazily."""
+    project = models.OneToOneField(
+        ValveMTOProject, on_delete=models.CASCADE, related_name='mto_settings',
+    )
+    line_pattern_preset = models.CharField(
+        max_length=48, choices=LINE_PATTERN_PRESET_CHOICES,
+        default='service-seq-size-class-insul',
+    )
+    line_pattern_regex = models.TextField(blank=True, default='')  # custom named-group regex
+    # PMS (Stage 2): parsed class rows + coverage, or the skip marker.
+    pms_data = models.JSONField(default=dict, blank=True)  # {classes: {code: {rating,facing,material,...}}, source: filename}
+    pms_skipped = models.BooleanField(default=False)
+    pms_infer_from_drawing = models.BooleanField(default=False)
+    # Engine (Stage 3) — server-configured engine, no personal API keys.
+    engine_method = models.CharField(max_length=24, default='vector-vision')  # vector-vision|vision-only
+    engine_scope = models.CharField(max_length=24, default='project-scope')   # project-scope|all-visible
+    engine_instruments = models.CharField(max_length=24, default='list-separately')  # list-separately|exclude
+    engine_review_threshold = models.FloatField(default=0.80)
+    # Legend (Stage 4).
+    legend = models.ForeignKey(
+        'ValveMTOLegend', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+    )
+    legend_ack = models.JSONField(default=dict, blank=True)  # {by, reason, at}
+    # Stage state machine: {1: 'complete'|'needs-recheck'|..., ...} +
+    # extraction outdated flag. Derived fields, stored for cheap reads.
+    stage_state = models.JSONField(default=dict, blank=True)
+    extraction_outdated = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Valve MTO Project Settings'
+        verbose_name_plural = 'Valve MTO Project Settings'
+
+    def __str__(self) -> str:
+        return f'Settings for {self.project_id}'
+
+
+class ValveMTODrawing(models.Model):
+    """One uploaded P&ID (Stage 1). The parsed title block / line labels /
+    clouds / classes live in `parsed` so re-parsing is never needed for
+    re-checks; the file itself is kept so extraction can re-open it."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ValveMTOProject, on_delete=models.CASCADE, related_name='drawings',
+    )
+    file = models.FileField(upload_to='valve_mto/drawings/')
+    original_name = models.CharField(max_length=255, blank=True, default='')
+    page_count = models.PositiveIntegerField(default=0)
+    pdf_type = models.CharField(max_length=16, blank=True, default='')  # vector | raster
+    # parsed: {title_block:{...}, line_labels:[...], clouds:{...},
+    #          classes:[...], counts:{...}, pattern:{preset, regex, parsed, total}}
+    parsed = models.JSONField(default=dict, blank=True)
+    confirmed_drawing_number = models.CharField(max_length=255, blank=True, default='')
+    confirmed_rev = models.CharField(max_length=16, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Valve MTO Drawing'
+        verbose_name_plural = 'Valve MTO Drawings'
+
+    def __str__(self) -> str:
+        return f'{self.original_name or self.id} [{self.project_id}]'
+
+
+class ValveMTOJob(models.Model):
+    """Async extraction job (§4 Start Extraction). Steps list mirrors the
+    UI progress: Reading text layer → Detecting symbols → Matching legend
+    & tag rules → Associating lines & sizes → Applying scope → Building
+    register."""
+    STATUS_QUEUED = 'queued'
+    STATUS_RUNNING = 'running'
+    STATUS_COMPLETED = 'completed'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, 'Queued'),
+        (STATUS_RUNNING, 'Running'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ValveMTOProject, on_delete=models.CASCADE, related_name='mto_jobs',
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
+    current_step = models.CharField(max_length=64, blank=True, default='')
+    steps = models.JSONField(default=list, blank=True)  # [{name, status, detail}]
+    error = models.TextField(blank=True, default='')
+    result = models.JSONField(default=dict, blank=True)  # {row_count, unidentified, field_gaps, ...}
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Valve MTO Job'
+        verbose_name_plural = 'Valve MTO Jobs'
+
+    def __str__(self) -> str:
+        return f'Job {self.id} [{self.status}]'
