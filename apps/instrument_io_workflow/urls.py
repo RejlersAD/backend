@@ -1,4 +1,4 @@
-from django.urls import path, include
+﻿from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from . import views_extraction as extraction_views
@@ -26,7 +26,7 @@ urlpatterns = [
     path('vision/test-key/', vision_test_key_view, name='vision-test-key'),
     path('pdf-page-count/', pdf_page_count_view, name='pdf-page-count'),
 
-    # Legend sheets — lookup/sections/add/edit/delete must come before the
+    # Legend sheets â€” lookup/sections/add/edit/delete must come before the
     # <uuid:legend_id> detail pattern.
     path('legends/add-lookup/', LegendLookupAddView.as_view(), name='legend-lookup-add'),
     path('legends/edit-lookup/', LegendLookupEditView.as_view(), name='legend-lookup-edit'),
@@ -42,30 +42,30 @@ urlpatterns = [
     path('symbol-image/delete/', SymbolImageDeleteView.as_view(), name='symbol-image-delete'),
     path('default-symbol-images/', DefaultSymbolImagesView.as_view(), name='default-symbol-images'),
 
-    # Deterministic P&ID → IO List extraction (alignment spec §8)
+    # Deterministic P&ID â†’ IO List extraction (alignment spec Â§8)
     # BYOK key endpoints reuse the shared per-user AI key views (the key is
     # stored per user, not per feature).
     path('user/ai-key/', SldUserAIKeyView.as_view(), name='io-ai-key'),
     path('user/ai-key/test/', SldUserAIKeyTestView.as_view(), name='io-ai-key-test'),
-    path('projects/<uuid:project_id>/extraction-files/',
+    path('projects/<int:project_id>/extraction-files/',
          extraction_views.upload_extraction_file, name='extraction-file-upload'),
-    path('projects/<uuid:project_id>/extraction-files/list/',
+    path('projects/<int:project_id>/extraction-files/list/',
          extraction_views.list_extraction_files, name='extraction-file-list'),
-    path('projects/<uuid:project_id>/extraction-legend/',
+    path('projects/<int:project_id>/extraction-legend/',
          extraction_views.put_legend, name='extraction-legend'),
-    path('projects/<uuid:project_id>/extraction-doc-info/',
+    path('projects/<int:project_id>/extraction-doc-info/',
          extraction_views.put_doc_info, name='extraction-doc-info'),
-    path('projects/<uuid:project_id>/extract/',
+    path('projects/<int:project_id>/extract/',
          extraction_views.start_extraction, name='extraction-start'),
-    path('projects/<uuid:project_id>/extractions/<uuid:extraction_id>/status/',
+    path('projects/<int:project_id>/extractions/<uuid:extraction_id>/status/',
          extraction_views.extraction_status, name='extraction-status'),
-    path('projects/<uuid:project_id>/extractions/<uuid:extraction_id>/decisions/',
+    path('projects/<int:project_id>/extractions/<uuid:extraction_id>/decisions/',
          extraction_views.post_decisions, name='extraction-decisions'),
-    path('projects/<uuid:project_id>/extractions/<uuid:extraction_id>/ai/<str:loop_key>/',
+    path('projects/<int:project_id>/extractions/<uuid:extraction_id>/ai/<str:loop_key>/',
          extraction_views.ai_suggest, name='extraction-ai'),
-    path('projects/<uuid:project_id>/extractions/<uuid:extraction_id>/export/',
+    path('projects/<int:project_id>/extractions/<uuid:extraction_id>/export/',
          extraction_views.export_extraction, name='extraction-export'),
-    path('projects/<uuid:project_id>/extractions/<uuid:extraction_id>/',
+    path('projects/<int:project_id>/extractions/<uuid:extraction_id>/',
          extraction_views.get_extraction, name='extraction-detail'),
 
     path('',        include(router.urls)),
