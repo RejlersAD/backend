@@ -3,10 +3,21 @@
 Existing assignments retain NULL bounds; no grants/delegations are created.
 """
 import uuid
+from importlib import import_module
 
 from django.conf import settings
 from django.db import migrations, models
 import django.db.models.deletion
+
+
+def ensure_delegation_reference_keys(apps, schema_editor):
+    # Restored schemas can have migration history but lack original PK indexes.
+    # Repair before CreateModel's deferred FK SQL, rather than in a later step.
+    repair = import_module('apps.rbac.migrations.0053_user_permission_overrides').ensure_override_reference_keys
+    repair(apps, schema_editor, [
+        ('rbac', 'Role'), ('rbac', 'UserProfile'),
+        tuple(settings.AUTH_USER_MODEL.split('.')),
+    ])
 
 
 class Migration(migrations.Migration):
@@ -16,6 +27,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_delegation_reference_keys, migrations.RunPython.noop),
         migrations.AddField(
             model_name='userrole', name='effective_from',
             field=models.DateTimeField(blank=True, null=True, help_text='Role assignment becomes active at this time (null = immediately)'),

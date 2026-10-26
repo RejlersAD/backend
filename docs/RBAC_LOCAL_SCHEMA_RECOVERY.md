@@ -34,3 +34,38 @@ endpoints returned HTTP 200 through the Vite proxy; anonymous directory access
 returned 401. The full requesting administrator profile includes its actual
 superuser flag, super_admin role and modules. See the workspace brief for exact
 endpoint counts, artifact paths and verification limits.
+
+## Deployed missing reference key - 26 October 2026
+
+The subsequent container log fails at 0067 deferred FK creation with PostgreSQL
+`no unique constraint matching given keys for referenced table "rbac_roles"`.
+The startup database-access warning is separate. The earlier healthy local audit
+verified migration history/columns but did not reproduce this missing-key state;
+it was explicitly not production verification.
+
+0067 now calls the existing 0053 reference-key repair before creating delegation
+foreign keys. It checks Role, UserProfile and the configured auth user, reuses
+eligible immediate/unconditional unique keys, and locks/validates before adding
+a missing PK (or UNIQUE if another column already has the PK). Duplicate/null
+IDs stop with a clear error; nothing deletes, merges or reassigns identities.
+0069 repeats this idempotent verification for already-applied 0067/0068 installs.
+Neither migration changes model state, role grants or assignment values. Reverse
+does not remove repaired reference keys, matching the existing repair convention.
+
+All 32 real PostgreSQL key-migration tests pass, including eight new delegation
+tests with missing-role reproduction, all 0067/0068 deferred FKs, healthy/alternate/
+partial/deferrable/composite indexes, duplicates/nulls on all three targets,
+idempotent follow-up, assignment/grant preservation and reverse DDL. Fixtures use
+transactional synthetic schemas; all test data/DDL rolls back. Logs remain in the
+workspace artifacts/rbac-delegation-key-*. No production credentials or data were
+read by this verification.
+
+The healthy local installation applied 0069 successfully: 657 applied migrations,
+none pending, no model drift, and identical eligible indexes, roles, assignments,
+permission/module grants and delegations before/after. This is local evidence only.
+
+Deploy the fixed backend revision through the normal release process; startup
+will retry the previously rolled-back 0067. Do not fake it or disable foreign keys.
+If identity validation stops the migration, reconcile the reported duplicate/null
+identities explicitly; this repair intentionally will not infer those decisions.
+Production migration success remains unverified until its deployment completes.
