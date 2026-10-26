@@ -133,7 +133,12 @@ def read_vendor_db(path):
             by_tag.setdefault(tag, rec)     # first Live row wins
         fname = path.replace('\\', '/').split('/')[-1]
         m = re.match(r'([0-9A-Z-]+?)_([A-Z0-9]+)\.xlsx$', fname, re.IGNORECASE)
-        return VendorDB(name=m.group(1) if m else fname, system='', by_tag=by_tag, live_count=live)
+        db = VendorDB(name=m.group(1) if m else fname, system='', by_tag=by_tag, live_count=live)
+        # DCS databases spell the FTA columns without underscores
+        # (RTP/FTALocation); ESD inserts them (RTP/FTA_Location). The column
+        # spelling — never the file name — decides the system.
+        db.system = 'DCS' if 'RTP/FTALocation' in headers else 'ESD'
+        return db
     finally:
         wb.close()
 

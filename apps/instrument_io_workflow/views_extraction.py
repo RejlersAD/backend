@@ -69,6 +69,7 @@ def _document_summary(doc):
     return {
         'id': str(doc.id), 'name': doc.document_number or (doc.pdf_file.name.split('/')[-1]),
         'documentType': doc.document_type,
+        'vendorSystem': (doc.extraction_stats or {}).get('vendor_system', ''),
         'uploadedAt': doc.created_at.isoformat() if doc.created_at else None,
     }
 
@@ -156,7 +157,12 @@ def upload_extraction_file(request, project_id):
             if isinstance(db, dict) and 'error' in db:
                 summary['error'] = db['error']
             else:
-                summary.update({'document': db.name, 'liveTags': db.live_count})
+                # DCS and ESD are two distinct, both-required databases; the
+                # detected system rides on the document for ordering.
+                doc.extraction_stats = {'vendor_system': db.system}
+                doc.save(update_fields=['extraction_stats', 'updated_at'])
+                summary.update({'document': db.name, 'liveTags': db.live_count,
+                                'vendorSystem': db.system})
         finally:
             os.unlink(tmp.name)
     return Response(summary, status=status.HTTP_201_CREATED)
@@ -227,7 +233,10 @@ def start_extraction(request, project_id):
                         status=status.HTTP_400_BAD_REQUEST)
     iolist_doc = next((d for d in docs if d.document_type == 'io_list'
                        and d.pdf_file.name.lower().endswith(('.xlsx', '.xlsm'))), None)
-    vendor_docs = [d for d in docs if d.document_type == 'vendor_db']
+    # DCS first, then ESD — GDS rows live in the DCS database (spec §6.8).
+    vendor_docs = sorted(
+        (d for d in docs if d.document_type == 'vendor_db'),
+        key=lambda d: 0 if (d.extraction_stats or {}).get('vendor_system') == 'DCS' else 1)
 
     # mark the previous extraction outdated (§2 re-check rule)
     project.extractions.filter(status=IOListExtraction.STATUS_COMPLETED).update(is_outdated=True)
