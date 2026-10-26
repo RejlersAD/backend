@@ -1,4 +1,4 @@
-"""
+﻿"""
 RADAI Project Planning Application â€” Models.
 
 Deliberately lean: PlanningProject + PlanningFile are relational; the heavy
@@ -128,7 +128,7 @@ class PlanningProject(BaseModel):
     class Meta:
         ordering = ['-created_at']
         constraints = [
-            models.CheckConstraint(condition=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
+            models.CheckConstraint(check=models.Q(budgeted_effort_hours__isnull=True) | models.Q(budgeted_effort_hours__gte=0),
                 name='plan_project_effort_nonnegative',
             ),
         ]
@@ -202,7 +202,8 @@ class PlanningGeneration(BaseModel):
         unique_together = [('project', 'version')]
         constraints = [
             models.UniqueConstraint(
-                fields=['project', 'input_fingerprint'],condition=models.Q(input_fingerprint__isnull=False),
+                fields=['project', 'input_fingerprint'],
+                condition=models.Q(input_fingerprint__isnull=False),
                 name='unique_generation_input_fingerprint',
             ),
         ]
@@ -260,7 +261,8 @@ class PlanningJob(BaseModel):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['project', 'job_type', 'idempotency_key'],condition=models.Q(idempotency_key__isnull=False),
+                fields=['project', 'job_type', 'idempotency_key'],
+                condition=models.Q(idempotency_key__isnull=False),
                 name='unique_planning_job_idempotency',
             ),
         ]

@@ -192,7 +192,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='invoice',
-            constraint=models.CheckConstraint(condition=models.Q(('paid_amount__gte', 0)), name='finance_invoice_paid_amount_nonnegative'),
+            constraint=models.CheckConstraint(check=models.Q(('paid_amount__gte', 0)), name='finance_invoice_paid_amount_nonnegative'),
         ),
         migrations.AddConstraint(
             model_name='invoice',
@@ -250,7 +250,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='invoicepurchaseorderallocation',
-            constraint=models.CheckConstraint(condition=models.Q(('allocated_amount__gte', 0)), name='finance_invoice_allocation_nonnegative'),
+            constraint=models.CheckConstraint(check=models.Q(('allocated_amount__gte', 0)), name='finance_invoice_allocation_nonnegative'),
         ),
     ]
 

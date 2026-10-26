@@ -1,4 +1,4 @@
-"""Versioned workflow and engineering-logic configuration for schedule generation."""
+﻿"""Versioned workflow and engineering-logic configuration for schedule generation."""
 from django.conf import settings as django_settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -41,10 +41,10 @@ class WorkflowTemplate(BaseModel):
                 fields=['project', 'code', 'version'], name='uniq_project_workflow_template_version',
             ),
             models.UniqueConstraint(
-                fields=['code', 'version'],condition=Q(project__isnull=True),
+                fields=['code', 'version'], condition=Q(project__isnull=True),
                 name='uniq_system_workflow_template_version',
             ),
-            models.CheckConstraint(condition=Q(is_system=False) | Q(project__isnull=True),
+            models.CheckConstraint(check=Q(is_system=False) | Q(project__isnull=True),
                 name='system_workflow_template_has_no_project',
             ),
         ]
@@ -132,10 +132,10 @@ class EngineeringDependencyTemplate(BaseModel):
                 fields=['project', 'code', 'version'], name='uniq_project_dependency_template_version',
             ),
             models.UniqueConstraint(
-                fields=['code', 'version'],condition=Q(project__isnull=True),
+                fields=['code', 'version'], condition=Q(project__isnull=True),
                 name='uniq_system_dependency_template_version',
             ),
-            models.CheckConstraint(condition=Q(is_system=False) | Q(project__isnull=True),
+            models.CheckConstraint(check=Q(is_system=False) | Q(project__isnull=True),
                 name='system_dependency_template_has_no_project',
             ),
         ]
@@ -178,7 +178,7 @@ class EngineeringDependencyRule(BaseModel):
                 ],
                 name='uniq_engineering_dependency_gate',
             ),
-            models.CheckConstraint(condition=~Q(predecessor_code=models.F('successor_code')),
+            models.CheckConstraint(check=~Q(predecessor_code=models.F('successor_code')),
                 name='dependency_rule_distinct_deliverables',
             ),
         ]

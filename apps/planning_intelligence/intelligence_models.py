@@ -1,4 +1,4 @@
-"""Persistent document-intelligence evidence, provenance, and review workflow."""
+﻿"""Persistent document-intelligence evidence, provenance, and review workflow."""
 from django.conf import settings
 from django.db import models
 
@@ -308,7 +308,7 @@ class GenerationDependency(BaseModel):
                 fields=['plan', 'predecessor', 'successor', 'relationship_type'],
                 name='uniq_generation_plan_dependency',
             ),
-            models.CheckConstraint(condition=~models.Q(predecessor=models.F('successor')), name='generation_dependency_distinct'),
+            models.CheckConstraint(check=~models.Q(predecessor=models.F('successor')), name='generation_dependency_distinct'),
         ]
 
 

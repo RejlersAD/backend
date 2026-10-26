@@ -233,7 +233,8 @@ class ProjectTask(BaseModel):
     
     class Meta:
         ordering = ['due_date', '-created_at']
-        constraints = [models.CheckConstraint(condition=models.Q(progress_percent__gte=0, progress_percent__lte=100),
+        constraints = [models.CheckConstraint(
+            check=models.Q(progress_percent__gte=0, progress_percent__lte=100),
             name='core_project_task_progress_range',
         )]
 

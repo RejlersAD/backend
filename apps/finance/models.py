@@ -1,4 +1,4 @@
-"""
+﻿"""
 Finance Invoice Models
 Converted from SQLAlchemy to Django ORM
 """
@@ -225,11 +225,12 @@ class Invoice(models.Model):
             models.Index(fields=['due_date', 'payment_status']),
         ]
         constraints = [
-            models.CheckConstraint(condition=models.Q(paid_amount__gte=0),
+            models.CheckConstraint(check=models.Q(paid_amount__gte=0),
                 name='finance_invoice_paid_amount_nonnegative',
             ),
             models.UniqueConstraint(
-                fields=['source_file_sha256'],condition=~models.Q(source_file_sha256=''),
+                fields=['source_file_sha256'],
+                condition=~models.Q(source_file_sha256=''),
                 name='finance_invoice_unique_source_hash',
             ),
             models.UniqueConstraint(
@@ -390,7 +391,7 @@ class InvoicePurchaseOrderAllocation(models.Model):
                 fields=['invoice', 'purchase_order'],
                 name='finance_invoice_unique_po_allocation',
             ),
-            models.CheckConstraint(condition=models.Q(allocated_amount__gte=0),
+            models.CheckConstraint(check=models.Q(allocated_amount__gte=0),
                 name='finance_invoice_allocation_nonnegative',
             ),
         ]
@@ -460,7 +461,7 @@ class PayablePayment(models.Model):
         ordering = ['-created_at']
         indexes = [models.Index(fields=['invoice', 'operation', '-created_at'])]
         constraints = [
-            models.CheckConstraint(condition=models.Q(amount__isnull=True) | models.Q(amount__gt=0),
+            models.CheckConstraint(check=models.Q(amount__isnull=True) | models.Q(amount__gt=0),
                 name='finance_payable_payment_positive_amount',
             ),
         ]

@@ -147,7 +147,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='payablepayment',
-            constraint=models.CheckConstraint(condition=models.Q(('amount__isnull', True), ('amount__gt', 0), _connector='OR'), name='finance_payable_payment_positive_amount'),
+            constraint=models.CheckConstraint(check=models.Q(('amount__isnull', True), ('amount__gt', 0), _connector='OR'), name='finance_payable_payment_positive_amount'),
         ),
     ]
 

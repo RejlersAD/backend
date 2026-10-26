@@ -351,8 +351,8 @@ class OpportunityNumberSequence(models.Model):
     class Meta:
         db_table = 'sales_opportunity_number_sequence'
         constraints = [
-            models.CheckConstraint(condition=models.Q(id=1), name='sales_vf_singleton'),
-            models.CheckConstraint(condition=models.Q(next_number__gte=102101), name='sales_vf_minimum'),
+            models.CheckConstraint(check=models.Q(id=1), name='sales_vf_singleton'),
+            models.CheckConstraint(check=models.Q(next_number__gte=102101), name='sales_vf_minimum'),
         ]
 
 

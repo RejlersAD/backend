@@ -494,3 +494,5 @@ ai/legend_models/data/_router/
 !apps/payroll/tests/test_leave_referral.py
 
 !docs/SALES_CLIENT_CRUD.md
+!docs/S3D_LOCAL_EXTRACTION.md
+!docs/RELEASE_20261026.md

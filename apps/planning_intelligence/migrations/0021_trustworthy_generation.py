@@ -220,7 +220,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='generationdependency',
-            constraint=models.CheckConstraint(condition=models.Q(('predecessor', models.F('successor')), _negated=True), name='generation_dependency_distinct'),
+            constraint=models.CheckConstraint(check=models.Q(('predecessor', models.F('successor')), _negated=True), name='generation_dependency_distinct'),
         ),
         migrations.AddField(
             model_name='activityrelationship',

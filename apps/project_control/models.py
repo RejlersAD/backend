@@ -1,4 +1,4 @@
-"""
+﻿"""
 Project Management â€” domain models layered on top of apps.core.project_models.Project.
 
 These models are deliberately additive: they FK into the existing Project and
@@ -217,7 +217,7 @@ class ControlAccount(BaseModel):
         ordering = ['project', 'wbs_node__sort_order', 'code']
         constraints = [
             models.UniqueConstraint(fields=['project', 'code'], name='pc_control_account_code_uniq'),
-            models.CheckConstraint(condition=models.Q(baseline_finish__gte=models.F('baseline_start')),
+            models.CheckConstraint(check=models.Q(baseline_finish__gte=models.F('baseline_start')),
                 name='pc_control_account_dates_valid',
             ),
         ]
@@ -267,11 +267,11 @@ class ReportingPeriod(BaseModel):
             models.UniqueConstraint(fields=['project', 'sequence'], name='pc_period_project_sequence_uniq'),
             models.UniqueConstraint(fields=['project', 'name'], name='pc_period_project_name_uniq'),
             models.UniqueConstraint(
-                fields=['project'],condition=models.Q(status__in=['open', 'reopened']),
+                fields=['project'], condition=models.Q(status__in=['open', 'reopened']),
                 name='pc_period_one_entry_window_uniq',
             ),
-            models.CheckConstraint(condition=models.Q(end_date__gte=models.F('start_date')), name='pc_period_dates_valid'),
-            models.CheckConstraint(condition=models.Q(data_date__gte=models.F('start_date'), data_date__lte=models.F('end_date')),
+            models.CheckConstraint(check=models.Q(end_date__gte=models.F('start_date')), name='pc_period_dates_valid'),
+            models.CheckConstraint(check=models.Q(data_date__gte=models.F('start_date'), data_date__lte=models.F('end_date')),
                 name='pc_period_data_date_valid',
             ),
         ]
@@ -330,7 +330,7 @@ class BudgetAllocation(BaseModel):
         ordering = ['project', 'wbs_node__sort_order', 'code']
         constraints = [
             models.UniqueConstraint(fields=['project', 'code'], name='pc_budget_project_code_uniq'),
-            models.CheckConstraint(condition=models.Q(amount__gt=0), name='pc_budget_amount_positive'),
+            models.CheckConstraint(check=models.Q(amount__gt=0), name='pc_budget_amount_positive'),
         ]
         indexes = [models.Index(fields=['project', 'status'], name='pc_budget_proj_status_idx')]
 
@@ -365,9 +365,10 @@ class CostAllocation(BaseModel):
         ordering = ['-created_at']
         constraints = [
             models.UniqueConstraint(
-                fields=['source_type', 'source_id', 'project', 'wbs_node'],condition=models.Q(is_deleted=False), name='pc_cost_source_wbs_uniq',
+                fields=['source_type', 'source_id', 'project', 'wbs_node'],
+                condition=models.Q(is_deleted=False), name='pc_cost_source_wbs_uniq',
             ),
-            models.CheckConstraint(condition=models.Q(amount__gt=0), name='pc_cost_amount_positive'),
+            models.CheckConstraint(check=models.Q(amount__gt=0), name='pc_cost_amount_positive'),
         ]
         indexes = [
             models.Index(fields=['project', 'status'], name='pc_cost_proj_status_idx'),
@@ -413,7 +414,7 @@ class CostLedgerEntry(BaseModel):
 
     class Meta:
         ordering = ['-entry_date', '-created_at']
-        constraints = [models.CheckConstraint(condition=models.Q(amount__gte=0), name='pc_ledger_amount_nonnegative')]
+        constraints = [models.CheckConstraint(check=models.Q(amount__gte=0), name='pc_ledger_amount_nonnegative')]
         indexes = [
             models.Index(fields=['project', 'entry_type', 'status'], name='pc_ledger_proj_type_idx'),
             models.Index(fields=['project', 'wbs_node', 'status'], name='pc_ledger_proj_wbs_idx'),
@@ -472,10 +473,11 @@ class ApprovedHourEntry(BaseModel):
         ordering = ['-work_date', '-created_at']
         constraints = [
             models.UniqueConstraint(
-                fields=['project', 'source_type', 'source_reference'],condition=models.Q(is_deleted=False), name='pc_hour_source_uniq',
+                fields=['project', 'source_type', 'source_reference'],
+                condition=models.Q(is_deleted=False), name='pc_hour_source_uniq',
             ),
-            models.CheckConstraint(condition=models.Q(hours__gt=0), name='pc_hour_hours_positive'),
-            models.CheckConstraint(condition=models.Q(hourly_cost_rate__gte=0), name='pc_hour_rate_nonnegative'),
+            models.CheckConstraint(check=models.Q(hours__gt=0), name='pc_hour_hours_positive'),
+            models.CheckConstraint(check=models.Q(hourly_cost_rate__gte=0), name='pc_hour_rate_nonnegative'),
         ]
         indexes = [
             models.Index(fields=['project', 'status'], name='pc_hour_project_status_idx'),

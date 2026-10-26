@@ -1,4 +1,4 @@
-"""Explicit EPC source links and immutable integrated baseline evidence."""
+﻿"""Explicit EPC source links and immutable integrated baseline evidence."""
 from django.conf import settings
 from django.db import models
 
@@ -85,8 +85,8 @@ class IntegratedBaseline(models.Model):
         ordering = ['-revision', '-id']
         constraints = [
             models.UniqueConstraint(fields=['project', 'revision'], name='pc_epc_baseline_revision_uniq'),
-            models.CheckConstraint(condition=models.Q(revision__gte=1), name='pc_epc_revision_positive'),
-            models.CheckConstraint(condition=models.Q(budget_total__gt=0), name='pc_epc_baseline_budget_positive'),
+            models.CheckConstraint(check=models.Q(revision__gte=1), name='pc_epc_revision_positive'),
+            models.CheckConstraint(check=models.Q(budget_total__gt=0), name='pc_epc_baseline_budget_positive'),
         ]
 
     def save(self, *args, **kwargs):

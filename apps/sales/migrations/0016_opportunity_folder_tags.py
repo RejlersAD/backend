@@ -37,7 +37,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='opportunityfoldertag',
-            constraint=models.CheckConstraint(condition=models.Q(('folder_key__in', ['correspondence', 'tender', 'proposal', 'internal', 'submitted', 'award'])), name='sales_opportunity_folder_tag_key'),
+            constraint=models.CheckConstraint(check=models.Q(('folder_key__in', ['correspondence', 'tender', 'proposal', 'internal', 'submitted', 'award'])), name='sales_opportunity_folder_tag_key'),
         ),
         migrations.RunPython(migrations.RunPython.noop, preserve_folder_tags),
     ]

@@ -1,4 +1,4 @@
-"""Relational scheduling domain for CPM calculation and controlled baselines."""
+﻿"""Relational scheduling domain for CPM calculation and controlled baselines."""
 from decimal import Decimal
 
 from django.conf import settings
@@ -406,7 +406,7 @@ class DailyFieldUpdate(BaseModel):
         ordering = ['-report_date', '-created_at']
         constraints = [
             models.UniqueConstraint(
-                fields=['activity', 'report_date'],condition=models.Q(is_deleted=False),
+                fields=['activity', 'report_date'], condition=models.Q(is_deleted=False),
                 name='unique_active_daily_field_update',
             ),
         ]
@@ -468,7 +468,7 @@ class ScheduleControlSnapshot(BaseModel):
         ordering = ['-data_date', '-revision', '-created_at', '-id']
         unique_together = [('version', 'data_date', 'revision')]
         indexes = [models.Index(fields=['version', '-data_date'])]
-        constraints = [models.CheckConstraint(condition=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
+        constraints = [models.CheckConstraint(check=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
         )]
 
     def save(self, *args, **kwargs):

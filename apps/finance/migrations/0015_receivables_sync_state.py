@@ -28,6 +28,6 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='receivablessyncstate',
-            constraint=models.CheckConstraint(condition=models.Q(('id', 1)), name='finance_ar_sync_singleton'),
+            constraint=models.CheckConstraint(check=models.Q(('id', 1)), name='finance_ar_sync_singleton'),
         ),
     ]

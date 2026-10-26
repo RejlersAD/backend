@@ -1,4 +1,4 @@
-"""Durable Sales storage work, separate from commercial lifecycle evidence."""
+﻿"""Durable Sales storage work, separate from commercial lifecycle evidence."""
 import uuid
 
 from django.conf import settings
@@ -37,7 +37,7 @@ class OpportunityFolderTag(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=['opportunity', 'folder_key'], name='sales_opportunity_folder_tag_uq'),
-            models.CheckConstraint(condition=models.Q(folder_key__in=[
+            models.CheckConstraint(check=models.Q(folder_key__in=[
                 'correspondence', 'tender', 'proposal', 'internal', 'submitted', 'award',
             ]), name='sales_opportunity_folder_tag_key'),
         ]
@@ -73,13 +73,13 @@ class OpportunityWorkspaceUpload(models.Model):
 
     class Meta:
         constraints = [
-            models.CheckConstraint(condition=models.Q(storage_encoding__in=['identity', 'gzip']),
+            models.CheckConstraint(check=models.Q(storage_encoding__in=['identity', 'gzip']),
                                    name='sales_upload_storage_encoding'),
             models.UniqueConstraint(fields=('workspace', 'request_id'), name='sales_workspace_upload_request'),
             models.UniqueConstraint(fields=('workspace', 'folder_key', 'normalized_name'),
                                     condition=models.Q(provider='radai', version_number=1), name='sales_private_attachment_name'),
             models.UniqueConstraint(fields=('document', 'version_number'), name='sales_document_revision_uq'),
-            models.CheckConstraint(condition=models.Q(version_number__gte=1), name='sales_document_revision_positive'),
+            models.CheckConstraint(check=models.Q(version_number__gte=1), name='sales_document_revision_positive'),
         ]
 
 

@@ -18,9 +18,9 @@ class Migration(migrations.Migration):
         migrations.AddField(model_name='planningriskrecord', name='mitigation_status', field=models.CharField(
             max_length=16, default='not_planned', choices=[('not_planned', 'Not Planned'), ('planned', 'Planned'),
                                                          ('in_progress', 'In Progress'), ('completed', 'Completed')])),
-        migrations.AddConstraint(model_name='planningriskrecord', constraint=models.CheckConstraint(condition=models.Q(probability_percent__isnull=True) | models.Q(probability_percent__gte=0, probability_percent__lte=100),
+        migrations.AddConstraint(model_name='planningriskrecord', constraint=models.CheckConstraint(check=models.Q(probability_percent__isnull=True) | models.Q(probability_percent__gte=0, probability_percent__lte=100),
             name='planning_risk_probability_range')),
-        migrations.AddConstraint(model_name='planningriskrecord', constraint=models.CheckConstraint(condition=models.Q(cost_impact__isnull=True) | models.Q(cost_impact__gte=0), name='planning_risk_cost_nonnegative')),
-        migrations.AddConstraint(model_name='planningriskrecord', constraint=models.CheckConstraint(condition=models.Q(schedule_impact_days__isnull=True) | models.Q(schedule_impact_days__gte=0), name='planning_risk_delay_nonnegative')),
+        migrations.AddConstraint(model_name='planningriskrecord', constraint=models.CheckConstraint(check=models.Q(cost_impact__isnull=True) | models.Q(cost_impact__gte=0), name='planning_risk_cost_nonnegative')),
+        migrations.AddConstraint(model_name='planningriskrecord', constraint=models.CheckConstraint(check=models.Q(schedule_impact_days__isnull=True) | models.Q(schedule_impact_days__gte=0), name='planning_risk_delay_nonnegative')),
     ]
 

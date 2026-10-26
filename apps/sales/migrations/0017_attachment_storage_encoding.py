@@ -35,7 +35,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='opportunityworkspaceupload',
-            constraint=models.CheckConstraint(condition=models.Q(('storage_encoding__in', ['identity', 'gzip'])), name='sales_upload_storage_encoding'),
+            constraint=models.CheckConstraint(check=models.Q(('storage_encoding__in', ['identity', 'gzip'])), name='sales_upload_storage_encoding'),
         ),
         migrations.RunPython(migrations.RunPython.noop, preserve_storage_evidence),
     ]

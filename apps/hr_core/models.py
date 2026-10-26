@@ -1,4 +1,4 @@
-"""
+﻿"""
 HR Core Models - Unified Employee Master System
 
 This module consolidates employee data from:
@@ -1084,7 +1084,7 @@ class OvertimeRequest(TimeStampedModel):
         db_table = 'hr_overtime_request'
         ordering = ['-work_date', '-created_at']
         constraints = [
-            models.UniqueConstraint(fields=['employee', 'work_date'],condition=models.Q(status__in=['pending', 'approved']), name='hr_overtime_active_day_unique'),
+            models.UniqueConstraint(fields=['employee', 'work_date'], condition=models.Q(status__in=['pending', 'approved']), name='hr_overtime_active_day_unique'),
         ]
         indexes = [models.Index(fields=['status', 'work_date'], name='hr_overtime_queue_idx')]
 
@@ -1371,7 +1371,7 @@ class OvertimeConversion(TimeStampedModel):
 
     class Meta:
         ordering = ['-created_at']
-        constraints = [models.CheckConstraint(condition=models.Q(hours__gt=0), name='ot_conversion_positive')]
+        constraints = [models.CheckConstraint(check=models.Q(hours__gt=0), name='ot_conversion_positive')]
 
 
 class OvertimeConversionAllocation(models.Model):
@@ -1382,6 +1382,6 @@ class OvertimeConversionAllocation(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=['conversion', 'request'], name='ot_conversion_request_unique'),
-            models.CheckConstraint(condition=models.Q(hours__gt=0), name='ot_allocation_positive'),
+            models.CheckConstraint(check=models.Q(hours__gt=0), name='ot_allocation_positive'),
         ]
 
