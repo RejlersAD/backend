@@ -104,12 +104,18 @@ def probe_credential(credential):
                 content = response.choices[0].message.content
             elif credential.provider == 'anthropic':
                 from anthropic import Anthropic, Omit
+                probe_body = {'output_config': {'format': {'type': 'json_schema', 'schema': SCHEMA}}}
+                if credential.model == 'claude-sonnet-5-5':
+                    # Sonnet 5.5 thinks by default. This synthetic check needs
+                    # only a tiny JSON response within the existing token cap.
+                    probe_body['thinking'] = {'type': 'between_tools'}
+                    probe_body['output_config']['effort'] = 'low'
                 with Anthropic(api_key=credential.api_key, auth_token='', base_url='https://api.anthropic.com',
                                default_headers={'Authorization': Omit(), 'X-Api-Key': credential.api_key},
                                timeout=20, max_retries=0) as client:
                     response = client.messages.create(
                         model=credential.model, max_tokens=1024, messages=[{'role': 'user', 'content': PROMPT}],
-                        extra_body={'output_config': {'format': {'type': 'json_schema', 'schema': SCHEMA}}},
+                        extra_body=probe_body,
                     )
                 blocks = [block for block in response.content if getattr(block, 'type', None) == 'text']
                 if response.stop_reason == 'refusal':

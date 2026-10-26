@@ -155,7 +155,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='overtimeconversion',
-            constraint=models.CheckConstraint(check=models.Q(('hours__gt', 0)), name='ot_conversion_positive'),
+            constraint=models.CheckConstraint(condition=models.Q(('hours__gt', 0)), name='ot_conversion_positive'),
         ),
         migrations.AddConstraint(
             model_name='overtimeconversionallocation',
@@ -163,6 +163,6 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='overtimeconversionallocation',
-            constraint=models.CheckConstraint(check=models.Q(('hours__gt', 0)), name='ot_allocation_positive'),
+            constraint=models.CheckConstraint(condition=models.Q(('hours__gt', 0)), name='ot_allocation_positive'),
         ),
     ]

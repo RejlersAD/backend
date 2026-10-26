@@ -28,7 +28,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='schedulecontrolsnapshot',
-            constraint=models.CheckConstraint(check=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
+            constraint=models.CheckConstraint(condition=models.Q(revision__gte=1), name='plan_ctrl_revision_positive',
             ),
         ),
     ]

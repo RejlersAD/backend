@@ -33,8 +33,7 @@ class Migration(migrations.Migration):
             max_length=160, unique=True, null=True, blank=True,
         )),
         migrations.AddField(model_name='projecttask', name='metadata', field=models.JSONField(default=dict, blank=True)),
-        migrations.AddConstraint(model_name='projecttask', constraint=models.CheckConstraint(
-            check=models.Q(progress_percent__gte=0, progress_percent__lte=100),
+        migrations.AddConstraint(model_name='projecttask', constraint=models.CheckConstraint(condition=models.Q(progress_percent__gte=0, progress_percent__lte=100),
             name='core_project_task_progress_range',
         )),
         migrations.RunPython(preserve_completed_progress, migrations.RunPython.noop),

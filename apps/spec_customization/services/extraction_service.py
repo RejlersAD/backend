@@ -24,10 +24,13 @@ import logging
 import math
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import SPEC_EXTRACTION_CONFIG
 from .prompts import SYSTEM_PROMPT, build_extraction_prompt
+from .local_extraction import local_capabilities, run_local_engine
+from .local_tables import LocalTableParser
 from .advanced_validation import (
     merge_ensemble_results,
     validate_extracted_classes,
@@ -81,6 +84,12 @@ class PaperSpecExtractionService:
         self._claude_quota_exceeded = False
         self._ai_pages_used = 0
         self.provider_configuration_errors = {}
+        self._chunk_deadline = None
+        self._job_deadline = time.monotonic() + self.config['job_total_timeout_s']
+        self._cloud_attempted = False
+        self._local_candidate = None
+        self.chunk_attempts = []
+        self.local_engine_errors = []
         
         # BYOK (Bring Your Own Key) support
         self._user_api_key = (user_api_key or "").strip()
@@ -97,23 +106,62 @@ class PaperSpecExtractionService:
 
     # ── Lazy client init ────────────────────────────────────────────────
     def _configured_engines(self):
-        """Read current saved defaults; retain legacy routing until centrally managed."""
+        """Prefer local OCR and parsing so extraction still works offline.
+
+        AI providers remain optional and are only used when a valid configured
+        credential is available. Missing credentials should not block extraction
+        for locally processable documents.
+        """
         configurations = [get_provider_configuration(provider) for provider in ('gemini', 'openai', 'anthropic')]
-        if not any(item['managed'] for item in configurations):
-            return list(self.config['ai_engines'])
+
         engines = ['pymupdf_text']
+        for local_name in ('rapidocr', 'paddleocr', 'tesseract'):
+            if local_name not in engines:
+                engines.append(local_name)
+
         for item in configurations:
             if not item['ready']:
                 continue
             name = 'claude' if item['provider'] == 'anthropic' else item['provider']
             engines.append(f'{name}_vision')
             self.config[f'{name}_model'] = item['model'] or self._module_models[name]
-        if len(engines) == 1:
-            raise ExtractionProviderConfigurationError(
-                'Structured extraction is unavailable. Configure and enable a default saved credential '
-                'in Admin → AI API Keys (/admin/ai-api-keys), then retry.'
-            )
-        return [*engines, 'tesseract']
+
+        return engines
+
+    def remaining_seconds(self):
+        deadline = min(self._job_deadline, self._chunk_deadline or self._job_deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Extraction processing budget exhausted.')
+        return remaining
+
+    def _extract_local(self, pdf_path, start, end, engine):
+        self.remaining_seconds()
+        if not next(item['available'] for item in local_capabilities(self.config)['engines'] if item['id'] == engine):
+            self.local_engine_errors.append({'engine': engine, 'reason': 'not_available'})
+            return None
+        try:
+            result = run_local_engine(pdf_path, start, end, engine, self.config, self.remaining_seconds())
+            self.remaining_seconds()
+            return result
+        except OSError:
+            self.local_engine_errors.append({'engine': engine, 'reason': 'execution_failed'})
+            return None
+
+    def _call_vision(self, engine, images, page_range):
+        pages = page_range[1] - page_range[0] + 1
+        self.remaining_seconds()
+        if self._ai_pages_used + pages > int(self.config['max_ai_pages_per_job']):
+            return None
+        # Reserve BEFORE calling, including failed requests and escalation.
+        self._ai_pages_used += pages
+        self._cloud_attempted = True
+        return getattr(self, f'extract_via_{engine}')(images, page_range)
+
+    def _bounded_client(self, client):
+        if client is not None and hasattr(client, 'with_options'):
+            return client.with_options(timeout=self.remaining_seconds(), max_retries=0)
+        return client
 
     def _get_gemini(self):
         if self._gemini_quota_exceeded:
@@ -305,10 +353,13 @@ class PaperSpecExtractionService:
             import fitz
             with fitz.open(pdf_path) as doc:
                 for i in range(start, end + 1):
+                    self.remaining_seconds()
                     if i >= doc.page_count:
                         break
                     page = doc[i]
                     texts.append(page.get_text("text") or "")
+        except TimeoutError:
+            raise
         except Exception as e:
             logger.warning("[SpecExtraction] text extract failed: %s", e)
         return self.strip_running_furniture(texts)
@@ -377,43 +428,27 @@ class PaperSpecExtractionService:
             import fitz
             with fitz.open(pdf_path) as doc:
                 dpi = self.config["render_dpi"]
-                mat = fitz.Matrix(dpi / 72, dpi / 72)
                 for i in range(start, end + 1):
+                    self.remaining_seconds()
                     if i >= doc.page_count:
                         break
                     page = doc[i]
+                    scale = min(dpi / 72, self.config['max_image_size'] / max(page.rect.width, page.rect.height))
+                    mat = fitz.Matrix(scale, scale)
                     pix = page.get_pixmap(matrix=mat)
                     img_bytes = pix.tobytes("jpeg", jpg_quality=self.config["jpeg_quality"])
                     out.append(base64.b64encode(img_bytes).decode("ascii"))
+        except TimeoutError:
+            raise
         except Exception as e:
             logger.warning("[SpecExtraction] render failed: %s", e)
         return out
 
     # ── Engine: PyMuPDF text-layer only (no AI) ─────────────────────────
     def extract_via_text_layer(self, pdf_path: str, start: int, end: int) -> Dict[str, Any]:
-        """Detect piping-class headers in raw text — returns minimal classes."""
-        texts = self.extract_text_for_pages(pdf_path, start, end)
-        full_text = "\n".join(texts)
-        header_re = re.compile(self.config["piping_class_header_regex"], re.IGNORECASE)
-        classes: Dict[str, Dict[str, Any]] = {}
-        for m in header_re.finditer(full_text):
-            code = m.group("code").upper()
-            classes.setdefault(code, {
-                "class_code":          code,
-                "class_full_code":     m.group(0).strip(),
-                "material_grade":      "",
-                "pressure_rating":     "",
-                "flange_facing":       "",
-                "corrosion_allowance": "",
-                "service_list":        [],
-                "pt_rating_table":     [],
-                "components":          [],
-                "raw_notes":           "",
-                "confidence":          0.30,
-                "_engine":             "pymupdf_text",
-                "_source_pages":       [start + 1, end + 1],
-            })
-        return {"piping_classes": list(classes.values()), "page_text_chars": len(full_text)}
+        """Extract explicit component tables in an isolated local process."""
+        return self._extract_local(pdf_path, start, end, 'pymupdf_text') or {
+            'piping_classes': [], 'page_text_chars': 0, 'engine_used': 'pymupdf_text'}
 
     def _text_layer_result_is_complete(self, classes: List[Dict[str, Any]]) -> bool:
         """Whether the deterministic parser produced a usable extraction.
@@ -443,6 +478,10 @@ class PaperSpecExtractionService:
                 model=self.config["gemini_model"],
                 contents=parts,
                 config=types.GenerateContentConfig(
+                    http_options=types.HttpOptions(
+                        timeout=max(1, int(self.remaining_seconds() * 1000)),
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
                     temperature=self.config["gemini_temperature"],
                     response_mime_type="application/json",
                 ),
@@ -474,7 +513,7 @@ class PaperSpecExtractionService:
 
     # ── Engine: OpenAI Vision ───────────────────────────────────────────
     def extract_via_openai(self, images_b64: List[str], page_range: Tuple[int, int]) -> Optional[Dict[str, Any]]:
-        client = self._get_openai()
+        client = self._bounded_client(self._get_openai())
         if not client or not images_b64:
             return None
         try:
@@ -529,7 +568,7 @@ class PaperSpecExtractionService:
     # ── Engine: Claude Vision ───────────────────────────────────────────
     def extract_via_claude(self, images_b64: List[str], page_range: Tuple[int, int]) -> Optional[Dict[str, Any]]:
         """Extract piping specs using Claude (Anthropic) vision API."""
-        client = self._get_claude()
+        client = self._bounded_client(self._get_claude())
         if not client or not images_b64:
             return None
         try:
@@ -593,47 +632,62 @@ class PaperSpecExtractionService:
                 logger.warning("[SpecExtraction] Claude failed: %s", e)
             return None
 
-    # ── Engine: Tesseract OCR fallback (text-only header detection) ─────
-    def extract_via_tesseract(self, pdf_path: str, start: int, end: int) -> Optional[Dict[str, Any]]:
-        try:
-            import pytesseract
-            import fitz
-            from PIL import Image
-            with fitz.open(pdf_path) as doc:
-                all_text_parts: List[str] = []
-                for i in range(start, end + 1):
-                    if i >= doc.page_count:
-                        break
-                    page = doc[i]
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                    img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    all_text_parts.append(pytesseract.image_to_string(img) or "")
-            ocr_text = "\n".join(all_text_parts)
-            header_re = re.compile(self.config["piping_class_header_regex"], re.IGNORECASE)
-            classes: List[Dict[str, Any]] = []
-            for m in header_re.finditer(ocr_text):
-                classes.append({
-                    "class_code":      m.group("code").upper(),
-                    "class_full_code": m.group(0).strip(),
-                    "material_grade":  "",
-                    "pressure_rating": "",
-                    "flange_facing":   "",
-                    "corrosion_allowance": "",
-                    "service_list":    [],
-                    "pt_rating_table": [],
-                    "components":      [],
-                    "raw_notes":       "",
-                    "confidence":      0.25,
-                    "_engine":         "tesseract",
-                    "_source_pages":   [start + 1, end + 1],
-                })
-            return {"piping_classes": classes}
-        except Exception as e:
-            logger.info("[SpecExtraction] Tesseract not usable: %s", e)
-            return None
+    def _collect_pages_as_images(self, pdf_path: str, start: int, end: int) -> List[Any]:
+        import fitz
+        from PIL import Image
 
-    # ── Escalation quality gate (mirrors HANDWRITING_CONFIG's
-    # escalate_if_fields_below / escalate_if_avg_conf_below pattern) ────
+        images: List[Any] = []
+        with fitz.open(pdf_path) as doc:
+            for i in range(start, end + 1):
+                if i >= doc.page_count:
+                    break
+                page = doc[i]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                image = Image.open(io.BytesIO(pix.tobytes("png")))
+                images.append(image)
+        return images
+
+    @staticmethod
+    def _ocr_lines_from_result(result: Any) -> List[str]:
+        lines: List[str] = []
+        if not result:
+            return lines
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, (list, tuple)):
+                    if len(item) >= 2:
+                        value = item[1]
+                        if isinstance(value, str) and value.strip():
+                            lines.append(value.strip())
+                        elif isinstance(value, (list, tuple)) and value and isinstance(value[0], str):
+                            lines.append(str(value[0]).strip())
+                    elif item and isinstance(item[0], str):
+                        lines.append(str(item[0]).strip())
+                elif isinstance(item, str):
+                    if item.strip():
+                        lines.append(item.strip())
+        elif isinstance(result, dict):
+            for key in ("text", "ocr_text", "content"):
+                value = result.get(key)
+                if isinstance(value, str):
+                    lines.append(value.strip())
+                    break
+        return [line for line in lines if line]
+
+    def _classes_from_ocr_text(self, ocr_text: str, engine: str, start: int, end: int) -> List[Dict[str, Any]]:
+        parser = LocalTableParser(self.config['piping_class_header_regex'], engine)
+        parser.read_text(ocr_text, start + 1)
+        return parser.result()['piping_classes']
+
+    def extract_via_rapidocr(self, pdf_path: str, start: int, end: int) -> Optional[Dict[str, Any]]:
+        return self._extract_local(pdf_path, start, end, 'rapidocr')
+
+    def extract_via_paddleocr(self, pdf_path: str, start: int, end: int) -> Optional[Dict[str, Any]]:
+        return self._extract_local(pdf_path, start, end, 'paddleocr')
+
+    def extract_via_tesseract(self, pdf_path: str, start: int, end: int) -> Optional[Dict[str, Any]]:
+        return self._extract_local(pdf_path, start, end, 'tesseract')
+
     @staticmethod
     def _classes_quality(classes: List[Dict[str, Any]]) -> Tuple[int, float]:
         """Return (total_component_count, avg_confidence) for a list of
@@ -658,7 +712,40 @@ class PaperSpecExtractionService:
         return total_components >= min_components and avg_conf >= min_conf
 
     # ── Orchestrator: process one chunk via the engine waterfall ────────
-    def extract_chunk(
+    def extract_chunk(self, pdf_path, start, end, enable_ensemble=None, retry_attempt=0):
+        """Share a chunk deadline; retry transient local failures, never paid calls."""
+        self._chunk_deadline = min(self._job_deadline, time.monotonic() + self.config['chunk_timeout_s'])
+        self._cloud_attempted = False
+        self.local_engine_errors = []
+        attempts = 1 + int(self.config['retry_max'])
+        for attempt in range(attempts):
+            self.remaining_seconds()
+            self._local_candidate = None
+            try:
+                result = self._extract_chunk_once(pdf_path, start, end, enable_ensemble, retry_attempt + attempt)
+                if self._local_candidate and ('vision' in result.get('engine_used', '') or 'ensemble' in result.get('engine_used', '')):
+                    # A provider response does not prove previously rejected
+                    # local rows were covered. Keep source candidates and gaps.
+                    result['piping_classes'] = self.merge_classes([
+                        result.get('piping_classes', []), self._local_candidate['piping_classes']])
+                    result['local_report'] = self._local_candidate.get('local_report', {})
+                self.remaining_seconds()
+                self.chunk_attempts.append({'page_from': start + 1, 'page_to': end + 1,
+                                            'attempts': attempt + 1, 'state': 'processed',
+                                            'engine_errors': list(self.local_engine_errors)})
+                return result
+            except (OSError, TimeoutError) as exc:
+                self.chunk_attempts.append({'page_from': start + 1, 'page_to': end + 1,
+                                            'attempts': attempt + 1, 'state': 'timeout' if isinstance(exc, TimeoutError) else 'local_error'})
+                if self._cloud_attempted or attempt + 1 == attempts:
+                    raise
+                delay = self.config['retry_backoff_base'] ** (attempt + 1)
+                if self.remaining_seconds() <= delay:
+                    raise TimeoutError('Insufficient chunk budget for a local retry.') from exc
+                time.sleep(delay)
+        raise RuntimeError('No extraction attempt executed.')
+
+    def _extract_chunk_once(
         self,
         pdf_path: str,
         start: int,
@@ -680,7 +767,6 @@ class PaperSpecExtractionService:
         
         engines = (list(self.config['ai_engines']) if self._user_provider in {'openai', 'claude'}
                    else self._configured_engines())
-        cost_skip_chars = int(self.config["skip_ai_if_text_chars_gte"])
         max_ai_pages = int(self.config["max_ai_pages_per_job"])
         page_count_in_chunk = (end - start + 1)
 
@@ -693,7 +779,7 @@ class PaperSpecExtractionService:
             if byok_engine not in engines:
                 engines.insert(1, byok_engine)
             # Keep deterministic text-layer first and OCR fallback last.
-            engines = ["pymupdf_text", byok_engine, "tesseract"]
+            engines = ["pymupdf_text", byok_engine, "rapidocr", "paddleocr", "tesseract"]
             # Ensemble currently supports Gemini+OpenAI only.
             enable_ensemble = False
         
@@ -706,18 +792,31 @@ class PaperSpecExtractionService:
 
         # 1) Always try text-layer first — cheap, accurate on vector PDFs.
         text_result = self.extract_via_text_layer(pdf_path, start, end)
-        text_chars = text_result.get("page_text_chars", 0)
         text_classes = text_result.get("piping_classes", [])
+        local_candidate = text_result if self._text_layer_result_is_complete(text_classes) else None
+        self._local_candidate = local_candidate
 
         # A text-rich document is not enough by itself.  Only bypass Vision
         # when a deterministic parser has returned actual component rows;
         # otherwise merged table cells yield a deceptively successful,
         # header-only job with an empty catalog.
         if (
-            self._text_layer_result_is_complete(text_classes)
-            and text_chars >= cost_skip_chars * max(1, page_count_in_chunk)
+            local_candidate and not text_result.get('local_report', {}).get('issues')
         ):
-            return {"piping_classes": text_classes, "engine_used": "pymupdf_text"}
+            return {**text_result, "engine_used": "pymupdf_text"}
+
+        # Local engines are independent of the paid-page budget. A header-only
+        # OCR result must never prevent later structured extraction.
+        if not byok_provider:
+            for engine in engines:
+                if engine in {'rapidocr', 'paddleocr', 'tesseract'}:
+                    blob = getattr(self, f'extract_via_{engine}')(pdf_path, start, end)
+                    if blob and self._text_layer_result_is_complete(blob.get('piping_classes', [])):
+                        if not blob.get('local_report', {}).get('issues'):
+                            return {**blob, 'engine_used': engine}
+                        if not local_candidate or self._classes_quality(blob['piping_classes'])[0] > self._classes_quality(local_candidate['piping_classes'])[0]:
+                            local_candidate = {**blob, 'engine_used': engine}
+                            self._local_candidate = local_candidate
 
         # Within AI budget?
         ai_budget_ok = (self._ai_pages_used + page_count_in_chunk) <= max_ai_pages
@@ -733,17 +832,16 @@ class PaperSpecExtractionService:
                 )
                 images = self.render_pages_to_jpeg_b64(pdf_path, start, end)
                 
-                gemini_blob = self.extract_via_gemini(images, (start, end))
-                openai_blob = self.extract_via_openai(images, (start, end))
+                gemini_blob = self._call_vision("gemini", images, (start, end))
+                openai_blob = self._call_vision("openai", images, (start, end))
                 
                 gemini_classes = gemini_blob.get("piping_classes", []) if gemini_blob else []
                 openai_classes = openai_blob.get("piping_classes", []) if openai_blob else []
                 
-                if gemini_classes or openai_classes:
+                if self._text_layer_result_is_complete(gemini_classes + openai_classes):
                     merged_classes, ensemble_metrics = merge_ensemble_results(
                         gemini_classes, openai_classes
                     )
-                    self._ai_pages_used += page_count_in_chunk * 2  # Both models used
                     
                     return {
                         "piping_classes": merged_classes,
@@ -763,10 +861,9 @@ class PaperSpecExtractionService:
                     continue  # already done
                 if engine == "gemini_vision":
                     images = images or self.render_pages_to_jpeg_b64(pdf_path, start, end)
-                    blob = self.extract_via_gemini(images, (start, end))
+                    blob = self._call_vision("gemini", images, (start, end))
                     classes = blob.get("piping_classes") if blob else None
-                    if classes:
-                        self._ai_pages_used += page_count_in_chunk
+                    if classes and self._text_layer_result_is_complete(classes):
                         if self._meets_escalation_thresholds(classes):
                             return {"piping_classes": classes, "engine_used": "gemini_vision"}
                         # Below threshold — keep as a fallback candidate and
@@ -779,10 +876,9 @@ class PaperSpecExtractionService:
                         )
                 elif engine == "openai_vision":
                     images = images or self.render_pages_to_jpeg_b64(pdf_path, start, end)
-                    blob = self.extract_via_openai(images, (start, end))
+                    blob = self._call_vision("openai", images, (start, end))
                     classes = blob.get("piping_classes") if blob else None
-                    if classes:
-                        self._ai_pages_used += page_count_in_chunk
+                    if classes and self._text_layer_result_is_complete(classes):
                         if not gemini_candidate:
                             return {"piping_classes": classes, "engine_used": "openai_vision"}
                         # Both tiers produced something — pick whichever is
@@ -801,10 +897,9 @@ class PaperSpecExtractionService:
                         return gemini_candidate
                 elif engine == "claude_vision":
                     images = images or self.render_pages_to_jpeg_b64(pdf_path, start, end)
-                    blob = self.extract_via_claude(images, (start, end))
+                    blob = self._call_vision("claude", images, (start, end))
                     classes = blob.get("piping_classes") if blob else None
-                    if classes:
-                        self._ai_pages_used += page_count_in_chunk
+                    if classes and self._text_layer_result_is_complete(classes):
                         if not gemini_candidate:
                             return {"piping_classes": classes, "engine_used": "claude_vision"}
                         # Compare against prior candidate using objective quality.
@@ -817,21 +912,18 @@ class PaperSpecExtractionService:
                     if gemini_candidate:
                         # Claude failed/empty — keep prior candidate.
                         return gemini_candidate
-                elif engine == "tesseract":
+                elif engine in {'rapidocr', 'paddleocr', 'tesseract'}:
+                    if not byok_provider:
+                        continue  # already attempted, regardless of AI budget
                     if gemini_candidate:
-                        # Already have a usable AI candidate — tesseract's
-                        # header-only detection can't improve on it.
                         return gemini_candidate
-                    if self.provider_configuration_errors and not self._text_layer_result_is_complete(text_classes):
-                        # OCR detects titles only; it cannot replace structured
-                        # table extraction when the configured AI is unavailable.
-                        raise ExtractionProviderConfigurationError(
-                            "Structured extraction is unavailable. The configured credentials or model are missing or rejected. "
-                            "Check the default saved credential and model in Admin → AI API Keys (/admin/ai-api-keys), then retry."
-                        )
-                    blob = self.extract_via_tesseract(pdf_path, start, end)
-                    if blob and blob.get("piping_classes"):
-                        return {"piping_classes": blob["piping_classes"], "engine_used": "tesseract"}
+                    blob = getattr(self, f'extract_via_{engine}')(pdf_path, start, end)
+                    if blob and self._text_layer_result_is_complete(blob.get('piping_classes', [])):
+                        if not blob.get('local_report', {}).get('issues'):
+                            return {**blob, 'engine_used': engine}
+                        if not local_candidate or self._classes_quality(blob['piping_classes'])[0] > self._classes_quality(local_candidate['piping_classes'])[0]:
+                            local_candidate = {**blob, 'engine_used': engine}
+                            self._local_candidate = local_candidate
 
             if gemini_candidate:
                 return gemini_candidate
@@ -839,12 +931,18 @@ class PaperSpecExtractionService:
             logger.info("[SpecExtraction] AI budget exhausted (%d/%d) — using text/tesseract only",
                         self._ai_pages_used, max_ai_pages)
 
+        # Failed/header-only fallback must not discard usable partial evidence.
+        if local_candidate:
+            return local_candidate
         # Fallback: text-layer classes (may be empty) + tesseract last attempt
         if text_classes:
-            return {"piping_classes": text_classes, "engine_used": "pymupdf_text"}
-        blob = self.extract_via_tesseract(pdf_path, start, end)
-        if blob and blob.get("piping_classes"):
-            return {"piping_classes": blob["piping_classes"], "engine_used": "tesseract"}
+            return {**text_result, "engine_used": "pymupdf_text"}
+        if byok_provider:
+            blob = self.extract_via_tesseract(pdf_path, start, end)
+            if blob and blob.get("piping_classes"):
+                return {**blob, "engine_used": "tesseract"}
+        if any(item['reason'] == 'execution_failed' for item in self.local_engine_errors):
+            raise OSError('Available local engines failed to execute.')
         return {"piping_classes": [], "engine_used": "none"}
 
     # ── Merging chunk results ───────────────────────────────────────────
@@ -855,6 +953,9 @@ class PaperSpecExtractionService:
         for f in fields:
             v = comp.get(f, "") or ""
             parts.append(re.sub(r"\s+", " ", str(v)).strip().lower())
+        source = comp.get('_source_reference') or {}
+        if source.get('item_code'):
+            parts.extend([source['item_code'], source.get('cell_code', '')])
         return tuple(parts)
 
     @staticmethod
@@ -950,6 +1051,8 @@ class PaperSpecExtractionService:
                     primary["_source_pages"] = [merged_pages[0], merged_pages[-1]]
                 if existing.get("_appendix_summary") or cls.get("_appendix_summary"):
                     primary["_appendix_summary"] = True
+                if existing.get('_source_only') or cls.get('_source_only'):
+                    primary['_source_only'] = True
                 bucket[code] = primary
         return sorted(bucket.values(), key=lambda c: c.get("class_code", ""))
 

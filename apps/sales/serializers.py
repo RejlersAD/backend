@@ -201,7 +201,7 @@ class ClientListSerializer(serializers.ModelSerializer):
             'primary_contact', 'active_deals_count', 'total_deal_value', 'tags'
             , 'legal_name', 'trading_name', 'parent_client', 'country',
             'market_sectors', 'verification_status', 'new_proposals_permitted',
-            'email', 'website'
+            'email', 'website', 'city', 'currency'
         ]
         read_only_fields = ['id', 'created_at', 'health_score']
     
@@ -256,6 +256,21 @@ class ClientCreateSerializer(serializers.ModelSerializer):
         model = Client
         exclude = ['health_score', 'churn_risk', 'lifetime_value', 'created_at', 'updated_at']
         extra_kwargs = {'client_code': {'required': False}}
+
+    def validate_currency(self, value):
+        value = value.strip().upper()
+        if value and (len(value) != 3 or not value.isascii() or not value.isalpha()):
+            raise serializers.ValidationError('Enter a three-letter currency code, for example AED or USD.')
+        return value
+
+    def validate_account_manager(self, value):
+        if value is None or (self.instance and self.instance.account_manager_id == value.pk):
+            return value
+        from .client_forms import visible_client_owners
+        request = self.context.get('request')
+        if not request or not visible_client_owners(request.user).filter(pk=value.pk).exists():
+            raise serializers.ValidationError('Select an active account owner from the available list.')
+        return value
 
     def validate(self, attrs):
         company_name = attrs.get('company_name', getattr(self.instance, 'company_name', '')).strip()

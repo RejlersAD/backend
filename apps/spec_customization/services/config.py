@@ -39,18 +39,22 @@ SPEC_EXTRACTION_CONFIG = {
     # to reduce table fragmentation and ensure comprehensive extraction.
     # Override via env var `SPEC_CHUNK_SIZE_PAGES` (1..50) without redeploying.
     "chunk_size_pages":      _env_int("SPEC_CHUNK_SIZE_PAGES", 10, lo=1, hi=50),
-    "max_chunks_parallel":   _env_int("SPEC_MAX_CHUNKS_PARALLEL", 4, lo=1, hi=32),
+    # Chunk order shares provider budgets and merge context; concurrency is one.
+    "max_chunks_parallel":   1,
     # Page overlap ensures component tables split across chunk boundaries are
     # captured in both chunks. Increased from 0 to 2 for table continuity.
     "page_overlap":          _env_int("SPEC_PAGE_OVERLAP", 2, lo=0, hi=10),
 
-    # ── AI engine waterfall (first non-failed engine wins per chunk) ────
-    # Supported: 'pymupdf_text', 'gemini_vision', 'openai_vision', 'tesseract'
+    # ── Engine waterfall (local-first, offline-safe) ─────────────────────
+    # Supported: 'pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract',
+    # optional AI providers only when configured by the user/server.
+    # This project now defaults to local OCR so uploads work immediately without
+    # external AI service credentials or subscriptions.
     "ai_engines": [
-        "pymupdf_text",        # free, instant; if rich text → may skip AI entirely
-        "gemini_vision",       # primary AI
-        "openai_vision",       # fallback AI
-        "tesseract",           # last resort for fully scanned pages
+        "pymupdf_text",        # free, instant; text-layer parse first
+        "rapidocr",            # local high-speed OCR (preferred when installed)
+        "paddleocr",           # local OCR fallback (GPU/CPU capable)
+        "tesseract",           # final local OCR fallback for scanned pages
     ],
 
     # ── Model identifiers ───────────────────────────────────────────────
@@ -87,10 +91,12 @@ SPEC_EXTRACTION_CONFIG = {
     "jpeg_quality":           85,
 
     # ── Retry + timeout ─────────────────────────────────────────────────
-    "retry_max":             3,
-    "retry_backoff_base":    2,        # exponential: 2s, 4s, 8s…
-    "chunk_timeout_s":       300,      # per chunk Celery task soft-limit
-    "job_total_timeout_s":   60 * 60,  # 60 min absolute job cap
+    "retry_max":             _env_int("SPEC_RETRY_MAX", 3, lo=0, hi=5),
+    "retry_backoff_base":    _env_int("SPEC_RETRY_BACKOFF_BASE", 2, lo=1, hi=30),
+    "chunk_timeout_s":       _env_int("SPEC_CHUNK_TIMEOUT_S", 300, lo=1, hi=3600),
+    "job_total_timeout_s":   _env_int("SPEC_JOB_TIMEOUT_S", 3600, lo=60, hi=14400),
+    "paddle_detection_model_dir": os.environ.get("SPEC_PADDLE_DETECTION_MODEL_DIR", ""),
+    "paddle_recognition_model_dir": os.environ.get("SPEC_PADDLE_RECOGNITION_MODEL_DIR", ""),
 
     # ── Extraction quality knobs ────────────────────────────────────────
     "confidence_threshold":  0.35,   # below this, class flagged low-confidence

@@ -369,11 +369,35 @@ class AICredentialProbeTests(SimpleTestCase):
             self.assertEqual(constructor.call_args.kwargs['base_url'], 'https://api.anthropic.com')
             self.assertEqual(constructor.call_args.kwargs['max_retries'], 0)
             self.assertEqual(client.messages.create.call_args.kwargs['max_tokens'], 1024)
+            self.assertNotIn('thinking', client.messages.create.call_args.kwargs['extra_body'])
             self.assertNotIn(KEY, str(client.messages.create.call_args.kwargs))
             error = type('BadRequestError', (Exception,), {})(KEY)
             client.messages.create.side_effect = error
             self.assertEqual(probe_credential(TestCredential('anthropic', 'synthetic-model', KEY)),
                              {'success': False, 'reason': 'provider_request'})
+
+    def test_sonnet_55_probe_uses_documented_low_thinking_setting_and_retains_validation(self):
+        with patch('anthropic.Anthropic') as constructor:
+            client = constructor.return_value.__enter__.return_value
+            client.messages.create.return_value = SimpleNamespace(stop_reason='end_turn',
+                content=[SimpleNamespace(type='text', text='{"ok":true}')])
+            credential = TestCredential('anthropic', 'claude-sonnet-5-5', KEY)
+            self.assertEqual(probe_credential(credential), {'success': True, 'reason': ''})
+            sent = client.messages.create.call_args.kwargs
+            self.assertEqual(sent['model'], 'claude-sonnet-5-5')
+            self.assertEqual(sent['max_tokens'], 1024)
+            self.assertEqual(sent['extra_body']['thinking'], {'type': 'between_tools'})
+            self.assertEqual(sent['extra_body']['output_config']['effort'], 'low')
+            self.assertEqual(sent['extra_body']['output_config']['format']['type'], 'json_schema')
+            self.assertEqual(constructor.call_args.kwargs['timeout'], 20)
+            self.assertEqual(constructor.call_args.kwargs['max_retries'], 0)
+            client.messages.create.return_value = SimpleNamespace(stop_reason='max_tokens', content=[])
+            self.assertEqual(probe_credential(credential), {'success': False, 'reason': 'provider_incomplete'})
+            client.messages.create.return_value = SimpleNamespace(stop_reason='end_turn',
+                content=[SimpleNamespace(type='text', text=KEY)])
+            result = probe_credential(credential)
+            self.assertEqual(result, {'success': False, 'reason': 'invalid_response'})
+            self.assertNotIn(KEY, str(result))
 
     def test_openai_probe_rejects_truncation_without_echoing_model_content(self):
         with patch('openai.OpenAI') as constructor:

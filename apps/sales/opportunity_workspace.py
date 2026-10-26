@@ -186,6 +186,12 @@ def delete_client_with_workspace_guard(client):
     for workspace in OpportunityWorkspace.objects.select_for_update().filter(opportunity_id__in=deals):
         if workspace.status != 'not_configured' or _registered(workspace) or workspace.uploads.exists():
             raise WorkspaceAPIError('workspace_retained', 409)
+    for relation in Client._meta.related_objects:
+        if relation.related_model._default_manager.filter(**{relation.field.name: client}).exists():
+            from rest_framework.exceptions import APIException
+            error = APIException('This client has linked records and cannot be deleted. Set its status to Inactive to retain its history.')
+            error.status_code = 409
+            raise error
     client.delete()
 
 

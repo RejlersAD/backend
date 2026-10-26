@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
                 default=0, validators=[django.core.validators.MaxValueValidator(100)])),
         migrations.AddConstraint(
             model_name='opportunitydocumentclassificationrun',
-            constraint=models.CheckConstraint(check=models.Q(('confidence__lte', 100)),
+            constraint=models.CheckConstraint(condition=models.Q(('confidence__lte', 100)),
                 name='sales_doc_classification_confidence_range')),
     ]
 

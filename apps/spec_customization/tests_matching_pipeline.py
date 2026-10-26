@@ -411,14 +411,13 @@ class ExtractionDispatchTests(TestCase):
         self.assertEqual(job.status, 'failed')
         self.assertEqual(job.error_message, 'Check AI credentials and model settings.')
 
-    def test_rejected_ai_does_not_become_header_only_ocr_success(self):
-        from .services.extraction_service import PaperSpecExtractionService, ExtractionProviderConfigurationError
+    def test_rejected_ai_does_not_block_structured_local_result(self):
+        from .services.extraction_service import PaperSpecExtractionService
         service = PaperSpecExtractionService()
         service.provider_configuration_errors = {'Gemini': 'model unavailable', 'OpenAI': 'authentication failed'}
-        with patch.object(service, 'extract_via_text_layer', return_value={'piping_classes': [], 'page_text_chars': 5000}), patch.object(service, 'render_pages_to_jpeg_b64', return_value=['synthetic']), patch.object(service, 'extract_via_gemini', return_value=None), patch.object(service, 'extract_via_openai', return_value=None), patch.object(service, 'extract_via_tesseract') as ocr:
-            with self.assertRaisesRegex(ExtractionProviderConfigurationError, '/admin/ai-api-keys'):
-                service.extract_chunk('source.pdf', 0, 9)
-            ocr.assert_not_called()
+        local = {'piping_classes': [{'class_code': 'CS150', 'components': [{'component_type': 'pipe'}]}]}
+        with patch.object(service, '_configured_engines', return_value=['pymupdf_text', 'tesseract']), patch.object(service, 'extract_via_text_layer', return_value={'piping_classes': []}), patch.object(service, 'extract_via_tesseract', return_value=local):
+            self.assertEqual(service.extract_chunk('source.pdf', 0, 9)['engine_used'], 'tesseract')
 
     def test_saved_claude_default_drives_provider_and_model(self):
         from .services.extraction_service import PaperSpecExtractionService
@@ -429,16 +428,16 @@ class ExtractionDispatchTests(TestCase):
             {'provider': 'anthropic', 'managed': True, 'ready': True, 'model': 'saved-claude-model'},
         ]
         with patch('apps.spec_customization.services.extraction_service.get_provider_configuration', side_effect=configurations):
-            self.assertEqual(service._configured_engines(), ['pymupdf_text', 'claude_vision', 'tesseract'])
+            self.assertEqual(service._configured_engines(), ['pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract', 'claude_vision'])
         self.assertEqual(service.config['claude_model'], 'saved-claude-model')
 
-    def test_managed_but_unselected_credentials_fail_without_legacy_fallback(self):
+    def test_managed_but_unselected_credentials_leave_local_engines_available(self):
         from .services.extraction_service import PaperSpecExtractionService, ExtractionProviderConfigurationError
         with patch('apps.spec_customization.services.extraction_service.get_provider_configuration', return_value={
             'managed': True, 'ready': False, 'model': '',
         }):
-            with self.assertRaisesRegex(ExtractionProviderConfigurationError, 'default saved credential'):
-                PaperSpecExtractionService()._configured_engines()
+            self.assertEqual(PaperSpecExtractionService()._configured_engines(),
+                             ['pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract'])
 
 
 class ProjectCreationRetryTests(TestCase):

@@ -297,8 +297,7 @@ class PidCheckerV2LineListUpload(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['created_by', 'owner_project'],
-                condition=models.Q(is_active=True),
+                fields=['created_by', 'owner_project'],condition=models.Q(is_active=True),
                 name='uniq_pidv2_active_line_list_per_user_project',
             ),
         ]
@@ -395,8 +394,7 @@ class PidCheckerV2EquipmentListUpload(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['created_by', 'owner_project'],
-                condition=models.Q(is_active=True),
+                fields=['created_by', 'owner_project'],condition=models.Q(is_active=True),
                 name='uniq_pidv2_active_equip_list_per_user_project',
             ),
         ]
@@ -507,8 +505,7 @@ class PidCheckerV2InstrumentIndexUpload(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['created_by', 'owner_project'],
-                condition=models.Q(is_active=True),
+                fields=['created_by', 'owner_project'],condition=models.Q(is_active=True),
                 name='uniq_pidv2_active_instr_index_per_user_project',
             ),
         ]
@@ -688,8 +685,7 @@ class LegendSymbolImage(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['section', 'symbol_name'],
-                condition=models.Q(is_default=True),
+                fields=['section', 'symbol_name'],condition=models.Q(is_default=True),
                 name='uniq_pidv2_default_symbol_per_section',
             ),
         ]

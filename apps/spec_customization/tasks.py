@@ -9,6 +9,7 @@ Redis cache so the UI can poll status without waiting for the full run.
 from __future__ import annotations
 
 import logging
+import time
 import os
 import tempfile
 from typing import Any, Dict, List
@@ -155,6 +156,7 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         raise self.retry(countdown=2, max_retries=5)
 
     cfg = SPEC_EXTRACTION_CONFIG
+    job_deadline = time.monotonic() + cfg['job_total_timeout_s']
     job.status = PaperSpecExtractionJob.STATUS_PROCESSING
     job.started_at = timezone.now()
     job.celery_task_id = self.request.id or ""
@@ -180,6 +182,7 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             logger.info("[SpecExtraction] Using BYOK: Claude (%s)", user_model or "default model")
     
     service = PaperSpecExtractionService(cfg, user_api_key=user_api_key, user_provider=user_provider, user_model=user_model)
+    service._job_deadline = job_deadline
     
     # Get local path for PDF (downloads from S3 if needed)
     pdf_path, needs_cleanup = None, False
@@ -218,6 +221,7 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         scanned_pages.update(appendix_result["appendix_pages"])
         classes_found = len(appendix_result["piping_classes"])
         failed_chunks = []
+        local_reports = []
         ensemble_metrics_list: List[Dict[str, Any]] = []
         cprog_start = cfg["chunk_progress_start"]
         cprog_end = cfg["chunk_progress_end"]
@@ -229,6 +233,8 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             logger.info("[SpecExtraction] Ensemble mode enabled for job %s", job_id)
 
         for idx, (start_page, end_page) in enumerate(chunks):
+            if time.monotonic() >= job_deadline:
+                raise TimeoutError('The extraction job exceeded its processing budget.')
             # Cancellation check.
             job.refresh_from_db(fields=["status"])
             if job.status == PaperSpecExtractionJob.STATUS_CANCELLED:
@@ -251,6 +257,12 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
 
             if chunk_result.get('engine_used') == 'error':
                 failed_chunks.append({'page_from': start_page + 1, 'page_to': end_page + 1})
+            elif chunk_result.get('local_report', {}).get('issues'):
+                failed_chunks.append({'page_from': start_page + 1, 'page_to': end_page + 1,
+                                      'reason': 'local_table_rows_require_review'})
+            if chunk_result.get('local_report'):
+                local_reports.append({'page_from': start_page + 1, 'page_to': end_page + 1,
+                                      **chunk_result['local_report']})
 
             all_results.append(chunk_result.get("piping_classes", []))
             
@@ -295,6 +307,12 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             )
 
         job.config_snapshot['extraction_outcome'] = {'failed_chunks': failed_chunks}
+        if isinstance(service.chunk_attempts, list):
+            job.config_snapshot['extraction_outcome']['chunk_attempts'] = service.chunk_attempts
+        if local_reports:
+            job.config_snapshot['extraction_outcome']['local_reports'] = local_reports
+        if time.monotonic() >= job_deadline:
+            raise TimeoutError('The extraction job exceeded its processing budget.')
         job.error_message = 'Partial extraction: some document chunks failed. Review the source and retry before exporting.' if failed_chunks else ''
         job.save(update_fields=['config_snapshot', 'error_message'])
 
@@ -336,6 +354,8 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             project_title=job.document.title,
             document_number=job.document.document_number,
         )
+        if time.monotonic() >= job_deadline:
+            raise TimeoutError('The extraction job exceeded its processing budget.')
         
         logger.info(
             "[SpecExtraction] Data quality report for job %s: %s",
@@ -360,8 +380,8 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         })
         if not has_records:
             job.error_message = (job.error_message + ' ' if job.error_message else '') + (
-                'No component records were extracted. Check the configured AI provider/model '
-                'and source tables, then upload the document again to start a new extraction. '
+                'No component records were extracted. Check the source table layout and available local engines '
+                'or configured AI provider/model, then upload the document again to start a new extraction. '
                 'Any detected class headers have been retained for review.'
             )
         
@@ -440,14 +460,16 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         if pdf_path and scanned_pages and classes_found == 0:
             service.log_zero_class_diagnostics(pdf_path, sorted(scanned_pages))
         job.status = PaperSpecExtractionJob.STATUS_FAILED
-        job.error_message = str(exc) if isinstance(exc, ExtractionProviderConfigurationError) else "Extraction failed while processing the document. Please retry or contact support."
+        job.error_message = str(exc) if isinstance(exc, (ExtractionProviderConfigurationError, TimeoutError)) else "Extraction failed while processing the document. Please retry or contact support."
         job.completed_at = timezone.now()
         job.user_openai_api_key = ""
         job.user_claude_api_key = ""
-        job.save(update_fields=['status', 'error_message', 'completed_at', 'user_openai_api_key', 'user_claude_api_key'])
+        job.save(update_fields=['status', 'error_message', 'completed_at', 'config_snapshot', 'user_openai_api_key', 'user_claude_api_key'])
         _write_progress(str(job.id), state="FAILURE", status=job.error_message)
         return {"success": False, "error": job.error_message}
     finally:
+        # Covers cancellation and early returns as well as normal completion.
+        PaperSpecExtractionJob.objects.filter(pk=job.pk).update(user_openai_api_key='', user_claude_api_key='')
         # Clean up temporary file if we downloaded from S3
         if needs_cleanup and pdf_path:
             try:

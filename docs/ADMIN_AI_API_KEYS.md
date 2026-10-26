@@ -64,6 +64,17 @@ Active authenticated users may GET `/api/v1/rbac/ai-provider-status/`. Its only 
 
 ## Synthetic connection test
 
+AI-KEY-TEST-55 (23 October 2026): the exact `claude-sonnet-5-5` model uses
+`thinking: {type: between_tools}` and `output_config.effort: low` for this tiny
+synthetic request. Sonnet 5.5 enables adaptive thinking by default, sharing the
+output budget; avoiding up-front thinking keeps the JSON check within the same
+bounded request. Other models retain existing probe parameters. Incomplete or
+invalid responses still fail validation; no retry, fallback, key replacement or
+model switch is introduced. All static backend failure categories have explicit
+safe frontend messages, including saved failed-test explanations. This is a
+compatibility correction; the user's original production last_test_reason was
+not available and no production failure cause or successful live test is claimed.
+
 The explicit administrator test sends a fixed prompt requesting `{"ok": true}` to the selected official provider with a saved key and explicit model. It sends no emails, uploaded documents, questions or business data. It uses a bounded 1024-token output, a 20-second provider timeout (Gemini also uses a 5-second connect timeout), and no SDK retries. A per-administrator cache lease rejects duplicate concurrent tests; cache failure prevents dispatch. A rotated/deleted key or stale revision prevents the old result from being saved.
 
 Test responses add `test: {success, reason, model}` to the overview. A completed provider rejection returns HTTP 200 with `success: false`; a concurrent test returns 429 `test_in_progress`; registry/storage errors return sanitized 503. Provider errors and SDK/http transport logs are not returned or persisted. Static allowlisted reasons are:

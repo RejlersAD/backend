@@ -1,4 +1,4 @@
-﻿"""Immutable workbook facts for reporting, separate from operational invoices."""
+"""Immutable workbook facts for reporting, separate from operational invoices."""
 from django.db import models
 from django.utils import timezone
 
@@ -20,7 +20,7 @@ class ReceivablesSourceSnapshot(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['sha256', 'sheet_name', 'header_row', 'first_row', 'last_row'],
                                     name='finance_ar_source_identity'),
-            models.UniqueConstraint(fields=['is_active'], condition=models.Q(is_active=True),
+            models.UniqueConstraint(fields=['is_active'],condition=models.Q(is_active=True),
                                     name='finance_ar_one_active_source'),
         ]
 
@@ -42,7 +42,7 @@ class ReceivablesSyncState(models.Model):
     )
 
     class Meta:
-        constraints = [models.CheckConstraint(check=models.Q(id=1), name='finance_ar_sync_singleton')]
+        constraints = [models.CheckConstraint(condition=models.Q(id=1), name='finance_ar_sync_singleton')]
 
     @classmethod
     def locked(cls):

@@ -139,7 +139,7 @@ class AIUsageLog(TimeStampedModel):
             models.Index(fields=['application', '-timestamp']),
             models.Index(fields=['-timestamp', 'success']),
         ]
-        constraints = [models.UniqueConstraint(fields=['workflow', 'provider', 'request_id'], condition=models.Q(provenance='server') & ~models.Q(request_id=''), name='unique_ai_server_workflow_request')]
+        constraints = [models.UniqueConstraint(fields=['workflow', 'provider', 'request_id'],condition=models.Q(provenance='server') & ~models.Q(request_id=''), name='unique_ai_server_workflow_request')]
 
     def __str__(self):
         return f"{self.user_id} {self.provider}/{self.model_name} ${self.cost_usd}"

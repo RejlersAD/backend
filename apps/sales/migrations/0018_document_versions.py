@@ -91,7 +91,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='opportunityworkspaceupload',
-            constraint=models.CheckConstraint(check=models.Q(('version_number__gte', 1)), name='sales_document_revision_positive'),
+            constraint=models.CheckConstraint(condition=models.Q(('version_number__gte', 1)), name='sales_document_revision_positive'),
         ),
         migrations.AddConstraint(
             model_name='opportunitydocument',

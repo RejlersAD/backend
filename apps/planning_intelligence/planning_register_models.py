@@ -1,4 +1,4 @@
-﻿"""Risk management state with immutable source statements and audit history."""
+"""Risk management state with immutable source statements and audit history."""
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -35,11 +35,11 @@ class PlanningRiskRecord(models.Model):
         ordering = ['id']
         constraints = [
             models.UniqueConstraint(fields=['version', 'source_key'], name='unique_planning_risk_source'),
-            models.CheckConstraint(check=models.Q(probability_percent__isnull=True) | models.Q(
+            models.CheckConstraint(condition=models.Q(probability_percent__isnull=True) | models.Q(
                 probability_percent__gte=0, probability_percent__lte=100), name='planning_risk_probability_range'),
-            models.CheckConstraint(check=models.Q(cost_impact__isnull=True) | models.Q(cost_impact__gte=0),
+            models.CheckConstraint(condition=models.Q(cost_impact__isnull=True) | models.Q(cost_impact__gte=0),
                 name='planning_risk_cost_nonnegative'),
-            models.CheckConstraint(check=models.Q(schedule_impact_days__isnull=True) | models.Q(schedule_impact_days__gte=0),
+            models.CheckConstraint(condition=models.Q(schedule_impact_days__isnull=True) | models.Q(schedule_impact_days__gte=0),
                 name='planning_risk_delay_nonnegative'),
         ]
 

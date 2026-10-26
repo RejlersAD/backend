@@ -492,3 +492,5 @@ ai/legend_models/data/_router/
 # HR-LEAVE-REFER-01 contract and regression coverage.
 !docs/LEAVE_REFERRAL.md
 !apps/payroll/tests/test_leave_referral.py
+
+!docs/SALES_CLIENT_CRUD.md

@@ -806,6 +806,16 @@ def process_extracted_classes(
         # Count original components
         orig_comp_count = len(cls.get("components", []))
         quality_report["total_components_before"] += orig_comp_count
+
+        if cls.get('_source_only'):
+            # Local table rows are literal evidence. Existing inference and
+            # size-expansion rules must not manufacture missing engineering data.
+            # Cross-chunk exact union already ran. Fuzzy deduplication could
+            # collapse different item codes in a nominal-size matrix.
+            cls['components'] = list(cls.get('components', []))
+            quality_report['total_components_after'] += len(cls['components'])
+            cleaned.append(cls)
+            continue
         
         # Step 1: Validate empty fields
         if not cls.get("_appendix_summary") and not validate_empty_fields(cls):

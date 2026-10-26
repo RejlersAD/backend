@@ -201,8 +201,7 @@ class ValveMTOLegend(models.Model):
             # (minus the project dimension â€” Valve MTO legends aren't
             # project-scoped) â€” exactly one active legend per user+section.
             models.UniqueConstraint(
-                fields=['created_by', 'section'],
-                condition=models.Q(is_active=True),
+                fields=['created_by', 'section'],condition=models.Q(is_active=True),
                 name='uniq_valve_mto_active_legend_per_user_section',
             ),
         ]

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Sales Management Models
 Comprehensive CRM and Pipeline Management with AI-powered insights
 """
@@ -140,6 +140,7 @@ class Client(TimeStampedModel):
     address = models.TextField(blank=True)
     city = models.CharField(max_length=100, blank=True)
     country = models.CharField(max_length=100, blank=True)
+    currency = models.CharField(max_length=3, blank=True, default='')
     operating_locations = models.JSONField(default=list, blank=True)
     market_sectors = models.JSONField(default=list, blank=True)
     
@@ -350,8 +351,8 @@ class OpportunityNumberSequence(models.Model):
     class Meta:
         db_table = 'sales_opportunity_number_sequence'
         constraints = [
-            models.CheckConstraint(check=models.Q(id=1), name='sales_vf_singleton'),
-            models.CheckConstraint(check=models.Q(next_number__gte=102101), name='sales_vf_minimum'),
+            models.CheckConstraint(condition=models.Q(id=1), name='sales_vf_singleton'),
+            models.CheckConstraint(condition=models.Q(next_number__gte=102101), name='sales_vf_minimum'),
         ]
 
 
@@ -994,8 +995,7 @@ class SalesEmailIntake(TimeStampedModel):
                 name='sales_intake_mailbox_message_uq',
             ),
             models.UniqueConstraint(
-                fields=['source_message_id'],
-                condition=models.Q(mailbox_connection__isnull=True),
+                fields=['source_message_id'],condition=models.Q(mailbox_connection__isnull=True),
                 name='sales_intake_legacy_message_uq',
             ),
         ]

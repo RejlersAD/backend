@@ -488,6 +488,16 @@ class ClientViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'company_name', 'health_score', 'lifetime_value']
     ordering = ['-created_at']
 
+    @action(detail=False, methods=['get'], url_path='form-options')
+    def form_options(self, request):
+        from .client_forms import visible_client_owners
+        return Response({
+            'industries': [{'value': value, 'label': label} for value, label in Client._meta.get_field('industry_type').choices],
+            'owners': [{'value': user.pk, 'label': user.get_full_name() or user.username}
+                       for user in visible_client_owners(request.user)],
+            'default_owner': request.user.pk,
+        })
+
     def perform_destroy(self, instance):
         from .opportunity_workspace import delete_client_with_workspace_guard
         delete_client_with_workspace_guard(instance)

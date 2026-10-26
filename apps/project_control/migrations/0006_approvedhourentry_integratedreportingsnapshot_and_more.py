@@ -194,11 +194,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='approvedhourentry',
-            constraint=models.CheckConstraint(check=models.Q(('hours__gt', 0)), name='pc_hour_hours_positive'),
+            constraint=models.CheckConstraint(condition=models.Q(('hours__gt', 0)), name='pc_hour_hours_positive'),
         ),
         migrations.AddConstraint(
             model_name='approvedhourentry',
-            constraint=models.CheckConstraint(check=models.Q(('hourly_cost_rate__gte', 0)), name='pc_hour_rate_nonnegative'),
+            constraint=models.CheckConstraint(condition=models.Q(('hourly_cost_rate__gte', 0)), name='pc_hour_rate_nonnegative'),
         ),
         migrations.AddConstraint(
             model_name='reconciliationrun',

@@ -142,11 +142,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='integratedbaseline',
-            constraint=models.CheckConstraint(check=models.Q(('revision__gte', 1)), name='pc_epc_revision_positive'),
+            constraint=models.CheckConstraint(condition=models.Q(('revision__gte', 1)), name='pc_epc_revision_positive'),
         ),
         migrations.AddConstraint(
             model_name='integratedbaseline',
-            constraint=models.CheckConstraint(check=models.Q(('budget_total__gt', 0)), name='pc_epc_baseline_budget_positive'),
+            constraint=models.CheckConstraint(condition=models.Q(('budget_total__gt', 0)), name='pc_epc_baseline_budget_positive'),
         ),
     ]
 

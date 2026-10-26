@@ -891,8 +891,17 @@ def export_smartplant_cat(request, job_id):
 @permission_classes([IsAuthenticated])
 def config_view(request):
     """Expose soft-coded config to the UI so feature flags stay in sync."""
+    from .services.local_extraction import local_capabilities
     accepted_exts = get_accepted_extensions()
     return Response({
+        "local_extraction": local_capabilities(SPEC_EXTRACTION_CONFIG),
+        "processing_limits": {
+            "max_chunks_parallel": 1,
+            "chunk_timeout_s": SPEC_EXTRACTION_CONFIG['chunk_timeout_s'],
+            "job_total_timeout_s": SPEC_EXTRACTION_CONFIG['job_total_timeout_s'],
+            "local_retry_max": SPEC_EXTRACTION_CONFIG['retry_max'],
+            "automatic_paid_retries": False,
+        },
         "chunk_size_pages":          SPEC_EXTRACTION_CONFIG["chunk_size_pages"],
         "ai_engines":                SPEC_EXTRACTION_CONFIG["ai_engines"],
         "max_ai_pages_per_job":      SPEC_EXTRACTION_CONFIG["max_ai_pages_per_job"],
