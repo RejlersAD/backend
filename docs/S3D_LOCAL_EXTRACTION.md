@@ -16,13 +16,71 @@ explicit Metric/Imperial units. Populated cells produce nominal-size candidates.
 Metric nominal sizes retain DN, imperial retain NPS; no conversion occurs. Item
 codes and cell codes remain separate source evidence, never commodity codes.
 
-Classes must be explicit on each page. Unsupported layouts, ambiguous rows and
+Generic tables require an explicit class on each page. The bounded LNG
+continuation exception is specified below. Unsupported layouts, ambiguous rows and
 unlabelled continuation pages are not guessed. Joining COMPONENT MATERIAL
 DESCRIPTION pages to item-code matrices remains unsupported and is reported.
 Missing material, schedule, ends and class metadata stay blank. Local rows bypass
 legacy inferred engineering defaults, fuzzy deduplication and size expansion.
 Source page/row and matrix codes survive in component notes; exact table/cell
 polygons are not claimed.
+
+### DGS appendix recovery (26 October 2026)
+
+The user's failed `0500867-SP-00-LA-0076_C2_PMS.pdf` upload also requires
+positioned DGS-1300-010 appendix tables. These now support an explicit five-digit
+class on the same appendix heading, two-line Size From/To headers, multiline
+descriptions, and blank short codes. Column positions come from that page's
+headings. Short/stock codes, rating and notes remain source evidence; material
+text remains in the literal description rather than an inferred material field.
+Multiple size lines and unsupported component rows are flagged for review.
+DGS source page/row identities prevent overlap duplication while preserving
+separate source rows. Image pages with little native text explicitly require OCR.
+Partial outcomes retain the retry/export warning even when components are saved.
+
+The source's SHA-256 is
+`1994a0580aae0ce82c8f914b4c2054569f78081281b5a06ae3fb2979a10dd924`.
+A local-only recovery of its existing document saved 526 component candidates
+across six classes, plus retained header-only classes (31 classes total).
+Completeness remains partial: 232 ambiguous rows and 15 image pages require
+review/OCR. No paid provider, engineering acceptance or release is implied.
+See the workspace brief for test and local activation evidence.
+
+### ADNOC LNG native grids
+
+Authority: the user's explicit LNG extension request; workspace brief
+`../../docs/features/s3d-lng-parser.md`. The uploaded 2,335-page PMS.pdf uses
+A-100-A4Z-0-25020 grids with PART NAME/SYMBOL, SIZE FROM/TO, W.T., DESCRIPTION
+and either ME NO. or COMMODITY CODE. Native table-cell rectangles resolve shared
+values only within explicit merged cells. Separate blank cells remain blank.
+Curly inch marks and spaced/mixed fractions validate without converting the
+literal source notation. Explicit BELOW/ABOVE constraints retain an open bound;
+a single stated bound is kept without inventing its counterpart and flagged.
+PIPING and FITTINGS are recognised source categories. Other literal categories
+retain component_type=other with a classification-review issue.
+
+A continuation must have recognised LNG headers, the same document identity and
+logical page total, and consecutive logical and physical pages. A non-table page
+or ambiguous heading breaks context. Chunk-start lookup verifies the same chain
+back to an explicit class heading, bounded by SPEC_LNG_CONTEXT_LOOKBACK_PAGES
+(default 64, range 1-200). It never carries a component name/description from a
+neighbouring page into an unlabelled source cell. Those rows remain review issues.
+Malformed or mixed explicit headings also block continuation rather than carrying
+the preceding class. Class codes respect the existing 32-character boundary.
+Note-qualified headings retain their literal note and require review.
+
+Source page/table/row, class-heading page and merged parent-row references survive
+in component notes. Native rectangle evidence is also available in the transient
+source-reference object; geometry is not added to the database schema. Explicit
+ME numbers and commodity codes remain distinct source evidence in notes. They are
+not generated or interpreted as matching/release approval. LNG source row identity
+deduplicates chunk overlaps while retaining separate source rows.
+
+Native grid extraction stays inside the existing hard-deadline child process.
+Other local/OCR/provider fallback and source-only quality handling remain. Missing
+grid headers, ambiguous class context, rejected rows, references such as AS ABOVE,
+unknown classifications and incomplete bounds retain partial coverage and block
+the existing release/export gates. This extension adds no schema or paid retry.
 
 RapidOCR, PaddleOCR and Tesseract preserve word positions and use the same table
 reader. Header-only OCR cannot mask later component extraction. RapidOCR requires

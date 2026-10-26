@@ -5,7 +5,7 @@ Smart diagnostic to check why a user can access modules they shouldn't have acce
 
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
-from apps.rbac.models import UserProfile, Role, Module
+from apps.rbac.models import UserProfile, Role, Module, RoleModule
 from apps.rbac.rbac_config import (
     DEFAULT_ROLE_MODULES,
     ROLE_MODULE_POLICY,
@@ -96,9 +96,13 @@ class Command(BaseCommand):
             if business:
                 self.stdout.write(f"     💼 Business: {len(business)} modules")
         
-        # Step 5: Check actual modules assigned
+        # Step 5: Check actual modules assigned (via Role -> RoleModule)
         self.stdout.write("\n📋 Step 5: Checking actual modules assigned to profile...")
-        actual_modules = profile.modules.filter(is_active=True)
+        user_role_ids = list(user_roles.values_list('id', flat=True))
+        actual_modules = Module.objects.filter(
+            rolemodule__role_id__in=user_role_ids,
+            is_active=True
+        ).distinct()
         self.stdout.write(f"  Actual modules: {actual_modules.count()}")
         
         # Step 6: Compare expected vs actual
@@ -196,27 +200,10 @@ class Command(BaseCommand):
         
         # Step 9: Auto-fix if requested
         if auto_fix:
-            self.stdout.write("\n🔧 Step 9: AUTO-FIX ENABLED - Syncing user to role-based modules...")
-            
-            # Clear all direct module assignments
-            profile.modules.clear()
-            self.stdout.write("  ✓ Cleared all direct module assignments")
-            
-            # Re-apply role-based modules
-            for role in user_roles:
-                role_modules = ROLE_MODULE_POLICY.get(role.code, [])
-                for module_code in role_modules:
-                    try:
-                        module = Module.objects.get(code=module_code, is_active=True)
-                        profile.modules.add(module)
-                    except Module.DoesNotExist:
-                        pass
-            
-            profile.save()
-            
-            new_count = profile.modules.filter(is_active=True).count()
-            self.stdout.write(self.style.SUCCESS(f"  ✅ Synced {new_count} modules based on roles"))
-            self.stdout.write(self.style.SUCCESS(f"\n✅ AUTO-FIX COMPLETE - User now has role-based access only"))
+            self.stdout.write("\n🔧 Step 9: AUTO-FIX ENABLED - Direct module assignment is disabled.")
+            self.stdout.write("  Access is granted exclusively through User -> Role -> Module -> Permission.")
+            self.stdout.write("  To change a user's modules, assign a different role or update ROLE_MODULE_POLICY.")
+            self.stdout.write("  No direct module assignments were made.")
         else:
             # Show fix command
             if extra_modules or missing_modules:

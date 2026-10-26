@@ -1,14 +1,18 @@
 """
 RBAC Signals
 """
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from .models import UserProfile, Organization, UserRole, RoleModule, RolePermission
+from .models import UserProfile, Organization, UserRole, RoleModule, RolePermission, Delegation, Role, Module, Permission
 from .utils import create_audit_log
 
 User = get_user_model()
+
+# Track previous profile status across pre_save/post_save boundary
+_profile_previous_status = {}
+
 
 
 @receiver(post_save, sender=User)
@@ -155,3 +159,130 @@ def ensure_saved_module_actions(sender, instance, using, raw=False, **kwargs):
     from .module_actions import ensure_module_actions
     from django.db import transaction
     transaction.on_commit(lambda: ensure_module_actions(sender, Permission, using=using, module_ids=[instance.pk]), using=using)
+
+
+@receiver(pre_save, sender=UserProfile)
+def capture_profile_previous_status(sender, instance, **kwargs):
+    """Capture previous status/is_deleted before save for cache invalidation."""
+    if instance.pk:
+        try:
+            prev = UserProfile.objects.only('status', 'is_deleted').get(pk=instance.pk)
+            _profile_previous_status[instance.pk] = (prev.status, prev.is_deleted)
+        except UserProfile.DoesNotExist:
+            pass
+
+
+@receiver(post_save, sender=UserProfile)
+def clear_profile_status_cache(sender, instance, created, **kwargs):
+    """
+    Clear user cache when profile status changes (active/suspended/deleted).
+    A suspended or deleted user must immediately lose cached access.
+    """
+    if created:
+        return
+    prev = _profile_previous_status.pop(instance.pk, None)
+    if prev and (prev[0] != instance.status or prev[1] != instance.is_deleted):
+        try:
+            cache.delete(f'user_permissions_{instance.id}')
+            cache.delete(f'user_modules_{instance.id}')
+            print(f"[Cache] Cleared cache for user {instance.id} (status={instance.status}, deleted={instance.is_deleted})")
+        except Exception as exc:
+            print(f"[Cache] WARNING Failed to clear cache for user {instance.id}: {exc}")
+
+
+@receiver(post_save, sender=Role)
+@receiver(post_delete, sender=Role)
+def clear_role_status_cache(sender, instance, **kwargs):
+    """
+    Clear module/permission cache for ALL users of a role when role is_active changes.
+    """
+    role_id = instance.id
+    try:
+        profile_ids = UserRole.objects.filter(
+            role_id=role_id
+        ).values_list('user_profile_id', flat=True)
+        cleared_count = 0
+        for profile_id in profile_ids:
+            try:
+                cache.delete(f'user_permissions_{profile_id}')
+                cache.delete(f'user_modules_{profile_id}')
+                cleared_count += 1
+            except Exception as exc:
+                print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+        if cleared_count > 0:
+            print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} status change")
+    except Exception as exc:
+        print(f"[Cache] WARNING Failed to clear role cache for role {role_id}: {exc}")
+
+
+@receiver(post_save, sender=Module)
+@receiver(post_delete, sender=Module)
+def clear_module_status_cache(sender, instance, **kwargs):
+    """
+    Clear cache for all users when a module is_active changes.
+    """
+    module_id = instance.id
+    try:
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        profile_ids = UserProfile.objects.filter(
+            userrole__role__rolemodule__module_id=module_id
+        ).values_list('id', flat=True).distinct()
+        cleared_count = 0
+        for profile_id in profile_ids:
+            try:
+                cache.delete(f'user_permissions_{profile_id}')
+                cache.delete(f'user_modules_{profile_id}')
+                cleared_count += 1
+            except Exception as exc:
+                print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+        if cleared_count > 0:
+            print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by module {module_id} status change")
+    except Exception as exc:
+        print(f"[Cache] WARNING Failed to clear module cache for module {module_id}: {exc}")
+
+
+@receiver(post_save, sender=Permission)
+@receiver(post_delete, sender=Permission)
+def clear_permission_status_cache(sender, instance, **kwargs):
+    """
+    Clear cache for all users when a permission is_active changes.
+    """
+    permission_id = instance.id
+    module_id = instance.module_id
+    try:
+        profile_ids = UserProfile.objects.filter(
+            userrole__role__rolepermission__permission_id=permission_id
+        ).values_list('id', flat=True).distinct()
+        # Also clear users with module-level access via RoleModule
+        profile_ids = list(profile_ids) + list(
+            UserProfile.objects.filter(
+                userrole__role__rolemodule__module_id=module_id
+            ).values_list('id', flat=True).distinct()
+        )
+        cleared_count = 0
+        for profile_id in set(profile_ids):
+            try:
+                cache.delete(f'user_permissions_{profile_id}')
+                cache.delete(f'user_modules_{profile_id}')
+                cleared_count += 1
+            except Exception as exc:
+                print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+        if cleared_count > 0:
+            print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by permission {permission_id} status change")
+    except Exception as exc:
+        print(f"[Cache] WARNING Failed to clear permission cache for permission {permission_id}: {exc}")
+
+
+@receiver(post_save, sender=Delegation)
+@receiver(post_delete, sender=Delegation)
+def clear_delegation_cache(sender, instance, **kwargs):
+    """
+    Clear cache for both delegator and delegatee when a delegation is created/removed.
+    """
+    for profile_id in (instance.delegator_id, instance.delegatee_id):
+        try:
+            cache.delete(f'user_permissions_{profile_id}')
+            cache.delete(f'user_modules_{profile_id}')
+        except Exception as exc:
+            print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")

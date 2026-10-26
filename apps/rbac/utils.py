@@ -1,7 +1,8 @@
 """
 RBAC Utility Functions
 """
-from .models import AuditLog
+from django.utils import timezone
+from .models import AuditLog, FieldPermission, RowLevelPermission
 from .rbac_config import is_module_enabled
 
 
@@ -173,3 +174,137 @@ def check_module_access(user, module_code):
         return profile.has_module_access(module_code)
     except:
         return False
+
+
+def get_field_permissions(user, model_name):
+    """
+    Return dict mapping field_name -> {'can_read': bool, 'can_write': bool}
+    for all FieldPermission entries applicable to the user.
+    User-specific overrides take precedence over role-level grants.
+    """
+    try:
+        profile = user.rbac_profile
+    except Exception:
+        return {}
+
+    now = timezone.now()
+    # Role-level field permissions (via effective roles)
+    role_ids = list(profile._effective_role_ids())
+    role_perms = FieldPermission.objects.filter(
+        role_id__in=role_ids,
+        model_name=model_name,
+        is_active=True,
+    )
+    # User-specific overrides
+    user_perms = FieldPermission.objects.filter(
+        user_profile=profile,
+        model_name=model_name,
+        is_active=True,
+    )
+
+    result = {}
+    # Start with role-level grants
+    for fp in role_perms:
+        result[fp.field_name] = {'can_read': fp.can_read, 'can_write': fp.can_write}
+    # User overrides take precedence
+    for fp in user_perms:
+        result[fp.field_name] = {'can_read': fp.can_read, 'can_write': fp.can_write}
+    return result
+
+
+def filter_serializer_fields(serializer, user, model_name):
+    """
+    Remove fields from a serializer that the user cannot read.
+    Returns the serializer with filtered fields.
+    """
+    if not hasattr(serializer, 'fields'):
+        return serializer
+    perms = get_field_permissions(user, model_name)
+    if not perms:
+        return serializer
+    fields_to_remove = []
+    for field_name in serializer.fields:
+        if field_name in perms and not perms[field_name]['can_read']:
+            fields_to_remove.append(field_name)
+    for field_name in fields_to_remove:
+        serializer.fields.pop(field_name, None)
+    return serializer
+
+
+def filter_validated_data(validated_data, user, model_name):
+    """
+    Remove fields from validated_data that the user cannot write.
+    Returns filtered dict.
+    """
+    perms = get_field_permissions(user, model_name)
+    if not perms:
+        return validated_data
+    return {
+        k: v for k, v in validated_data.items()
+        if k not in perms or perms[k]['can_write']
+    }
+
+
+def apply_row_level_filter(queryset, user, model_name):
+    """
+    Apply row-level permissions to a queryset based on the user's roles.
+    Returns the filtered queryset.
+    Super admins see all rows.
+    """
+    try:
+        profile = user.rbac_profile
+    except Exception:
+        return queryset.none()
+
+    if profile.is_super_admin():
+        return queryset
+
+    now = timezone.now()
+    role_ids = list(profile._effective_role_ids())
+
+    # Collect all row-level permissions for this user's roles
+    rlp_role = RowLevelPermission.objects.filter(
+        role_id__in=role_ids,
+        model_name=model_name,
+        is_active=True,
+    )
+    rlp_user = RowLevelPermission.objects.filter(
+        user_profile=profile,
+        model_name=model_name,
+        is_active=True,
+    )
+
+    # Combine filters with OR (any matching grant allows access)
+    from django.db.models import Q
+    combined_q = Q()
+
+    for rlp in rlp_role:
+        combined_q |= _build_row_filter(rlp, user, profile)
+
+    for rlp in rlp_user:
+        combined_q |= _build_row_filter(rlp, user, profile)
+
+    if combined_q:
+        return queryset.filter(combined_q)
+    # No row-level permissions defined -> no access (deny by default)
+    return queryset.none()
+
+
+def _build_row_filter(rlp, user, profile):
+    """Build a Django Q filter from a RowLevelPermission."""
+    from django.db.models import Q
+    field = rlp.filter_field
+    ftype = rlp.filter_type
+    value = rlp.filter_value
+
+    if ftype == 'exact':
+        if value:
+            return Q(**{field: value})
+        return Q()
+    elif ftype == 'org_user':
+        return Q(**{field: profile.organization_id})
+    elif ftype == 'org_department':
+        return Q(**{field: profile.organization_id})
+    elif ftype == 'user_owner':
+        return Q(**{field: user.id})
+    return Q()

@@ -223,11 +223,9 @@ def user_has_module_access(user, module_code: str) -> bool:
         # Get all modules user has access to
         user_modules = profile.get_all_modules()
         if module_code == 'sales':
-            from apps.rbac.service_catalogue import is_sales_department
-            return is_sales_department(profile.department) and any(
-                module.code == 'sales' or module.code.startswith('sales_')
-                for module in user_modules
-            )
+            # Sales access is strictly role-based: must have a sales_* module
+            # granted through an active role. No department-based bypass.
+            return any(module.code.startswith('sales_') for module in user_modules)
         return any(module.code == module_code for module in user_modules)
     except Exception:
         return False
@@ -247,10 +245,13 @@ def get_users_with_module_access(module_code: str) -> List:
         from apps.rbac.models import UserProfile, Module
         
         if module_code == 'sales':
-            from apps.rbac.service_catalogue import is_sales_department
-            profiles = UserProfile.objects.filter(is_deleted=False).only('user_id', 'department')
-            return [profile.user_id for profile in profiles
-                    if is_sales_department(profile.department) and user_has_module_access(profile.user, 'sales')]
+            # Sales access is strictly role-based: users must have a sales_* module
+            # granted through an active role. No department-based bypass.
+            matching = []
+            for profile in UserProfile.objects.filter(is_deleted=False).only('user_id'):
+                if any(m.code.startswith('sales_') for m in profile.get_all_modules()):
+                    matching.append(profile.user_id)
+            return matching
 
         # Get the module
         module = Module.objects.filter(code=module_code, is_active=True).first()

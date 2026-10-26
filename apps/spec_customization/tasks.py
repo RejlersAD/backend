@@ -371,19 +371,29 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         # Calculate final accuracy estimate
         accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
         total_components = PipingClassComponent.objects.filter(piping_class__job=job).count()
-        has_records = saved > 0 and total_components > 0
+        has_classes = saved > 0
+        has_records = has_classes and total_components > 0
+        partial_review = has_classes and total_components == 0
         job.config_snapshot['extraction_outcome'].update({
             'classes_saved': saved,
             'components_saved': total_components,
-            'empty_result': not has_records,
+            'empty_result': not has_classes,
+            'partial_result': partial_review,
             'validation_status': validation_report['overall_status'],
         })
-        if not has_records:
+        if not has_classes:
             job.error_message = (job.error_message + ' ' if job.error_message else '') + (
                 'No component records were extracted. Check the source table layout and available local engines '
                 'or configured AI provider/model, then upload the document again to start a new extraction. '
                 'Any detected class headers have been retained for review.'
             )
+        elif partial_review:
+            job.error_message = (
+                'Class headers were detected and saved for review, but no component rows were extracted. '
+                'Validate the source table layout or retry with a better local/OCR or AI configuration.'
+            )
+        elif not failed_chunks:
+            job.error_message = ''
         
         # Extract token usage and cost from service (BACKWARD COMPATIBLE)
         # Only set these fields if migration 0005 has been applied
@@ -410,10 +420,13 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         job.status = PaperSpecExtractionJob.STATUS_COMPLETED if has_records else PaperSpecExtractionJob.STATUS_FAILED
         job.progress_percent = 100
         job.completed_at = timezone.now()
-        job.current_phase = (
-            f"{'Completed' if has_records else 'Failed: no components extracted'} · "
-            f"{saved} classes · {total_components} components"
-        )
+        if partial_review:
+            job.current_phase = f"Review required · {saved} classes · {total_components} components"
+        else:
+            job.current_phase = (
+                f"{'Completed' if has_records else 'Failed: no components extracted'} · "
+                f"{saved} classes · {total_components} components"
+            )
         
         # SECURITY: Wipe user-supplied API keys now that extraction is complete
         # Keys are held temporarily during processing and wiped immediately after

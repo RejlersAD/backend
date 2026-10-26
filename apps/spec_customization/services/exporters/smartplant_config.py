@@ -2213,7 +2213,7 @@ def _rows_piping_commodity_matl_control_data(cls):
     bolt_req      = SPEC_DEFAULTS['pcmd_bolting_requirements']
     weld_req      = SPEC_DEFAULTS['pcmd_welding_requirement']
 
-    for c in cls.components.all().order_by('display_order'):
+    for c in cls.components.all():
         sheet = route_component_to_cat_sheet(c)
         prefix = (CAT_SHEET_DEFAULTS.get(sheet, {}) or {}).get('icc_prefix', 'RAD_CMP')
         npds = _enumerate_npds(c.size_from, c.size_to)
@@ -2291,7 +2291,9 @@ def _rows_gasket_selection_filter(cls):
     rows = []
     spec_name = _spec_name(cls)
     fluid_code = _infer_fluid_from_spec_name(spec_name)
-    for c in cls.components.filter(component_type='gasket'):
+    for c in cls.components.all():
+        if c.component_type != 'gasket':
+            continue
         contractor_code = (getattr(c, 'commodity_code', '') or '').strip()
         comments = (c.description or '').strip()[:128] or SPEC_DEFAULTS['gasket_comments_default']
         rows.append({
@@ -2336,7 +2338,9 @@ def _rows_bolt_selection_filter(cls):
     """
     rows = []
     spec_name = _spec_name(cls)
-    for c in cls.components.filter(component_type='bolt'):
+    for c in cls.components.all():
+        if c.component_type != 'bolt':
+            continue
         commodity_code = getattr(c, 'commodity_code', '') or ''
         description = (c.description or '')[:128] or SPEC_DEFAULTS['bolt_comments_default']
         rows.append({
@@ -3306,7 +3310,7 @@ def _rows_piping_commodity_filter(cls):
     # Track if we've generated custom ranges (to avoid duplicates)
     custom_ranges_generated = False
 
-    for c in cls.components.all().order_by('display_order'):
+    for c in cls.components.all():
         sheet = route_component_to_cat_sheet(c)
         prefix = (CAT_SHEET_DEFAULTS.get(sheet, {}) or {}).get('icc_prefix', 'RAD_CMP')
         npds = _enumerate_npds(c.size_from, c.size_to)

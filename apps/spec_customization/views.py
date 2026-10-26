@@ -32,6 +32,7 @@ from django.db.models import Count, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.views.decorators.gzip import gzip_page
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.exceptions import PermissionDenied
@@ -628,7 +629,9 @@ def complete_paper_spec_upload(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_jobs(request):
-    if _is_spec_admin(request.user):
+    if request.query_params.get('mine') == '1':
+        qs = PaperSpecExtractionJob.objects.filter(created_by=request.user)
+    elif _is_spec_admin(request.user):
         qs = PaperSpecExtractionJob.objects.all()
     else:
         owned_project_ids = SpecProject.objects.filter(created_by=request.user).values_list('project_id', flat=True)
@@ -756,7 +759,8 @@ def class_asme_validation(request, class_id):
 @permission_classes([IsAuthenticated])
 def export_job(request, job_id):
     job = _get_accessible_job(request, job_id)
-    fmt = (request.query_params.get('format') or 'json').lower()
+    # `format` is also DRF's renderer selector; XLSX is an attachment, not a renderer.
+    fmt = (request.query_params.get('export_format') or request.query_params.get('format') or 'json').lower()
 
     classes = list(
         job.piping_classes.prefetch_related('components').order_by('class_code')
@@ -1064,6 +1068,7 @@ _MAX_CELL_VALUE_LEN = 2000
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@gzip_page
 def workbook_preview(request, job_id):
     """Return the SPEC or CAT workbook as JSON for the canvas.
 

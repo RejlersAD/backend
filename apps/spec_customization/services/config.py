@@ -80,6 +80,8 @@ SPEC_EXTRACTION_CONFIG = {
     # merged component tables still require layout-aware / Vision extraction.
     "skip_ai_if_text_chars_gte": 3000,
     "text_layer_min_components_for_direct_accept": 1,
+    # Continuation lookup stops at any document/page-sequence or table break.
+    "lng_context_lookback_pages": _env_int("SPEC_LNG_CONTEXT_LOOKBACK_PAGES", 64, lo=1, hi=200),
 
     # Hard ceiling on how many pages may be sent to a Vision AI per job.
     # Once exceeded, remaining pages are processed by PyMuPDF/Tesseract only.

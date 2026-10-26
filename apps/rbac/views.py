@@ -2088,13 +2088,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             except Role.DoesNotExist:
                                 pass
                         
-                        # Assign modules
-                        module_codes = row.get('module_codes', '').strip()
-                        if module_codes:
-                            module_code_list = [m.strip() for m in module_codes.split(',')]
-                            modules = Module.objects.filter(code__in=module_code_list, is_active=True)
-                            for module in modules:
-                                profile.modules.add(module)
+                        # Modules are assigned exclusively through Role assignments
+                        # (UserRole -> Role -> RoleModule). Direct per-user module
+                        # assignment is disabled: MODULE_ASSIGNMENT_CONFIG.strategy
+                        # is "role_based". The module_codes column is accepted for
+                        # schema compatibility but does not grant access.
                         
                         results['success'].append({
                             'row': row_num,
@@ -2323,6 +2321,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     'username': request.user.username,
                     'first_name': request.user.first_name,
                     'last_name': request.user.last_name,
+                    'is_superuser': request.user.is_superuser,
+                    'is_staff': request.user.is_staff,
                     'roles': [],
                     'can_review_profile_documents': False,
                     'organization': None,
@@ -2363,6 +2363,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'username': getattr(request.user, 'username', ''),
                 'first_name': getattr(request.user, 'first_name', ''),
                 'last_name': getattr(request.user, 'last_name', ''),
+                'is_superuser': bool(getattr(request.user, 'is_superuser', False)),
+                'is_staff': bool(getattr(request.user, 'is_staff', False)),
                 'roles': [],
                 'organization': None,
                 'status': 'pending',
