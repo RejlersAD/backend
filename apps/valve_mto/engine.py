@@ -470,7 +470,15 @@ def _run_vision_extraction(job, pdf_bytes, parsed, settings_obj, mark,
             pass
 
     if outcome.get('status') == 'error':
-        raise ValueError(outcome.get('error') or 'Vision extraction failed.')
+        # Keep the extractor's own warnings (per-batch provider errors, OCR
+        # notes) attached to the failure — the view persists str(exc) as
+        # job.error, and without this the true provider-side cause never
+        # leaves the server log (confirmed production diagnostic gap).
+        message = outcome.get('error') or 'Vision extraction failed.'
+        details = [w for w in (outcome.get('warnings') or []) if w and w != message]
+        if details:
+            message = f"{message} Details: {' | '.join(details[:5])}"
+        raise ValueError(message)
 
     vision_rows = outcome.get('rows') or []
     mark(1, 'done', f'{len(vision_rows)} valves detected')
