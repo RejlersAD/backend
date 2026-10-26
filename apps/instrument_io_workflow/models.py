@@ -213,6 +213,7 @@ class IOListDocument(models.Model):
     DOCUMENT_TYPE_CHOICES = [
         ('io_list',     'IO List'),
         ('pid_drawing', 'P&ID Drawing'),
+        ('vendor_db',   'Vendor IO Database'),
     ]
 
     # Identity
@@ -495,3 +496,7 @@ class IOListLegendSymbolImage(models.Model):
     def __str__(self) -> str:  # pragma: no cover
         return f'{self.symbol_name} ({self.section})'
 
+
+
+# Deterministic P&ID extraction models (kept in a submodule for readability).
+from .models_extraction import IOListAISuggestion, IOListExtraction, IOListServiceDecision  # noqa: F401,E402

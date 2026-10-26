@@ -154,6 +154,12 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
             'conflicts': vendor_conflicts,
             'noRecord': no_vendor,
             'baseline': {k: v for k, v in baseline_info.items() if k != 'rows'} if baseline_info else {},
+            # full baseline row set (stringified) so exports rebuild the
+            # 53-column layout without re-reading the workbook
+            'baselineRows': [
+                {k: ('' if v is None else str(v)) for k, v in row.items()}
+                for row in (baseline_info.get('rows') if baseline_info else [])
+            ],
         },
         'summary': {
             'sheets': len(pages),
