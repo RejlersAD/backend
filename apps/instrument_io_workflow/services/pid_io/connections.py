@@ -27,18 +27,20 @@ class Contact:
     via: str = ''               # 'connection line' | 'leader' | ''
 
 
-def _walk_signal_line(page, tag, runs, equipment):
-    """Walk solid 0.24 pt strokes from the bubble edge."""
+def _walk_signal_line(page, tag, runs, equipment, all_tags):
+    """Walk solid 0.24 pt strokes from the bubble edge (any orientation;
+    dashed signal lines break the walk)."""
     x0, y0, x1, y1 = tag.bbox
     signals = [s for s in page.strokes
                if abs(s.width - S.SIGNAL_WIDTH_PT) <= 0.06 and not s.dashed
                and s.length > S.SIGNAL_MIN_LEN_PT]
-    # seed: stroke starting at the bubble edge
+    # seed: stroke starting at the bubble edge (±2.5 pt — line caps overshoot
+    # the outline slightly on the reference sheets)
     chain = []
     current_pt = None
     for seg in signals:
         for pt in (seg.p0, seg.p1):
-            if x0 - 1.0 <= pt[0] <= x1 + 1.0 and y0 - 1.0 <= pt[1] <= y1 + 1.0:
+            if x0 - 2.5 <= pt[0] <= x1 + 2.5 and y0 - 2.5 <= pt[1] <= y1 + 2.5:
                 chain.append(seg)
                 current_pt = seg.p1 if pt == seg.p0 else seg.p0
                 break
@@ -48,10 +50,13 @@ def _walk_signal_line(page, tag, runs, equipment):
         return None
     # walk up to 12 connected strokes
     for _ in range(12):
-        # contact?
         hit = _contact_at(current_pt, runs, equipment)
         if hit:
             return chain, hit
+        # bubble-to-bubble: device chain (e.g. solenoid next to its valve)
+        other = _bubble_at(current_pt, all_tags, exclude=tag)
+        if other is not None:
+            return chain, Contact('device', point=current_pt)
         nxt = None
         for seg in signals:
             if seg in chain:
@@ -67,6 +72,18 @@ def _walk_signal_line(page, tag, runs, equipment):
             break
         chain.append(nxt)
     return chain, _contact_at(current_pt, runs, equipment)
+
+
+def _bubble_at(pt, all_tags, exclude=None):
+    if pt is None:
+        return None
+    for t in all_tags or []:
+        if t is exclude:
+            continue
+        x0, y0, x1, y1 = t.bbox
+        if x0 - 1.5 <= pt[0] <= x1 + 1.5 and y0 - 1.5 <= pt[1] <= y1 + 1.5:
+            return t
+    return None
 
 
 def _contact_at(pt, runs, equipment):
@@ -121,8 +138,8 @@ def _leader_contact(page, tag, runs, equipment):
     return None
 
 
-def find_contact(page, tag, runs, equipment):
-    walked = _walk_signal_line(page, tag, runs, equipment)
+def find_contact(page, tag, runs, equipment, all_tags=None):
+    walked = _walk_signal_line(page, tag, runs, equipment, all_tags)
     if walked and walked[1]:
         chain, contact = walked
         contact.via = 'connection line'

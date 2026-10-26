@@ -65,43 +65,81 @@ class LineLabel:
 # ─────────────────────────────────────────────────────────────────────────
 
 def find_equipment(page):
-    """§6.2.1 — equipment labels + the thick body outline near the label."""
+    """§6.2.1 — equipment bodies. Primary source: EQ# smart tags, which sit
+    exactly on the body outline (the vessel-side label is often absent while
+    the title-block list repeats the tag with no drawing). Body = smallest
+    mid-weight outline containing the EQ# point. Visible labels without an
+    EQ# still register via the merged-nearby-parts heuristic."""
     out = []
+    for st in page.smart_tags:
+        if not st.text.startswith('EQ#'):
+            continue
+        tag = st.text[3:]
+        # Merge every mid-weight outline containing the EQ# point — the
+        # vessel body may be split into several paths, and picking just the
+        # smallest/largest single one proved unstable on the reference set.
+        hits = []
+        for sh in page.shapes:
+            x0, y0, x1, y1 = sh.bbox
+            if sh.width < S.PIPE_WIDTH_PT - 0.06 or sh.item_count < 2:
+                continue
+            if not (500 <= sh.area <= 60000):
+                continue
+            if x0 - 1 <= st.cx <= x1 + 1 and y0 - 1 <= st.cy <= y1 + 1:
+                hits.append(sh)
+        if not hits:
+            continue
+        merged = (min(s.bbox[0] for s in hits), min(s.bbox[1] for s in hits),
+                  max(s.bbox[2] for s in hits), max(s.bbox[3] for s in hits))
+        body = type('Body', (), {'bbox': merged, 'item_count': sum(s.item_count for s in hits), 'area': 0})
+        out.append(Equipment(tag=tag, page=st.page, label_bbox=merged,
+                             body_bbox=merged, name=''))
+        out[-1]._parts = body.item_count
+
+    # label-driven fallback for equipment without EQ#
     for sp in page.spans:
         if sp.size < S.EQUIP_LABEL_MIN_SIZE_PT or sp.size > 20:
             continue
         text = sp.text.replace(' ', '')
         if not _EQUIP_RE.match(text):
             continue
-        # nearest thick body within proximity; most path items, area-capped
-        best = None
+        if any(e.tag == text for e in out):
+            continue
+        parts = []
         for sh in page.shapes:
-            if sh.width < S.EQUIP_BODY_MIN_WIDTH_PT:
+            if sh.width < S.PIPE_WIDTH_PT - 0.06 or sh.item_count < 2:
                 continue
-            if not (0 < sh.area < S.EQUIP_BODY_MAX_AREA_PT2):
+            if not (0 < sh.area < 40000):
                 continue
             scx, scy = (sh.bbox[0] + sh.bbox[2]) / 2, (sh.bbox[1] + sh.bbox[3]) / 2
             d = ((scx - sp.cx) ** 2 + (scy - sp.cy) ** 2) ** 0.5
-            if d > S.EQUIP_LABEL_PROXIMITY_PT:
-                continue
-            if best is None or sh.item_count > best[0].item_count:
-                best = (sh, d)
-        # EQ# smart tag nearest the label confirms the equipment identity
-        eq_smart = [s for s in page.smart_tags if s.text.startswith('EQ#')
-                    and abs(s.cx - sp.cx) < 40 and abs(s.cy - sp.cy) < 40]
-        out.append(Equipment(
+            if d <= S.EQUIP_LABEL_PROXIMITY_PT + 40:
+                parts.append(sh)
+        best = None
+        if parts:
+            merged = (min(s.bbox[0] for s in parts), min(s.bbox[1] for s in parts),
+                      max(s.bbox[2] for s in parts), max(s.bbox[3] for s in parts))
+            if (merged[2] - merged[0]) * (merged[3] - merged[1]) < 60000:
+                best = (type('Body', (), {'bbox': merged, 'item_count': len(parts)}), 0)
+        eq = Equipment(
             tag=text, page=sp.page, label_bbox=sp.bbox,
             body_bbox=best[0].bbox if best else sp.bbox,
-            name=eq_smart[0].text[3:] if eq_smart else '',
-        ))
-    # de-duplicate identical tags (label repeats on multi-line text)
-    seen, unique = set(), []
+            name='',
+        )
+        eq._parts = len(parts) if best else 0
+        out.append(eq)
+    # drop pure title-block repeats: no body parts AND sitting in the
+    # title-block band (bottom-right corner of the sheet)
+    filtered = []
     for eq in out:
-        if eq.tag in seen:
-            continue
-        seen.add(eq.tag)
-        unique.append(eq)
-    return unique
+        if getattr(eq, '_parts', 0) == 0 and eq.body_bbox == eq.label_bbox:
+            x, y = (eq.label_bbox[0] + eq.label_bbox[2]) / 2, (eq.label_bbox[1] + eq.label_bbox[3]) / 2
+            if y > page.height * 0.75 and x > page.width * 0.4:
+                continue
+            if y < page.height * 0.08:
+                continue
+        filtered.append(eq)
+    return filtered
 
 
 # ─────────────────────────────────────────────────────────────────────────
