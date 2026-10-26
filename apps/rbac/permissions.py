@@ -2,31 +2,62 @@
 RBAC Permissions - Django Rest Framework Permission Classes
 Enterprise-grade permission enforcement
 """
+import logging
 from rest_framework import permissions
+from rest_framework.exceptions import PermissionDenied
 from .models import UserProfile
+from .utils import create_audit_log
+
+logger = logging.getLogger(__name__)
 
 
 class IsSuperAdmin(permissions.BasePermission):
     """
-    Permission class to check if user is super admin
-    Also allows Django superuser as fallback
+    Permission class to check if user is super admin.
+    Requires MFA for super admin role activation (step-up auth).
+    All super admin access is audit logged.
     """
     message = "You must be a super admin to perform this action."
-    
+
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
-        
-        # Allow Django superuser as fallback
+
+        # Allow Django superuser as fallback (emergency break-glass)
         if request.user.is_superuser:
+            self._audit_super_admin_access(request, view, source='django_superuser')
             return True
-        
-        # Check RBAC role
+
+        # Check RBAC super_admin role with MFA requirement
         try:
             profile = request.user.rbac_profile
-            return profile.roles.filter(code='super_admin', is_active=True).exists()
         except UserProfile.DoesNotExist:
             return False
+
+        is_sa = profile.is_super_admin_active()
+        if is_sa:
+            self._audit_super_admin_access(request, view, source='rbac_role')
+        return is_sa
+
+    def _audit_super_admin_access(self, request, view, source):
+        """Audit log every super admin access decision."""
+        try:
+            create_audit_log(
+                user=request.user,
+                action='super_admin_access',
+                resource_type='rbac.super_admin',
+                resource_repr=f"{view.__class__.__name__} [{request.method}]",
+                metadata={
+                    'source': source,
+                    'path': request.path,
+                    'mfa_verified': getattr(request, 'mfa_verified', False),
+                },
+                ip_address=getattr(request, 'META', {}).get('REMOTE_ADDR', ''),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+                success=True,
+            )
+        except Exception:
+            logger.exception('Failed to audit super admin access')
 
 
 class IsAdmin(permissions.BasePermission):
@@ -35,16 +66,16 @@ class IsAdmin(permissions.BasePermission):
     SECURITY: Only is_superuser bypasses (emergency access), is_staff does NOT bypass
     """
     message = "You must be an admin to perform this action."
-    
+
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
-        
+
         # ONLY Django superuser bypasses (emergency access)
         # is_staff does NOT bypass - it only grants Django admin panel access
         if request.user.is_superuser:
             return True
-        
+
         # Check RBAC roles (soft-coded from rbac_config.py)
         try:
             profile = request.user.rbac_profile

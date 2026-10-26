@@ -45,6 +45,25 @@ import logging
 from typing import Iterable
 
 from openpyxl import load_workbook
+from contextlib import ExitStack, closing, contextmanager
+from contextvars import ContextVar
+
+
+_TEMPLATE_CONTEXT = ContextVar('s3d_preview_templates', default=None)
+
+
+@contextmanager
+def _template_book(template_path):
+    context = _TEMPLATE_CONTEXT.get()
+    if context is None:
+        with closing(load_workbook(template_path, read_only=True, data_only=True)) as book:
+            yield book
+    else:
+        stack, books = context
+        if template_path not in books:
+            books[template_path] = stack.enter_context(closing(
+                load_workbook(template_path, read_only=True, data_only=True)))
+        yield books[template_path]
 
 from . import smartplant_config as cfg
 
@@ -104,10 +123,14 @@ def _scan_header_rows(template_path: str, sheet_name: str) -> tuple[int | None, 
     layout matches.
     """
     try:
-        wb = load_workbook(template_path, read_only=True, data_only=True)
+        with _template_book(template_path) as wb:
+            return _scan_book_header_rows(wb, sheet_name)
     except Exception:
         logger.exception("[WorkbookPreview] could not open template %s", template_path)
         return None, []
+
+
+def _scan_book_header_rows(wb, sheet_name):
     if sheet_name not in wb.sheetnames:
         return None, []
     ws = wb[sheet_name]
@@ -198,9 +221,13 @@ def _template_passthrough_rows(
     if header_row_idx is None:
         return []
     try:
-        wb = load_workbook(template_path, read_only=True, data_only=True)
+        with _template_book(template_path) as wb:
+            return _book_passthrough_rows(wb, sheet_name, headers, header_row_idx)
     except Exception:
         return []
+
+
+def _book_passthrough_rows(wb, sheet_name, headers, header_row_idx):
     if sheet_name not in wb.sheetnames:
         return []
     ws = wb[sheet_name]
@@ -250,9 +277,17 @@ def _template_passthrough_rows(
 
 
 # ─── Row enumeration (reuses exporter builders) ──────────────────────────────
+def _preview_classes(job):
+    from django.db.models import Prefetch
+    from ...models import PipingClassComponent
+    return list(job.piping_classes.prefetch_related(Prefetch(
+        'components', queryset=PipingClassComponent.objects.order_by('display_order'),
+    )).order_by('class_code'))
+
+
 def _enumerate_spec_rows(job):
     """Yield (sheet_name, row_key, source_dict, cells_dict) tuples for SPEC."""
-    classes = list(job.piping_classes.prefetch_related('components').order_by('class_code'))
+    classes = _preview_classes(job)
     for sheet_name, builders in cfg.SPEC_SHEET_BUILDERS.items():
         for cls in classes:
             for b_idx, builder in enumerate(builders):
@@ -287,11 +322,11 @@ def _route_cat_components(job) -> tuple[dict[str, list], list[dict]]:
     applicable CAT shape sheet via `cfg.expand_generic_fitting_family()`
     (see smartplant_config.py, section 6b) before falling back to unrouted.
     """
-    classes = list(job.piping_classes.prefetch_related('components').order_by('class_code'))
+    classes = _preview_classes(job)
     by_sheet: dict[str, list] = {}
     unrouted: list[dict] = []
     for cls in classes:
-        for comp in cls.components.all().order_by('display_order'):
+        for comp in cls.components.all():
             sheet = cfg.route_component_to_cat_sheet(comp)
             if sheet is None:
                 fanned_out = cfg.expand_generic_fitting_family(comp)
@@ -381,6 +416,17 @@ def _load_overrides(job, workbook: str) -> dict[tuple[str, str], dict[str, str]]
 
 # ─── Public API ──────────────────────────────────────────────────────────────
 def build_preview(job, workbook: str) -> dict:
+    # One read-only template per build, including cold header discovery and
+    # passthrough sheets. Context is isolated between concurrent requests.
+    with ExitStack() as stack:
+        token = _TEMPLATE_CONTEXT.set((stack, {}))
+        try:
+            return _build_preview(job, workbook)
+        finally:
+            _TEMPLATE_CONTEXT.reset(token)
+
+
+def _build_preview(job, workbook: str) -> dict:
     """Build the JSON preview for the given workbook ('spec' or 'cat').
 
     Applies any saved `WorkbookCellOverride` entries on top of the
@@ -455,8 +501,8 @@ def build_preview(job, workbook: str) -> dict:
     # This keeps the UI aligned with the standard bulkload template so the
     # user can see the full schema, not just the populated subset.
     try:
-        _wb = load_workbook(template_path, read_only=True, data_only=True)
-        template_sheet_names = list(_wb.sheetnames)
+        with _template_book(template_path) as _wb:
+            template_sheet_names = list(_wb.sheetnames)
     except Exception:
         logger.exception("[WorkbookPreview] could not enumerate template sheets at %s",
                          template_path)

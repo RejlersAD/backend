@@ -75,8 +75,8 @@ def positioned_rows(words):
 
 def parse_size(value):
     value = clean(value)
-    number = r'(?:\d+(?:[ -]\d+/\d+|/\d+|\.\d+)?|\d*[¼½¾])'
-    single = rf'(?:DN\s*|NPS\s*)?{number}\s*(?:["″]|in(?:ch(?:es)?)?|mm)?'
+    number = r'(?:\d+(?:[ -]\d+\s*/\s*\d+|\s*/\s*\d+|\.\d+)?|\d*\s*[¼½¾])'
+    single = rf'(?:DN\s*|NPS\s*)?{number}\s*(?:["″“”]|in(?:ch(?:es)?)?|mm)?'
     if re.fullmatch(single, value, re.I):
         return value, value
     parts = re.split(r'\s+(?:to|thru|[-–—])\s+', value, flags=re.I)
@@ -119,6 +119,9 @@ class LocalTableParser:
         # table to the preceding page's class based on proximity alone.
         self.current = None
         self.columns = None
+        from .dgs_tables import read_dgs_table
+        if read_dgs_table(self, rows, page):
+            return
         if self._read_nominal_matrix(rows, page):
             return
         for index, row in enumerate(rows):
@@ -186,7 +189,8 @@ class LocalTableParser:
         commodity code. Material/schedule/end data are not inferred from codes.
         """
         text = '\n'.join(' '.join(cell[2] for cell in row['cells']) for row in rows)
-        if 'PIPING COMPONENTS' not in text.upper() or 'nominal pipe size' not in text.lower():
+        if (not any(' '.join(cell[2] for cell in row['cells']).strip().upper() == 'PIPING COMPONENTS' for row in rows)
+                or 'nominal pipe size' not in text.lower()):
             return False
         matches = list(self.numeric_header.finditer(text))
         codes = {match.group('code') for match in matches}

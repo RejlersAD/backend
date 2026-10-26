@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from .local_tables import LocalTableParser, positioned_rows
+from .lng_tables import LNGTableReader
 
 
 def local_capabilities(config):
@@ -47,7 +48,8 @@ def local_capabilities(config):
 def run_local_engine(pdf_path, start, end, engine, config, timeout):
     request = dict(pdf_path=str(pdf_path), start=start, end=end, engine=engine, config={
         key: config[key] for key in ('piping_class_header_regex', 'render_dpi', 'max_image_size',
-                                    'paddle_detection_model_dir', 'paddle_recognition_model_dir') if key in config})
+                                    'paddle_detection_model_dir', 'paddle_recognition_model_dir',
+                                    'lng_context_lookback_pages') if key in config})
     # Only local parser configuration goes into the child. Never serialize keys,
     # provider clients or the environment to the result/logs.
     try:
@@ -98,6 +100,7 @@ def extract_local(request):
     config = request['config']
     engine = request['engine']
     parser = LocalTableParser(config['piping_class_header_regex'], engine)
+    lng = LNGTableReader(parser, config.get('lng_context_lookback_pages', 64))
     reader = None
     if engine != 'pymupdf_text':
         readiness = next(item for item in local_capabilities(config)['engines'] if item['id'] == engine)
@@ -121,10 +124,15 @@ def extract_local(request):
             if engine == 'pymupdf_text':
                 text = page.get_text('text', sort=True)
                 chars += len(text)
+                if len(text.strip()) < 100 and page.get_images():
+                    parser.issues.append({'page': index + 1, 'reason': 'image_page_requires_ocr'})
+                words = page.get_text('words')
+                if lng.read_page(document, index, text, words):
+                    continue
                 if '|' in text or '\t' in text:
                     parser.read_text(text, index + 1)
                 else:
-                    parser.read_rows(positioned_rows(page.get_text('words')), index + 1)
+                    parser.read_rows(positioned_rows(words), index + 1)
                 if 'COMPONENT MATERIAL DESCRIPTION' in text.upper():
                     parser.issues.append({'page': index + 1, 'reason': 'material_description_join_not_supported'})
             else:

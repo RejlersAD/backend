@@ -5,7 +5,6 @@ Smart batch fix to reset all users to their correct role-based module access
 
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
-from django.db import transaction
 from apps.rbac.models import UserProfile, Role, Module
 from apps.rbac.rbac_config import (
     ROLE_MODULE_POLICY,
@@ -97,8 +96,12 @@ class Command(BaseCommand):
                     role_modules = ROLE_MODULE_POLICY.get(role.code, [])
                     expected_modules.update(role_modules)
                 
-                # Get current modules
-                current_modules = set(profile.modules.filter(is_active=True).values_list('code', flat=True))
+                # Get current modules (via Role -> RoleModule)
+                user_role_ids = list(user_roles.values_list('id', flat=True))
+                current_modules = set(Module.objects.filter(
+                    rolemodule__role_id__in=user_role_ids,
+                    is_active=True
+                ).values_list('code', flat=True))
                 
                 # Compare
                 extra = current_modules - expected_modules
@@ -133,19 +136,8 @@ class Command(BaseCommand):
                 
                 # Apply changes if not dry run
                 if not dry_run:
-                    with transaction.atomic():
-                        # Clear all modules
-                        profile.modules.clear()
-                        
-                        # Add role-based modules
-                        for module_code in expected_modules:
-                            try:
-                                module = Module.objects.get(code=module_code, is_active=True)
-                                profile.modules.add(module)
-                            except Module.DoesNotExist:
-                                self.stdout.write(f"     ⚠️  Module not found: {module_code}")
-                        
-                        profile.save()
+                    self.stdout.write(f"     ℹ️  Direct module assignment disabled — modules are granted through Role -> RoleModule only.")
+                    self.stdout.write(f"     ℹ️  Ensure roles are correctly assigned; no direct module changes applied.")
                 
                 synced += 1
                 changes_made.append({

@@ -956,6 +956,10 @@ class PaperSpecExtractionService:
         source = comp.get('_source_reference') or {}
         if source.get('item_code'):
             parts.extend([source['item_code'], source.get('cell_code', '')])
+        if source.get('layout') == 'dgs':
+            parts.extend(['dgs', source.get('page'), source.get('row')])
+        if source.get('layout') == 'lng':
+            parts.extend(['lng', source.get('page'), source.get('table'), source.get('row')])
         return tuple(parts)
 
     @staticmethod

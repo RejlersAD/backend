@@ -91,7 +91,8 @@ class ExtractionOutcomeTests(TestCase):
         self.assertFalse(result['success'])
         self.assertEqual(self.job.piping_classes.count(), 1)
         self.assertEqual(self.job.status, 'failed')
-        self.assertEqual(extraction_completeness(self.job)['state'], 'empty')
+        self.assertEqual(extraction_completeness(self.job)['state'], 'partial')
+        self.assertTrue(self.job.config_snapshot['extraction_outcome']['partial_result'])
 
     def test_persisted_component_result_remains_successful(self):
         result = self.run_with_classes([{'class_code': 'SYN150', 'class_full_code': 'Synthetic class',
@@ -104,6 +105,17 @@ class ExtractionOutcomeTests(TestCase):
             'state': 'complete', 'failed_chunks': [], 'chunks_total': 1,
             'chunks_done': 1, 'processing_report_available': True,
         })  # Preserve successful-run completeness inputs in frozen manifests.
+
+    def test_partial_rows_keep_coverage_warning_after_components_are_saved(self):
+        self.service.extract_chunk.return_value = {
+            'piping_classes': [], 'engine_used': 'pymupdf_text',
+            'local_report': {'components': 1, 'issues': [{'page': 1, 'reason': 'image_page_requires_ocr'}]},
+        }
+        result = self.run_with_classes([{'class_code': 'SYN150', 'class_full_code': 'Synthetic class',
+            'components': [{'component_type': 'pipe', 'size_from': '2'}]}])
+        self.assertTrue(result['success'])
+        self.assertEqual(extraction_completeness(self.job)['state'], 'partial')
+        self.assertIn('retry before exporting', self.job.error_message)
 
     def test_historical_completed_empty_job_is_reported_without_rewriting_history(self):
         self.job.status = 'completed'

@@ -5,6 +5,7 @@ authenticated workflows are exempted by callback identity, never by user input.
 """
 import re
 
+from django.db import models
 from django.utils import timezone
 
 
@@ -82,6 +83,12 @@ ROUTE_MODULES = {
     'dashboard/personal/project-control/': 'project_control',
     'dashboard/aws-status/': 'file_storage', 'dashboard/aws-report/': 'file_storage',
     'analytics/': 'reports', 'marketing-analytics/': 'reports',
+    # Business routes missing from the original map — added to close authorization gaps.
+    # Longest-prefix match is used, so parent prefixes cover sub-routes.
+    'engineering/piping/critical-line-list/': 'piping_critical_line_list',
+    'electrical-comparison/': 'electrical_datasheet',
+    'file-replica/': 'file_storage',
+    'project-organizer/': 'project_control',
 }
 
 # These handlers retain their existing token/API-key or requester/owner checks.
@@ -369,7 +376,15 @@ def operation_action(request, view):
 
 
 def module_action_allowed(user, module_code, action):
-    """Effective action grants; user denies win, including over super-admin."""
+    """Effective action grants; user denies win, including over super-admin.
+
+    Strictly role-based: User -> Role -> Module -> Permission. No department,
+    service-area, or sales bypass exists. Access can only come from an active
+    role assignment that links the role to the module (RoleModule) and to the
+    permission (RolePermission). User-level permission overrides can deny but
+    never grant beyond the role's grants. Role assignments are time-bounded
+    by UserRole.effective_from / UserRole.expires_at.
+    """
     from .models import Module, Permission, RoleModule, RolePermission, UserProfile
     from .rbac_config import is_module_enabled
     if not user or not user.is_authenticated or not user.is_active:
@@ -382,23 +397,14 @@ def module_action_allowed(user, module_code, action):
         profile.locked_until and profile.locked_until > timezone.now()
     ):
         return False
-    from .service_catalogue import is_sales_department
-    sales_department = is_sales_department(profile.department)
     if not is_module_enabled(module_code) or not Module.objects.filter(code=module_code, is_active=True).exists():
         return False
-    roles = list(profile.roles.filter(is_active=True).values_list('pk', 'code'))
+    roles = list(profile._effective_roles())
     role_ids = [pk for pk, code in roles]
     super_admin = user.is_superuser or any(code == 'super_admin' for pk, code in roles)
-    if not super_admin and not sales_department and not RoleModule.objects.filter(module__code=module_code, role_id__in=role_ids).exists():
-        # Sales permissions are assigned as business-area services in the UI,
-        # but the API routes use the individual service codes. A grant on any
-        # active Sales service is therefore the user's Sales-area grant and
-        # must not make the rest of Sales appear unavailable.
-        if not (module_code.startswith('sales_') and RoleModule.objects.filter(
-            module__code__startswith='sales_', module__is_active=True,
-            role_id__in=role_ids,
-        ).exists()):
-            return False
+    # Role must grant the module.
+    if not super_admin and not RoleModule.objects.filter(module__code=module_code, role_id__in=role_ids).exists():
+        return False
     definitions = set(Permission.objects.filter(module__code=module_code, is_active=True, action=action).values_list('pk', flat=True))
     if not definitions:
         return False
@@ -409,22 +415,9 @@ def module_action_allowed(user, module_code, action):
         return True
     allowed = {pk for pk, granted in overrides.items() if granted}
     allowed.update(RolePermission.objects.filter(role_id__in=role_ids, permission_id__in=definitions).values_list('permission_id', flat=True))
-    if module_code.startswith('sales_') and sales_department:
-        allowed.update(Permission.objects.filter(
-            module__code=module_code, is_active=True, action=action,
-        ).values_list('pk', flat=True))
-    elif module_code.startswith('sales_'):
-        # A fully configured Sales service grant applies consistently across
-        # the Sales workspace, including opportunity creation and edits.
-        sales_permissions = Permission.objects.filter(
-            module__code__startswith='sales_', module__is_active=True,
-            is_active=True, action=action,
-        ).values_list('pk', flat=True)
-        allowed.update(RolePermission.objects.filter(
-            role_id__in=role_ids, permission_id__in=sales_permissions,
-        ).values_list('permission_id', flat=True))
-    # A partially selected legacy action cell is not a full module-wide grant.
-    return definitions.issubset(allowed) if module_code not in {'sales_opportunities', 'sales_proposals', 'sales_clients', 'sales_frameworks', 'sales_forecasts', 'sales_handovers', 'sales_email_intake', 'sales_overview'} else bool(allowed.intersection(definitions))
+    # Full-cell semantics: every permission definition for (module, action) must
+    # be granted. A partial selection is not a full grant.
+    return definitions.issubset(allowed)
 
 
 def request_action_allowed(request, module, action):
@@ -477,14 +470,12 @@ def effective_action_map(profile):
     ):
         return {}
     effective = {permission.pk for permission in profile.get_all_permissions()}
-    from .service_catalogue import is_sales_department
-    sales_department = is_sales_department(profile.department)
     grouped = defaultdict(set)
     for pk, code, action in Permission.objects.filter(is_active=True, module__is_active=True).values_list('pk', 'module__code', 'action'):
         grouped[(code, action)].add(pk)
     result = defaultdict(list)
     for (code, action), ids in grouped.items():
-        if ids.issubset(effective) or (sales_department and code.startswith('sales_')):
+        if ids.issubset(effective):
             result[code].append(action)
     return dict(result)
 

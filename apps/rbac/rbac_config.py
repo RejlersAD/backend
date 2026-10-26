@@ -341,36 +341,12 @@ SUCCESS_MESSAGES = {
 # To add/remove modules: edit this list, then run: python manage.py sync_default_role
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_ROLE_MODULES = [
-    # ── Process Engineering ───────────────────────────────────────────
-    'pid_analysis',
-    'pfd_quality',
-    'process_datasheet',
-    'hmb_extractor',
-    'pid_line_list',
-    'pid_equipment_list',
-    'legend_manager',
-    # ── Piping Engineering ────────────────────────────────────────────
-    'piping_critical_line_list',
-    'piping_pms',
-    'piping_datasheet',
-    # ── Electrical Engineering ────────────────────────────────────────
-    'electrical_sld',
-    'electrical_checklist',  # SOFT-CODED: NEW FEATURE - Electrical Check List
-    'electrical_datasheet',
-    # ── Civil Engineering ─────────────────────────────────────────────
-    'civil_datasheet',
-    # ── Mechanical Engineering ────────────────────────────────────────
-    'mechanical_datasheet',
-    # ── Digital Transformation ────────────────────────────────────────
-    'spec_customization',
-    'non_teff_metadata',
-    'valve_standards_reference',
-    # ── Common & Integration ──────────────────────────────────────────
-    'crs_documents',
-    'pfd_to_pid',
-    'designiq',
-    'data_mining',
-    'hr_self_service',  # SOFT-CODED: My Profile (moved to COMMON section 2.5) — always accessible
+    # ── Minimal default access for every user ──
+    # Default users get only HR self-service and basic reporting.
+    # Engineering and discipline modules are granted through specific roles,
+    # never through the default role (principle of least privilege).
+    'hr_self_service',
+    'reports',
 ]
 
 ENGINEERING_SECTION_MODULES = [

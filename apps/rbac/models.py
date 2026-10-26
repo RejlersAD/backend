@@ -7,6 +7,7 @@ import uuid
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from apps.core.models import TimeStampedModel
 
 
@@ -391,10 +392,82 @@ class UserProfile(TimeStampedModel):
         """True for Django is_superuser or an active super_admin role — bypasses all module/permission gating."""
         if getattr(self.user, 'is_superuser', False):
             return True
-        from apps.rbac.models import UserRole
+        now = timezone.now()
         return UserRole.objects.filter(
-            user_profile=self, role__code='super_admin', role__is_active=True
+            user_profile=self,
+            role__code='super_admin',
+            role__is_active=True,
+        ).filter(
+            models.Q(effective_from__isnull=True) | models.Q(effective_from__lte=now),
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
         ).exists()
+
+    def is_super_admin_active(self, mfa_verified=False):
+        """
+        True if user has an active super_admin role AND MFA is satisfied.
+        MFA requirement: profile must have is_mfa_enabled=True, and the
+        caller must pass mfa_verified=True (step-up auth for this request).
+        Django superusers always pass (emergency break-glass).
+        """
+        if getattr(self.user, 'is_superuser', False):
+            return True
+        if not self.is_mfa_enabled or not mfa_verified:
+            return False
+        now = timezone.now()
+        return UserRole.objects.filter(
+            user_profile=self,
+            role__code='super_admin',
+            role__is_active=True,
+        ).filter(
+            models.Q(effective_from__isnull=True) | models.Q(effective_from__lte=now),
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
+        ).exists()
+
+    def _effective_role_ids(self):
+        """Return role IDs granted to this user directly or via active delegation, within time bounds."""
+        now = timezone.now()
+        # Direct role assignments within time window
+        direct_ids = set(UserRole.objects.filter(
+            user_profile=self,
+            role__is_active=True,
+        ).filter(
+            models.Q(effective_from__isnull=True) | models.Q(effective_from__lte=now),
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
+        ).values_list('role_id', flat=True))
+        # Roles delegated TO this user within time window
+        delegated_ids = set(Delegation.objects.filter(
+            delegatee=self,
+            is_active=True,
+            role__is_active=True,
+        ).filter(
+            models.Q(effective_from__isnull=True) | models.Q(effective_from__lte=now),
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
+        ).values_list('role_id', flat=True))
+        return direct_ids | delegated_ids
+
+    def _effective_roles(self):
+        """Return (role_id, role_code) tuples for all effective roles (direct + delegated)."""
+        now = timezone.now()
+        direct = UserRole.objects.filter(
+            user_profile=self,
+            role__is_active=True,
+        ).filter(
+            models.Q(effective_from__isnull=True) | models.Q(effective_from__lte=now),
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
+        ).values_list('role__pk', 'role__code')
+        delegated = Delegation.objects.filter(
+            delegatee=self,
+            is_active=True,
+            role__is_active=True,
+        ).filter(
+            models.Q(effective_from__isnull=True) | models.Q(effective_from__lte=now),
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
+        ).values_list('role__pk', 'role__code')
+        # Merge, preferring direct assignment over delegation for same role
+        seen = {}
+        for pk, code in list(direct) + list(delegated):
+            seen[pk] = code
+        return list(seen.items())
 
     def has_permission(self, permission_code):
         """Check if user has specific permission through any active role"""
@@ -404,15 +477,7 @@ class UserProfile(TimeStampedModel):
         if self.is_super_admin():
             return True
 
-        from apps.rbac.service_catalogue import is_sales_department
-        module_code = str(permission_code or '').split('.', 1)[0]
-        if is_sales_department(self.department) and module_code.startswith('sales_'):
-            return Module.objects.filter(code=module_code, is_active=True).exists()
-        from apps.rbac.models import UserRole
-        user_role_ids = UserRole.objects.filter(
-            user_profile=self,
-            role__is_active=True
-        ).values_list('role_id', flat=True)
+        user_role_ids = self._effective_role_ids()
         return Permission.objects.filter(
             roles__id__in=user_role_ids,
             code=permission_code,
@@ -433,11 +498,7 @@ class UserProfile(TimeStampedModel):
         if self.is_super_admin():
             return True
         
-        from apps.rbac.models import UserRole
-        user_role_ids = UserRole.objects.filter(
-            user_profile=self,
-            role__is_active=True
-        ).values_list('role_id', flat=True)
+        user_role_ids = self._effective_role_ids()
         accepted_codes = [module_code]
         return Module.objects.filter(
             roles__id__in=user_role_ids,
@@ -448,10 +509,11 @@ class UserProfile(TimeStampedModel):
     def get_all_permissions(self):
         """Effective action permissions: explicit user decisions override role grants."""
         # Read overrides on every request so a revoke cannot be masked by a stale cache.
+        user_role_ids = self._effective_role_ids()
         permissions = Permission.objects.filter(is_active=True)
         if not self.is_super_admin():
             permissions = permissions.filter(
-                models.Q(roles__in=self.roles.filter(is_active=True)) |
+                models.Q(roles__id__in=user_role_ids) |
                 models.Q(user_overrides__user_profile=self, user_overrides__allowed=True)
             )
         return list(permissions.exclude(
@@ -478,23 +540,14 @@ class UserProfile(TimeStampedModel):
                 _sync_module_catalogue()
                 modules = list(Module.objects.filter(is_active=True))
             else:
-                # Get role IDs through UserRole relationship — only active roles
-                user_role_ids = UserRole.objects.filter(
-                    user_profile=self,
-                    role__is_active=True
-                ).values_list('role_id', flat=True)
+                # Get role IDs through UserRole relationship — only active roles (incl. delegated)
+                user_role_ids = self._effective_role_ids()
                 
                 # Get modules linked to these roles through RoleModule
                 modules = list(Module.objects.filter(
                     rolemodule__role_id__in=user_role_ids,
                     is_active=True
                 ).distinct())
-
-                from apps.rbac.service_catalogue import is_sales_department
-                if is_sales_department(self.department):
-                    sales_modules = Module.objects.filter(code__startswith='sales_', is_active=True)
-                    existing_ids = {module.id for module in modules}
-                    modules.extend(module for module in sales_modules if module.id not in existing_ids)
 
             # Soft-coded global access modules (for all authenticated users)
             try:
@@ -538,6 +591,8 @@ class UserRole(TimeStampedModel):
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
     assigned_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     is_primary = models.BooleanField(default=False)
+    effective_from = models.DateTimeField(null=True, blank=True, help_text="Role assignment becomes active at this time (null = immediately)")
+    expires_at = models.DateTimeField(null=True, blank=True, help_text="Role assignment expires at this time (null = never expires)")
     
     class Meta:
         db_table = 'rbac_user_roles'
@@ -545,10 +600,69 @@ class UserRole(TimeStampedModel):
         indexes = [
             models.Index(fields=['user_profile', 'role']),
             models.Index(fields=['is_primary']),
+            models.Index(fields=['effective_from', 'expires_at']),
         ]
     
     def __str__(self):
         return f"{self.user_profile.user.email} - {self.role.name}"
+
+    def is_effective(self):
+        """True if this role assignment is currently within its time window."""
+        now = timezone.now()
+        if self.effective_from and self.effective_from > now:
+            return False
+        if self.expires_at and self.expires_at <= now:
+            return False
+        return True
+
+
+class Delegation(TimeStampedModel):
+    """
+    Temporary delegation of a role from one user to another.
+    The delegatee gains the delegator's role grants for the delegation window.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    delegator = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='delegations_given'
+    )
+    delegatee = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='delegations_received'
+    )
+    role = models.ForeignKey(Role, on_delete=models.CASCADE)
+    effective_from = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    reason = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    delegated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+
+    class Meta:
+        db_table = 'rbac_delegations'
+        indexes = [
+            models.Index(fields=['delegatee', 'role']),
+            models.Index(fields=['delegator', 'role']),
+            models.Index(fields=['effective_from', 'expires_at']),
+            models.Index(fields=['is_active']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['delegator', 'delegatee', 'role'],
+                name='rbac_unique_delegation',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.delegator.user.email} -> {self.delegatee.user.email} ({self.role.code})"
+
+    def is_effective(self):
+        """True if this delegation is currently active and within its time window."""
+        if not self.is_active:
+            return False
+        now = timezone.now()
+        if self.effective_from and self.effective_from > now:
+            return False
+        if self.expires_at and self.expires_at <= now:
+            return False
+        return True
 
 
 class UserStorage(TimeStampedModel):
@@ -1098,6 +1212,87 @@ class ProfileDocument(TimeStampedModel):
         from datetime import timedelta
         threshold = timezone.now().date() + timedelta(days=days)
         return self.expiry_date <= threshold and not self.is_expired
+
+
+class FieldPermission(TimeStampedModel):
+    """
+    Field-level permission: grant or deny read/write access to a specific
+    model field for a role (or individual user override).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    role = models.ForeignKey(
+        Role, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='field_permissions',
+        help_text='Role this field permission applies to (null = user-specific override)',
+    )
+    user_profile = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='field_permission_overrides',
+        help_text='User-specific override (null = role-level)',
+    )
+    model_name = models.CharField(
+        max_length=100,
+        help_text='Model class name (e.g. EmployeeMaster, Invoice)',
+    )
+    field_name = models.CharField(max_length=100)
+    can_read = models.BooleanField(default=True)
+    can_write = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'rbac_field_permissions'
+        unique_together = ['role', 'user_profile', 'model_name', 'field_name']
+        indexes = [
+            models.Index(fields=['role', 'model_name', 'field_name']),
+            models.Index(fields=['user_profile', 'model_name', 'field_name']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        target = self.user_profile.user.email if self.user_profile else self.role.code
+        return f"{target} -> {self.model_name}.{self.field_name} (r={self.can_read}, w={self.can_write})"
+
+
+class RowLevelPermission(TimeStampedModel):
+    """
+    Row-level permission: restricts which rows of a model a role/user can access,
+    based on a filter field and value pattern.
+    Example: role 'engineer' can only access EmployeeMaster rows where
+    organization = user's organization.
+    """
+    FILTER_TYPE_CHOICES = [
+        ('exact', 'Exact match'),
+        ('org_user', 'Same organization as user'),
+        ('org_department', 'Same organization and department as user'),
+        ('user_owner', 'Row owned by user (created_by)'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    role = models.ForeignKey(
+        Role, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='row_level_permissions',
+    )
+    user_profile = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='row_level_permission_overrides',
+    )
+    model_name = models.CharField(max_length=100)
+    filter_field = models.CharField(max_length=100, help_text='Model field to filter on (e.g. organization, created_by)')
+    filter_type = models.CharField(max_length=20, choices=FILTER_TYPE_CHOICES, default='exact')
+    filter_value = models.CharField(max_length=255, blank=True, help_text='Static value for exact match (ignored for org_user/org_department/user_owner)')
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'rbac_row_level_permissions'
+        unique_together = ['role', 'user_profile', 'model_name', 'filter_field', 'filter_type']
+        indexes = [
+            models.Index(fields=['role', 'model_name']),
+            models.Index(fields=['user_profile', 'model_name']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        target = self.user_profile.user.email if self.user_profile else self.role.code
+        return f"{target} -> {self.model_name} where {self.filter_field} ({self.filter_type})"
 
 
 # Re-export the AI Champion models so Django discovers them as part of this app.

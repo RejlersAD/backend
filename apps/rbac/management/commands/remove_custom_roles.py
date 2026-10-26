@@ -125,18 +125,8 @@ class Command(BaseCommand):
                             profile.roles.add(default_role)
                             self.stdout.write(f"     ✅ Added 'default' role to {user_email}")
                         
-                        # Clear direct module assignments
-                        profile.modules.clear()
-                        
-                        # Add default role modules
-                        for module_code in default_modules:
-                            try:
-                                module = Module.objects.get(code=module_code, is_active=True)
-                                profile.modules.add(module)
-                            except Module.DoesNotExist:
-                                pass
-                        
-                        profile.save()
+                        # Module access is granted exclusively through Role -> RoleModule.
+                        # No direct per-user module assignment.
                         migrated += 1
                         
                 except Exception as e:
