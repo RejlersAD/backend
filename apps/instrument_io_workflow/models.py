@@ -1,4 +1,4 @@
-﻿"""
+"""
 Lean data model â€” six tables:
 
     IOListProject             â€” project container for organizing documents

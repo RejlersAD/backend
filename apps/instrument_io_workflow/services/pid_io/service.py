@@ -267,8 +267,9 @@ def _base_service(member, connectors_by_page, page=None, equipment=None, members
         if conns:
             conn = conns[0]
             verb = 'FROM' if conn.direction == 'out' else 'TO'
+            equip_name = tag.equipment.replace('-', '')
             return ServiceResult(
-                tag.tag, f'{conn.fluid} {verb} {tag.equipment.replace("-", "")}', 0.85,
+                tag.tag, f'{conn.fluid} {verb} {equip_name}', 0.85,
                 f'connector #{conn.conn_id} ({conn.drawing_ref}); valve on {tag.equipment}')
         return ServiceResult(tag.tag, tag.equipment.replace('-', ''), 0.50,
                              f'valve on {tag.equipment}, no connector reached')
@@ -296,8 +297,9 @@ def _base_service(member, connectors_by_page, page=None, equipment=None, members
         if conn and equip_at_end:
             direction = conn.direction or 'in'
             verb = 'TO' if direction == 'in' else 'FROM'
+            equip_name = equip_at_end.replace('-', '')
             return ServiceResult(
-                tag.tag, f'{conn.fluid} {verb} {equip_at_end.replace("-", "")}', 0.85,
+                tag.tag, f'{conn.fluid} {verb} {equip_name}', 0.85,
                 f'connector #{conn.conn_id} ({conn.drawing_ref}) flows {direction}; '
                 f'line run ends at {equip_at_end} nozzle')
         if conn:

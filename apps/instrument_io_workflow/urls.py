@@ -1,4 +1,4 @@
-﻿from django.urls import path, include
+from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from . import views_extraction as extraction_views
