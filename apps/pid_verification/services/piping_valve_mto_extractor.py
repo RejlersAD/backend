@@ -237,6 +237,11 @@ LINE_NUMBER_HARVEST_PATTERNS: List[str] = [
     r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z]{1,4}[-\s]+[A-Z0-9]{3,6}[-\s]+\d{3,6}\b',
     # SIZE"-AREA-SERVICE-SEQ-PIPECLASS-END (Borouge / Linde area-first)
     r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+\d{2,3}[-\s]+[A-Z]{1,3}[-\s]+\d{4,6}[-\s]+[A-Z0-9]{5,7}[-\s]+[A-Z]{1,2}\b',
+    # FLUID-SEQ-SIZE"-PIPECLASS(-INSUL) — service-first convention, seq may
+    # carry a unit-train letter prefix or variant suffix. Seen on production
+    # P&IDs: P-55027-12"-33460-C, P-U51316-8"-PA0D1, P-51524A-1"-PA0D-C,
+    # BD-71115A-2"-EA2B. (Mirrors valve_mto pdf_parse's default preset.)
+    r'\b[A-Z]{1,4}-[A-Z]?\d{3,6}[A-Z]?-\d{1,2}(?:-\d/\d)?["″]?-[A-Z0-9]{3,7}(?:-[A-Z]{1,2}\d?)?\b',
 ]
 _LINE_NUMBER_HARVEST_RE = [re.compile(p, re.IGNORECASE) for p in LINE_NUMBER_HARVEST_PATTERNS]
 

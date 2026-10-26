@@ -41,23 +41,27 @@ logger = logging.getLogger(__name__)
 _SIZE = r'(?P<size>\d{1,2}(?:-\d/\d)?)["″]?'
 _CLASS = r'(?P<class>[A-Z0-9]{3,7})'
 _INSUL = r'(?:-(?P<insul>[A-Z]{1,2}\d?))?'
+# Sequence numbers on real drawings may carry a letter prefix (unit-train
+# marker, e.g. U51316) or a letter suffix (line variant, e.g. 51524A,
+# 71115A) — both seen on production P&IDs; bare digits remain the norm.
+_SEQ = r'(?P<seq>[A-Z]?\d{3,6}[A-Z]?)'
 
 LINE_PATTERN_PRESETS = {
-    # P-51220-18"-31170-C
+    # P-51220-18"-31170-C  ·  P-U51316-8"-PA0D1  ·  P-51524A-1"-PA0D-C
     'service-seq-size-class-insul': (
-        rf'(?P<fluid>[A-Z]{{1,4}})-(?P<seq>\d{{3,6}})-{_SIZE}-{_CLASS}{_INSUL}'
+        rf'(?P<fluid>[A-Z]{{1,4}})-{_SEQ}-{_SIZE}-{_CLASS}{_INSUL}'
     ),
     # 8"-2600-P-305-11051YR-I
     'size-unit-fluid-seq-class-insul': (
-        rf'{_SIZE}-(?P<unit>\d{{3,4}})-(?P<fluid>[A-Z]{{1,4}})-(?P<seq>\d{{3,6}})-{_CLASS}{_INSUL}'
+        rf'{_SIZE}-(?P<unit>\d{{3,4}})-(?P<fluid>[A-Z]{{1,4}})-{_SEQ}-{_CLASS}{_INSUL}'
     ),
     # 2600-AY-005-17091R-V
     'unit-fluid-seq-class-insul': (
-        rf'(?P<unit>\d{{3,4}})-(?P<fluid>[A-Z]{{1,4}})-(?P<seq>\d{{3,6}})-{_CLASS}{_INSUL}'
+        rf'(?P<unit>\d{{3,4}})-(?P<fluid>[A-Z]{{1,4}})-{_SEQ}-{_CLASS}{_INSUL}'
     ),
     # 6-PL-DC3N-8166-P
     'size-fluid-class-seq-insul': (
-        rf'(?P<size>\d{{1,2}})-(?P<fluid>[A-Z]{{1,4}})-{_CLASS}-(?P<seq>\d{{3,6}}){_INSUL}'
+        rf'(?P<size>\d{{1,2}})-(?P<fluid>[A-Z]{{1,4}})-{_CLASS}-{_SEQ}{_INSUL}'
     ),
 }
 # Required named groups for a Custom preset regex (§3).

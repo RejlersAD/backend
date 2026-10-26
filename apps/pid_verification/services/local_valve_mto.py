@@ -58,11 +58,26 @@ def _extract_class_from_line_number(line_number):
     tokens[0] is the 2-letter service code (no digit) and tokens[1] the
     size.
 
+    Format 3 \u2014 SERVICE-SEQ-SIZE-CLASS[-INSUL]:
+    P-55027-12"-33460-C, P-U51316-8"-PA0D1, P-51524A-1"-PA0D-C
+    tokens[0] service, tokens[1] sequence (optional letter prefix/suffix),
+    tokens[2] size, class at tokens[3]. The class may be digit-only here
+    (e.g. 33460) \u2014 the surrounding shape is strict enough that this is a
+    read, not a guess.
+
     Returns None (never raises, never guesses a class from an unrelated
     format) whenever the line number doesn't match either shape or the
     candidate segment doesn't look like a real class code."""
     tokens = [t.strip() for t in str(line_number or '').upper().split('-') if t.strip()]
     if len(tokens) < 3:
+        return None
+    if (len(tokens) >= 4
+            and re.fullmatch(r'[A-Z]{1,4}', tokens[0])
+            and re.fullmatch(r'[A-Z]?\d{3,6}[A-Z]?', tokens[1])
+            and re.fullmatch(r'\d{1,2}(?:-\d/\d)?["\u2033]?', tokens[2])):
+        class_candidate = tokens[3]
+        if re.fullmatch(r'[A-Z0-9]{3,7}', class_candidate):
+            return class_candidate
         return None
     if any(ch.isdigit() for ch in tokens[0]):
         # Format 1: size first, then the 2-letter service code.
