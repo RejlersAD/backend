@@ -207,7 +207,9 @@ def call_claude(
             'max_retries': 0,
         }
         if managed:
-            client_options.update(base_url='https://api.anthropic.com', auth_token='',
+            # No auth_token: anthropic SDK v2 rejects api_key+auth_token together;
+            # the Omit() Authorization header alone suppresses Bearer auth.
+            client_options.update(base_url='https://api.anthropic.com',
                                   default_headers={'Authorization': anthropic.Omit(),
                                                    'X-Api-Key': claude_config['api_key']})
         with (_private_provider_logs() if managed else nullcontext()), anthropic.Anthropic(**client_options) as client:

@@ -53,7 +53,9 @@ class CentralPlanningTransportTests(TestCase):
                     options = constructor.call_args.kwargs
                     self.assertEqual(options['base_url'], 'https://api.anthropic.com')
                     self.assertEqual(options['api_key'], secret)
-                    self.assertEqual(options['auth_token'], '')
+                    # auth_token must never accompany api_key (anthropic SDK v2
+                    # raises on the combination).
+                    self.assertNotIn('auth_token', options)
                     self.assertEqual(options['default_headers']['X-Api-Key'], secret)
                     self.assertEqual(type(options['default_headers']['Authorization']).__name__, 'Omit')
                     self.assertEqual(options['max_retries'], 0)

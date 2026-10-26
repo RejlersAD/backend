@@ -104,7 +104,7 @@ def probe_credential(credential):
                 content = response.choices[0].message.content
             elif credential.provider == 'anthropic':
                 from anthropic import Anthropic, Omit
-                with Anthropic(api_key=credential.api_key, auth_token='', base_url='https://api.anthropic.com',
+                with Anthropic(api_key=credential.api_key, base_url='https://api.anthropic.com',
                                default_headers={'Authorization': Omit(), 'X-Api-Key': credential.api_key},
                                timeout=20, max_retries=0) as client:
                     response = client.messages.create(

@@ -333,7 +333,7 @@ class AnthropicEmailAIProviderTests(SimpleTestCase):
         self.assertIsInstance(options['default_headers']['Authorization'], Omit)
         self.assertEqual(options['default_headers']['X-Api-Key'], 'synthetic-anthropic-key')
         self.assertEqual({key: value for key, value in options.items() if key != 'default_headers'}, {
-            'api_key': 'synthetic-anthropic-key', 'auth_token': '', 'base_url': OFFICIAL_ANTHROPIC_URL,
+            'api_key': 'synthetic-anthropic-key', 'base_url': OFFICIAL_ANTHROPIC_URL,
             'timeout': 12.0, 'max_retries': 0,
         })
         arguments = self.client.messages.create.call_args.kwargs
