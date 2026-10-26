@@ -135,7 +135,8 @@ def generate_service(c, members, connectors_by_page, all_loops=None,
         x_members = (all_loops or {}).get(f'{tag.unit}-X-{digits}', members)
         xv = next((m.tag for m in x_members if m.tag.func == 'XV'), None)
         if tmpl and xv:
-            valve = f'{xv.unit}{xv.func}{re.match(r"^(\d+)", xv.loop).group(1)}'
+            loop_digits = re.match(r'^(\d+)', xv.loop).group(1)
+            valve = f'{xv.unit}{xv.func}{loop_digits}'
             return ServiceResult(tag.tag, tmpl.format(valve=valve), 0.95,
                                  f'HS template ({suffix}) for {xv.tag}')
 
