@@ -259,5 +259,6 @@ def test_valve_mto_api_key_view(request):
 
     provider = request.data.get('provider')
     api_key  = request.data.get('api_key')
-    valid, message = test_api_key(provider, api_key)
+    model    = request.data.get('model')  # optional BYOK model dropdown choice
+    valid, message = test_api_key(provider, api_key, model=model)
     return Response({'valid': valid, 'message': message})

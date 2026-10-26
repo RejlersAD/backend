@@ -112,3 +112,69 @@ class ElectricalComparisonResult(models.Model):
         max_length=100, blank=True)
     # resolved from electrical legend lookup
     remarks = models.TextField(blank=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Staged analysis flow ("RADAI SLD Comparison" canvas) — additive models;
+# the legacy job/result tables above stay untouched for old analyses.
+# ─────────────────────────────────────────────────────────────────────────
+
+class SldUserAIKey(models.Model):
+    """Stage 2 BYOK — one vision key per user+provider, stored ENCRYPTED
+    (apps.core.ai_credentials.encrypt_api_key). The raw key is never
+    echoed back to the browser, never written to logs; only key_last4
+    is exposed for the 'Using your key ••••a91f' pill."""
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sld_ai_keys')
+    provider = models.CharField(max_length=20)  # openai | claude
+    encrypted_key = models.TextField()
+    key_last4 = models.CharField(max_length=8)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'provider'], name='uniq_sld_ai_key_per_user_provider'),
+        ]
+
+
+class SldAnalysisFile(models.Model):
+    """Stage 1 — one uploaded file slot (sld / equipment / load) with its
+    read summary (what RADAI read from the file before continuing)."""
+    KIND_CHOICES = [('sld', 'SLD drawing'), ('equipment', 'Equipment List'), ('load', 'Load List')]
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True)
+    project = models.ForeignKey(ElectricalProject, on_delete=models.CASCADE, related_name='sld_files')
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES)
+    file = models.FileField(upload_to='electrical_comparison/staged/%Y/%m/')
+    original_name = models.CharField(max_length=255)
+    summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class SldProjectSettings(models.Model):
+    """Per-project staged-flow state: stage gating, active legend. Mirrors
+    apps.valve_mto.ValveMTOProjectSettings' convention."""
+    project = models.OneToOneField(ElectricalProject, on_delete=models.CASCADE, related_name='sld_settings')
+    stage_state = models.JSONField(default=dict, blank=True)  # {'1': 'complete', ...}
+    legend = models.JSONField(default=dict, blank=True)       # {source: 'drawing'|legendId, tagRules, name}
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class SldAnalysis(models.Model):
+    """One analysis run. All tab payloads live in `result` (equipment /
+    load / drafting / interfaces / cables + headline) so tabs can be
+    served from a single row; evidence crops are stored as files whose
+    URLs appear in the payload."""
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True)
+    project = models.ForeignKey(ElectricalProject, on_delete=models.CASCADE, related_name='sld_analyses')
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    status = models.CharField(max_length=20, default='queued')  # queued/running/completed/failed
+    error = models.TextField(blank=True)
+    result = models.JSONField(default=dict, blank=True)
+    outdated = models.BooleanField(default=False)  # a list file was replaced after this run
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']

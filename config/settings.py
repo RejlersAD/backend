@@ -509,16 +509,19 @@ print(f"[DJANGO] DB host: {DATABASE_URL.split('@')[-1]}")
 # Parse database configuration
 db_config = dj_database_url.parse(DATABASE_URL)
 
-# Extended timeout configuration for Railway database
+# Extended timeout configuration for Railway database (PostgreSQL only —
+# these OPTIONS are passed verbatim to the driver, and sqlite3 rejects
+# them with "Connection() takes at most 8 keyword arguments").
 db_config['CONN_MAX_AGE'] = 600  # Keep connection alive for 10 minutes
-db_config['OPTIONS'] = {
-    'connect_timeout': 60,  # 60 seconds for initial connection
-    'options': '-c statement_timeout=120000',  # 120 seconds for queries
-    'keepalives': 1,
-    'keepalives_idle': 60,
-    'keepalives_interval': 10,
-    'keepalives_count': 10
-}
+if 'postgresql' in db_config.get('ENGINE', ''):
+    db_config['OPTIONS'] = {
+        'connect_timeout': 60,  # 60 seconds for initial connection
+        'options': '-c statement_timeout=120000',  # 120 seconds for queries
+        'keepalives': 1,
+        'keepalives_idle': 60,
+        'keepalives_interval': 10,
+        'keepalives_count': 10
+    }
 
 # Dedicated test database name so `manage.py test` / pytest never touch the main DB
 if ENVIRONMENT.lower() not in ('production', 'prod'):

@@ -33,3 +33,23 @@ urlpatterns = [
     path('jobs/<uuid:job_id>/annotated-pages/',
          AnnotatedPagesView.as_view(), name='annotated-pages'),
 ]
+
+# ── Staged analysis flow ("RADAI SLD Comparison" canvas) ─────────────────
+from .views_staged import (  # noqa: E402
+    SldAnalyseView, SldAnalysesView, SldAnalysisDetailView, SldAnalysisExportView,
+    SldFileMappingView, SldFileUploadView, SldLegendView, SldStateView,
+    SldUserAIKeyTestView, SldUserAIKeyView,
+)
+
+urlpatterns += [
+    path('sld/user/ai-key/', SldUserAIKeyView.as_view()),
+    path('sld/user/ai-key/test/', SldUserAIKeyTestView.as_view()),
+    path('sld/<uuid:project_id>/state/', SldStateView.as_view()),
+    path('sld/<uuid:project_id>/files/', SldFileUploadView.as_view()),
+    path('sld/<uuid:project_id>/files/<uuid:file_id>/mapping/', SldFileMappingView.as_view()),
+    path('sld/<uuid:project_id>/legend/', SldLegendView.as_view()),
+    path('sld/<uuid:project_id>/analyse/', SldAnalyseView.as_view()),
+    path('sld/<uuid:project_id>/analyses/', SldAnalysesView.as_view()),
+    path('sld/<uuid:project_id>/analyses/<uuid:analysis_id>/', SldAnalysisDetailView.as_view()),
+    path('sld/<uuid:project_id>/analyses/<uuid:analysis_id>/export/', SldAnalysisExportView.as_view()),
+]

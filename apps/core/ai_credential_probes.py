@@ -110,7 +110,7 @@ def probe_credential(credential):
                     # only a tiny JSON response within the existing token cap.
                     probe_body['thinking'] = {'type': 'between_tools'}
                     probe_body['output_config']['effort'] = 'low'
-                with Anthropic(api_key=credential.api_key, auth_token='', base_url='https://api.anthropic.com',
+                with Anthropic(api_key=credential.api_key, base_url='https://api.anthropic.com',
                                default_headers={'Authorization': Omit(), 'X-Api-Key': credential.api_key},
                                timeout=20, max_retries=0) as client:
                     response = client.messages.create(

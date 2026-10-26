@@ -273,7 +273,16 @@ class _ProviderClient(_Resource):
                 options.update(base_url='https://api.openai.com/v1', organization='', project='')
             elif self._provider == 'anthropic':
                 from anthropic import Omit
-                options.update(base_url='https://api.anthropic.com', auth_token='',
+                # BUG FIX (real, confirmed in production): passing
+                # auth_token='' alongside api_key= is rejected outright by
+                # anthropic SDK v2 ("Pass at most one of api_key=,
+                # auth_token=, ...") — the ValueError carries no HTTP
+                # status, so every Anthropic call (central AND BYOK, since
+                # personal keys take this same managed branch) was masked as
+                # "The AI provider is unavailable". An empty auth_token adds
+                # nothing on any SDK version, so simply never send it; the
+                # X-Api-Key header below keeps Bearer auth suppressed.
+                options.update(base_url='https://api.anthropic.com',
                                default_headers={'Authorization': Omit(), 'X-Api-Key': key})
             elif self._provider == 'gemini':
                 options.update(vertexai=False, http_options={'base_url': 'https://generativelanguage.googleapis.com'})

@@ -208,10 +208,11 @@ def _anthropic_client(config):
     from anthropic import Anthropic, Omit
 
     return Anthropic(
-        api_key=config.api_key, auth_token='', base_url=OFFICIAL_ANTHROPIC_URL,
+        api_key=config.api_key, base_url=OFFICIAL_ANTHROPIC_URL,
         timeout=config.timeout_seconds, max_retries=0,
-        # Some SDK versions emit "Bearer " for an empty auth_token. Remove that
-        # header explicitly; email processing uses only the configured API key.
+        # Never pass auth_token alongside api_key: anthropic SDK v2 rejects the
+        # combination outright. Omitting the Authorization header via Omit()
+        # keeps Bearer auth suppressed on every SDK version.
         default_headers={'Authorization': Omit(), 'X-Api-Key': config.api_key},
     )
 

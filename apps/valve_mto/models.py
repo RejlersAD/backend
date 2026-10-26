@@ -1,27 +1,27 @@
-﻿"""
-Valve MTO â€” Server-side persistence
+"""
+Valve MTO — Server-side persistence
 ====================================
 
 Until this app existed, the Valve MTO workspace (frontend:
-src/pages/Engineering/Piping/ValveMTO.jsx) was ENTIRELY client-persisted â€”
+src/pages/Engineering/Piping/ValveMTO.jsx) was ENTIRELY client-persisted —
 project headers and extracted rows lived only in browser localStorage
 (`radai.valveMTO.state.v1`), so closing the browser (or switching
 devices) silently lost a user's extracted/hand-corrected MTO data. This
 app adds a real, durable, server-side copy alongside that (the frontend
-keeps localStorage too, as an offline-friendly cache/backup â€” see its
+keeps localStorage too, as an offline-friendly cache/backup — see its
 own comment), so the data survives regardless of the browser.
 
 Two models, mirroring the frontend's own project/row split
 (src/config/valveMTO.config.js's VALVE_COLUMNS and
 src/config/valveMTOProjects.js's project shape):
 
-    ValveMTOProject â€” one saved "project" (a named MTO workspace, usually
+    ValveMTOProject — one saved "project" (a named MTO workspace, usually
     one per source P&ID/valve schedule).
-    ValveMTORow â€” one valve/line row belonging to a project, in the
+    ValveMTORow — one valve/line row belonging to a project, in the
     canonical 17-field schema the extractor/frontend already use.
 
 Does NOT touch the actual extraction pipeline (apps.pid_verification's
-piping_valve_mto_view.py / services/piping_valve_mto_extractor.py) â€” this
+piping_valve_mto_view.py / services/piping_valve_mto_extractor.py) — this
 app is pure storage; the frontend calls the existing extraction endpoint
 first, then POSTs the resulting rows here to persist them.
 """
@@ -55,7 +55,7 @@ class ValveMTOProject(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     # The PDF (or spreadsheet) the rows were originally extracted/imported
-    # from â€” filename only, not a stored file (the extraction pipeline in
+    # from — filename only, not a stored file (the extraction pipeline in
     # apps.pid_verification already handles the transient upload/job
     # lifecycle; duplicating file storage here isn't this app's job).
     source_pdf_name = models.CharField(max_length=255, blank=True, default='')
@@ -74,10 +74,10 @@ class ValveMTOProject(models.Model):
 
 
 class ValveMTORow(models.Model):
-    """One valve/line row â€” the canonical schema shared by the extractor
+    """One valve/line row — the canonical schema shared by the extractor
     (piping_valve_mto_extractor.py's ROW_KEYS) and the frontend table
     (valveMTO.config.js's VALVE_COLUMNS), so every field the extractor can
-    populate has a real column here â€” nothing gets dropped on save. `tab`
+    populate has a real column here — nothing gets dropped on save. `tab`
     records which of the frontend's ISLAND/FIELD/COMBINED tabs this row
     was showing under. Installation allocation is independent of `area`,
     which stores the complete source drawing title.
@@ -92,17 +92,17 @@ class ValveMTORow(models.Model):
     rating = models.CharField(max_length=64, blank=True, default='')
     size_primary = models.CharField(max_length=32, blank=True, default='')
     # BUG FIX: the frontend's local row shape (VALVE_COLUMNS) has THREE
-    # size-related columns â€” size_1, size_2, AND bore â€” but this model
+    # size-related columns — size_1, size_2, AND bore — but this model
     # originally only had one ('size_secondary', mapped from 'bore') to
     # match the field list this app was first built to. That silently
-    # dropped 'size_2' on every save â€” a real, confirmed data-loss gap.
+    # dropped 'size_2' on every save — a real, confirmed data-loss gap.
     # size_secondary_2 now covers it; size_secondary (bore) is unchanged.
     size_secondary = models.CharField(max_length=32, blank=True, default='')  # bore (FB/RB)
     size_secondary_2 = models.CharField(max_length=32, blank=True, default='')  # size_2 (NB)
     line_number = models.CharField(max_length=255, blank=True, default='')
     line_list_ref = models.CharField(max_length=255, blank=True, default='')
     # P&ID drawing sheet number (AD111-XXX-D-XXXXX format) the valve
-    # appears ON â€” distinct from line_number (the valve's own line/piping
+    # appears ON — distinct from line_number (the valve's own line/piping
     # tag). Added alongside 'facing' below so the extractor's two newer
     # fields (see piping_valve_mto_extractor.py's MANDATORY FIELDS rules
     # for pid_number/facing) have real columns here; without them both
@@ -110,7 +110,7 @@ class ValveMTORow(models.Model):
     # size_secondary_2 fixed for 'size_2' above.
     pid_number = models.CharField(max_length=255, blank=True, default='')
     # Valve facing: RF (Raised Face) / FF (Flat Face) / RTJ (Ring-Type
-    # Joint) â€” kept as its own field (not folded into 'rating') so it
+    # Joint) — kept as its own field (not folded into 'rating') so it
     # round-trips independently even though the standard Excel template
     # displays it combined with rating under one "RATING / FACING" column
     # (see valveMTOExporter.js).
@@ -129,6 +129,22 @@ class ValveMTORow(models.Model):
     tab = models.CharField(max_length=16, blank=True, default='')  # island / field / combined
     row_order = models.IntegerField(default=0)
 
+    # ── §7 data-contract fields (staged extraction flow) ─────────────
+    # All additive/nullable so existing rows/imports keep working.
+    page = models.PositiveIntegerField(null=True, blank=True)
+    pos_x = models.FloatField(null=True, blank=True)
+    pos_y = models.FloatField(null=True, blank=True)
+    variant = models.CharField(max_length=32, blank=True, default='')  # open | normally-closed | locked-open | actuated
+    category = models.CharField(max_length=32, blank=True, default='')  # manual|control|actuated-onoff|psv|solenoid
+    type_basis = models.CharField(max_length=32, blank=True, default='')  # tag-rule|legend-symbol|note-rule|unidentified
+    symbol_group_id = models.CharField(max_length=64, blank=True, default='')
+    scope_status = models.CharField(max_length=32, blank=True, default='')  # new-in-scope|existing-reused|existing-outside|vendor-package
+    piping_class_source = models.CharField(max_length=32, blank=True, default='')  # line-number|spec-break|not-shown
+    material_source = models.CharField(max_length=16, blank=True, default='')  # pms|inferred|per-pms
+    pid_rev = models.CharField(max_length=16, blank=True, default='')
+    confidence_score = models.FloatField(null=True, blank=True)  # 0..1
+    evidence_crop = models.FileField(upload_to='valve_mto/evidence/', null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -144,7 +160,7 @@ class ValveMTORow(models.Model):
         return f'{self.tag_number or "(untagged)"} [{self.project_id}]'
 
 
-# Deliberately its OWN tuple, not imported from apps.pid_checker_v2 â€”
+# Deliberately its OWN tuple, not imported from apps.pid_checker_v2 —
 # same cross-app isolation convention this codebase already uses
 # elsewhere (e.g. apps.instrument_io_workflow's own independent legend/
 # vision reimplementations). Matches ValveMTO.jsx's own
@@ -157,16 +173,16 @@ VALVE_MTO_LEGEND_SECTION_CHOICES = tuple((s, s.replace('_', ' ').title()) for s 
 
 
 class ValveMTOLegend(models.Model):
-    """Valve MTO's OWN legend/reference-data table â€” fully isolated from
+    """Valve MTO's OWN legend/reference-data table — fully isolated from
     apps.pid_checker_v2's PidCheckerV2LegendSheet (used by P&ID
     Verification V1/V2). Architectural fix for a real, confirmed bug this
     session: that shared table has only ONE active legend per (user,
     section), with no per-module dimension at all, so Valve MTO's own
-    auto-created defaults (needed active to feed its Vision prompt â€” see
+    auto-created defaults (needed active to feed its Vision prompt — see
     piping_valve_mto_extractor.py's _build_legend_context) kept silently
     becoming the active legend in P&ID V1/V2 too, since both modules read
     the exact same row. Giving Valve MTO its own table removes the shared
-    state entirely â€” no amount of activating here can ever affect P&ID.
+    state entirely — no amount of activating here can ever affect P&ID.
 
     Same (legend_id UUID distinct from PK, section, name, description,
     definition JSON, is_active, created_by, timestamps) shape as
@@ -198,8 +214,8 @@ class ValveMTOLegend(models.Model):
         constraints = [
             # Mirrors PidCheckerV2LegendSheet's own
             # uniq_pidv2_active_legend_per_user_section_project constraint
-            # (minus the project dimension â€” Valve MTO legends aren't
-            # project-scoped) â€” exactly one active legend per user+section.
+            # (minus the project dimension — Valve MTO legends aren't
+            # project-scoped) — exactly one active legend per user+section.
             models.UniqueConstraint(
                 fields=['created_by', 'section'],condition=models.Q(is_active=True),
                 name='uniq_valve_mto_active_legend_per_user_section',
@@ -209,3 +225,125 @@ class ValveMTOLegend(models.Model):
     def __str__(self) -> str:
         return f'{self.name} [{self.section}] ({"active" if self.is_active else "inactive"})'
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# Staged extraction flow (§7 data contract)
+# ─────────────────────────────────────────────────────────────────────────
+
+# Line-number pattern presets (§3) — kept in sync with
+# pdf_parse.LINE_PATTERN_PRESETS; stored on the settings row as the preset id.
+LINE_PATTERN_PRESET_CHOICES = [
+    ('service-seq-size-class-insul', 'SERVICE-SEQ-SIZE-CLASS-INSUL'),
+    ('size-unit-fluid-seq-class-insul', 'SIZE-UNIT-FLUID-SEQ-CLASS-INSUL'),
+    ('unit-fluid-seq-class-insul', 'UNIT-FLUID-SEQ-CLASS-INSUL'),
+    ('size-fluid-class-seq-insul', 'SIZE-FLUID-CLASS-SEQ-INSUL'),
+    ('custom', 'Custom (regex)'),
+]
+
+
+class ValveMTOProjectSettings(models.Model):
+    """Per-project settings for the staged extraction flow (§2/§7):
+    stages 2–4 choices persist here so a new P&ID in the same project
+    pre-fills them. One row per ValveMTOProject, created lazily."""
+    project = models.OneToOneField(
+        ValveMTOProject, on_delete=models.CASCADE, related_name='mto_settings',
+    )
+    line_pattern_preset = models.CharField(
+        max_length=48, choices=LINE_PATTERN_PRESET_CHOICES,
+        default='service-seq-size-class-insul',
+    )
+    line_pattern_regex = models.TextField(blank=True, default='')  # custom named-group regex
+    # PMS (Stage 2): parsed class rows + coverage, or the skip marker.
+    pms_data = models.JSONField(default=dict, blank=True)  # {classes: {code: {rating,facing,material,...}}, source: filename}
+    pms_skipped = models.BooleanField(default=False)
+    pms_infer_from_drawing = models.BooleanField(default=False)
+    # Engine (Stage 3) — server-configured engine, no personal API keys.
+    engine_method = models.CharField(max_length=24, default='vector-vision')  # vector-vision|vision-only
+    engine_scope = models.CharField(max_length=24, default='project-scope')   # project-scope|all-visible
+    engine_instruments = models.CharField(max_length=24, default='list-separately')  # list-separately|exclude
+    engine_review_threshold = models.FloatField(default=0.80)
+    # Legend (Stage 4).
+    legend = models.ForeignKey(
+        'ValveMTOLegend', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+    )
+    legend_ack = models.JSONField(default=dict, blank=True)  # {by, reason, at}
+    # Stage state machine: {1: 'complete'|'needs-recheck'|..., ...} +
+    # extraction outdated flag. Derived fields, stored for cheap reads.
+    stage_state = models.JSONField(default=dict, blank=True)
+    extraction_outdated = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Valve MTO Project Settings'
+        verbose_name_plural = 'Valve MTO Project Settings'
+
+    def __str__(self) -> str:
+        return f'Settings for {self.project_id}'
+
+
+class ValveMTODrawing(models.Model):
+    """One uploaded P&ID (Stage 1). The parsed title block / line labels /
+    clouds / classes live in `parsed` so re-parsing is never needed for
+    re-checks; the file itself is kept so extraction can re-open it."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ValveMTOProject, on_delete=models.CASCADE, related_name='drawings',
+    )
+    file = models.FileField(upload_to='valve_mto/drawings/')
+    original_name = models.CharField(max_length=255, blank=True, default='')
+    page_count = models.PositiveIntegerField(default=0)
+    pdf_type = models.CharField(max_length=16, blank=True, default='')  # vector | raster
+    # parsed: {title_block:{...}, line_labels:[...], clouds:{...},
+    #          classes:[...], counts:{...}, pattern:{preset, regex, parsed, total}}
+    parsed = models.JSONField(default=dict, blank=True)
+    confirmed_drawing_number = models.CharField(max_length=255, blank=True, default='')
+    confirmed_rev = models.CharField(max_length=16, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Valve MTO Drawing'
+        verbose_name_plural = 'Valve MTO Drawings'
+
+    def __str__(self) -> str:
+        return f'{self.original_name or self.id} [{self.project_id}]'
+
+
+class ValveMTOJob(models.Model):
+    """Async extraction job (§4 Start Extraction). Steps list mirrors the
+    UI progress: Reading text layer → Detecting symbols → Matching legend
+    & tag rules → Associating lines & sizes → Applying scope → Building
+    register."""
+    STATUS_QUEUED = 'queued'
+    STATUS_RUNNING = 'running'
+    STATUS_COMPLETED = 'completed'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, 'Queued'),
+        (STATUS_RUNNING, 'Running'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ValveMTOProject, on_delete=models.CASCADE, related_name='mto_jobs',
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
+    current_step = models.CharField(max_length=64, blank=True, default='')
+    steps = models.JSONField(default=list, blank=True)  # [{name, status, detail}]
+    error = models.TextField(blank=True, default='')
+    result = models.JSONField(default=dict, blank=True)  # {row_count, unidentified, field_gaps, ...}
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Valve MTO Job'
+        verbose_name_plural = 'Valve MTO Jobs'
+
+    def __str__(self) -> str:
+        return f'Job {self.id} [{self.status}]'
