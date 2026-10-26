@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from . import views_extraction as extraction_views
+from apps.electrical_comparison.views_staged import SldUserAIKeyTestView, SldUserAIKeyView
 from .views import (
     IOListProjectViewSet, IOListDocumentViewSet, config_view, diff_view,
     vision_test_key_view, pdf_page_count_view,
@@ -42,6 +43,10 @@ urlpatterns = [
     path('default-symbol-images/', DefaultSymbolImagesView.as_view(), name='default-symbol-images'),
 
     # Deterministic P&ID → IO List extraction (alignment spec §8)
+    # BYOK key endpoints reuse the shared per-user AI key views (the key is
+    # stored per user, not per feature).
+    path('user/ai-key/', SldUserAIKeyView.as_view(), name='io-ai-key'),
+    path('user/ai-key/test/', SldUserAIKeyTestView.as_view(), name='io-ai-key-test'),
     path('projects/<uuid:project_id>/extraction-files/',
          extraction_views.upload_extraction_file, name='extraction-file-upload'),
     path('projects/<uuid:project_id>/extraction-files/list/',
