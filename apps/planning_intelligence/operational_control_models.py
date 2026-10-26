@@ -77,5 +77,6 @@ class OperationalControlReport(ApprovedControlRecord):
 
     class Meta:
         ordering = ['-created_at', '-pk']
-        constraints = [models.UniqueConstraint(fields=['baseline', 'reporting_period'],condition=models.Q(status__in=['draft', 'submitted']), name='one_open_operational_report')]
+        constraints = [models.UniqueConstraint(fields=['baseline', 'reporting_period'],
+            condition=models.Q(status__in=['draft', 'submitted']), name='one_open_operational_report')]
 

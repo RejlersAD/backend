@@ -91,13 +91,18 @@ across 38 class codes. The final run took 167.37 seconds and reported 133 issues
 (46 material joins, 81 unsupported/empty matrix rows, four ambiguous classes,
 two missing unit systems). There are no supplied independent engineering labels.
 
-Verification: the full scoped backend run passed 141 tests with six skips;
+Historical implementation verification: the initial scoped backend run passed 141 tests with six skips;
 24 focused checks passed after the last partial-fallback preservation changes.
 Two isolated component browser checks, scoped lint and whitespace checks passed.
-The full application build did not complete. Test settings used SQLite and a
+At that stage the full application build did not complete. Test settings used SQLite and a
 workspace-only Django 5.2.18 overlay to bypass an existing Django 5.0/model-API
 version mismatch; this is not verification of the installed deployment runtime.
 The workspace feature brief lists exact commands, test-hasher boundary and logs.
+
+The subsequent Development alignment fixes the Django 5.0 compatibility issue
+and validates the actual pinned runtime and frontend build. See
+[the current release verification](RELEASE_20261026.md) for the final results
+and separate PostgreSQL migration audit.
 
 ## Disposable-target handoff
 

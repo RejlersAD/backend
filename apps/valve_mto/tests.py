@@ -10,6 +10,13 @@ from .models import ValveMTOProject, ValveMTORow
 from .views import ValveMTOProjectViewSet, ValveMTOLegendViewSet
 
 
+def export_table(sheet):
+    """Read the data table independently of the preceding project header."""
+    rows = sheet.iter_rows(values_only=True)
+    headers = next(row for row in rows if 'SIZE (NB)' in row)
+    return headers, [dict(zip(headers, row)) for row in rows]
+
+
 class ValveMTODataTests(SimpleTestCase):
     def test_size_nb_is_derived_only_from_explicit_quoted_line_prefix(self):
         from .specification_lookup import size_nb_from_line_number, enrich_specifications
@@ -29,8 +36,8 @@ class ValveMTODataTests(SimpleTestCase):
         row = ValveMTORow(line_number='4"-PL-DC3N-8198-P', size_primary='', area='Field')
         rows = MagicMock()
         rows.all.return_value = [row]
-        wb = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows))))
-        exported = dict(zip((c.value for c in wb['FIELD'][1]), (c.value for c in wb['FIELD'][2])))
+        wb = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows, project_name='Export regression fixture'))))
+        exported = export_table(wb['FIELD'])[1][0]
         self.assertEqual(exported['SIZE (NB)'], '4"')
 
     def test_explicit_specifications_fill_only_exact_class_and_source_area_mappings(self):
@@ -68,10 +75,12 @@ class ValveMTODataTests(SimpleTestCase):
         row = ValveMTORow(**data.validated_data)
         rows = MagicMock()
         rows.all.return_value = [row]
-        wb = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows))))
-        exported = dict(zip((c.value for c in wb['ISLAND'][1]), (c.value for c in wb['ISLAND'][2])))
+        wb = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows, project_name='Export regression fixture'))))
+        exported = export_table(wb['ISLAND'])[1][0]
         self.assertEqual(exported['Area'], title)
-        self.assertEqual(wb['FIELD'].max_row, 1)
+        self.assertEqual(export_table(wb['FIELD'])[1], [])
+        self.assertEqual(wb['ISLAND']['A3'].value, 'PROJECT')
+        self.assertEqual(wb['ISLAND']['B3'].value, 'Export regression fixture')
 
     def test_conflicting_active_project_lookup_is_explicit_not_last_writer_wins(self):
         from .specification_lookup import load_specification_lookups
@@ -133,10 +142,9 @@ class ValveMTODataTests(SimpleTestCase):
         )
         rows = MagicMock()
         rows.all.return_value = [row]
-        workbook = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows))))
-        headers = [cell.value for cell in workbook['FIELD'][1]]
-        values = [cell.value for cell in workbook['FIELD'][2]]
-        exported = dict(zip(headers, values))
+        workbook = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows, project_name='Export regression fixture'))))
+        headers, exported_rows = export_table(workbook['FIELD'])
+        exported = exported_rows[0]
         self.assertEqual(exported['P&ID Number'], row.pid_number)
         self.assertEqual(exported['Line Number'], row.line_number)
         self.assertEqual(exported['Piping Class'], 'AC2GA0')
@@ -147,7 +155,7 @@ class ValveMTODataTests(SimpleTestCase):
         self.assertEqual(exported['Unit'], 'NOS')
         self.assertEqual(exported['SIZE (NB)'], '2"')
         for sheet in workbook:
-            labels = [cell.value for cell in sheet[1]]
+            labels, _ = export_table(sheet)
             self.assertIn('SIZE (NB)', labels)
             for removed in ('Size 1', 'Size 2', 'Line List Ref'):
                 self.assertNotIn(removed, labels)
@@ -170,8 +178,8 @@ class ValveMTODataTests(SimpleTestCase):
         row = ValveMTORow(valve_type='BALL VALVE', qty_observed=1, confidence='LOW', location_hint='Page 1')
         rows = MagicMock()
         rows.all.return_value = [row]
-        workbook = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows))))
+        workbook = load_workbook(BytesIO(export_project_to_xlsx(SimpleNamespace(rows=rows, project_name='Export regression fixture'))))
         sheet = workbook['UNASSIGNED REVIEW']
-        exported = dict(zip((cell.value for cell in sheet[1]), (cell.value for cell in sheet[2])))
+        exported = export_table(sheet)[1][0]
         self.assertEqual(exported['Observed Qty (Review)'], 1)
         self.assertEqual(exported['Type'], 'BALL VALVE')

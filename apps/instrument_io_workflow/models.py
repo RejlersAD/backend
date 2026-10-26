@@ -486,7 +486,8 @@ class IOListLegendSymbolImage(models.Model):
         unique_together = [('created_by', 'section', 'symbol_name')]
         constraints = [
             models.UniqueConstraint(
-                fields=['section', 'symbol_name'],condition=models.Q(is_default=True),
+                fields=['section', 'symbol_name'],
+                condition=models.Q(is_default=True),
                 name='uniq_io_default_symbol_per_section',
             ),
         ]

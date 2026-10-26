@@ -1,4 +1,4 @@
-"""
+﻿"""
 Sales Management Models
 Comprehensive CRM and Pipeline Management with AI-powered insights
 """
@@ -995,7 +995,8 @@ class SalesEmailIntake(TimeStampedModel):
                 name='sales_intake_mailbox_message_uq',
             ),
             models.UniqueConstraint(
-                fields=['source_message_id'],condition=models.Q(mailbox_connection__isnull=True),
+                fields=['source_message_id'],
+                condition=models.Q(mailbox_connection__isnull=True),
                 name='sales_intake_legacy_message_uq',
             ),
         ]
