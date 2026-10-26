@@ -605,7 +605,7 @@ class UserRole(TimeStampedModel):
     
     def __str__(self):
         return f"{self.user_profile.user.email} - {self.role.name}"
-    
+
     def is_effective(self):
         """True if this role assignment is currently within its time window."""
         now = timezone.now()
