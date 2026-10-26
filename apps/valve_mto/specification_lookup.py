@@ -10,7 +10,13 @@ LOOKUP_FIELDS = {
 def size_nb_from_line_number(line_number):
     match = re.match(r'^(\d+(?:(?:[- ]\d+)?/\d+)?)["\u201d\u2033]\s*[-\u2013\u2014]\s*[A-Z0-9]+[-\u2013\u2014]',
                      str(line_number or '').strip(), re.IGNORECASE)
-    return match.group(1) + '"' if match else ''
+    if match:
+        return match.group(1) + '"'
+    # Service-first convention: P-U51316-8"-PA0D1 -> 8" (size at segment 3).
+    service_first = re.match(
+        r'^[A-Z]{1,4}-[A-Z]?\d{3,6}[A-Z]?-(\d{1,2}(?:-\d/\d)?)["\u201d\u2033]?\s*[-\u2013\u2014]',
+        str(line_number or '').strip(), re.IGNORECASE)
+    return service_first.group(1) + '"' if service_first else ''
 
 
 def load_specification_lookups(user_id, pms_data=None):

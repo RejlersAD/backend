@@ -199,6 +199,15 @@ UPPER_SNAKE_ROW_MAP = {
 # can never pass through even when the model disobeys.
 DRAWING_NO_PATTERN = r'^[A-Z0-9]+(?:-[A-Z0-9]+)+-\d+[A-Z]?$'
 LINE_NO_PATTERN = r'^[\d/-]+"?(?:x[\d/-]+")?-(?=[A-Z0-9-]*[A-Z])(?:[A-Z0-9]+-){2,}[A-Z0-9]+$'
+# BUG FIX (real, confirmed in production): LINE_NO_PATTERN only accepts
+# size-first numbers, so the validator in _coerce_row silently EMPTIED every
+# service-first line number (e.g. P-55027-12"-33460-C, P-U51316-8"-PA0D1)
+# that Vision correctly returned — an entire extraction's LINE NUMBER column
+# was blanked post-parse. Service-first shape mirrors the harvester/pdf_parse
+# preset for the same convention; both shapes are accepted, never merged.
+LINE_NO_PATTERN_SERVICE_FIRST = (
+    r'^[A-Z]{1,4}-[A-Z]?\d{3,6}[A-Z]?-\d{1,2}(?:-\d/\d)?["″]?-[A-Z0-9]{3,7}(?:-[A-Z]{1,2}\d?)?$'
+)
 
 # ─── CLASS → RATING lookup (soft-coded) ─────────────────────────────────
 # Intentionally blank values — the user fills ratings from the PMS/legend
@@ -237,6 +246,11 @@ LINE_NUMBER_HARVEST_PATTERNS: List[str] = [
     r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z]{1,4}[-\s]+[A-Z0-9]{3,6}[-\s]+\d{3,6}\b',
     # SIZE"-AREA-SERVICE-SEQ-PIPECLASS-END (Borouge / Linde area-first)
     r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+\d{2,3}[-\s]+[A-Z]{1,3}[-\s]+\d{4,6}[-\s]+[A-Z0-9]{5,7}[-\s]+[A-Z]{1,2}\b',
+    # FLUID-SEQ-SIZE"-PIPECLASS(-INSUL) — service-first convention, seq may
+    # carry a unit-train letter prefix or variant suffix. Seen on production
+    # P&IDs: P-55027-12"-33460-C, P-U51316-8"-PA0D1, P-51524A-1"-PA0D-C,
+    # BD-71115A-2"-EA2B. (Mirrors valve_mto pdf_parse's default preset.)
+    r'\b[A-Z]{1,4}-[A-Z]?\d{3,6}[A-Z]?-\d{1,2}(?:-\d/\d)?["″]?-[A-Z0-9]{3,7}(?:-[A-Z]{1,2}\d?)?\b',
 ]
 _LINE_NUMBER_HARVEST_RE = [re.compile(p, re.IGNORECASE) for p in LINE_NUMBER_HARVEST_PATTERNS]
 
@@ -1125,7 +1139,9 @@ def _coerce_row(raw: Dict[str, Any]) -> Dict[str, Any]:
         _low_confidence()
     from .local_valve_mto import LINE_CHARACTERS
     row['line_number'] = row['line_number'].translate(LINE_CHARACTERS)
-    if row['line_number'] and not re.fullmatch(LINE_NO_PATTERN, row['line_number'], re.IGNORECASE):
+    if row['line_number'] and not (
+            re.fullmatch(LINE_NO_PATTERN, row['line_number'], re.IGNORECASE)
+            or re.fullmatch(LINE_NO_PATTERN_SERVICE_FIRST, row['line_number'], re.IGNORECASE)):
         logger.info('[ValveMTO] Dropping corrupted line_number %r (pattern mismatch)', row['line_number'])
         row['line_number'] = ''
         _low_confidence()
