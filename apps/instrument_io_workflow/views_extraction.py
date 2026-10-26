@@ -251,6 +251,8 @@ def start_extraction(request, project_id):
     if pid_doc is None:
         return Response({'error': 'Upload a P&ID drawing first (Stage 1).'},
                         status=status.HTTP_400_BAD_REQUEST)
+    # EVERY uploaded P&ID is processed (multi-file upload in Stage 1)
+    pid_docs = [d for d in docs if d.document_type == 'pid_drawing']
     iolist_doc = next((d for d in docs if d.document_type == 'io_list'
                        and d.pdf_file.name.lower().endswith(('.xlsx', '.xlsm'))), None)
     # DCS first, then ESD — GDS rows live in the DCS database (spec §6.8).
@@ -273,8 +275,11 @@ def start_extraction(request, project_id):
         try:
             from .services.pid_io import engine
             extraction = IOListExtraction.objects.get(id=extraction_id)
+            # every P&ID uploaded to the project is processed
+            pid_paths = [_file_path(d) for d in IOListDocument.objects.filter(
+                project=extraction.project, document_type='pid_drawing')]
             result = engine.run_extraction(
-                _file_path(extraction.pid_document),
+                pid_paths,
                 baseline_path=_file_path(extraction.iolist_document),
                 vendor_paths=[_file_path(d) for d in
                               IOListDocument.objects.filter(id__in=extraction.vendor_documents)],
@@ -311,6 +316,79 @@ def extraction_status(request, project_id, extraction_id):
         return Response({'error': 'Extraction not found.'}, status=status.HTTP_404_NOT_FOUND)
     return Response({'status': ext.status, 'error': ext.error, 'summary': ext.summary,
                      'isOutdated': ext.is_outdated})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_extractions(request, project_id):
+    """Extraction history for the project — newest first; past results stay
+    reopenable, replaced ones are flagged outdated."""
+    project = _project_or_404(request, project_id)
+    if project is None:
+        return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+    out = []
+    for ext in project.extractions.all()[:25]:
+        s = ext.summary or {}
+        out.append({
+            'id': str(ext.id), 'status': ext.status, 'isOutdated': ext.is_outdated,
+            'createdAt': ext.created_at.isoformat(),
+            'createdBy': getattr(ext.created_by, 'email', '') or '',
+            'docNumber': ext.doc_number, 'revision': ext.revision,
+            'useAi': ext.use_ai,
+            'summary': {k: s.get(k) for k in (
+                'tags', 'fieldIO', 'derived', 'withLine', 'setpoints', 'untagged',
+                'vendorMatched', 'vendorCells', 'vendorConflicts', 'aiTags', 'elapsed_s')},
+            'error': ext.error[:300] if ext.error else '',
+        })
+    return Response({'extractions': out})
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def patch_extraction_row(request, project_id, extraction_id, tag):
+    """Verify/edit one extracted row. Only allowlisted fields are writable;
+    every edit is stamped (who/when) on the row itself. Confirming a row is a
+    decision, stored via the decisions endpoint — not here."""
+    ext = IOListExtraction.objects.filter(id=extraction_id, project_id=project_id).first()
+    if not ext:
+        return Response({'error': 'Extraction not found.'}, status=status.HTTP_404_NOT_FOUND)
+    allowed = {'service', 'line', 'ioType', 'setpoint'}
+    updates = {k: v for k, v in request.data.items() if k in allowed}
+    if not updates:
+        return Response({'error': f'Allowed fields: {sorted(allowed)}'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    from django.utils import timezone
+    stamp = {'editedBy': getattr(request.user, 'email', ''), 'editedAt': timezone.now().isoformat()}
+    row = None
+    for t in ext.tags_payload:
+        if t.get('tag') == tag:
+            row = t
+            break
+    if row is None:
+        return Response({'error': 'Row not found.'}, status=status.HTTP_404_NOT_FOUND)
+    for field in ('service', 'line', 'ioType'):
+        if field in updates:
+            row[field] = str(updates[field])[:255]
+    if 'setpoint' in updates and isinstance(updates['setpoint'], dict):
+        sp = updates['setpoint']
+        point = str(sp.get('point') or '')[:16]
+        for existing in ext.setpoints_payload:
+            if existing.get('tag') == tag and existing.get('point') == point:
+                existing['value'] = str(sp.get('value') or '')[:32]
+                existing['editedBy'] = stamp['editedBy']
+                existing['editedAt'] = stamp['editedAt']
+                break
+        else:
+            ext.setpoints_payload.append({
+                'tag': tag, 'point': point, 'value': str(sp.get('value') or '')[:32],
+                'unit': str(sp.get('unit') or ''), 'label': 'manual entry',
+                'column': str(sp.get('column') or 'Set point'), 'sheet': row.get('page', 0) + 1,
+                'evidence': 'Edited by reviewer', **stamp,
+            })
+    row.update(stamp)
+    ext.save(update_fields=['tags_payload', 'setpoints_payload', 'updated_at'])
+    return Response({'ok': True, 'row': row})
 
 
 @api_view(['GET'])

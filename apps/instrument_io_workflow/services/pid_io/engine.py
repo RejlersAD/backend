@@ -9,9 +9,11 @@ from . import connections, ioclass, pipes, service, setpoints, spans, tags, vend
 
 def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=None,
                    progress=None):
-    """Deterministic drawing-rules extraction. `progress(step, detail)` is
-    called between steps for the job tracker. Never raises on drawing
-    quirks — problems land in the row's evidence/warnings instead."""
+    """Deterministic drawing-rules extraction. `pid_path` may be one PDF path
+    or a list of them (every uploaded P&ID is processed; sheets are numbered
+    continuously across files). `progress(step, detail)` is called between
+    steps for the job tracker. Never raises on drawing quirks — problems land
+    in the row's evidence/warnings instead."""
     t0 = time.monotonic()
     warnings = []
 
@@ -19,9 +21,15 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
         if progress:
             progress(step, detail)
 
-    # ── §6.1–6.4 per sheet ─────────────────────────────────────────────
+    # ── §6.1–6.4 per sheet (all uploaded P&ID files) ───────────────────
     mark('reading', 'Reading text and vector layers')
-    pages = spans.read_document(pid_path)
+    pid_paths = [pid_path] if isinstance(pid_path, str) else list(pid_path)
+    pages = []
+    for path in pid_paths:
+        file_pages = spans.read_document(path)
+        for pg in file_pages:
+            pg.page_no = len(pages)      # continuous sheet numbering
+            pages.append(pg)
     all_tags, all_untagged, all_labels = [], [], []
     conns_by_page, pages_by_no, eq_by_page = {}, {}, {}
     scales_by_page, psv_by_page = {}, {}
