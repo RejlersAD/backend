@@ -15,6 +15,7 @@ Endpoints (all project-scoped):
   GET  /projects/<pid>/extractions/<eid>/export/?format=iolist|review
 """
 import logging
+import os
 import re
 import threading
 
@@ -213,7 +214,26 @@ def put_doc_info(request, project_id):
 
 
 def _file_path(doc):
-    return doc.pdf_file.path if doc and doc.pdf_file else None
+    """Return a local file path for a stored document. S3-backed storage
+    doesn't support absolute paths (.path raises), so stream the bytes into
+    a NamedTemporaryFile and hand the engine a real local path."""
+    if not doc or not doc.pdf_file:
+        return None
+    import tempfile
+    suffix = os.path.splitext(doc.pdf_file.name)[1] or '.bin'
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        with doc.pdf_file.open('rb') as fh:
+            for chunk in fh.chunks():
+                tmp.write(chunk)
+        tmp.close()
+        return tmp.name
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
 
 
 @api_view(['POST'])
@@ -414,8 +434,20 @@ def export_extraction(request, project_id, extraction_id):
     ext = IOListExtraction.objects.filter(id=extraction_id, project_id=project_id).first()
     if not ext:
         return Response({'error': 'Extraction not found.'}, status=status.HTTP_404_NOT_FOUND)
-    fmt = request.query_params.get('format', 'iolist')
-    from .services.pid_io import export as export_mod
-    path = export_mod.build_workbook(ext, fmt)
-    return FileResponse(open(path, 'rb'), as_attachment=True,
-                        filename=f'{ext.doc_number or "io-list"}-{fmt}.xlsx')
+    fmt = request.query_params.get('fmt', 'iolist')
+    try:
+        from .services.pid_io import export as export_mod
+        path = export_mod.build_workbook(ext, fmt)
+        # Read into memory: the temp file must not be tied to the response's
+        # streaming lifecycle (test clients and some servers close it early).
+        import io as _io
+        import os as _os
+        with open(path, 'rb') as fh:
+            payload = _io.BytesIO(fh.read())
+        _os.unlink(path)
+        return FileResponse(payload, as_attachment=True,
+                            filename=f'{ext.doc_number or "io-list"}-{fmt}.xlsx')
+    except Exception as exc:
+        logger.exception('io-list export failed')
+        return Response({'error': f'Export failed: {exc}'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
