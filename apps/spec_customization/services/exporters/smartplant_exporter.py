@@ -188,6 +188,10 @@ def build_spec_workbook(job, preview_data=None, export_state='draft') -> io.Byte
 
     logger.info("[SmartPlantExport] SPEC job=%s wrote rows: %s", job.id, summary)
 
+    if export_state == 'review':
+        from ..review_export import stamp_review_notice
+        stamp_review_notice(wb, job, 'spec')
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -255,6 +259,10 @@ def build_cat_workbook(job, preview_data=None, export_state='draft') -> io.Bytes
             summary[sheet_name] = n
 
     logger.info("[SmartPlantExport] CAT job=%s wrote rows: %s", job.id, summary)
+
+    if export_state == 'review':
+        from ..review_export import stamp_review_notice
+        stamp_review_notice(wb, job, 'cat')
 
     buf = io.BytesIO()
     wb.save(buf)

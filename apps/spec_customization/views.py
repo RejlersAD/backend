@@ -848,6 +848,8 @@ def export_smartplant_spec(request, job_id):
     """Export SmartPlant 3D SPEC workbook (rule sheets)."""
     job = _get_accessible_job(request, job_id)
     job = PaperSpecExtractionJob.objects.select_for_update(of=('self',)).select_related('document', 'reference_workbook_set').get(pk=job.pk)
+    if request.query_params.get('review') == '1':
+        return _review_workbook_download(request, job, 'spec')
     if job.status != PaperSpecExtractionJob.STATUS_COMPLETED or extraction_completeness(job)['state'] == 'partial':
         return Response({'error': 'A completed extraction without failed or missing chunks is required for SPEC export.'}, status=status.HTTP_409_CONFLICT)
     if request.query_params.get('draft') != '1':
@@ -866,6 +868,29 @@ def export_smartplant_spec(request, job_id):
     return response
 
 
+def _review_workbook_download(request, job, kind):
+    """Explicit review attachment; ordinary draft/released guards are unchanged."""
+    if request.query_params.get('draft') != '1' or request.query_params.get('release_id'):
+        return Response({'error': 'Review downloads require draft=1 and cannot select a released workbook.'}, status=400)
+    if job.status != PaperSpecExtractionJob.STATUS_COMPLETED:
+        return Response({'error': 'Wait for extraction to finish before downloading a review workbook.'}, status=409)
+    if not job.piping_classes.filter(components__isnull=False).exists():
+        return Response({'error': 'No component rows are available for a review workbook. Review the extraction error and source document.'}, status=409)
+    builder = build_spec_workbook if kind == 'spec' else build_cat_workbook
+    try:
+        buffer = builder(job, export_state='review')
+    except Exception:
+        logger.exception('[SmartPlantExport] %s review build failed for job %s', kind, job.pk)
+        return Response({'error': 'The review workbook could not be generated. Please retry or contact support.'}, status=500)
+    from .services.controlled_release import audit
+    audit(job, 'review_export', request.user, workbook=kind, coverage=extraction_completeness(job)['state'])
+    filename = (SPEC_OUTPUT_FILENAME_TPL if kind == 'spec' else CAT_OUTPUT_FILENAME_TPL).format(job_id=job.id)
+    response = _reference_export_response(job, buffer, 'REVIEW_' + filename)
+    response['X-Spec-Export-State'] = 'review'
+    response['X-Spec-Coverage'] = extraction_completeness(job)['state']
+    return response
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
@@ -873,6 +898,8 @@ def export_smartplant_cat(request, job_id):
     """Export SmartPlant 3D Catalog workbook (component part sheets)."""
     job = _get_accessible_job(request, job_id)
     job = PaperSpecExtractionJob.objects.select_for_update(of=('self',)).select_related('document', 'reference_workbook_set').get(pk=job.pk)
+    if request.query_params.get('review') == '1':
+        return _review_workbook_download(request, job, 'cat')
     if job.status != PaperSpecExtractionJob.STATUS_COMPLETED or extraction_completeness(job)['state'] == 'partial':
         return Response({'error': 'A completed extraction without failed or missing chunks is required for CAT export.'}, status=status.HTTP_409_CONFLICT)
     if request.query_params.get('draft') != '1':
