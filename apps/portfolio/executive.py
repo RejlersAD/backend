@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 from .access import can_upload_workbook
 from .scope import IDENTITY, workbook_scope
 
@@ -391,7 +391,7 @@ def build_revenue_dashboard(user, *, search='', pm='', business_unit='', client=
                 'scope': {'label': 'Uploaded portfolio source' if full_source else 'Workbook rows matched to accessible registered projects',
                           'full_source': full_source, 'filtered': filtered, 'accessible_rows': len(all_rows),
                           'row_count': count, 'project_count': len({row['project_code'] for row in rows})},
-                'can_upload': full_source, 'kpis': kpis, 'filters': choices,
+                'can_upload': can_upload_workbook(user), 'kpis': kpis, 'filters': choices,
                 'connections': connections,
                 'breakdowns': {'business_unit': _breakdown(rows, 'business_unit'),
                                'client': _breakdown(rows, 'client'), 'project_manager': _breakdown(rows, 'pm')},

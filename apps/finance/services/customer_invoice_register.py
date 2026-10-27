@@ -13,7 +13,7 @@ from django.db.models.functions import Coalesce, NullIf, Trim, Upper
 from django.utils import timezone
 from rest_framework.exceptions import APIException, NotFound
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 from apps.invoice_tracker.services.receivable_balance import annotate_receivable_balance
 from .command_center import MONEY, ROUTES
 from .receivables_dashboard import _Metric, _money, _selected, _unknown_metric

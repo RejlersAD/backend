@@ -18,7 +18,7 @@ from django.utils import timezone
 from apps.finance.services.receivables_source import get_active_receivables_source
 from apps.invoice_tracker.models import CustomerInvoice
 from apps.invoice_tracker.services.receivable_balance import receivable_balance
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def _empty(status, limit, offset, description):
 def _parent_access(user, keys):
     """A visible child alone does not authorize its parent's invoice register."""
     from apps.core.project_models import Project
-    from apps.project_control.access import accessible_enterprise_projects
+    from apps.dashboard.reporting_scope import report_projects as accessible_enterprise_projects
 
     records = list(Project.objects.annotate(_invoice_code=Upper(Trim('code')))
                    .filter(_invoice_code__in=keys).values('id', '_invoice_code'))

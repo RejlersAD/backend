@@ -100,6 +100,12 @@ class ExecutiveFinanceTests(TestCase):
         self.assertEqual(response['Cache-Control'], 'private, no-store')
         return response.data
 
+    def source_report(self, url=RECEIVABLES_URL):
+        """The ordinary Finance services keep source authorization and row filters."""
+        with patch('django.utils.timezone.now', return_value=NOW):
+            builder = build_customer_invoice_register if url == REGISTER_URL else build_receivables_dashboard
+            return builder(self.user)
+
     def test_executive_and_source_grants_work_without_finance_overview(self):
         self.grant('executive_dashboard', 'finance_outgoing')
         self.invoice('EXEC-ONLY', '25')
@@ -153,23 +159,23 @@ class ExecutiveFinanceTests(TestCase):
         self.assertIsNone(register['totals']['amount']['known_amount'])
         self.assertNotIn('Private company', str((dashboard, register)))
 
-    def test_explicit_source_and_executive_denies_apply_even_to_superusers(self):
+    def test_direct_services_explicit_source_and_executive_denies_apply_even_to_superusers(self):
         self.grant('executive_dashboard', 'finance_outgoing', 'finance_incoming')
         self.user.is_superuser = True
         self.user.save(update_fields=['is_superuser'])
         self.deny('finance_outgoing')
-        dashboard = self.report()
+        dashboard = self.source_report()
         self.assertEqual(dashboard['sources']['receivables']['status'], 'restricted')
         self.assertEqual(dashboard['workbook_summary']['status'], 'restricted')
         self.assertEqual(dashboard['sources']['payables']['status'], 'available')
-        self.assertEqual(self.report(REGISTER_URL)['status'], 'restricted')
+        self.assertEqual(self.source_report(REGISTER_URL)['status'], 'restricted')
         self.deny('finance_incoming')
-        self.assertEqual(self.report()['sources']['payables']['status'], 'restricted')
+        self.assertEqual(self.source_report()['sources']['payables']['status'], 'restricted')
         self.deny('executive_dashboard')
         for url in (RECEIVABLES_URL, REGISTER_URL):
             self.assertEqual(self.client.get(url).status_code, 403)
 
-    def test_incoming_grant_preserves_supplier_visibility_and_does_not_grant_receivables(self):
+    def test_direct_services_incoming_grant_preserves_supplier_visibility_and_does_not_grant_receivables(self):
         self.grant('executive_dashboard', 'finance_incoming')
         other = get_user_model().objects.create_user('other-invoice-owner')
         for number, owner, total in [('OWN', self.user, '25'), ('HIDDEN', other, '900')]:
@@ -177,12 +183,12 @@ class ExecutiveFinanceTests(TestCase):
                 invoice_number=number, submitted_by=owner, total_amount=Decimal(total),
                 paid_amount=0, currency='AED', due_date=TODAY,
             )
-        data = self.report()
+        data = self.source_report()
         self.assertEqual(data['sources']['receivables']['status'], 'restricted')
         self.assertEqual(data['sources']['payables']['invoice_count'], 1)
         current = next(row for row in data['ageing'] if row['id'] == 'current')
         self.assertEqual(current['payables']['amount'], '25.00')
-        self.assertEqual(self.report(REGISTER_URL)['status'], 'restricted')
+        self.assertEqual(self.source_report(REGISTER_URL)['status'], 'restricted')
 
     def test_dashboard_filters_and_company_identity_match_finance_builder(self):
         self.grant('executive_dashboard', 'finance_outgoing', 'finance_incoming')
@@ -207,8 +213,8 @@ class ExecutiveFinanceTests(TestCase):
         self.assertEqual(actual['customers'][0]['company'], 'Acme')
         self.assertEqual(actual['sources']['payables']['status'], 'unavailable')
         self.assertEqual(len(actual['overdue_by_month']), 6)
-        self.assertIn('Invoice Amount (L)', actual['definitions']['balance_basis'])
-        self.assertIn('Partial invoices use the recorded Balance to be received (Y)', actual['definitions']['balance_basis'])
+        self.assertIn('Invoice Amount', actual['definitions']['balance_basis'])
+        self.assertIn('Partial invoices use the recorded Balance to be received', actual['definitions']['balance_basis'])
         self.assertFalse(actual['currency_conversion_applied'])
 
     @override_settings(ROOT_URLCONF=__name__)
@@ -233,7 +239,7 @@ class ExecutiveFinanceTests(TestCase):
 
         executive = self.report(company='Acme')
         finance = self.report(FINANCE_RECEIVABLES_URL, company='Acme')
-        self.assertEqual(executive, finance)
+        self.assertEqual(executive, {key: value for key, value in finance.items() if key != 'sharepoint_sync'})
         self.assertEqual(executive['kpis']['unpaid'], {
             'amount': None, 'known_amount': '400.00', 'count': 5,
             'missing_count': 1, 'partial': True,

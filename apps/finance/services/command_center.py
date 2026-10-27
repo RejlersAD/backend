@@ -57,7 +57,7 @@ def _empty_source(kind, status, reason):
 def _payable_queryset(user):
     # Same row filter as InvoiceViewSet, without its data-access audit writer.
     from apps.finance.models import Invoice
-    from apps.rbac.data_visibility_mixin import build_visibility_filter
+    from apps.dashboard.reporting_scope import report_visibility_filter as build_visibility_filter
     return Invoice.objects.filter(build_visibility_filter(
         user=user, module_code='finance', owner_field='submitted_by',
     ))
