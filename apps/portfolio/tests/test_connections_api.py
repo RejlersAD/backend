@@ -48,30 +48,36 @@ class PortfolioConnectionsAPITests(TestCase):
         self.assertEqual(response.data['workbook_reporting_date'], snapshot.reporting_date.isoformat())
 
     @patch('apps.portfolio.recorded_invoices.build_recorded_invoices')
-    def test_known_hidden_child_does_not_inherit_its_visible_parents_invoice_scope(self, build):
+    def test_executive_view_includes_all_source_rows_without_changing_project_membership(self, build):
         client = self.client_for_user(full=False)
         parent = Project.objects.create(code='P', name='Visible parent')
         Project.objects.create(code='P-HIDDEN', name='Hidden child')
         snapshot = self.source()
-        visible = self.row(snapshot)
+        self.row(snapshot)
         self.row(snapshot, 'P-HIDDEN')
         self.row(snapshot, 'OTHER', project_code='OTHER')
         build.return_value = {'status': 'available', 'rows': []}
         with patch('apps.project_control.access.accessible_enterprise_projects', return_value=Project.objects.filter(pk=parent.pk)):
             response = client.get(self.url)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([row['id'] for row in build.call_args.args[1]], [visible.pk])
-        self.assertFalse(build.call_args.kwargs['full_source'])
+        self.assertEqual({row['id'] for row in build.call_args.args[1]}, set(snapshot.rows.values_list('pk', flat=True)))
+        self.assertTrue(build.call_args.kwargs['full_source'])
 
     @patch('apps.portfolio.recorded_invoices.build_recorded_invoices')
-    def test_explicit_source_and_finance_denials_prevent_any_ledger_access(self, build):
+    def test_executive_denial_blocks_reporting_while_source_denials_stay_on_source_registers(self, build):
         client = self.client_for_user()
+        self.row(self.source())
+        build.return_value = {'status': 'available', 'rows': []}
         for module in ('executive_dashboard', 'project_control', 'finance_outgoing'):
             with self.subTest(module=module):
                 permission = Permission.objects.get(module__code=module, action='read')
                 override = UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
-                self.assertEqual(client.get(self.url).status_code, 403)
-                build.assert_not_called()
+                build.reset_mock()
+                self.assertEqual(client.get(self.url).status_code, 403 if module == 'executive_dashboard' else 200)
+                if module == 'executive_dashboard':
+                    build.assert_not_called()
+                else:
+                    build.assert_called_once()
                 override.delete()
         client.force_authenticate(None)
         self.assertIn(client.get(self.url).status_code, (401, 403))

@@ -10,7 +10,7 @@ from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import company_reporting, report_action_allowed as module_action_allowed
 from .access import can_upload_workbook
 
 
@@ -44,6 +44,8 @@ def _empty(status, description, *, can_upload=False):
 
 
 def _visible_rows(snapshot, user):
+    if company_reporting(user, 'project_control'):
+        return snapshot.rows.all()
     from apps.core.project_models import Project
     from apps.project_control.access import accessible_enterprise_projects
 
@@ -181,7 +183,8 @@ def build_workbook_report(user, *, search='', pm='', business_unit='', client=''
                     'is_stale': stale, 'data_age_days': age, 'sync_overdue': sync_late,
                     'snapshot_id': snapshot.pk, 'has_validation_warnings': bool(snapshot.warnings),
                 },
-                'scope': {'label': 'Accessible registered projects and unregistered source rows for reconciliation'
+                'scope': {'label': 'Company-wide portfolio workbook' if company_reporting(user, 'project_control')
+                          else 'Accessible registered projects and unregistered source rows for reconciliation'
                           if user.is_superuser else 'Workbook rows matched to accessible registered projects'},
                 'totals': totals, 'row_count': total,
                 'project_count': rows.order_by().values('project_code').distinct().count(),

@@ -12,6 +12,7 @@ from apps.finance.services.receivables_dashboard import build_receivables_dashbo
 from apps.rbac.permissions import HasModuleAccess
 from .executive import build_executive_dashboard
 from .executive_access import HasExecutiveTabAccess, filter_executive_report
+from .reporting_scope import company_report
 
 
 class ExecutiveDashboardView(APIView):
@@ -20,6 +21,7 @@ class ExecutiveDashboardView(APIView):
     permission_action = 'read'
     http_method_names = ['get', 'head', 'options']
 
+    @company_report()
     def get(self, request):
         report = filter_executive_report(build_executive_dashboard(request.user), request.user,
                                          request.query_params.get('tab'))
@@ -29,10 +31,11 @@ class ExecutiveDashboardView(APIView):
 
 
 class ExecutiveReceivablesDashboardView(ExecutiveDashboardView):
-    """Executive access with the finance builder's independent source grants."""
+    """Company reporting under Overview or Financial viewing authority."""
     permission_classes = [IsAuthenticated, HasModuleAccess, HasExecutiveTabAccess]
     executive_tabs = ('overview', 'financial')
 
+    @company_report('overview', 'financial')
     def get(self, request):
         filters = ReceivablesDashboardFilters(data=request.query_params)
         filters.is_valid(raise_exception=True)
@@ -42,10 +45,11 @@ class ExecutiveReceivablesDashboardView(ExecutiveDashboardView):
 
 
 class ExecutiveCustomerInvoiceRegisterView(ExecutiveDashboardView):
-    """Current customer invoices under the executive and outgoing read grants."""
+    """Read-only company invoice reporting for authorized Executive viewers."""
     permission_classes = [IsAuthenticated, HasModuleAccess, HasExecutiveTabAccess]
     executive_tabs = ('overview', 'financial')
 
+    @company_report('overview', 'financial')
     def get(self, request):
         filters = CustomerInvoiceRegisterFilters(data=request.query_params)
         filters.is_valid(raise_exception=True)

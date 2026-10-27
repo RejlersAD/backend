@@ -192,7 +192,7 @@ def build_portfolio_performance(user, context, project_section):
         return _empty('restricted', 'Project Control read access is required.')
     result = _empty('error', 'The authorized project source could not be read.')
     try:
-        from apps.project_control.access import accessible_enterprise_projects
+        from apps.dashboard.reporting_scope import report_projects as accessible_enterprise_projects
         with transaction.atomic():
             projects = list(accessible_enterprise_projects(user).filter(status__in=OPEN_STATUSES)
                             .select_related('owner').order_by('code', 'pk'))

@@ -16,7 +16,7 @@ from django.db import transaction
 from django.db.models.functions import Trim, Upper
 from django.utils import timezone
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 
 
 logger = logging.getLogger(__name__)

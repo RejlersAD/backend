@@ -66,6 +66,12 @@ class ExecutiveDashboardTests(TestCase):
         self.assertEqual(response.status_code, 200, getattr(response, 'data', None))
         return response
 
+    def source_response(self):
+        """Direct report services retain source rules outside Executive GET scope."""
+        from apps.dashboard.executive import build_executive_dashboard
+        from apps.dashboard.executive_access import filter_executive_report
+        return SimpleNamespace(data=filter_executive_report(build_executive_dashboard(self.user), self.user))
+
     def test_authentication_and_dedicated_read_grant_are_required(self):
         self.assertEqual(self.client.get(self.url).status_code, 403)
         self.user.is_staff = True
@@ -74,16 +80,15 @@ class ExecutiveDashboardTests(TestCase):
         self.client.force_authenticate(None)
         self.assertIn(self.client.get(self.url).status_code, [401, 403])
 
-    def test_executive_grant_does_not_grant_underlying_sources(self):
+    def test_direct_services_executive_grant_does_not_grant_underlying_sources(self):
         self.grant('executive_dashboard')
-        response = self.response()
+        response = self.source_response()
         data = response.data
         self.assertTrue(all(section['status'] == 'restricted' for section in data['departments']))
         self.assertEqual(data['actions'], [])
         self.assertIsNone(data['portfolio']['counts'])
         self.assertEqual(data['coverage']['available_departments'], 0)
         self.assertTrue(all(kpi['value'] is None for kpi in data['kpis']))
-        self.assertEqual(response['Cache-Control'], 'private, no-store')
         self.assertFalse(data['scope']['consolidated'])
         self.assertEqual(data['workforce']['status'], 'restricted')
         self.assertEqual(data['workforce']['allocation'], [])
@@ -95,13 +100,13 @@ class ExecutiveDashboardTests(TestCase):
         self.assertEqual(portfolio_tab['register']['projects'], [])
         self.assertEqual(portfolio_tab['concentration']['by_currency'], [])
 
-    def test_explicit_deny_revokes_source_and_endpoint_even_for_superuser(self):
+    def test_direct_services_explicit_deny_revokes_source_and_endpoint_even_for_superuser(self):
         self.grant('executive_dashboard', 'project_control')
         self.user.is_superuser = True
         self.user.save(update_fields=['is_superuser'])
         source_permission = Permission.objects.filter(module__code='project_control', action='read').first()
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=source_permission, allowed=False)
-        self.assertEqual(self.response().data['portfolio']['status'], 'restricted')
+        self.assertEqual(self.source_response().data['portfolio']['status'], 'restricted')
         executive_permission = Permission.objects.filter(module__code='executive_dashboard', action='read').first()
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=executive_permission, allowed=False)
         self.assertEqual(self.client.get(self.url).status_code, 403)
@@ -379,14 +384,14 @@ class ExecutiveDashboardTests(TestCase):
         self.assertEqual(aging['invoice_count'], 0)
         self.assertEqual(aging['missing_balance_count'], 0)
 
-    def test_financial_aging_respects_explicit_outgoing_deny(self):
+    def test_direct_services_financial_aging_respects_explicit_outgoing_deny(self):
         self.grant('executive_dashboard', 'finance_outgoing')
         self.user.is_superuser = True
         self.user.save(update_fields=['is_superuser'])
         CustomerInvoice.objects.create(invoice_number='EX-DENIED-AR', currency='USD', balance_to_be_received=100)
         permission = Permission.objects.filter(module__code='finance_outgoing', action='read').first()
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
-        aging = self.response().data['financial_performance']['working_capital']['aging']
+        aging = self.source_response().data['financial_performance']['working_capital']['aging']
         self.assertEqual(aging['status'], 'restricted')
         self.assertEqual(aging['by_currency'], [])
         self.assertIsNone(aging['invoice_count'])
@@ -460,7 +465,7 @@ class ExecutiveDashboardTests(TestCase):
         self.assertIsNone(rows['GBP']['top_client'])
         self.assertEqual(rows['GBP']['top_five_projects']['share_pct'], 100.0)
 
-    def test_portfolio_milestones_preserve_dates_scope_and_unknown_accountability(self):
+    def test_direct_services_portfolio_milestones_preserve_dates_scope_and_unknown_accountability(self):
         self.grant('executive_dashboard', 'project_control')
         today = timezone.localdate()
         project = Project.objects.create(code='PF-MAIN', name='Accessible project', owner=self.user, status='active')
@@ -472,7 +477,7 @@ class ExecutiveDashboardTests(TestCase):
         ProjectMilestone.objects.create(project=hidden, name='Hidden milestone', target_date=today - timedelta(days=12))
         # Preserve any narrower future/shared project row policy for ALL contributors.
         with patch('apps.project_control.access.accessible_enterprise_projects', return_value=Project.objects.filter(pk=project.pk)):
-            portfolio = self.response().data['portfolio_performance']
+            portfolio = self.source_response().data['portfolio_performance']
         milestones = portfolio['milestones']
         self.assertEqual(milestones['status'], 'available')
         self.assertEqual(milestones['total_rows'], 3)
@@ -565,7 +570,7 @@ class ExecutiveDashboardTests(TestCase):
                                    estimated_value=Decimal(str(amount)), expected_close_date=timezone.localdate(),
                                    owner=owner or self.user, client=client, **fields)
 
-    def test_commercial_scope_currency_and_probability_are_recorded_not_predicted(self):
+    def test_direct_services_commercial_scope_currency_and_probability_are_recorded_not_predicted(self):
         self.grant('executive_dashboard', 'sales_opportunities')
         self._commercial_deal('CM-LEAD', stage='lead', currency='USD', amount=100)
         self._commercial_deal('CM-QUAL', stage='qualified', currency='usd', amount=200)
@@ -574,7 +579,7 @@ class ExecutiveDashboardTests(TestCase):
         self._commercial_deal('CM-CLOSED', stage='awarded', currency='USD', amount=9999)
         other = get_user_model().objects.create_user('cm-other', email='cm-other@example.test')
         self._commercial_deal('CM-HIDDEN', owner=other, stage='qualified', currency='GBP', amount=8888)
-        commercial = self.response().data['commercial_performance']
+        commercial = self.source_response().data['commercial_performance']
         self.assertEqual(commercial['status'], 'available')
         self.assertEqual(commercial['currencies'], ['EUR', 'UNSPECIFIED', 'USD'])
         self.assertEqual(commercial['register']['total_rows'], 4)
@@ -727,23 +732,23 @@ class ExecutiveDashboardTests(TestCase):
             {'currency': 'EUR', 'amount': '500.00'}, {'currency': 'USD', 'amount': '20000.00'},
         ])
 
-    def test_commercial_source_and_handoff_grants_are_separate_and_deny_wins(self):
+    def test_direct_services_commercial_source_and_handoff_grants_are_separate_and_deny_wins(self):
         self.grant('executive_dashboard', 'sales_opportunities')
         self._commercial_deal('CM-HANDOFF', stage='awarded', award_status='approved')
-        handoff = self.response().data['commercial_performance']['won_handoff']
+        handoff = self.source_response().data['commercial_performance']['won_handoff']
         self.assertEqual(handoff['count'], 1)
         self.assertIsNone(handoff['route'])
         self.grant('sales_handovers')
-        self.assertEqual(self.response().data['commercial_performance']['won_handoff']['route'], '/sales/project-handovers')
+        self.assertEqual(self.source_response().data['commercial_performance']['won_handoff']['route'], '/sales/project-handovers')
         self.user.is_superuser = True
         self.user.save(update_fields=['is_superuser'])
         permission = Permission.objects.get(module__code='sales_handovers', action='read')
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
-        self.assertIsNone(self.response().data['commercial_performance']['won_handoff']['route'])
+        self.assertIsNone(self.source_response().data['commercial_performance']['won_handoff']['route'])
         permission = Permission.objects.get(module__code='sales_opportunities', action='read')
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
         with patch('apps.dashboard.commercial_performance._read_deals', side_effect=AssertionError('Must not query denied source')):
-            commercial = self.response().data['commercial_performance']
+            commercial = self.source_response().data['commercial_performance']
         self.assertEqual(commercial['status'], 'restricted')
         self.assertEqual(commercial['register']['opportunities'], [])
         self.assertIsNone(commercial['won_handoff']['count'])
@@ -918,14 +923,14 @@ class ExecutiveDashboardTests(TestCase):
         self.assertEqual(report['action_count'], 0)
         self.assertNotIn('Private', str(report))
 
-    def test_workforce_source_deny_prevents_aggregate_reads_even_for_superuser(self):
+    def test_direct_services_workforce_source_deny_prevents_aggregate_reads_even_for_superuser(self):
         self.grant('executive_dashboard', 'hr_management')
         self.user.is_superuser = True
         self.user.save(update_fields=['is_superuser'])
         permission = Permission.objects.get(module__code='hr_management', action='read')
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
         with patch('apps.dashboard.workforce_performance._read_workforce', side_effect=AssertionError('Denied source was queried')):
-            report = self.response().data['workforce_performance']
+            report = self.source_response().data['workforce_performance']
         self.assertEqual(report['status'], 'restricted')
         self.assertIsNone(report['kpis'][0]['value'])
         self.assertIsNone(report['kpis'][0]['route'])
@@ -1045,7 +1050,7 @@ class ExecutiveDashboardTests(TestCase):
         self.assertTrue(risk['coverage_complete'])
         self.assertTrue(all(row['value'] == 0 for row in risk['qhse_performance']['project_metrics']))
 
-    def test_risk_sources_need_separate_reads_and_quality_deny_wins_for_superuser(self):
+    def test_direct_services_risk_sources_need_separate_reads_and_quality_deny_wins_for_superuser(self):
         self.grant('executive_dashboard')
         with patch('apps.dashboard.risk_compliance.apps.get_model', side_effect=AssertionError('Denied source read')):
             from apps.dashboard.risk_compliance import build_risk_compliance
@@ -1056,7 +1061,7 @@ class ExecutiveDashboardTests(TestCase):
         self.assertTrue(all(row['route'] is None for row in risk['sources']))
         self._risk_project(cars_open=1)
         self.grant('qhse')
-        risk = self.response().data['risk_compliance']
+        risk = self.source_response().data['risk_compliance']
         self.assertEqual(risk['qhse_performance']['status'], 'available')
         self.assertEqual(risk['qhse_performance']['route'], '/qhse')
         self.assertEqual(risk['audit_controls']['status'], 'restricted')
@@ -1067,7 +1072,7 @@ class ExecutiveDashboardTests(TestCase):
         permission = Permission.objects.get(module__code='qhse_quality', action='read')
         UserPermissionOverride.objects.create(user_profile=self.profile, permission=permission, allowed=False)
         with patch('apps.dashboard.risk_compliance._audits', side_effect=AssertionError('Denied audit source')):
-            risk = self.response().data['risk_compliance']
+            risk = self.source_response().data['risk_compliance']
         self.assertEqual(risk['status'], 'partial')
         self.assertEqual(risk['qhse_performance']['status'], 'available')
         self.assertEqual(risk['audit_controls']['status'], 'restricted')

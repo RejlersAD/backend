@@ -11,7 +11,7 @@ from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 
 
 logger = logging.getLogger(__name__)

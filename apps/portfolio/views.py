@@ -13,8 +13,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.rbac.permissions import HasModuleAccess
-from apps.rbac.action_policy import module_action_allowed
 from apps.dashboard.executive_access import HasExecutiveTabAccess
+from apps.dashboard.reporting_scope import company_report, report_action_allowed
 from .access import CanUploadPortfolioWorkbook
 from .importer import PortfolioSnapshotChanged, import_workbook
 from .models import PortfolioSource
@@ -42,6 +42,7 @@ class PortfolioWorkbookView(APIView):
     permission_action = 'read'
     http_method_names = ['get', 'head', 'options']
 
+    @company_report('portfolio')
     def get(self, request):
         filters = WorkbookFilters(data=request.query_params)
         filters.is_valid(raise_exception=True)
@@ -53,6 +54,7 @@ class PortfolioWorkbookView(APIView):
 class PortfolioRevenueView(PortfolioWorkbookView):
     """Current uploaded revenue report, aggregated over the authorised filters."""
 
+    @company_report('portfolio')
     def get(self, request):
         from .executive import build_revenue_dashboard
 
@@ -71,11 +73,12 @@ class OutgoingInvoiceFilters(WorkbookFilters):
 class PortfolioOutgoingInvoicesView(PortfolioWorkbookView):
     """Live, read-only outgoing invoices for the authorized workbook project scope."""
 
+    @company_report('portfolio')
     def get(self, request):
         from .recorded_invoices import FinanceSourceChanged, build_recorded_invoices
         from .scope import workbook_scope
 
-        if not all(module_action_allowed(request.user, module, 'read')
+        if not all(report_action_allowed(request.user, module, 'read')
                    for module in ('project_control', 'finance_outgoing')):
             raise PermissionDenied('Project Control and Outgoing Invoices read access are required.')
         filters = OutgoingInvoiceFilters(data=request.query_params)
