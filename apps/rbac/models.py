@@ -145,6 +145,9 @@ class Permission(TimeStampedModel):
         ('view_overview', 'View Executive Overview'),
         ('view_financial', 'View Executive Financial performance'),
         ('view_portfolio', 'View Executive Project portfolio'),
+        ('view_commercial', 'View Executive Commercial pipeline'),
+        ('view_workforce', 'View Executive Workforce'),
+        ('view_risk', 'View Executive Risk & Compliance'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -495,6 +498,10 @@ class UserProfile(TimeStampedModel):
         if not is_module_enabled(module_code):
             return False
 
+        if module_code == 'executive_dashboard':
+            from .action_policy import module_action_allowed
+            return module_action_allowed(self.user, module_code, 'read')
+
         if self.is_super_admin():
             return True
         
@@ -569,6 +576,11 @@ class UserProfile(TimeStampedModel):
             # Cache for 60 seconds — short TTL so role changes propagate quickly
             cache.set(cache_key, modules, 60)
         
+        # Executive tab overrides are evaluated on every read, outside role cache.
+        from .action_policy import module_action_allowed
+        modules = [module for module in modules if module.code != 'executive_dashboard']
+        if module_action_allowed(self.user, 'executive_dashboard', 'read'):
+            modules.extend(Module.objects.filter(code='executive_dashboard', is_active=True))
         return modules
 
 

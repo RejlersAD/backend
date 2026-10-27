@@ -12,7 +12,7 @@ from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from apps.dashboard.executive_access import TAB_ACTIONS, allowed_tabs, filter_executive_report
 from apps.portfolio.views import PortfolioWorkbookView, PortfolioRevenueView, PortfolioOutgoingInvoicesView, PortfolioWorkbookPreviewView, PortfolioWorkbookImportView
-from apps.rbac.action_policy import module_action_allowed
+from apps.rbac.action_policy import effective_action_map, module_action_allowed
 from apps.rbac.models import Module, Organization, Permission, Role, RoleModule, RolePermission, UserPermissionOverride, UserProfile, UserRole
 from apps.rbac.module_actions import ensure_module_actions
 
@@ -67,6 +67,7 @@ class ExecutiveTabAccessTests(TestCase):
         self.assertNotIn('portfolio_performance', response.data)
 
     def test_each_role_grant_is_independent(self):
+        RoleModule.objects.filter(role=self.role, module=self.module).delete()
         for tab in TAB_ACTIONS:
             with self.subTest(tab=tab):
                 RolePermission.objects.filter(role=self.role, permission__in=self.permissions.values()).delete()
@@ -180,4 +181,77 @@ class ExecutiveTabAccessTests(TestCase):
         register(apps, editor)
         register(apps, editor)
         self.assertEqual(list(RolePermission.objects.values_list('role_id', 'permission_id')), before)
-        self.assertEqual(Permission.objects.filter(code__in=[p.code for p in self.permissions.values()]).count(), 3)
+        self.assertEqual(Permission.objects.filter(code__in=[p.code for p in self.permissions.values()]).count(), 6)
+
+    def test_individual_assignment_without_any_role_opens_only_selected_tab(self):
+        self.profile.roles.clear()
+        # Warm module cache before the administrator grants anything.
+        self.profile.get_all_modules()
+        for tab in TAB_ACTIONS:
+            with self.subTest(tab=tab):
+                self.profile.permission_overrides.all().delete()
+                self.override(tab, True)
+                response = self.report(tab=tab)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data['allowed_tabs'], [tab])
+                self.assertTrue(self.profile.has_module_access('executive_dashboard'))
+                self.assertIn('executive_dashboard', [m.code for m in self.profile.get_all_modules()])
+                self.assertIn('read', effective_action_map(self.profile)['executive_dashboard'])
+                self.assertFalse(module_action_allowed(self.user, 'project_control', 'read'))
+                self.assertFalse(module_action_allowed(self.user, 'executive_dashboard', 'update'))
+                self.assertFalse(module_action_allowed(self.user, 'executive_dashboard', 'export'))
+        self.profile.permission_overrides.all().delete()
+        self.assertEqual(self.report().status_code, 403)
+        self.assertNotIn('executive_dashboard', [m.code for m in self.profile.get_all_modules()])
+        self.assertNotIn('read', effective_action_map(self.profile).get('executive_dashboard', []))
+
+    def test_all_denied_tab_payloads_are_withheld(self):
+        for tab in TAB_ACTIONS:
+            self.override(tab, False)
+        data = self.report().data
+        self.assertEqual(data['allowed_tabs'], [])
+        for key in ('financial_performance', 'portfolio_performance', 'commercial_performance',
+                    'workforce_performance', 'risk_compliance'):
+            self.assertNotIn(key, data)
+
+    def test_disabled_or_locked_accounts_cannot_use_tab_only_grant(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        self.profile.roles.clear()
+        self.override('portfolio', True)
+        self.profile.locked_until = timezone.now() + timedelta(hours=1)
+        self.profile.save(update_fields=['locked_until'])
+        self.assertFalse(module_action_allowed(self.user, 'executive_dashboard', 'read'))
+
+    def test_new_permission_registration_grants_no_roles_or_users(self):
+        register = import_module('apps.rbac.migrations.0070_executive_all_tab_permissions').register_tabs
+        before = RolePermission.objects.count(), UserPermissionOverride.objects.count()
+        register(apps, SimpleNamespace(connection=connection))
+        register(apps, SimpleNamespace(connection=connection))
+        self.assertEqual(before, (RolePermission.objects.count(), UserPermissionOverride.objects.count()))
+
+    def test_admin_saved_assignment_is_usable_by_target_for_each_tab(self):
+        from apps.rbac.views import UserProfileViewSet
+        self.profile.roles.clear()
+        actor = get_user_model().objects.create_superuser('tab-admin', 'tab-admin@example.test', 'test-password')
+        view = UserProfileViewSet.as_view({'get': 'permission_overrides', 'patch': 'permission_overrides'})
+        memberships = list(UserRole.objects.filter(user_profile=self.profile).values())
+        for selected in TAB_ACTIONS:
+            with self.subTest(tab=selected):
+                request = APIRequestFactory().get('/users/permission-overrides/')
+                force_authenticate(request, actor)
+                before = view(request, pk=str(self.profile.pk))
+                self.assertEqual(before.status_code, 200)
+                request = APIRequestFactory().patch('/users/permission-overrides/', {
+                    'snapshot': before.data['snapshot'], 'reason': f'Assign {selected}',
+                    'changes': [{'permission_id': str(permission.pk),
+                                 'effect': 'allow' if tab == selected else 'deny'}
+                                for tab, permission in self.permissions.items()],
+                }, format='json')
+                force_authenticate(request, actor)
+                saved = view(request, pk=str(self.profile.pk))
+                self.assertEqual(saved.status_code, 200)
+                response = self.report(tab=selected)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data['allowed_tabs'], [selected])
+        self.assertEqual(list(UserRole.objects.filter(user_profile=self.profile).values()), memberships)
