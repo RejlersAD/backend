@@ -1,5 +1,69 @@
 # S3D local extraction and acceptance
 
+## Local-only timeout repair - 27 October 2026
+
+Authority: S3D-LOCAL-02 and the user's explicit goal to extract without AI API
+keys. The default is SPEC_LOCAL_ONLY=true, which prevents provider discovery and
+vision calls even when a project/provider key is configured. The prior optional
+cloud/BYOK path requires explicit SPEC_LOCAL_ONLY=false. Historical jobs and
+their usage records remain unchanged.
+
+Native extraction reports image pages needing OCR; only those pages enter local
+OCR. Unsupported native table semantics remain review issues. Installation checks
+still gate each engine. SPEC_LOCAL_ENGINE_TIMEOUT_S defaults to 60 seconds per
+attempt, additionally capped at 75% of the remaining chunk/job budget so fallback
+and result handling retain time. A timed-out engine does not suppress later local
+engines. Page checkpoints retain completed-page rows when a child is killed and
+record unfinished pages in local_report. Native thread pools default to one via
+SPEC_LOCAL_ENGINE_THREADS; the pinned RapidOCR 1.3.2 SessionOptions factory is
+temporarily bounded during isolated child initialization and restored afterwards.
+
+SPEC_MAX_CONSECUTIVE_CHUNK_TIMEOUTS defaults to three. Reaching it stops further
+chunks and records their page ranges as not processed. The job deadline reserves
+finalization time; completed chunks survive that deadline as partial results.
+Cancelled/terminal reserved jobs are skipped. Completeness and SPEC/CAT export
+guards retain their existing semantics; zero-component runs are not successful.
+
+GET config retains existing fields and adds local_extraction.mode=local_only
+by default, processing_limits.local_engine_timeout_s, and
+processing_limits.max_consecutive_chunk_timeouts. No schema migration or endpoint
+change. The upload UI shows queued status separately and explains key-free local
+mode without claiming engineering acceptance.
+
+Read-only source checks retained 526 native DGS candidates across six classes:
+11.81 seconds on Windows (OCR unavailable), 45.26 seconds in the local Linux
+container with Tesseract attempts on 15 image pages. Provider access was forbidden
+and cost was zero. Both retain unresolved source coverage. A generated scanned
+table yielded two rows in 2.18 seconds using local Tesseract; a harder fractional
+size OCR example correctly retains a rejection instead of fabricating a value.
+Source probes exclude uploads, queue delay and DB persistence; they do not certify
+engineering accuracy or promise production timing. Workspace artifacts preserve
+counts, gaps and timing. Production was not modified or deployed by these checks.
+
+Final verification: the complete isolated Spec Customization suite ran 191 tests
+successfully (six existing skips). After the final header-only timeout handling
+correction, all 51 local extraction/recovery checks passed. Three focused browser
+checks, scoped ESLint, production/PWA build and changed-file whitespace checks
+passed. The build retains existing large-bundle/Browserslist warnings. Backend
+checks use SQLite and a workspace-only Django 5.2.18 overlay; no application
+dependency or production schema was changed.
+
+The read-only 2,335-page PMS.pdf pipeline probe finished in 476.55 seconds,
+returning 12,339 candidates across 171 classes with zero provider calls and zero
+API cost. Its SHA-256 is
+0adadf56d556054dedea48d3a1957fa2a5a91d6e8797afae281a769e1a93d317.
+Unsupported source rows remain partial review work. Results are in workspace
+artifacts/s3d-offline-large-source-verification.json; full logs are
+s3d-key-free-full-regressions.log, s3d-key-free-final-recovery-regressions.log,
+s3d-timeout-browser-capabilities.log and s3d-timeout-frontend-build.log.
+
+Rollout is pending. Deploy backend and frontend through the existing reviewed
+release workflow, retain SPEC_LOCAL_ONLY=true (the new default), and verify an
+authenticated fresh extraction on production. Retrying requires a new job;
+historical cancelled/failed attempts are retained. No worker-capacity increase or
+production-data rewrite is part of this repair.
+
+
 Authority: S3D-LOCAL-01, the user's five-task continuation on 26 October 2026;
 workspace brief `../../docs/features/s3d-local-extraction.md`.
 
@@ -87,9 +151,9 @@ reader. Header-only OCR cannot mask later component extraction. RapidOCR require
 packaged ONNX assets. PaddleOCR requires preinstalled detection/recognition model
 directories in SPEC_PADDLE_DETECTION_MODEL_DIR and SPEC_PADDLE_RECOGNITION_MODEL_DIR;
 automatic model downloads are not requested. Tesseract requires its binding,
-executable and language data. Missing installations are skipped. Configured cloud
-providers may run when local extraction cannot produce components; explicit BYOK
-retains provider routing.
+executable and language data. Missing installations are skipped. With explicit
+SPEC_LOCAL_ONLY=false, configured providers may run when local extraction cannot
+produce components; BYOK retains provider routing in that opt-in mode.
 Partial local results can also reach fallback, but their candidates and reported
 coverage gaps are retained alongside provider output. A provider response alone
 does not resolve a rejected local row or confer coverage approval.

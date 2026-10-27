@@ -97,6 +97,11 @@ SPEC_EXTRACTION_CONFIG = {
     "retry_backoff_base":    _env_int("SPEC_RETRY_BACKOFF_BASE", 2, lo=1, hi=30),
     "chunk_timeout_s":       _env_int("SPEC_CHUNK_TIMEOUT_S", 300, lo=1, hi=3600),
     "job_total_timeout_s":   _env_int("SPEC_JOB_TIMEOUT_S", 3600, lo=60, hi=14400),
+    # Local extraction is the default even if platform provider keys exist.
+    "local_only": os.environ.get("SPEC_LOCAL_ONLY", "true").strip().lower() not in {"0", "false", "no", "off"},
+    "local_engine_timeout_s": _env_int("SPEC_LOCAL_ENGINE_TIMEOUT_S", 60, lo=1, hi=600),
+    "local_engine_threads": _env_int("SPEC_LOCAL_ENGINE_THREADS", 1, lo=1, hi=8),
+    "max_consecutive_chunk_timeouts": _env_int("SPEC_MAX_CONSECUTIVE_CHUNK_TIMEOUTS", 3, lo=1, hi=20),
     "paddle_detection_model_dir": os.environ.get("SPEC_PADDLE_DETECTION_MODEL_DIR", ""),
     "paddle_recognition_model_dir": os.environ.get("SPEC_PADDLE_RECOGNITION_MODEL_DIR", ""),
 

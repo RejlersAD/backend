@@ -90,6 +90,7 @@ class PaperSpecExtractionService:
         self._local_candidate = None
         self.chunk_attempts = []
         self.local_engine_errors = []
+        self._ocr_pages = None
         
         # BYOK (Bring Your Own Key) support
         self._user_api_key = (user_api_key or "").strip()
@@ -112,13 +113,14 @@ class PaperSpecExtractionService:
         credential is available. Missing credentials should not block extraction
         for locally processable documents.
         """
-        configurations = [get_provider_configuration(provider) for provider in ('gemini', 'openai', 'anthropic')]
-
         engines = ['pymupdf_text']
         for local_name in ('rapidocr', 'paddleocr', 'tesseract'):
             if local_name not in engines:
                 engines.append(local_name)
 
+        if self.config.get('local_only', True):
+            return engines
+        configurations = [get_provider_configuration(provider) for provider in ('gemini', 'openai', 'anthropic')]
         for item in configurations:
             if not item['ready']:
                 continue
@@ -136,17 +138,42 @@ class PaperSpecExtractionService:
         return remaining
 
     def _extract_local(self, pdf_path, start, end, engine):
-        self.remaining_seconds()
         if not next(item['available'] for item in local_capabilities(self.config)['engines'] if item['id'] == engine):
             self.local_engine_errors.append({'engine': engine, 'reason': 'not_available'})
             return None
+        if engine != 'pymupdf_text' and self._ocr_pages == []:
+            return None
+        remaining = self.remaining_seconds()
+        # Leave time for another engine and final result/report handling.
+        timeout = min(self.config['local_engine_timeout_s'], remaining * .75)
         try:
-            result = run_local_engine(pdf_path, start, end, engine, self.config, self.remaining_seconds())
-            self.remaining_seconds()
+            result = run_local_engine(pdf_path, start, end, engine, self.config, timeout,
+                                      pages=None if engine == 'pymupdf_text' else self._ocr_pages)
+            if result.get('timed_out'):
+                self.local_engine_errors.append({'engine': engine, 'reason': 'timeout'})
             return result
+        except TimeoutError:
+            self.local_engine_errors.append({'engine': engine, 'reason': 'timeout'})
+            logger.warning('[SpecExtraction] Local engine %s timed out on pages %d-%d; trying fallback', engine, start + 1, end + 1)
+            return None
         except OSError:
             self.local_engine_errors.append({'engine': engine, 'reason': 'execution_failed'})
             return None
+
+    def _combine_local_results(self, base, result):
+        """Union source rows; OCR only resolves explicit image-readability gaps."""
+        if not base:
+            return result
+        resolved = set(result.get('pages_with_components', [])) - {
+            issue.get('page') for issue in result.get('local_report', {}).get('issues', [])}
+        issues = [issue for issue in base.get('local_report', {}).get('issues', [])
+                  if not (issue.get('reason') in {'image_page_requires_ocr', 'ocr_no_component_rows', 'local_engine_timeout'} and issue.get('page') in resolved)]
+        issues.extend(issue for issue in result.get('local_report', {}).get('issues', []) if issue not in issues)
+        classes = self.merge_classes([base.get('piping_classes', []), result.get('piping_classes', [])])
+        return {**result, 'piping_classes': classes,
+                'local_report': {**base.get('local_report', {}), **result.get('local_report', {}),
+                                 'components': sum(len(item.get('components', [])) for item in classes),
+                                 'issues': issues}}
 
     def _call_vision(self, engine, images, page_range):
         pages = page_range[1] - page_range[0] + 1
@@ -717,6 +744,7 @@ class PaperSpecExtractionService:
         self._chunk_deadline = min(self._job_deadline, time.monotonic() + self.config['chunk_timeout_s'])
         self._cloud_attempted = False
         self.local_engine_errors = []
+        self._ocr_pages = None
         attempts = 1 + int(self.config['retry_max'])
         for attempt in range(attempts):
             self.remaining_seconds()
@@ -737,7 +765,13 @@ class PaperSpecExtractionService:
             except (OSError, TimeoutError) as exc:
                 self.chunk_attempts.append({'page_from': start + 1, 'page_to': end + 1,
                                             'attempts': attempt + 1, 'state': 'timeout' if isinstance(exc, TimeoutError) else 'local_error'})
-                if self._cloud_attempted or attempt + 1 == attempts:
+                if self._local_candidate:
+                    candidate = self._local_candidate
+                    candidate.setdefault('local_report', {}).setdefault('issues', []).append(
+                        {'page': start + 1, 'page_to': end + 1, 'reason': 'chunk_processing_timeout' if isinstance(exc, TimeoutError) else 'local_execution_failed'})
+                    return candidate
+                # Retrying an expired chunk cannot replenish its budget.
+                if isinstance(exc, TimeoutError) or self._cloud_attempted or attempt + 1 == attempts:
                     raise
                 delay = self.config['retry_backoff_base'] ** (attempt + 1)
                 if self.remaining_seconds() <= delay:
@@ -765,15 +799,19 @@ class PaperSpecExtractionService:
         if enable_ensemble is None:
             enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
         
-        engines = (list(self.config['ai_engines']) if self._user_provider in {'openai', 'claude'}
+        local_only = self.config.get('local_only', True)
+        engines = (list(self.config['ai_engines']) if not local_only and self._user_provider in {'openai', 'claude'}
                    else self._configured_engines())
+        if local_only:
+            engines = [engine for engine in engines if engine in {'pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract'}]
+            enable_ensemble = False
         max_ai_pages = int(self.config["max_ai_pages_per_job"])
         page_count_in_chunk = (end - start + 1)
 
         # BYOK provider routing: when a user/project key is present, run the
         # explicitly selected provider first. For predictable billing/behavior,
         # default to a strict provider-only AI path plus OCR fallback.
-        byok_provider = self._user_provider if self._user_provider in {"openai", "claude"} else ""
+        byok_provider = self._user_provider if not local_only and self._user_provider in {"openai", "claude"} else ""
         if byok_provider:
             byok_engine = f"{byok_provider}_vision"
             if byok_engine not in engines:
@@ -792,6 +830,9 @@ class PaperSpecExtractionService:
 
         # 1) Always try text-layer first — cheap, accurate on vector PDFs.
         text_result = self.extract_via_text_layer(pdf_path, start, end)
+        # Native page routing is explicit. Unsupported native table semantics
+        # are review gaps; rasterising those same readable pages cannot fix them.
+        self._ocr_pages = text_result.get('ocr_pages')
         text_classes = text_result.get("piping_classes", [])
         local_candidate = text_result if self._text_layer_result_is_complete(text_classes) else None
         self._local_candidate = local_candidate
@@ -811,15 +852,18 @@ class PaperSpecExtractionService:
             for engine in engines:
                 if engine in {'rapidocr', 'paddleocr', 'tesseract'}:
                     blob = getattr(self, f'extract_via_{engine}')(pdf_path, start, end)
-                    if blob and self._text_layer_result_is_complete(blob.get('piping_classes', [])):
-                        if not blob.get('local_report', {}).get('issues'):
-                            return {**blob, 'engine_used': engine}
-                        if not local_candidate or self._classes_quality(blob['piping_classes'])[0] > self._classes_quality(local_candidate['piping_classes'])[0]:
-                            local_candidate = {**blob, 'engine_used': engine}
-                            self._local_candidate = local_candidate
+                    if blob:
+                        blob = self._combine_local_results(local_candidate or text_result, {**blob, 'engine_used': engine})
+                        if self._text_layer_result_is_complete(blob.get('piping_classes', [])):
+                            local_candidate = blob
+                            self._local_candidate = blob
+                            if not blob.get('local_report', {}).get('issues'):
+                                return blob
+                        else:
+                            text_result = blob
 
         # Within AI budget?
-        ai_budget_ok = (self._ai_pages_used + page_count_in_chunk) <= max_ai_pages
+        ai_budget_ok = not local_only and (self._ai_pages_used + page_count_in_chunk) <= max_ai_pages
 
         if ai_budget_ok:
             images: Optional[List[str]] = None
@@ -927,7 +971,7 @@ class PaperSpecExtractionService:
 
             if gemini_candidate:
                 return gemini_candidate
-        else:
+        elif not local_only:
             logger.info("[SpecExtraction] AI budget exhausted (%d/%d) — using text/tesseract only",
                         self._ai_pages_used, max_ai_pages)
 
@@ -935,15 +979,22 @@ class PaperSpecExtractionService:
         if local_candidate:
             return local_candidate
         # Fallback: text-layer classes (may be empty) + tesseract last attempt
-        if text_classes:
-            return {**text_result, "engine_used": "pymupdf_text"}
+        if text_result.get('piping_classes'):
+            timed_out = any(item['reason'] == 'timeout' for item in self.local_engine_errors)
+            if timed_out:
+                text_result.setdefault('local_report', {}).setdefault('issues', []).append(
+                    {'page': start + 1, 'page_to': end + 1, 'reason': 'local_engine_timeout'})
+            return {**text_result, 'timed_out': timed_out, "engine_used": "pymupdf_text"}
         if byok_provider:
             blob = self.extract_via_tesseract(pdf_path, start, end)
             if blob and blob.get("piping_classes"):
                 return {**blob, "engine_used": "tesseract"}
         if any(item['reason'] == 'execution_failed' for item in self.local_engine_errors):
             raise OSError('Available local engines failed to execute.')
-        return {"piping_classes": [], "engine_used": "none"}
+        if any(item['reason'] == 'timeout' for item in self.local_engine_errors):
+            raise TimeoutError('Available local extraction engines timed out for this chunk.')
+        # Preserve image/unsupported-layout coverage even when no rows were found.
+        return {**text_result, "engine_used": "none"}
 
     # ── Merging chunk results ───────────────────────────────────────────
     @staticmethod
