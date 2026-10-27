@@ -375,15 +375,12 @@ def operation_action(request, view):
     return {'POST': 'create', 'PUT': 'update', 'PATCH': 'update', 'DELETE': 'delete'}.get(method)
 
 
-def module_action_allowed(user, module_code, action):
+def module_action_allowed(user, module_code, action, *, include_executive_tabs=True):
     """Effective action grants; user denies win, including over super-admin.
 
-    Strictly role-based: User -> Role -> Module -> Permission. No department,
-    service-area, or sales bypass exists. Access can only come from an active
-    role assignment that links the role to the module (RoleModule) and to the
-    permission (RolePermission). User-level permission overrides can deny but
-    never grant beyond the role's grants. Role assignments are time-bounded
-    by UserRole.effective_from / UserRole.expires_at.
+    Module membership normally comes from an active, time-bounded role.
+    Executive tab grants additionally supply entry to that read-only workspace;
+    they do not supply source-module permissions. Individual denies always win.
     """
     from .models import Module, Permission, RoleModule, RolePermission, UserProfile
     from .rbac_config import is_module_enabled
@@ -402,6 +399,14 @@ def module_action_allowed(user, module_code, action):
     roles = list(profile._effective_roles())
     role_ids = [pk for pk, code in roles]
     super_admin = user.is_superuser or any(code == 'super_admin' for pk, code in roles)
+    if include_executive_tabs and module_code == 'executive_dashboard' and action == 'read':
+        from apps.dashboard.executive_access import has_tab_grant
+        if has_tab_grant(profile):
+            # Explicit read denial still wins over a tab grant.
+            return not profile.permission_overrides.filter(
+                permission__module__code=module_code, permission__action='read',
+                permission__is_active=True, allowed=False,
+            ).exists()
     # Role must grant the module.
     if not super_admin and not RoleModule.objects.filter(module__code=module_code, role_id__in=role_ids).exists():
         return False
@@ -477,6 +482,13 @@ def effective_action_map(profile):
     for (code, action), ids in grouped.items():
         if ids.issubset(effective):
             result[code].append(action)
+    if module_action_allowed(profile.user, 'executive_dashboard', 'read'):
+        if 'read' not in result['executive_dashboard']:
+            result['executive_dashboard'].append('read')
+    elif 'executive_dashboard' in result:
+        result['executive_dashboard'] = [action for action in result['executive_dashboard'] if action != 'read']
+        if not result['executive_dashboard']:
+            del result['executive_dashboard']
     return dict(result)
 
 

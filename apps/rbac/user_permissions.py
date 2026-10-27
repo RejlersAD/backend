@@ -24,9 +24,16 @@ class ReviewSerializer(serializers.Serializer):
 def permission_state(profile, actor):
     catalogue = list(Permission.objects.filter(is_active=True).select_related('module').order_by('module__name', 'action', 'code'))
     inherited = set(p.id for p in catalogue) if profile.is_super_admin() else set(
-        Permission.objects.filter(roles__in=profile.roles.filter(is_active=True), is_active=True).values_list('id', flat=True)
+        Permission.objects.filter(roles__id__in=profile._effective_role_ids(), is_active=True).values_list('id', flat=True)
     )
     overrides = dict(profile.permission_overrides.values_list('permission_id', 'allowed'))
+    # These tabs historically inherit Executive read. Show the same effective
+    # state in the editor as the report until an explicit tab decision is saved.
+    from apps.dashboard.executive_access import LEGACY_TABS, TAB_ACTIONS
+    from .action_policy import module_action_allowed
+    if module_action_allowed(profile.user, 'executive_dashboard', 'read', include_executive_tabs=False):
+        legacy_codes = {f'executive_dashboard.{TAB_ACTIONS[tab]}' for tab in LEGACY_TABS}
+        inherited.update(p.id for p in catalogue if p.code in legacy_codes)
     rows = [{
         'id': str(p.id), 'code': p.code, 'name': p.name, 'action': p.action,
         'module': str(p.module_id), 'module_name': p.module.name,
