@@ -1,5 +1,26 @@
 # EXEC-ACCESS-01 — Executive tab access
 
+## EXEC-ACCESS-03 - company-wide dashboard viewing, 27 October 2026
+
+Authorized by the user after viewer/admin screenshot comparison: an assigned tab
+must show the same company-wide dashboard data as an administrator. This replaces
+the source/row restrictions in older sections for Executive GET reports only.
+The server creates an actor-bound, exception-safe reporting scope after Executive
+and tab checks. Read helpers use company source visibility only within that scope.
+Direct source endpoints retain normal grants and record restrictions. There is
+no role mutation, administrator impersonation or schema change. Explicit
+Executive/tab denials and disabled identities/modules remain effective.
+
+Portfolio readers include the complete workbook, including unmatched identities,
+so totals, charts, forecasts and watchlists agree for identical filters. Full
+report scope never implies can_upload: preview/import, writes and approvals keep
+existing authorization. Shared invoice reports still require Overview/Financial;
+Portfolio readers require Portfolio. Responses remain private/no-store and hide
+unassigned tab objects. 112 backend and 14 browser checks passed. Read-only local
+comparison: 83 projects for both viewer/admin, identical KPIs/forecasts/watchlists,
+viewer can_upload=false; no users saved. Shared scope: ../../docs/features/executive-company-reporting.md.
+
+
 ## EXEC-ACCESS-02 - assignment repair, 27 October 2026
 
 Effective tab grants now supply Executive workspace read entry without separate

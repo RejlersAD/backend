@@ -13,7 +13,7 @@ from django.db.models import Count, Max
 from django.db.models.functions import Trim, Upper
 from django.utils import timezone
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 from .command_center import ROUTES, _payable_queryset
 from .workbook_summary import build_workbook_summary
 from .invoice_performance import build_invoice_performance, source_snapshot_metadata

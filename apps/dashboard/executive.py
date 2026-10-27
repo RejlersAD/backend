@@ -1,7 +1,7 @@
-"""Read-only executive view of authorized operational registers.
+"""Read-only Executive reporting over operational registers.
 
-This is not a consolidated financial ledger. Each contributor has its own read
-grant and retains its source's row visibility. A failed source never becomes 0.
+Authorized Executive GET scope supplies company-wide reporting visibility.
+Direct service use retains source grants. A failed source never becomes zero.
 """
 import logging
 from collections import defaultdict
@@ -14,7 +14,7 @@ from django.db.models import Count, DecimalField, ExpressionWrapper, F, Max, Sum
 from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 
-from apps.rbac.action_policy import module_action_allowed
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
 
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ def _money_metric(identifier, label, rows, source, description):
 
 def _visible(queryset, user, module, owner_field):
     # The same row policy used by Finance and Sales TeamCollaborationMixin.
-    from apps.rbac.data_visibility_mixin import build_visibility_filter
+    from apps.dashboard.reporting_scope import report_visibility_filter as build_visibility_filter
     return queryset.filter(build_visibility_filter(
         user=user, module_code=module, owner_field=owner_field,
     )).distinct()
@@ -110,7 +110,7 @@ def _visible(queryset, user, module, owner_field):
 def _build_projects(user, context):
     if 'project_control' not in context['allowed_modules']:
         return restricted('project_control'), {'status': 'restricted', 'counts': None, 'projects': []}
-    from apps.project_control.access import accessible_enterprise_projects
+    from apps.dashboard.reporting_scope import report_projects as accessible_enterprise_projects
     from apps.project_control.services.portfolio_exceptions import build_portfolio_exception_dashboard
 
     projects = accessible_enterprise_projects(user)
@@ -345,7 +345,7 @@ def _build_procurement(user, context):
     if not allowed.intersection({'procurement_orders', 'procurement_requisitions'}):
         return restricted('procurement')
     from apps.procurement.models import PurchaseOrder, PurchaseRequisition
-    from apps.project_control.access import accessible_enterprise_projects
+    from apps.dashboard.reporting_scope import report_projects as accessible_enterprise_projects
 
     projects = accessible_enterprise_projects(user)
     metrics, actions, action_count, source_updates = [], [], 0, []

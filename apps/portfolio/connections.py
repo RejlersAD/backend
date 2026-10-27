@@ -14,12 +14,12 @@ from django.db import DatabaseError, transaction
 from django.db.models import Count
 
 from apps.core.project_models import Project
-from apps.project_control.access import accessible_enterprise_projects
+from apps.dashboard.reporting_scope import report_projects as accessible_enterprise_projects
 from apps.procurement.services.project_relationships import (
     normalize_project_code, resolve_enterprise_project_by_code,
 )
-from apps.rbac.action_policy import module_action_allowed
-from apps.rbac.data_visibility_mixin import build_visibility_filter
+from apps.dashboard.reporting_scope import report_action_allowed as module_action_allowed
+from apps.dashboard.reporting_scope import report_visibility_filter as build_visibility_filter
 
 
 logger = logging.getLogger(__name__)

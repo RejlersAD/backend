@@ -1,13 +1,14 @@
 """One authorized workbook scope for portfolio facts and operational links."""
 from .access import can_upload_workbook
 from .reporting import _visible_rows
+from apps.dashboard.reporting_scope import company_reporting
 
 
 IDENTITY = ('project_code', 'subproject_code', 'title', 'business_unit', 'client', 'pm', 'pc', 'scope_type')
 
 
 def workbook_scope(snapshot, user, *, search='', pm='', business_unit='', client=''):
-    full_source = can_upload_workbook(user)
+    full_source = company_reporting(user, 'project_control') or can_upload_workbook(user)
     queryset = snapshot.rows.all() if full_source else _visible_rows(snapshot, user)
     all_rows = list(queryset.order_by('project_code', 'subproject_code').values())
     choices = {key: sorted({row[field] for row in all_rows if row[field]}, key=str.casefold)
