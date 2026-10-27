@@ -1,13 +1,17 @@
 """Synthetic layout/dispatch/budget checks; not engineering acceptance data."""
 from pathlib import Path
+import json
+import subprocess
+import sys
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
 
 from .services.config import SPEC_EXTRACTION_CONFIG
 from .services.local_tables import LocalTableParser, positioned_rows
-from .services.local_extraction import local_capabilities, run_local_engine, _ocr_words
+from .services.local_extraction import local_capabilities, run_local_engine, _ocr_words, _rapidocr_reader
 from .services.extraction_service import PaperSpecExtractionService
 from .services.data_quality import process_extracted_classes
 
@@ -88,14 +92,68 @@ class LocalTableTests(SimpleTestCase):
         self.assertEqual(result['local_report']['components'], 2)
         self.assertEqual(result['local_report']['issues'], [])
 
+    def test_image_dominated_page_with_native_footer_still_routes_to_ocr(self):
+        import fitz
+        import io
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'mixed.pdf'
+            stream = io.BytesIO()
+            Image.new('RGB', (500, 500), 'white').save(stream, format='PNG')
+            with fitz.open() as document:
+                page = document.new_page()
+                page.insert_image(page.rect, stream=stream.getvalue())
+                page.insert_text((36, 40), 'Readable source footer ' * 8, fontsize=8)
+                document.save(path)
+            result = run_local_engine(path, 0, 0, 'pymupdf_text', SPEC_EXTRACTION_CONFIG, 30)
+        self.assertGreater(result['page_text_chars'], 100)
+        self.assertEqual(result['ocr_pages'], [1])
+
     def test_real_child_is_killed_when_budget_expires(self):
         with self.assertRaises(TimeoutError):
             run_local_engine('not-opened.pdf', 0, 0, 'pymupdf_text', SPEC_EXTRACTION_CONFIG, .00001)
+
+    def test_child_timeout_retains_completed_page_rows_and_reports_missing_pages(self):
+        checkpoint = {'piping_classes': [{'class_code': 'CS150', 'components': [{'component_type': 'pipe'}]}],
+                      'pages_processed': [1], 'local_report': {'components': 1, 'issues': []}}
+        error = subprocess.TimeoutExpired('synthetic', 2, output=(json.dumps(checkpoint) + '\n').encode())
+        with patch('apps.spec_customization.services.local_extraction.subprocess.run', side_effect=error):
+            result = run_local_engine('synthetic.pdf', 0, 2, 'rapidocr', SPEC_EXTRACTION_CONFIG, 2)
+        self.assertTrue(result['timed_out'])
+        self.assertEqual(result['local_report']['components'], 1)
+        self.assertEqual([issue['page'] for issue in result['local_report']['issues']], [2, 3])
+
+    def test_child_receives_thread_bounds_and_only_selected_image_pages(self):
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps({'piping_classes': [], 'local_report': {'issues': []}}))
+        with patch('apps.spec_customization.services.local_extraction.subprocess.run', return_value=completed) as run:
+            run_local_engine('synthetic.pdf', 0, 9, 'tesseract', SPEC_EXTRACTION_CONFIG, 2, pages=[3, 7])
+        self.assertEqual(json.loads(run.call_args.kwargs['input'])['pages'], [3, 7])
+        self.assertEqual(run.call_args.kwargs['env']['OMP_NUM_THREADS'], '1')
 
     def test_paddle_requires_preinstalled_models(self):
         config = {**SPEC_EXTRACTION_CONFIG, 'paddle_detection_model_dir': '', 'paddle_recognition_model_dir': ''}
         item = next(item for item in local_capabilities(config)['engines'] if item['id'] == 'paddleocr')
         self.assertFalse(item['available'])
+
+    def test_pinned_rapidocr_onnx_pools_are_bounded_and_factory_restored(self):
+        factory = lambda: SimpleNamespace()
+        utils = SimpleNamespace(SessionOptions=factory)
+        module = SimpleNamespace(utils=utils, RapidOCR=lambda: utils.SessionOptions())
+        with patch.dict(sys.modules, {'rapidocr_onnxruntime': module}):
+            reader = _rapidocr_reader({'local_engine_threads': 2})
+        self.assertEqual((reader.intra_op_num_threads, reader.inter_op_num_threads), (2, 1))
+        self.assertIs(utils.SessionOptions, factory)
+
+    def test_default_local_only_does_not_consult_the_credential_registry(self):
+        with patch('apps.spec_customization.services.extraction_service.get_provider_configuration', side_effect=AssertionError('unexpected provider access')):
+            engines = PaperSpecExtractionService({'local_only': True})._configured_engines()
+        self.assertEqual(engines, ['pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract'])
+
+    def test_local_upload_does_not_resolve_or_retain_request_credentials(self):
+        from .views import _resolve_project_byok
+        with patch('apps.spec_customization.views.provider_managed', side_effect=AssertionError('Credential access forbidden')), \
+                patch.dict(SPEC_EXTRACTION_CONFIG, {'local_only': True}):
+            self.assertEqual(_resolve_project_byok('synthetic-project', 'openai', 'synthetic-model', 'synthetic-key'), ('', '', ''))
 
     def test_matrix_uses_populated_cells_and_never_builds_commodity_codes(self):
         def row(y, *words):
@@ -135,7 +193,8 @@ class LocalTableTests(SimpleTestCase):
 
 class LocalDispatchTests(SimpleTestCase):
     def setUp(self):
-        self.service = PaperSpecExtractionService({'retry_max': 0})
+        # Legacy optional provider routing is explicitly opted in by these fixtures.
+        self.service = PaperSpecExtractionService({'retry_max': 0, 'local_only': False})
         self.text = self.enterContext(patch.object(self.service, 'extract_via_text_layer', return_value={'piping_classes': []}))
         self.enterContext(patch.object(self.service, '_configured_engines', return_value=['pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract', 'openai_vision']))
         self.rapid = self.enterContext(patch.object(self.service, 'extract_via_rapidocr', return_value=None))
@@ -152,6 +211,63 @@ class LocalDispatchTests(SimpleTestCase):
         self.paddle.assert_called_once()
         self.tesseract.assert_not_called()
         self.cloud.assert_not_called()
+
+    def test_local_only_never_calls_provider_even_with_selected_key_and_ready_engine(self):
+        self.service.config['local_only'] = True
+        self.service._user_provider = 'openai'
+        self.service._user_api_key = 'synthetic-unused-key'
+        self.service.extract_chunk('synthetic.pdf', 0, 0)
+        self.cloud.assert_not_called()
+
+    def test_native_page_routing_skips_ocr_for_readable_unsupported_tables(self):
+        self.text.return_value = {'piping_classes': [], 'ocr_pages': [], 'local_report': {'issues': [{'page': 1, 'reason': 'unsupported_row'}]}}
+        # Use actual local dispatch to check selection instead of mocked OCR methods.
+        for name in ('rapidocr', 'paddleocr', 'tesseract'):
+            setattr(self.service, f'extract_via_{name}', lambda path, start, end, engine=name: self.service._extract_local(path, start, end, engine))
+        with patch('apps.spec_customization.services.extraction_service.local_capabilities', return_value={'engines': [
+                {'id': name, 'available': True} for name in ('rapidocr', 'paddleocr', 'tesseract')]}), \
+                patch('apps.spec_customization.services.extraction_service.run_local_engine') as run:
+            self.service.config['local_only'] = True
+            result = self.service.extract_chunk('synthetic.pdf', 0, 0)
+        run.assert_not_called()
+        self.assertEqual(result['local_report']['issues'][0]['reason'], 'unsupported_row')
+
+    def test_timed_out_engine_leaves_budget_for_next_local_engine(self):
+        self.service.config['local_only'] = True
+        self.rapid.side_effect = lambda path, start, end: self.service._extract_local(path, start, end, 'rapidocr')
+        self.tesseract.return_value = {'piping_classes': [{'class_code': 'CS150', 'components': [{'component_type': 'pipe'}]}]}
+        with patch('apps.spec_customization.services.extraction_service.local_capabilities', return_value={'engines': [{'id': 'rapidocr', 'available': True}]}), \
+                patch('apps.spec_customization.services.extraction_service.run_local_engine', side_effect=TimeoutError()) as run:
+            result = self.service.extract_chunk('synthetic.pdf', 0, 0)
+        self.assertEqual(result['engine_used'], 'tesseract')
+        self.assertLessEqual(run.call_args.args[5], self.service.config['local_engine_timeout_s'])
+        self.cloud.assert_not_called()
+
+    def test_timeout_after_native_partial_result_does_not_discard_source_rows(self):
+        self.text.return_value = {'piping_classes': [{'class_code': 'CS150', 'components': [{'component_type': 'pipe'}]}],
+                                 'local_report': {'issues': [{'page': 1, 'reason': 'unsupported_row'}]}}
+        self.rapid.side_effect = TimeoutError('synthetic engine deadline')
+        result = self.service.extract_chunk('synthetic.pdf', 0, 0)
+        self.assertEqual(len(result['piping_classes'][0]['components']), 1)
+        self.assertEqual(result['local_report']['issues'][-1]['reason'], 'chunk_processing_timeout')
+
+    def test_empty_ocr_keeps_its_page_coverage_report(self):
+        self.service.config['local_only'] = True
+        self.text.return_value = {'piping_classes': [], 'ocr_pages': [1], 'local_report': {'issues': [{'page': 1, 'reason': 'image_page_requires_ocr'}]}}
+        self.tesseract.return_value = {'piping_classes': [], 'local_report': {'issues': [{'page': 1, 'reason': 'ocr_no_component_rows'}]}}
+        result = self.service.extract_chunk('synthetic.pdf', 0, 0)
+        self.assertIn('ocr_no_component_rows', [issue['reason'] for issue in result['local_report']['issues']])
+
+    def test_header_only_native_result_does_not_hide_ocr_timeouts(self):
+        self.service.config['local_only'] = True
+        self.text.return_value = {'piping_classes': [{'class_code': 'CS150', 'components': []}]}
+        def timeout(*args):
+            self.service.local_engine_errors.append({'engine': 'rapidocr', 'reason': 'timeout'})
+        self.rapid.side_effect = timeout
+        result = self.service.extract_chunk('synthetic.pdf', 0, 0)
+        self.assertTrue(result['timed_out'])
+        self.assertEqual(result['piping_classes'][0]['class_code'], 'CS150')
+        self.assertEqual(result['local_report']['issues'][-1]['reason'], 'local_engine_timeout')
 
     def test_header_only_ocr_does_not_mask_later_component_result(self):
         self.rapid.return_value = {'piping_classes': [{'class_code': 'CS150', 'components': []}]}

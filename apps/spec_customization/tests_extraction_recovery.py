@@ -1,6 +1,8 @@
 """Provider/result recovery; all provider operations are offline synthetic fixtures."""
 import inspect
 import json
+from pathlib import Path
+import tempfile
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -85,6 +87,68 @@ class ExtractionOutcomeTests(TestCase):
         self.assertEqual(self.job.user_openai_api_key, '')
         self.assertEqual(self.job.user_claude_api_key, '')
         self.assertEqual(self.progress.call_args.kwargs['state'], 'FAILURE')
+
+    def test_cancelled_reserved_job_is_not_started_again(self):
+        self.job.status = 'cancelled'
+        self.job.save(update_fields=['status'])
+        result = extract_paper_spec.run(str(self.job.pk))
+        self.job.refresh_from_db()
+        self.assertTrue(result['skipped'])
+        self.assertEqual(self.job.status, 'cancelled')
+        self.service.extract_chunk.assert_not_called()
+
+    def test_repeated_chunk_timeouts_stop_and_preserve_earlier_rows_and_coverage(self):
+        self.service.get_page_count.return_value = 6
+        self.service.chunk_ranges.return_value = [(i, i) for i in range(6)]
+        classes = [{'class_code': 'SYN150', 'class_full_code': 'Synthetic class',
+                    'components': [{'component_type': 'pipe', 'size_from': '2'}]}]
+        self.service.extract_chunk.side_effect = [
+            {'piping_classes': classes, 'engine_used': 'pymupdf_text'},
+            TimeoutError('synthetic'), TimeoutError('synthetic'), TimeoutError('synthetic')]
+        result = self.run_with_classes(classes)
+        self.assertTrue(result['success'])
+        self.assertEqual(self.service.extract_chunk.call_count, 4)
+        self.assertEqual((self.job.chunks_done, self.job.chunks_total), (4, 6))
+        self.assertEqual(self.job.piping_classes.get().components.count(), 1)
+        report = self.job.config_snapshot['extraction_outcome']
+        self.assertEqual(len(report['failed_chunks']), 5)
+        self.assertEqual(report['failed_chunks'][-1]['reason'], 'not_processed_after_timeouts')
+        self.assertIn('Stopped after repeated', self.job.error_message)
+        self.assertEqual(extraction_completeness(self.job)['state'], 'partial')
+
+    def test_job_budget_stops_before_next_chunk_and_retains_completed_rows(self):
+        self.service.get_page_count.return_value = 3
+        self.service.chunk_ranges.return_value = [(i, i) for i in range(3)]
+        classes = [{'class_code': 'SYN150', 'class_full_code': 'Synthetic class',
+                    'components': [{'component_type': 'pipe', 'size_from': '2'}]}]
+        clock = [100.0]
+        def first_chunk(*args, **kwargs):
+            clock[0] += 10000
+            return {'piping_classes': classes, 'engine_used': 'pymupdf_text'}
+        self.service.extract_chunk.side_effect = first_chunk
+        with patch('apps.spec_customization.tasks.time.monotonic', side_effect=lambda: clock[0]):
+            result = self.run_with_classes(classes)
+        self.assertTrue(result['success'])
+        self.assertEqual(self.service.extract_chunk.call_count, 1)
+        self.assertEqual((self.job.chunks_done, self.job.chunks_total), (1, 3))
+        self.assertEqual(self.job.piping_classes.get().components.count(), 1)
+        self.assertEqual(self.job.config_snapshot['extraction_outcome']['failed_chunks'][-1]['reason'], 'not_processed_after_job_timeout')
+
+    def test_real_local_pdf_is_extracted_and_persisted_without_provider_access(self):
+        from .tests_local_extraction import native_pdf
+        service = PaperSpecExtractionService({'local_only': True})
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'native.pdf'
+            native_pdf(source)
+            with patch('apps.spec_customization.tasks.PaperSpecExtractionService', return_value=service), \
+                    patch('apps.spec_customization.tasks._get_local_path', return_value=(str(source), False)), \
+                    patch('apps.spec_customization.services.extraction_service.get_provider_configuration', side_effect=AssertionError('Provider lookup forbidden')), \
+                    patch.object(service, '_call_vision', side_effect=AssertionError('Provider call forbidden')):
+                result = extract_paper_spec.run(str(self.job.pk))
+        self.job.refresh_from_db()
+        self.assertTrue(result['success'], result)
+        self.assertEqual(self.job.piping_classes.get(class_code='CS150').components.count(), 2)
+        self.assertEqual(self.job.cost_usd, 0)
 
     def test_header_only_result_is_retained_for_review_but_is_not_completed(self):
         result = self.run_with_classes([{'class_code': 'SYN150', 'class_full_code': 'Synthetic class', 'components': []}])

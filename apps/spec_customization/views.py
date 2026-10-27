@@ -144,6 +144,9 @@ def _resolve_project_byok(project_id, user_provider: str, user_model: str, user_
       2. Project-level BYOK settings (encrypted key in SpecProject.metadata.ai_settings).
       3. Empty values -> backend default non-BYOK engine path.
     """
+    if SPEC_EXTRACTION_CONFIG.get('local_only', True):
+        # Local jobs neither decrypt project credentials nor retain request keys.
+        return '', '', ''
     provider = (user_provider or '').strip().lower()
     model = (user_model or '').strip()
     api_key = (user_api_key or '').strip()
@@ -902,6 +905,8 @@ def config_view(request):
         "processing_limits": {
             "max_chunks_parallel": 1,
             "chunk_timeout_s": SPEC_EXTRACTION_CONFIG['chunk_timeout_s'],
+            "local_engine_timeout_s": SPEC_EXTRACTION_CONFIG['local_engine_timeout_s'],
+            "max_consecutive_chunk_timeouts": SPEC_EXTRACTION_CONFIG['max_consecutive_chunk_timeouts'],
             "job_total_timeout_s": SPEC_EXTRACTION_CONFIG['job_total_timeout_s'],
             "local_retry_max": SPEC_EXTRACTION_CONFIG['retry_max'],
             "automatic_paid_retries": False,

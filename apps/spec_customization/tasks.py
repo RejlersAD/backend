@@ -156,7 +156,11 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         raise self.retry(countdown=2, max_retries=5)
 
     cfg = SPEC_EXTRACTION_CONFIG
-    job_deadline = time.monotonic() + cfg['job_total_timeout_s']
+    if job.status in {PaperSpecExtractionJob.STATUS_CANCELLED, PaperSpecExtractionJob.STATUS_COMPLETED, PaperSpecExtractionJob.STATUS_FAILED}:
+        PaperSpecExtractionJob.objects.filter(pk=job.pk).update(user_openai_api_key='', user_claude_api_key='')
+        return {'success': False, 'skipped': True, 'status': job.status}
+    # Reserve time to merge/save candidates and coverage before Celery's limit.
+    job_deadline = time.monotonic() + cfg['job_total_timeout_s'] - min(60, cfg['job_total_timeout_s'] / 2)
     job.status = PaperSpecExtractionJob.STATUS_PROCESSING
     job.started_at = timezone.now()
     job.celery_task_id = self.request.id or ""
@@ -223,18 +227,23 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         failed_chunks = []
         local_reports = []
         ensemble_metrics_list: List[Dict[str, Any]] = []
+        consecutive_timeouts = 0
+        stopped_reason = ''
         cprog_start = cfg["chunk_progress_start"]
         cprog_end = cfg["chunk_progress_end"]
         band = max(1, cprog_end - cprog_start)
         
         # Enable ensemble extraction for better accuracy (98% target)
-        enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
+        enable_ensemble = not cfg.get('local_only', True) and ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
         if enable_ensemble:
             logger.info("[SpecExtraction] Ensemble mode enabled for job %s", job_id)
 
         for idx, (start_page, end_page) in enumerate(chunks):
             if time.monotonic() >= job_deadline:
-                raise TimeoutError('The extraction job exceeded its processing budget.')
+                stopped_reason = 'The extraction processing budget was reached. Completed source rows were retained; retry the unprocessed pages.'
+                failed_chunks.extend({'page_from': first + 1, 'page_to': last + 1,
+                                      'reason': 'not_processed_after_job_timeout'} for first, last in chunks[idx:])
+                break
             # Cancellation check.
             job.refresh_from_db(fields=["status"])
             if job.status == PaperSpecExtractionJob.STATUS_CANCELLED:
@@ -249,11 +258,17 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
                     retry_attempt=0
                 )
                 scanned_pages.update(range(start_page + 1, end_page + 2))
+                consecutive_timeouts = consecutive_timeouts + 1 if chunk_result.get('timed_out') else 0
             except ExtractionProviderConfigurationError:
                 raise
+            except TimeoutError as e:
+                logger.warning('[SpecExtraction] Job %s pages %d-%d timed out: %s', job_id, start_page + 1, end_page + 1, e)
+                consecutive_timeouts += 1
+                chunk_result = {'piping_classes': [], 'engine_used': 'error'}
             except Exception as e:
                 logger.exception("[SpecExtraction] chunk %d-%d failed: %s", start_page, end_page, e)
                 chunk_result = {"piping_classes": [], "engine_used": "error"}
+                consecutive_timeouts = 0
 
             if chunk_result.get('engine_used') == 'error':
                 failed_chunks.append({'page_from': start_page + 1, 'page_to': end_page + 1})
@@ -305,22 +320,27 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
                 [c for lst in all_results for c in lst],
                 timeout=PROGRESS_CACHE_TIMEOUT,
             )
+            if consecutive_timeouts >= cfg['max_consecutive_chunk_timeouts']:
+                stopped_reason = 'Stopped after repeated local extraction timeouts. Review failed pages and local OCR availability before retrying.'
+                failed_chunks.extend({'page_from': first + 1, 'page_to': last + 1,
+                                      'reason': 'not_processed_after_timeouts'} for first, last in chunks[idx + 1:])
+                break
 
         job.config_snapshot['extraction_outcome'] = {'failed_chunks': failed_chunks}
+        if stopped_reason:
+            job.config_snapshot['extraction_outcome']['stopped_reason'] = stopped_reason
         if isinstance(service.chunk_attempts, list):
             job.config_snapshot['extraction_outcome']['chunk_attempts'] = service.chunk_attempts
         if local_reports:
             job.config_snapshot['extraction_outcome']['local_reports'] = local_reports
-        if time.monotonic() >= job_deadline:
-            raise TimeoutError('The extraction job exceeded its processing budget.')
-        job.error_message = 'Partial extraction: some document chunks failed. Review the source and retry before exporting.' if failed_chunks else ''
+        job.error_message = (stopped_reason or 'Partial extraction: some document chunks failed. Review the source and retry before exporting.') if failed_chunks else ''
         job.save(update_fields=['config_snapshot', 'error_message'])
 
         # ── Merge + Advanced Validation + Data Quality + Persist ──────────
         _write_progress(
             str(job.id),
             state="PROGRESS",
-            status="Merging chunks & running AI-powered validation...",
+            status="Merging extracted rows and validating source data...",
             percent=cprog_end + 5,
         )
         
@@ -354,8 +374,6 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             project_title=job.document.title,
             document_number=job.document.document_number,
         )
-        if time.monotonic() >= job_deadline:
-            raise TimeoutError('The extraction job exceeded its processing budget.')
         
         logger.info(
             "[SpecExtraction] Data quality report for job %s: %s",
@@ -384,13 +402,13 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         if not has_classes:
             job.error_message = (job.error_message + ' ' if job.error_message else '') + (
                 'No component records were extracted. Check the source table layout and available local engines '
-                'or configured AI provider/model, then upload the document again to start a new extraction. '
+                'then upload the document again to start a new extraction. '
                 'Any detected class headers have been retained for review.'
             )
         elif partial_review:
-            job.error_message = (
+            job.error_message = (stopped_reason + ' ' if stopped_reason else '') + (
                 'Class headers were detected and saved for review, but no component rows were extracted. '
-                'Validate the source table layout or retry with a better local/OCR or AI configuration.'
+                'Validate the source table layout and available local OCR engines before retrying.'
             )
         elif not failed_chunks:
             job.error_message = ''
@@ -449,7 +467,7 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             status=job.current_phase if has_records else job.error_message,
             percent=100,
             chunks_total=len(chunks),
-            chunks_done=len(chunks),
+            chunks_done=job.chunks_done,
             classes_found=saved,
             total_components=total_components,
             accuracy_estimate=accuracy_pct,

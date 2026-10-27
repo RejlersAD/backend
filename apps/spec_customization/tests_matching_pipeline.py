@@ -421,7 +421,7 @@ class ExtractionDispatchTests(TestCase):
 
     def test_saved_claude_default_drives_provider_and_model(self):
         from .services.extraction_service import PaperSpecExtractionService
-        service = PaperSpecExtractionService()
+        service = PaperSpecExtractionService({'local_only': False})
         configurations = [
             {'provider': 'gemini', 'managed': False, 'ready': False, 'model': ''},
             {'provider': 'openai', 'managed': False, 'ready': False, 'model': ''},
@@ -436,7 +436,7 @@ class ExtractionDispatchTests(TestCase):
         with patch('apps.spec_customization.services.extraction_service.get_provider_configuration', return_value={
             'managed': True, 'ready': False, 'model': '',
         }):
-            self.assertEqual(PaperSpecExtractionService()._configured_engines(),
+            self.assertEqual(PaperSpecExtractionService({'local_only': False})._configured_engines(),
                              ['pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract'])
 
 
