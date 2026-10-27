@@ -95,9 +95,8 @@ class SpecExporterSheetTests(TestCase):
     def test_spec_workbook_renders_all_registered_builders(self):
         buf = build_spec_workbook(self.job)
         names = sheet_names(buf)
-        for sheet in cfg.SPEC_SHEET_BUILDERS:
-            self.assertIn(sheet, names, f'SPEC sheet missing: {sheet}')
-        self.assertGreaterEqual(len(names), len(cfg.SPEC_SHEET_BUILDERS))
+        self.assertEqual(names, cfg.SPEC_TEMPLATE_PROFILE['sheet_names'])
+        self.assertEqual(len(names), 50)
 
     def test_cat_workbook_renders_all_routed_sheets(self):
         buf = build_cat_workbook(self.job)
@@ -118,8 +117,8 @@ class SpecExporterSheetTests(TestCase):
                     break
             self.assertIsNotNone(header_row)
             headers = [(ws.cell(header_row, c).value or '') for c in range(1, ws.max_column + 1)]
-            self.assertIn('SpecName', headers)
-            col = headers.index('SpecName') + 1
+            self.assertIn('SPECNAME', headers)
+            col = headers.index('SPECNAME') + 1
             values = [str(ws.cell(r, col).value or '') for r in range(header_row + 1, ws.max_row + 1)]
             self.assertIn('A1', values)
         finally:

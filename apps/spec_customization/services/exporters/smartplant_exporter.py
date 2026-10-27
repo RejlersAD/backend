@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import logging
+from copy import copy
 from typing import Iterable, Optional
 
 from openpyxl import load_workbook
@@ -112,6 +113,8 @@ def _write_row(ws, row_idx: int, header_map: dict[str, int], data: dict):
     """Write a dict of {header_name: value} into `row_idx`."""
     for name, value in data.items():
         col = header_map.get(name)
+        if col is None:
+            col = next((index for header, index in header_map.items() if header.casefold() == str(name).casefold()), None)
         if col is None or value in (None, ''):
             continue
         ws.cell(row_idx, col).value = value
@@ -171,6 +174,17 @@ def build_spec_workbook(job, preview_data=None, export_state='draft') -> io.Byte
         n = _write_preview_rows_to_sheet(wb[sheet_name], rows)
         if n:
             summary[sheet_name] = n
+
+    profile = cfg.SPEC_TEMPLATE_PROFILE
+    if profile['index_sheet'] in wb.sheetnames:
+        index_sheet = wb[profile['index_sheet']]
+        for row in index_sheet.iter_rows(min_row=5):
+            name = row[profile['index_name_column'] - 1].value
+            if name in wb.sheetnames:
+                count = summary.get(name, 0)
+                row[profile['index_status_column'] - 1].value = f'{count} generated {export_state} rows' if count else 'No generated rows'
+    if profile['revision_sheet'] in wb.sheetnames:
+        wb[profile['revision_sheet']][profile['revision_title_cell']] = f'RADAI {export_state.upper()} - SmartPlant SPEC data'
 
     logger.info("[SmartPlantExport] SPEC job=%s wrote rows: %s", job.id, summary)
 
@@ -288,7 +302,13 @@ def _write_preview_rows_to_sheet(ws, rows: list[dict]) -> int:
     start_row = _find_marker_row(ws, cfg.START_MARKERS, max_search=header_row + 10) or header_row + 1
     insert_at = _find_insert_row(ws, start_row)
 
+    exemplar = [copy(ws.cell(insert_at, col)._style) for col in range(1, ws.max_column + 1)] if ws.cell(insert_at, 1).value not in cfg.END_MARKERS else None
+    height = ws.row_dimensions[insert_at].height
     ws.insert_rows(insert_at, amount=len(rows))
     for offset, row_dict in enumerate(rows):
+        if exemplar:
+            for col, style in enumerate(exemplar, 1):
+                ws.cell(insert_at + offset, col)._style = copy(style)
+            ws.row_dimensions[insert_at + offset].height = height
         _write_row(ws, insert_at + offset, header_map, row_dict)
     return len(rows)
