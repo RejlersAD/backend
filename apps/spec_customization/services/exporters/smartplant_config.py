@@ -21,6 +21,7 @@ in `services/templates/`).
 from __future__ import annotations
 
 import os
+import json
 import re
 from datetime import datetime
 from types import SimpleNamespace
@@ -31,8 +32,10 @@ from types import SimpleNamespace
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 
 SPEC_TEMPLATE_PATH = os.path.abspath(
-    os.path.join(_TEMPLATE_DIR, 'smartplant_spec_template.xlsx')
+    os.environ.get('SPEC_TEMPLATE_PATH') or os.path.join(_TEMPLATE_DIR, 'smartplant_spec_template.xlsx')
 )
+with open(os.path.join(_TEMPLATE_DIR, 'smartplant_spec_profile.json'), encoding='utf-8') as _profile_file:
+    SPEC_TEMPLATE_PROFILE = json.load(_profile_file)
 CAT_TEMPLATE_PATH = os.path.abspath(
     os.path.join(_TEMPLATE_DIR, 'smartplant_cat_template.xlsx')
 )

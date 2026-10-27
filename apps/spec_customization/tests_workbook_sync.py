@@ -5,6 +5,8 @@ cell override merge; batch-save; deterministic validation; chatbot
 repair/update provenance. Synthetic fixtures only (isolated SQLite).
 """
 from __future__ import annotations
+from pathlib import Path
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -42,7 +44,11 @@ class ExtractionToExportRoundtripTests(TestCase):
         self.assertIn('150', models, f'Fig 150 model missing: {models}')
 
     def test_allowable_stress_reaches_materials_data(self):
-        preview = build_preview(self.job, WORKBOOK_SPEC)
+        # MaterialsData belongs to the retained legacy profile, rather than
+        # the user-selected 50-sheet SPEC schema.
+        legacy = str(Path(cfg.SPEC_TEMPLATE_PATH).with_name('smartplant_spec_legacy_template.xlsx'))
+        with patch.object(cfg, 'SPEC_TEMPLATE_PATH', legacy):
+            preview = build_preview(self.job, WORKBOOK_SPEC)
         mats = next((s for s in preview['sheets'] if s['name'] == 'MaterialsData'), None)
         self.assertIsNotNone(mats)
         stresses = [str(r['cells'].get('AllowableStress', '')) for r in mats['rows']]

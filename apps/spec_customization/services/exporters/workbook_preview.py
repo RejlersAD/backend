@@ -196,7 +196,11 @@ def _get_headers(template_path: str, sheet_name: str) -> list[str]:
     by_sheet = _HEADERS_CACHE.setdefault(template_path, {})
     if sheet_name not in by_sheet:
         by_sheet[sheet_name] = _template_headers(template_path, sheet_name)
-    return by_sheet[sheet_name]
+    actual = by_sheet[sheet_name]
+    # Keep established API/override field keys while preserving the selected
+    # workbook's original header spelling in the downloaded XLSX.
+    aliases = cfg.SPEC_TEMPLATE_PROFILE.get('canonical_headers', {}).get(sheet_name, {}) if template_path == cfg.SPEC_TEMPLATE_PATH else {}
+    return [aliases.get(value, value) for value in actual]
 
 
 def _template_passthrough_rows(
@@ -288,7 +292,11 @@ def _preview_classes(job):
 def _enumerate_spec_rows(job):
     """Yield (sheet_name, row_key, source_dict, cells_dict) tuples for SPEC."""
     classes = _preview_classes(job)
+    with _template_book(cfg.SPEC_TEMPLATE_PATH) as book:
+        selected_sheets = set(book.sheetnames)
     for sheet_name, builders in cfg.SPEC_SHEET_BUILDERS.items():
+        if sheet_name not in selected_sheets:
+            continue
         for cls in classes:
             for b_idx, builder in enumerate(builders):
                 seq = 0
@@ -538,6 +546,11 @@ def _build_preview(job, workbook: str) -> dict:
         'job_id':    str(job.id),
         'sheets':    sheets_out,
     }
+    if workbook == WORKBOOK_SPEC:
+        order = {name: index for index, name in enumerate(template_sheet_names)}
+        result['sheets'].sort(key=lambda sheet: order.get(sheet['name'], len(order)))
+        result['template_profile'] = cfg.SPEC_TEMPLATE_PROFILE['name'] if template_sheet_names == cfg.SPEC_TEMPLATE_PROFILE['sheet_names'] else 'Alternate SPEC template'
+        result['excluded_legacy_sections'] = [name for name in cfg.SPEC_SHEET_BUILDERS if name not in order]
     if workbook == WORKBOOK_CAT:
         result['unrouted_components'] = _summarize_unrouted(unrouted)
         # Soft-coded catch-all sheet: surface unrouted components as a real
