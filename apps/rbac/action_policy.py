@@ -88,7 +88,11 @@ ROUTE_MODULES = {
     'engineering/piping/critical-line-list/': 'piping_critical_line_list',
     'electrical-comparison/': 'electrical_datasheet',
     'file-replica/': 'file_storage',
-    'project-organizer/': 'project_control',
+    # project-organizer/ is intentionally unmapped: it is the shared cross-tool
+    # project registry (used by Valve MTO, spec customization, etc.) whose views
+    # already enforce authentication plus owner/admin modification rules. Mapping
+    # it to a single business module (e.g. project_control) denies every engineer
+    # without that module, blocking project creation from unrelated tools.
 }
 
 # These handlers retain their existing token/API-key or requester/owner checks.
