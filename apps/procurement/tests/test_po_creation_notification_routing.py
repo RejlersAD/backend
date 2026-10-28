@@ -1,4 +1,4 @@
-"""Native creation and PR conversion open a separate, eligible PO request."""
+"""Native creation allows optional routing; PR conversion opens its eligible PO request."""
 
 from copy import deepcopy
 from types import SimpleNamespace
@@ -89,22 +89,32 @@ class PurchaseOrderCreationNotificationRoutingTests(TestCase):
         self.pr.refresh_from_db()
         self.assertEqual(self.pr.approval_workflow_config, self.history)
 
-    def test_new_native_order_rejects_empty_or_omitted_assignments_without_creating_a_silent_draft(self):
+    def test_new_native_order_allows_empty_or_omitted_assignments(self):
         for omitted in (False, True):
             with self.subTest(omitted=omitted):
                 serializer = self.serializer(approval_log=[])
                 if omitted:
                     serializer.initial_data.pop('approval_log')
-                self.assertFalse(serializer.is_valid())
-                self.assertIn('approval_log', serializer.errors)
-        self.assertFalse(PurchaseOrder.objects.exists())
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+                if not omitted:
+                    with self.captureOnCommitCallbacks(execute=True):
+                        order = serializer.save()
+                    self.assertEqual(order.approval_log, [])
+                    self.assertIsNone(order.approved_at)
         self.teams.assert_not_called()
 
-    def test_explicit_assignment_cannot_use_operations_title_as_ceo(self):
+    def test_native_draft_can_save_an_assignment_without_current_eligibility(self):
         set_position(self.ceo, 'Chief Operating Officer & VP, Head of Operations & Project Delivery')
+        UserRole.objects.filter(user_profile=self.ceo.rbac_profile).delete()
         serializer = self.serializer()
-        self.assertFalse(serializer.is_valid())
-        self.assertIn('configured business position', str(serializer.errors))
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        with self.captureOnCommitCallbacks(execute=True):
+            order = serializer.save()
+        self.assertEqual(order.approval_log[0]['user_id'], str(self.ceo.pk))
+        self.assertFalse(Notification.objects.filter(
+            metadata__po_id=str(order.pk), metadata__event_type='approval_assignment',
+        ).exists())
+        self.teams.assert_not_called()
 
     def test_old_unassigned_draft_can_be_configured_and_notified_once_without_fabricating_approval(self):
         order = PurchaseOrder.objects.create(
@@ -168,13 +178,14 @@ class PurchaseOrderCreationNotificationRoutingTests(TestCase):
             RequisitionConversionService.convert(self.pr.pk, self.sender)
         self.assertFalse(PurchaseOrder.objects.exists())
 
-    def test_assigned_route_cannot_be_cleared_by_an_ordinary_draft_edit(self):
+    def test_assigned_route_can_be_cleared_in_an_ordinary_draft_edit(self):
         serializer = self.serializer()
         self.assertTrue(serializer.is_valid(), serializer.errors)
         order = serializer.save()
         edit = PurchaseOrderSerializer(order, data={'approval_log': []}, partial=True)
-        self.assertFalse(edit.is_valid())
-        self.assertIn('approval_log', edit.errors)
+        self.assertTrue(edit.is_valid(), edit.errors)
+        order = edit.save()
+        self.assertEqual(order.approval_log, [])
 
     def test_stale_empty_draft_save_cannot_erase_a_concurrently_assigned_approver(self):
         order = PurchaseOrder.objects.create(
