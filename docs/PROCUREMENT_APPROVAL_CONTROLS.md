@@ -6,6 +6,13 @@ purchase recommendation's approval requirements.
 
 ## Purchase order progression
 
+Saving a PO in draft does not require an approval assignment and does not
+validate a selected active employee against final-signatory position or PO
+approval permission. Draft assignment is routing information only; it cannot
+produce an actionable approval notification for an ineligible employee or
+authorize a decision. Every transition out of draft and each approval decision
+continues to use current server-side eligibility checks.
+
 Sending, acknowledging, progressing, partially receiving, and completing a PO
 require a nonempty approval route whose stages are all approved. Known signer
 conflicts, changed approved content, unresolved stages and unverified source

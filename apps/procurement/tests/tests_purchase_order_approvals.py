@@ -80,6 +80,39 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
 
         self.assertEqual(result, [])
 
+    @patch('apps.procurement.serializers.resolve_order_enterprise_project', return_value=(None, ''))
+    @patch('apps.procurement.services.purchase_order_approvals._active_profiles')
+    @patch('apps.procurement.services.purchase_order_approvals.eligible_stage_assignee', return_value=False)
+    def test_draft_save_keeps_ineligible_jarmo_assignment_but_submission_rejects_it(
+        self, _eligible, active_profiles, _resolve_project,
+    ):
+        jarmo = self._profile('jarmo-id', 'Jarmo Suominen', 'jarmo@example.com', 'Management')
+        active_profiles.return_value = {'jarmo-id': jarmo}
+        data = {
+            'pr_reference': SimpleNamespace(pr_number='RAD-PR-0001'),
+            'approval_log': [{
+                'stage': 'Final Management Sign-off',
+                'user_id': 'jarmo-id',
+            }],
+        }
+
+        draft = PurchaseOrderSerializer().validate({**data, 'status': 'draft'})
+        self.assertEqual(draft['approval_log'][0]['user_id'], 'jarmo-id')
+        self.assertEqual(draft['management_approver'], 'Jarmo Suominen')
+
+        with self.assertRaisesMessage(ValidationError, 'configured business position'):
+            PurchaseOrderSerializer().validate({**data, 'status': 'sent'})
+
+    @patch('apps.procurement.serializers.resolve_order_enterprise_project', return_value=(None, ''))
+    def test_draft_creation_does_not_require_an_approver(self, _resolve_project):
+        result = PurchaseOrderSerializer().validate({
+            'pr_reference': SimpleNamespace(pr_number='RAD-PR-0001'),
+            'status': 'draft',
+            'approval_log': [],
+        })
+
+        self.assertEqual(result['approval_log'], [])
+
     def test_migrated_assignment_uses_email_when_user_id_changed(self):
         actor = SimpleNamespace(id='production-id', email='firaol.akawak@rejlers.ae')
         entry = {
