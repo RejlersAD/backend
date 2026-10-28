@@ -304,6 +304,12 @@ class CredentialDetailView(APIView):
         cred = AICredential.objects.filter(pk=pk, revoked_at__isnull=True).first()
         if cred is None:
             return Response({'detail': 'Credential not found.'}, status=status.HTTP_404_NOT_FOUND)
+        hard = str(request.query_params.get('hard', '')).lower() in ('1', 'true', 'yes')
+        if hard:
+            # Permanent delete; audit row survives (credential_id is a plain field).
+            audit(request.user, 'delete', provider=cred.provider_id, credential_id=cred.id)
+            cred.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
         cred.revoked_at = timezone.now()
         cred.enabled = False
         cred.save(update_fields=['revoked_at', 'enabled'])
