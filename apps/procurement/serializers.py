@@ -1499,12 +1499,17 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 attrs.get('approval_log'),
                 existing_log=existing_log,
                 require_core=False,
-                # Creating a PO records a draft route only. Signer eligibility
-                # is enforced when the PO enters approval, not while saving it.
-                require_eligibility=self.instance is not None and str(attrs.get(
-                    'status', getattr(self.instance, 'status', 'draft'),
-                )).lower() != 'draft',
             )
+            needs_assignment = not self.context.get('source_document_import') and (
+                self.instance is None or any(
+                    isinstance(row, dict) and row.get('user_id') and not row.get('external')
+                    and not row.get('evidence_document_id') for row in existing_log
+                )
+            )
+            if needs_assignment and not attrs['approval_log']:
+                raise serializers.ValidationError({
+                    'approval_log': 'Select an active PO approver in Final Signatory before saving. PR approvals are recorded separately.'
+                })
             attrs['approval_log'].extend(source_history)
             protect_approval_route(
                 existing_log or [], attrs['approval_log'], level=_entry_level, label='stage',
