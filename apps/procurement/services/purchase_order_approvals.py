@@ -227,6 +227,32 @@ def normalize_assignments(
             )})
         incoming_assignments.add(key)
 
+    # Draft PO editing is a data-entry action. Preserve the selected employee
+    # identity even if their HR/approval eligibility has changed; eligibility
+    # is checked when an approval decision is recorded.
+    if not require_eligibility:
+        normalized = []
+        for index, entry in enumerate(incoming):
+            user_id = str(entry.get('user_id') or '').strip()
+            if not user_id:
+                continue
+            previous = existing_by_assignment.get(assignment_key(entry, index)) or {}
+            normalized.append({
+                'stage': str(entry.get('stage') or '').strip(),
+                **({'business_position': entry['business_position']} if entry.get('business_position') else {}),
+                'level': _entry_level(entry, index),
+                'user_id': user_id,
+                'approver': str(entry.get('approver') or previous.get('approver') or ''),
+                'approver_email': str(entry.get('approver_email') or previous.get('approver_email') or ''),
+                'assignment_id': previous.get('assignment_id') or str(uuid4()),
+                'status': previous.get('status', 'Pending'),
+                'date': previous.get('date', ''),
+                'approved_at': previous.get('approved_at', previous.get('date', '')),
+                'comments': previous.get('comments', ''),
+                'signature': previous.get('signature', ''),
+            })
+        return normalized
+
     user_ids = {str(entry.get('user_id')).strip() for entry in incoming if entry.get('user_id')}
     profiles = _active_profiles(user_ids)
     if len(profiles) != len(user_ids):
