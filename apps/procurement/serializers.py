@@ -1491,11 +1491,6 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'po_number': 'This Purchase Order number is already in use.'})
             attrs['po_number'] = po_number
 
-        if self.instance is None and not self.context.get('source_document_import') and 'approval_log' not in attrs:
-            raise serializers.ValidationError({
-                'approval_log': 'Select an active PO approver in Final Signatory before saving. PR approvals are recorded separately.'
-            })
-
         if 'approval_log' in attrs:
             existing_log = self.instance.approval_log if self.instance is not None else []
             source_history = [dict(entry) for entry in (existing_log or [])
@@ -1504,17 +1499,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 attrs.get('approval_log'),
                 existing_log=existing_log,
                 require_core=False,
+                require_eligibility=str(attrs.get(
+                    'status', getattr(self.instance, 'status', 'draft'),
+                )).lower() != 'draft',
             )
-            needs_assignment = not self.context.get('source_document_import') and (
-                self.instance is None or any(
-                    isinstance(row, dict) and row.get('user_id') and not row.get('external')
-                    and not row.get('evidence_document_id') for row in existing_log
-                )
-            )
-            if needs_assignment and not attrs['approval_log']:
-                raise serializers.ValidationError({
-                    'approval_log': 'Select an active PO approver in Final Signatory before saving. PR approvals are recorded separately.'
-                })
             attrs['approval_log'].extend(source_history)
             protect_approval_route(
                 existing_log or [], attrs['approval_log'], level=_entry_level, label='stage',
@@ -1581,6 +1569,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         from .services.procurement_lifecycle import associate_requisition_order, reconcile_requisition_orders
 
+        original_approval_log = copy.deepcopy(instance.approval_log or [])
         old_pr_id = instance.pr_reference_id
         selected_pr = validated_data.get('pr_reference', instance.pr_reference)
         pr_ids = {value for value in (old_pr_id, selected_pr.pk if selected_pr else None) if value}
@@ -1614,16 +1603,31 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 [entry for entry in validated_data['approval_log'] if entry.get('user_id')],
                 existing_log=instance.approval_log,
                 require_core=False,
+                require_eligibility=str(validated_data.get('status', instance.status)).lower() != 'draft',
             ) + source_history
-            # A second editor may have assigned the formerly empty draft
-            # since this serializer was validated. Recheck under the PO lock.
-            if not self.context.get('source_document_import') and any(
-                isinstance(row, dict) and row.get('user_id') and not row.get('external')
-                and not row.get('evidence_document_id') for row in (instance.approval_log or [])
-            ) and not any(
-                row.get('user_id') and not row.get('external') and not row.get('evidence_document_id')
-                for row in validated_data['approval_log']
-            ):
+            # Do not let a stale empty draft erase an assignment added after
+            # this editor loaded the order; intentional draft route changes remain allowed.
+            assignment_key = lambda row: (
+                str(row.get('stage') or '').strip().lower(),
+                _entry_level(row, 0),
+                str(row.get('user_id') or '').strip(),
+            )
+            loaded_assignments = {
+                assignment_key(row) for row in original_approval_log
+                if isinstance(row, dict) and row.get('user_id') and not row.get('external')
+                and not row.get('evidence_document_id')
+            }
+            current_assignments = {
+                assignment_key(row) for row in (instance.approval_log or [])
+                if isinstance(row, dict) and row.get('user_id') and not row.get('external')
+                and not row.get('evidence_document_id')
+            }
+            incoming_assignments = {
+                assignment_key(row) for row in validated_data['approval_log']
+                if isinstance(row, dict) and row.get('user_id') and not row.get('external')
+                and not row.get('evidence_document_id')
+            }
+            if not self.context.get('source_document_import') and current_assignments - loaded_assignments - incoming_assignments:
                 raise serializers.ValidationError({
                     'approval_log': 'A PO approver was assigned while this form was open. Refresh before changing the approval route.'
                 })

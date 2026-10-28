@@ -140,8 +140,9 @@ class POFinalSignatoryEligibilityTests(TestCase):
         EmployeeMaster.objects.filter(user=self.ceo).delete()
         self.assert_not_eligible()
         response = self.save_assignment()
-        self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('active HR record and CEO designation', str(response.data))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.approval_log[0]['user_id'], str(self.ceo.pk))
 
     def test_secondary_ceo_title_does_not_override_primary_position(self):
         EmployeeMaster.objects.filter(user=self.ceo).update(designation='Engineer', job_title_uae=COMBINED_TITLE)
@@ -158,8 +159,9 @@ class POFinalSignatoryEligibilityTests(TestCase):
         UserPermissionOverride.objects.create(user_profile=self.ceo.rbac_profile, permission=permission, allowed=False)
         self.assert_not_eligible()
         response = self.save_assignment()
-        self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('Purchase Order Approve permission', str(response.data))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.approval_log[0]['user_id'], str(self.ceo.pk))
 
     def test_disabled_module_excludes_the_signatory(self):
         Module.objects.filter(code='procurement_orders').update(is_active=False)
@@ -179,14 +181,14 @@ class POFinalSignatoryEligibilityTests(TestCase):
         get_user_model().objects.filter(pk=self.ceo.pk).update(is_active=False)
         self.assert_not_eligible()
 
-    def test_directory_selection_cannot_bypass_revocation_before_save(self):
+    def test_revoked_signatory_can_be_saved_in_draft_but_is_not_directory_eligible(self):
         self.assertEqual([row['id'] for row in self.candidates()], [str(self.ceo.pk)])
         UserRole.objects.filter(user_profile=self.ceo.rbac_profile).delete()
         response = self.save_assignment()
-        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.status_code, 200, response.data)
         self.order.refresh_from_db()
-        self.assertEqual(self.order.approval_log, [])
-        self.assertNotEqual(self.order.notes, 'Keep draft input')
+        self.assertEqual(self.order.approval_log[0]['user_id'], str(self.ceo.pk))
+        self.assertEqual(self.order.notes, 'Keep draft input')
         self.assertIsNone(self.order.approved_at)
 
     def test_any_active_directory_retains_employees_without_final_approval_access(self):
