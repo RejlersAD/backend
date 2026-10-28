@@ -98,6 +98,7 @@ class POFinalSignatoryEligibilityTests(TestCase):
         for title in (
             'CEO', 'Chief Executive Officer', 'CEO, Rejlers Abu Dhabi',
             'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region',
+            'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region (604)',
             'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region. 5950 Abu Dhabi',
             COMBINED_TITLE,
             'Senior Vice President, Middle East / CEO, Rejlers Abu Dhabi',

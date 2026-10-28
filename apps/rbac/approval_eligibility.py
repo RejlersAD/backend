@@ -21,6 +21,10 @@ from .organization_catalog import ORGANIZATIONAL_ROLES
 
 def _title(value):
     value = str(value or '').casefold().replace('&', ' and ')
+    # HR titles may append the employee's numeric business-position code,
+    # e.g. "CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region (604)".
+    # The code identifies the catalog position; it is not part of the title.
+    value = re.sub(r'\s*\(\s*\d+\s*\)\s*$', '', value)
     value = re.sub(r'\bacting\b|\brejlers abu dhabi\b', ' ', value)
     return re.sub(r'[^a-z0-9]+', ' ', value).strip()
 
