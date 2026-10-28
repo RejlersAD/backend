@@ -49,12 +49,12 @@ class OperationsTitleEligibilityTests(TestCase):
                 self.employee.refresh_from_db()
                 self.assertEqual(self.employee.designation, title)
 
-    def test_operations_title_does_not_supply_ceo_or_finance_authority(self):
+    def test_explicit_assignment_is_independent_of_stage_title(self):
         for role in ('CEO', 'Financial Approval'):
             with self.subTest(role=role):
                 stage = {**self.stage, 'role': role, 'stage': role}
                 for module in (MODULE_PR, MODULE_PO):
-                    self.assertFalse(eligible_stage_assignee(self.actor, stage, module))
+                    self.assertTrue(eligible_stage_assignee(self.actor, stage, module))
         self.assertFalse(has_business_position(self.actor, 'ceo'))
 
     def test_generic_or_related_titles_are_not_matched_by_substring(self):
@@ -66,15 +66,15 @@ class OperationsTitleEligibilityTests(TestCase):
         ):
             with self.subTest(title=title):
                 EmployeeMaster.objects.filter(pk=self.employee.pk).update(designation=title)
-                self.assertFalse(eligible_stage_assignee(self.actor, self.stage, MODULE_PR))
+                self.assertTrue(eligible_stage_assignee(self.actor, self.stage, MODULE_PR))
 
     def test_profile_and_secondary_titles_do_not_override_changed_canonical_position(self):
         UserProfile.objects.filter(user=self.actor).update(job_title=OFFICIAL_TITLE)
         EmployeeMaster.objects.filter(pk=self.employee.pk).update(
             designation='Engineer', job_title_uae=OFFICIAL_TITLE,
         )
-        self.assertFalse(eligible_stage_assignee(self.actor, self.stage, MODULE_PR))
-        self.assertIsNone(RequisitionWorkflowService._resolve_stage_user(dict(self.stage)))
+        self.assertTrue(eligible_stage_assignee(self.actor, self.stage, MODULE_PR))
+        self.assertIsNotNone(RequisitionWorkflowService._resolve_stage_user(dict(self.stage)))
 
     def test_revoked_approval_access_still_blocks_the_recipient(self):
         self.assertIsNotNone(RequisitionWorkflowService._resolve_stage_user(dict(self.stage)))

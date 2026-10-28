@@ -86,7 +86,17 @@ def _eligible_selected_employee(user, module):
 
 
 def eligible_stage_assignee(user, stage, module):
-    """Assignment identity and current sequence are additionally checked by callers."""
+    """Check access for a person explicitly assigned to a workflow stage.
+
+    The assignment and current stage are checked by callers. Position matching
+    belongs to candidate discovery, not authorization after a person is assigned.
+    """
     if module == MODULE_PR and is_employee_selected_pr_stage(stage):
         return _eligible_selected_employee(user, module)
-    return approval_access(user, module) and position_matches_stage(user, stage)
+    if not approval_access(user, module):
+        return False
+    from apps.hr_core.models import EmployeeMaster
+    employment_status = EmployeeMaster.objects.filter(user_id=user.pk).values_list(
+        'employment_status', flat=True,
+    ).first()
+    return employment_status is None or employment_status in {'active', 'probation', 'notice_period'}

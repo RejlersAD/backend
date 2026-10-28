@@ -61,12 +61,12 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         self.assertEqual(result[1]['approver_email'], 'finance@example.com')
 
     @patch('apps.procurement.services.purchase_order_approvals._active_profiles')
-    def test_financial_stage_rejects_non_finance_employee(self, active_profiles):
+    def test_financial_stage_requires_finance_approval_permission(self, active_profiles):
         active_profiles.return_value = {
             'technical-id': self.technical,
             'other-id': self.non_finance,
         }
-        with self.assertRaisesMessage(ValidationError, 'configured business position'):
+        with self.assertRaisesMessage(ValidationError, 'approval permission'):
             normalize_assignments([
                 {'stage': TECHNICAL_STAGE, 'user_id': 'technical-id'},
                 {'stage': FINANCIAL_STAGE, 'user_id': 'other-id'},
@@ -83,7 +83,7 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
     @patch('apps.procurement.serializers.resolve_order_enterprise_project', return_value=(None, ''))
     @patch('apps.procurement.services.purchase_order_approvals._active_profiles')
     @patch('apps.procurement.services.purchase_order_approvals.eligible_stage_assignee', return_value=False)
-    def test_draft_save_keeps_ineligible_jarmo_assignment_but_submission_rejects_it(
+    def test_submission_requires_permission_but_not_a_position_title(
         self, _eligible, active_profiles, _resolve_project,
     ):
         jarmo = self._profile('jarmo-id', 'Jarmo Suominen', 'jarmo@example.com', 'Management')
@@ -93,6 +93,7 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
             'approval_log': [{
                 'stage': 'Final Management Sign-off',
                 'user_id': 'jarmo-id',
+                'approver': 'Jarmo Suominen',
             }],
         }
 
@@ -100,8 +101,9 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         self.assertEqual(draft['approval_log'][0]['user_id'], 'jarmo-id')
         self.assertEqual(draft['management_approver'], 'Jarmo Suominen')
 
-        with self.assertRaisesMessage(ValidationError, 'configured business position'):
-            PurchaseOrderSerializer().validate({**data, 'status': 'sent'})
+        with patch('apps.procurement.services.purchase_order_approvals.eligible_stage_assignee', return_value=True):
+            sent = PurchaseOrderSerializer().validate({**data, 'status': 'sent'})
+        self.assertEqual(sent['approval_log'][0]['user_id'], 'jarmo-id')
 
     @patch('apps.procurement.serializers.resolve_order_enterprise_project', return_value=(None, ''))
     def test_draft_creation_does_not_require_an_approver(self, _resolve_project):

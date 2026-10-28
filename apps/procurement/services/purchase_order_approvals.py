@@ -168,8 +168,8 @@ def default_management_assignment():
     stage = {'stage': MANAGEMENT_STAGE, 'level': 0, 'user_id': str(recipient.pk)}
     if not eligible_stage_assignee(recipient, stage, MODULE_PO):
         raise ValidationError({'error': (
-            'The configured PO final signatory must have the official CEO position and '
-            'Purchase Order approval permission. Review the employee assignment before conversion.'
+            'The configured PO final signatory must be active and have Purchase Order approval permission. '
+            'Review the employee assignment before conversion.'
         )})
     return normalize_assignments([stage], require_core=False, require_management=True)
 
@@ -267,19 +267,12 @@ def normalize_assignments(
             continue
         profile = profiles[user_id]
         if require_eligibility and not eligible_stage_assignee(profile.user, entry, MODULE_PO):
-            message = (
-                f'{stage or "Approval stage"} requires an employee in the configured business position '
-                'with Purchase Order approval permission.'
-            )
-            if stage.casefold() == MANAGEMENT_STAGE.casefold():
-                if not position_matches_stage(profile.user, entry):
-                    message += " Check the selected employee's active HR record and CEO designation."
-                else:
-                    message += (
-                        " Check the selected employee's Purchase Order Approve permission, "
-                        'including any explicit denial.'
-                    )
-            raise ValidationError({'approval_log': message})
+            raise ValidationError({
+                'approval_log': (
+                    f'{stage or "Approval stage"} requires an active assigned employee '
+                    'with Purchase Order approval permission.'
+                )
+            })
 
         user = profile.user
         level = _entry_level(entry, index)
