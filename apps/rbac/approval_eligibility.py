@@ -21,6 +21,10 @@ from .organization_catalog import ORGANIZATIONAL_ROLES
 
 def _title(value):
     value = str(value or '').casefold().replace('&', ' and ')
+    # HR titles may append the employee's numeric business-position code,
+    # e.g. "CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region (604)".
+    # The code identifies the catalog position; it is not part of the title.
+    value = re.sub(r'\s*\(\s*\d+\s*\)\s*$', '', value)
     value = re.sub(r'\bacting\b|\brejlers abu dhabi\b', ' ', value)
     return re.sub(r'[^a-z0-9]+', ' ', value).strip()
 
@@ -213,10 +217,13 @@ def require_configured_approval(user, module, obj, operation):
     states = route['pending_states']
     if not isinstance(positions, list) or not isinstance(states, list):
         raise PermissionDenied('The business approval route is invalid.')
-    assigned = has_business_position(user, positions)
     assignee_field = route.get('assignee_field')
     if assignee_field:
-        assigned = assigned and str(getattr(obj, assignee_field, '')) == str(user.pk)
+        # An explicit person assignment is the route's business assignment.
+        # Do not require that person's HR title to duplicate the stage label.
+        assigned = str(getattr(obj, assignee_field, '')) == str(user.pk)
+    else:
+        assigned = has_business_position(user, positions)
     department_field = route.get('department_field')
     if department_field:
         employee = canonical_employee(user)

@@ -98,12 +98,11 @@ class RequisitionRecoveryDiagnosticTests(TestCase):
             self.assertTrue(after['evidence_requested_at'])
         notify.assert_called_once_with(result, result.approval_workflow_config, 4, force=True)
 
-    def test_wrong_ceo_position_is_not_reported_as_an_inactive_employee(self):
+    def test_wrong_ceo_position_does_not_block_explicitly_assigned_approver(self):
         EmployeeMaster.objects.filter(user=self.ceo).update(designation='Engineer')
-        error = self.assert_recovery_error('business_position_mismatch')
-        self.assertIn('official HR position', error)
-        self.assertNotIn('inactive', error)
-        self.assertNotIn('VP Delivery:', error)
+        result, count = RequisitionWorkflowService.resend_missing_approvals(self.pr.pk, self.issuer)
+        self.assertGreater(count, 0)
+        self.assertEqual(result.approval_workflow_config[2]['user_id'], str(self.ceo.pk))
 
     def test_missing_approval_grant_is_reported_as_permission_not_inactivity(self):
         UserRole.objects.filter(user_profile=self.ceo.rbac_profile).delete()
@@ -135,20 +134,22 @@ class RequisitionRecoveryDiagnosticTests(TestCase):
         UserProfile.objects.filter(user=self.ceo).update(locked_until=timezone.now() + timedelta(hours=1))
         self.assert_recovery_error('locked_account')
 
-    def test_inactive_employment_is_distinguished_from_position_mismatch(self):
+    def test_inactive_employment_is_reported_as_inactive(self):
         EmployeeMaster.objects.filter(user=self.ceo).update(employment_status='terminated')
         self.assert_recovery_error('inactive_employee')
 
-    def test_missing_canonical_employee_record_does_not_imply_the_account_is_inactive(self):
+    def test_missing_employee_record_does_not_block_explicit_assignment(self):
         EmployeeMaster.objects.filter(user=self.ceo).delete()
-        error = self.assert_recovery_error('missing_employee_record')
-        self.assertNotIn('inactive', error)
+        result, count = RequisitionWorkflowService.resend_missing_approvals(self.pr.pk, self.issuer)
+        self.assertGreater(count, 0)
+        self.assertEqual(result.approval_workflow_config[2]['user_id'], str(self.ceo.pk))
 
     def test_failed_recovery_does_not_persist_resolved_legacy_ids_or_existing_decisions(self):
-        self.pr.approval_workflow_config[1]['user_id'] = 'legacy-operations-user-id'
-        EmployeeMaster.objects.filter(user=self.ceo).update(designation='Engineer')
-        self.assert_recovery_error('business_position_mismatch')
-        self.assertEqual(self.pr.approval_workflow_config[1]['user_id'], 'legacy-operations-user-id')
+        self.pr.approval_workflow_config[2].update(
+            user_id='legacy-operations-user-id', user_email='', approver_email='',
+        )
+        self.assert_recovery_error('missing_account')
+        self.assertEqual(self.pr.approval_workflow_config[2]['user_id'], 'legacy-operations-user-id')
 
     @patch.object(RequisitionWorkflowService, '_notify_level')
     def test_selected_level_one_employee_does_not_require_a_module_wide_approval_grant(self, notify):

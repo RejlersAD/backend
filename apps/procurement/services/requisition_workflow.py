@@ -268,12 +268,9 @@ class RequisitionWorkflowService:
         The resolver remains authoritative. This diagnostic is used only after
         it rejects a stage, and follows its email-first account lookup.
         """
-        from apps.hr_core.models import EmployeeMaster
         from apps.rbac.action_policy import record_workflow_not_denied
         from apps.rbac.approval_eligibility import approval_access
-        from .approval_eligibility import (
-            is_employee_selected_pr_stage, position_matches_stage, stage_positions,
-        )
+        from .approval_eligibility import is_employee_selected_pr_stage
 
         assigned_email = cls._stage_email(stage)
         assigned_id = stage.get('user_id') or stage.get('approver_id')
@@ -300,6 +297,7 @@ class RequisitionWorkflowService:
         if profile.locked_until and profile.locked_until > timezone.now():
             return 'locked_account', 'the assigned employee account is temporarily locked.'
 
+        from apps.hr_core.models import EmployeeMaster
         employee = EmployeeMaster.objects.filter(user_id=recipient.pk).first()
         if employee is not None and employee.employment_status not in ('active', 'probation', 'notice_period'):
             return 'inactive_employee', 'the assigned employee does not have an active employment status.'
@@ -310,13 +308,6 @@ class RequisitionWorkflowService:
         )
         if not permitted:
             return 'missing_approval_permission', 'the assigned employee does not have permission to approve this purchase requisition.'
-        if not selected_employee:
-            if employee is None:
-                return 'missing_employee_record', 'the assigned account has no official HR employee record to verify its approval position.'
-            if not stage_positions(stage):
-                return 'unrecognized_business_position', 'this approval stage has no recognized business position; review its configuration.'
-            if not position_matches_stage(recipient, stage):
-                return 'business_position_mismatch', 'the assigned employee\'s official HR position does not match this approval stage.'
         return 'assignment_changed', 'the assignment or approval eligibility changed; refresh and review the assigned employee.'
 
     @classmethod

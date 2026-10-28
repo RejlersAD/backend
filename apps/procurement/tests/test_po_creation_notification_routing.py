@@ -31,7 +31,7 @@ class PurchaseOrderCreationNotificationRoutingTests(TestCase):
             'po-route-ceo', email='ceo@po-route.example.test', first_name='Jarmo', last_name='Suominen',
         )
         grant_approval(self.ceo)
-        set_position(self.ceo, 'CEO')
+        set_position(self.ceo, 'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region (604)')
         self.vendor = Vendor.objects.create(vendor_code='PO-ROUTE', name='Approval routing supplier', status='active')
         self.history = [{
             'stage': 'VP Delivery', 'level': 4, 'user_id': 'source-vp',

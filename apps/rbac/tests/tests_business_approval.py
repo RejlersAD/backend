@@ -115,8 +115,10 @@ class BusinessApprovalTests(TestCase):
             'positions': ['hr_manager'], 'pending_states': ['pending'], 'assignee_field': 'assigned_to_id',
         },
     })
-    def test_explicit_route_checks_current_assignment_position_permission_and_stage(self):
+    def test_explicit_route_checks_current_assignment_permission_and_stage_without_title_gate(self):
         item = SimpleNamespace(status='pending', assigned_to_id=self.actor.pk)
+        from apps.hr_core.models import EmployeeMaster
+        EmployeeMaster.objects.filter(user=self.actor).update(designation='Engineer')
         require_configured_approval(self.actor, 'user_mgmt', item, 'approve')
         item.status = 'approved'
         with self.assertRaises(ValidationError):
@@ -126,8 +128,7 @@ class BusinessApprovalTests(TestCase):
         with self.assertRaises(PermissionDenied):
             require_configured_approval(self.actor, 'user_mgmt', item, 'approve')
         item.assigned_to_id = self.admin.pk
-        with self.assertRaises(PermissionDenied):
-            require_configured_approval(self.admin, 'user_mgmt', item, 'approve')
+        require_configured_approval(self.admin, 'user_mgmt', item, 'approve')
 
     def test_unregistered_approval_handler_fails_before_mutation(self):
         from rest_framework import status, viewsets

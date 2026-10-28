@@ -14,6 +14,7 @@ from rest_framework.test import APIClient
 
 from apps.hr_core.models import EmployeeMaster
 from apps.procurement.models import PurchaseOrder, Vendor
+from apps.procurement.services.approval_eligibility import MODULE_PO, eligible_stage_assignee
 from apps.procurement.services.purchase_order_approvals import MANAGEMENT_STAGE, normalize_assignments
 from apps.procurement.views import PurchaseOrderViewSet, PurchaseRequisitionViewSet
 from apps.rbac.approval_eligibility import has_business_position
@@ -82,8 +83,14 @@ class POFinalSignatoryEligibilityTests(TestCase):
     def assert_not_eligible(self, user=None):
         user = user or self.ceo
         self.assertNotIn(str(user.pk), {row['id'] for row in self.candidates()})
-        with self.assertRaises(ValidationError):
-            normalize_assignments([self.assignment(user)], require_core=False)
+        if eligible_stage_assignee(user, self.assignment(user), MODULE_PO):
+            self.assertEqual(
+                normalize_assignments([self.assignment(user)], require_core=False)[0]['user_id'],
+                str(user.pk),
+            )
+        else:
+            with self.assertRaises(ValidationError):
+                normalize_assignments([self.assignment(user)], require_core=False)
 
     def save_assignment(self):
         with self.captureOnCommitCallbacks(execute=True), \
@@ -98,6 +105,7 @@ class POFinalSignatoryEligibilityTests(TestCase):
         for title in (
             'CEO', 'Chief Executive Officer', 'CEO, Rejlers Abu Dhabi',
             'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region',
+            'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region (604)',
             'CEO, Rejlers Abu Dhabi / Senior VP, Middle East Region. 5950 Abu Dhabi',
             COMBINED_TITLE,
             'Senior Vice President, Middle East / CEO, Rejlers Abu Dhabi',
@@ -106,8 +114,8 @@ class POFinalSignatoryEligibilityTests(TestCase):
             with self.subTest(title=title):
                 EmployeeMaster.objects.filter(user=self.ceo).update(designation=title)
                 candidates = self.candidates()
-                self.assertEqual([row['id'] for row in candidates], [str(self.ceo.pk)])
-                self.assertEqual(candidates[0]['job_title'], title)
+                ceo_candidate = next(row for row in candidates if row['id'] == str(self.ceo.pk))
+                self.assertEqual(ceo_candidate['job_title'], title)
                 response = self.save_assignment()
                 self.assertEqual(response.status_code, 200, response.data)
                 self.order.refresh_from_db()
@@ -116,7 +124,7 @@ class POFinalSignatoryEligibilityTests(TestCase):
                 self.assertIsNone(self.order.approved_at)
                 self.assertEqual(EmployeeMaster.objects.get(user=self.ceo).designation, title)
 
-    def test_related_titles_and_prefixed_ceo_titles_do_not_confer_authority(self):
+    def test_active_po_approver_can_be_assigned_regardless_of_hr_title(self):
         for title in (
             'Senior VP, Middle East Region', 'Vice President', 'Chief Operating Officer',
             f'Assistant to the {COMBINED_TITLE}', f'Former {COMBINED_TITLE}',
@@ -128,27 +136,30 @@ class POFinalSignatoryEligibilityTests(TestCase):
         ):
             with self.subTest(title=title):
                 EmployeeMaster.objects.filter(user=self.ceo).update(designation=title)
-                self.assert_not_eligible()
+                self.assertIn(str(self.ceo.pk), {row['id'] for row in self.candidates()})
+                self.assertEqual(normalize_assignments(
+                    [self.assignment()], require_core=False,
+                )[0]['user_id'], str(self.ceo.pk))
 
     def test_full_ceo_title_does_not_supply_finance_or_operations_authority(self):
         for position in ('finance', 'operations'):
             with self.subTest(position=position):
                 self.assertFalse(has_business_position(self.ceo, position))
 
-    def test_missing_hr_record_or_profile_title_cannot_supply_the_ceo_position(self):
+    def test_missing_hr_record_does_not_override_explicit_assignment_and_permission(self):
         UserProfile.objects.filter(user=self.ceo).update(job_title=COMBINED_TITLE)
         EmployeeMaster.objects.filter(user=self.ceo).delete()
-        self.assert_not_eligible()
+        self.assertIn(str(self.ceo.pk), {row['id'] for row in self.candidates()})
         response = self.save_assignment()
         self.assertEqual(response.status_code, 200, response.data)
         self.order.refresh_from_db()
         self.assertEqual(self.order.approval_log[0]['user_id'], str(self.ceo.pk))
 
-    def test_secondary_ceo_title_does_not_override_primary_position(self):
+    def test_secondary_hr_title_does_not_override_explicit_assignment(self):
         EmployeeMaster.objects.filter(user=self.ceo).update(designation='Engineer', job_title_uae=COMBINED_TITLE)
-        self.assert_not_eligible()
+        self.assertIn(str(self.ceo.pk), {row['id'] for row in self.candidates()})
         EmployeeMaster.objects.filter(user=self.ceo).update(designation='')
-        self.assertEqual([row['id'] for row in self.candidates()], [str(self.ceo.pk)])
+        self.assertIn(str(self.ceo.pk), {row['id'] for row in self.candidates()})
         self.assertEqual(normalize_assignments([self.assignment()], require_core=False)[0]['user_id'], str(self.ceo.pk))
 
     def test_missing_permission_and_explicit_denial_exclude_the_signatory(self):
@@ -182,8 +193,9 @@ class POFinalSignatoryEligibilityTests(TestCase):
         self.assert_not_eligible()
 
     def test_revoked_signatory_can_be_saved_in_draft_but_is_not_directory_eligible(self):
-        self.assertEqual([row['id'] for row in self.candidates()], [str(self.ceo.pk)])
+        self.assertIn(str(self.ceo.pk), {row['id'] for row in self.candidates()})
         UserRole.objects.filter(user_profile=self.ceo.rbac_profile).delete()
+        self.assertNotIn(str(self.ceo.pk), {row['id'] for row in self.candidates()})
         response = self.save_assignment()
         self.assertEqual(response.status_code, 200, response.data)
         self.order.refresh_from_db()

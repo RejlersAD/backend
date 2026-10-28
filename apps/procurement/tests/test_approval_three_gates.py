@@ -74,7 +74,7 @@ class ProcurementThreeGateTests(TestCase):
                 pr._notify_level(self.requisition, self.route, 0)
             create.assert_not_called()
 
-    def test_parallel_assignment_does_not_authorize_notice_for_another_business_position(self):
+    def test_parallel_assignment_authorizes_the_selected_person_independent_of_stage_position(self):
         financial = self.stage(self.procurement, 0, 'Financial Approval')
         self.order.approval_log = [self.route[0], financial]
         self.order.save(update_fields=['approval_log'])
@@ -82,7 +82,7 @@ class ProcurementThreeGateTests(TestCase):
         notice = Notification.objects.create(recipient=self.procurement, title='Financial approval', message='Review',
             metadata={'requires_action': True, 'po_id': str(self.order.pk), 'approval_level': 0,
                       'approval_stage': 'Financial Approval', 'assignment_id': financial['assignment_id']})
-        self.assertTrue(approval_assignment_issue(notice))
+        self.assertFalse(approval_assignment_issue(notice))
 
     def test_generic_management_labels_need_explicit_business_position(self):
         for label in ('Department Manager', 'Vice President', 'VP Rejlers Abu Dhabi'):
@@ -92,31 +92,32 @@ class ProcurementThreeGateTests(TestCase):
         self.assertEqual(stage_positions({'role': 'VP Delivery'}), ('operations',))
         self.assertEqual(stage_positions({'role': 'Vice President Operations'}), ('operations',))
 
-    def test_canonical_position_change_blocks_even_superuser_with_old_profile_title(self):
+    def test_assigned_employee_can_approve_after_position_title_changes(self):
         self.procurement.is_superuser = True
         self.procurement.save(update_fields=['is_superuser'])
         UserProfile.objects.filter(user=self.procurement).update(job_title='Procurement Manager', department='procurement')
         EmployeeMaster.objects.filter(user=self.procurement).update(designation='CEO')
-        self.assertFalse(po.can_approve(self.order, self.procurement))
-        self.assertFalse(pr.can_approve(self.requisition, self.procurement))
-        with self.assertRaises(PermissionDenied):
-            po.record_decision(self.order, self.procurement, 'approve')
+        self.assertTrue(po.can_approve(self.order, self.procurement))
+        self.assertTrue(pr.can_approve(self.requisition, self.procurement))
 
-    def test_finance_access_or_display_title_does_not_make_an_employee_a_finance_approver(self):
+    def test_wrong_position_does_not_block_explicit_assignment_but_permission_is_required(self):
+        UserProfile.objects.filter(user=self.procurement).update(job_title='Engineer', department='engineering')
+        EmployeeMaster.objects.filter(user=self.procurement).update(designation='Engineer')
+        self.assertTrue(po.can_approve(self.order, self.procurement))
+        self.assertTrue(pr.can_approve(self.requisition, self.procurement))
+
+    def test_financial_stage_accepts_explicitly_assigned_employee_with_po_permission(self):
         UserProfile.objects.filter(user=self.engineer).update(department='Finance', job_title='Finance Manager')
         grant_approval(self.engineer, 'finance_salary')
         entry = self.stage(self.engineer, 0, 'Financial Approval')
-        self.assertFalse(eligible_stage_assignee(self.engineer, entry, MODULE_PO))
-        with self.assertRaises(ValidationError):
-            po.normalize_assignments([entry], require_core=False)
+        self.assertTrue(eligible_stage_assignee(self.engineer, entry, MODULE_PO))
+        self.assertEqual(po.normalize_assignments([entry], require_core=False)[0]['user_id'], str(self.engineer.pk))
 
-    def test_generic_level_requires_configured_position_and_cannot_override_known_business_role(self):
+    def test_explicitly_assigned_employee_can_cover_any_stage_with_permission(self):
         stage = self.stage(self.engineer, 0, 'Level 0')
-        self.assertFalse(eligible_stage_assignee(self.engineer, stage, MODULE_PO))
-        stage['business_position'] = 'engineer'
         self.assertTrue(eligible_stage_assignee(self.engineer, stage, MODULE_PO))
         stage['stage'] = 'CEO'
-        self.assertFalse(eligible_stage_assignee(self.engineer, stage, MODULE_PO))
+        self.assertTrue(eligible_stage_assignee(self.engineer, stage, MODULE_PO))
 
     def test_revocation_after_queuing_invalidates_notification_and_preserves_history(self):
         notice = Notification.objects.create(
