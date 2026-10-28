@@ -1751,11 +1751,6 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
-        'apps.pid_verification': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
         'apps.pid_verification_v2': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
