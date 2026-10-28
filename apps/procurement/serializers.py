@@ -1499,7 +1499,9 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 attrs.get('approval_log'),
                 existing_log=existing_log,
                 require_core=False,
-                require_eligibility=str(attrs.get(
+                # Creating a PO records a draft route only. Signer eligibility
+                # is enforced when the PO enters approval, not while saving it.
+                require_eligibility=self.instance is not None and str(attrs.get(
                     'status', getattr(self.instance, 'status', 'draft'),
                 )).lower() != 'draft',
             )
