@@ -174,7 +174,10 @@ def default_management_assignment():
     return normalize_assignments([stage], require_core=False, require_management=True)
 
 
-def normalize_assignments(approval_log, existing_log=None, require_core=True, require_management=False):
+def normalize_assignments(
+    approval_log, existing_log=None, require_core=True, require_management=False,
+    require_eligibility=True,
+):
     """Validate employee assignments and keep decisions server-controlled."""
     incoming = [dict(entry) for entry in (approval_log or []) if isinstance(entry, dict)]
 
@@ -237,7 +240,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
             # Optional unassigned stages are not part of the approval queue.
             continue
         profile = profiles[user_id]
-        if not eligible_stage_assignee(profile.user, entry, MODULE_PO):
+        if require_eligibility and not eligible_stage_assignee(profile.user, entry, MODULE_PO):
             message = (
                 f'{stage or "Approval stage"} requires an employee in the configured business position '
                 'with Purchase Order approval permission.'
