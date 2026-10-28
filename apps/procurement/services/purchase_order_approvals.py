@@ -354,7 +354,8 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
             category='APPROVAL',
             priority='HIGH',
             action_url=f'/procurement/orders/{order.id}',
-            action_label='Open Request',
+            action_label='Review and approve',
+            send_email=True,
             send_teams=True,
             teams_context={**teams_context, 'approval_level': _entry_level(entry, index)},
             metadata=metadata,
@@ -365,22 +366,13 @@ def notify_assigned_approvers(order, previous_approver='', previous_level=None):
 
 
 def notify_purchase_order_created(order):
-    """Send a PO-created FYI to its final signatory and buyer references."""
+    """Send PO-created FYIs to buyer references; approvers get one actionable alert."""
     from apps.notifications.models import Notification
     from apps.notifications.services import NotificationService
 
     buyer_entries = []
     contact_people = order.contact_persons if isinstance(order.contact_persons, dict) else {}
     recipients = []
-    for entry in (getattr(order, 'approval_log', None) or []):
-        if (
-            isinstance(entry, dict)
-            and str(entry.get('stage') or '').strip().casefold() == MANAGEMENT_STAGE.casefold()
-            and entry.get('user_id')
-        ):
-            recipient = _resolve_entry_user(entry)
-            if recipient:
-                recipients.append(('final_signatory', recipient))
 
     for entry in contact_people.get('buyer_references') or []:
         if isinstance(entry, dict):
@@ -402,7 +394,7 @@ def notify_purchase_order_created(order):
         if not identity or identity in seen:
             continue
         seen.add(identity)
-        if role != 'final_signatory' and any(
+        if any(
             _entry_matches_user(entry, recipient)
             for entry in (getattr(order, 'approval_log', None) or [])
         ):
@@ -428,15 +420,9 @@ def notify_purchase_order_created(order):
             recipient=recipient,
             sender=order.created_by,
             title=f'Purchase Order {order.po_number} created',
-            message=(
-                f'Purchase Order {order.po_number} has been created and assigned to you as the final signatory. '
-                'It remains a draft until it is submitted for approval.'
-                if role == 'final_signatory' else
-                f'Purchase Order {order.po_number} has been created and is available for review.'
-            ),
+            message=f'Purchase Order {order.po_number} has been created and is available for review.',
             category='PROCUREMENT',
             priority='HIGH',
-            send_email=role == 'final_signatory',
             action_url=f'/procurement/orders/{order.id}',
             action_label='Open Purchase Order',
             send_teams=True,
