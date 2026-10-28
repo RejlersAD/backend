@@ -677,4 +677,7 @@ class DocumentAccessLog(models.Model):
 
 
 from .ai_credential_models import AIProviderConfiguration, AIProviderCredential  # noqa: E402,F401
+from .ai_hub_models import (  # noqa: E402,F401
+    AIAudit, AICredential, AIHubSettings, AIModel, AIProvider, AIRoute, AISyncRun,
+)
 from .shared_record_models import SharedRecordLinkCommand  # noqa: E402,F401
