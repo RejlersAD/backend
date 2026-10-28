@@ -101,6 +101,7 @@ def _personal_rows(user):
             'models_allowed': [], 'monthly_cap_usd': None, 'rotate_days': None,
             'last_test_at': key.last_tested_at, 'last_test_model': '', 'last_test_ok': None,
             'created_by': str(user.pk), 'created_at': key.created_at, 'revoked_at': None,
+            'personal': True,
         })
     return rows
 
