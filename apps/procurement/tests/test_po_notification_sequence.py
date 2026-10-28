@@ -111,7 +111,11 @@ class PurchaseOrderNotificationSequenceTests(TestCase):
         notify_assigned_approvers(self.order)
         self.assertEqual(len(self.deliveries), 2)
 
-    def test_created_fyi_excludes_all_approvers_but_keeps_other_buyers(self):
+    def test_created_fyi_includes_final_signatory_and_other_buyers(self):
+        self.order.approval_log = [
+            self.entry('ceo', 3, stage='Final Management Sign-off'),
+            self.entry('two', 2), self.entry('one', 1), self.entry('zero_a', 0),
+        ]
         self.order.contact_persons = {
             'buyer_references': [
                 {'email': self.users[key].email}
@@ -120,12 +124,23 @@ class PurchaseOrderNotificationSequenceTests(TestCase):
         }
         self.order.buyer_reference_email = self.users['buyer'].email
         with patch('apps.procurement.services.purchase_order_approvals._jarmo_user') as ceo_lookup:
-            notify_purchase_order_created(self.order)
-            notify_purchase_order_created(self.order)
+            with patch(
+                'apps.procurement.services.purchase_order_approvals.eligible_stage_assignee',
+                return_value=False,
+            ) as eligibility:
+                notify_purchase_order_created(self.order)
+                notify_purchase_order_created(self.order)
         ceo_lookup.assert_not_called()
-        self.assertEqual(len(self.deliveries), 1)
-        self.assertEqual(self.deliveries[0]['recipient'], self.users['buyer'])
-        self.assertEqual(self.deliveries[0]['metadata']['event_type'], 'po_created')
+        eligibility.assert_not_called()
+        self.assertEqual(
+            {item['recipient'].pk for item in self.deliveries},
+            {self.users['ceo'].pk, self.users['buyer'].pk},
+        )
+        signer_notice = next(item for item in self.deliveries if item['recipient'] == self.users['ceo'])
+        self.assertEqual(signer_notice['metadata']['event_type'], 'po_created')
+        self.assertEqual(signer_notice['metadata']['recipient_role'], 'final_signatory')
+        self.assertEqual(signer_notice['recipient'].email, self.users['ceo'].email)
+        self.assertTrue(signer_notice['send_email'])
 
     def test_legacy_actionable_notification_still_prevents_ordinary_resend(self):
         self.order.approval_log = [self.entry('zero_a', 0)]
