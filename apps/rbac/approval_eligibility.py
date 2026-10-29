@@ -201,7 +201,7 @@ def configured_approval_routes():
     return routes if isinstance(routes, dict) else None
 
 
-def require_configured_approval(user, module, obj, operation):
+def require_configured_approval(user, module, obj, operation, *, accepted_states=None):
     """Older single-step modules need an explicit business route before use.
 
     Routes are deployment-controlled policy, never accepted from request data.
@@ -230,8 +230,17 @@ def require_configured_approval(user, module, obj, operation):
         target = str(getattr(obj, department_field, '') or '').strip().casefold()
         assigned = bool(assigned and employee and target
                         and target == employee.department.strip().casefold())
-    require_approval(user, module, assigned=assigned,
-                     current=getattr(obj, route.get('state_field', 'status'), None) in states)
+    current_state = getattr(obj, route.get('state_field', 'status'), None)
+    current = current_state in states
+    # Some governed commands may allow a documented reversal from a later
+    # state while retaining the same configured approver group. The original
+    # pending state must still be present in policy.
+    if not current and accepted_states:
+        current = any(
+            configured_state in states and current_state in reversal_states
+            for configured_state, reversal_states in accepted_states.items()
+        )
+    require_approval(user, module, assigned=assigned, current=current)
     if route.get('submitter_field') and str(getattr(obj, route['submitter_field'], '')) == str(user.pk):
         raise PermissionDenied('The submitter cannot approve their own request.')
 

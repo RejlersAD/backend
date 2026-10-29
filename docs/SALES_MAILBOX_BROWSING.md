@@ -10,6 +10,24 @@ status, mark messages read, download attachments, or send mail. Imported enquiry
 review remains available. Explicit reviewed opportunity creation and its authority
 checks are described below. No migration is needed.
 
+## Personal Outlook browsing - 29 October 2026
+
+The same authenticated `messages/` and `message/` GET actions now accept a
+connected delegated Outlook record as well as an application mailbox. Delegated
+reads use Graph `/me/messages` and the saved encrypted refresh token; they cannot
+select a different mailbox through a URL or query parameter. A pending or
+disconnected delegated record cannot browse. Search, details, bounded pagination,
+safe response projection and reviewed opportunity actions reuse the existing
+contracts. Refresh-token rotation may update the encrypted token during a read.
+
+Delegated connections and mailbox-linked saved intakes are visible only to their
+RADAI creator, including when another RADAI user is an administrator. Existing
+application mailbox administrator visibility remains. Continuation links must
+stay under the exact Graph `/me/messages` path and signed cursors bind the current
+actor, connection and delegated account. Email Intake shows connected delegated
+records as My Outlook. Microsoft tenant consent is still required for the
+delegated OAuth scopes; RADAI does not accept mailbox passwords or grant consent.
+
 ## Administrator shared-mailbox setup - 29 September 2026
 
 `POST /api/v1/sales/mailbox-connections/` can register an application mailbox

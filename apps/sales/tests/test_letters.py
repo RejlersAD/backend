@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from apps.sales.letter_attachments import attach_letter_files
 from apps.sales.letter_context import (
-    build_letterhead, format_date_ordinal, normalize_body_text, split_body_paragraphs,
+    build_letterhead, format_date_ordinal, letter_salutation, normalize_body_text, split_body_paragraphs,
 )
 from apps.sales.letter_docx import generate_letter_docx, get_letter_docx_bytes
 from apps.sales.models import (
@@ -86,11 +86,13 @@ class LetterContextTests(TestCase):
             ['First paragraph.', 'Second paragraph.'],
         )
 
-    def test_salutation_with_body_in_same_plain_text_paragraph_is_preserved(self):
+    def test_salutation_with_body_in_same_plain_text_paragraph_is_rendered_once(self):
         self.assertEqual(
             split_body_paragraphs('Dear Sir,\nProject details.'),
-            ['Dear Sir,\nProject details.'],
+            ['Project details.'],
         )
+        self.assertEqual(letter_salutation('Dear Sir / Madam,\nProject details.'), 'Dear Sir / Madam,')
+        self.assertEqual(split_body_paragraphs('Dear Sir / Madam,\nProject details.'), ['Project details.'])
 
     def test_closing_with_signature_in_same_paragraph_is_preserved(self):
         self.assertEqual(
@@ -121,8 +123,7 @@ class LetterContextTests(TestCase):
         self.assertEqual(head['recipient_company'], 'Abu Dhabi National Oil Company')
         self.assertIn('Abu Dhabi', head['recipient_address'])
         self.assertEqual(head['recipient_email'], 'ridhesh.rajan@adnoc.ae')
-        self.assertIn('SAP Ariba Email Notifications dated', head['your_ref'])
-        self.assertIn('Message ID: MSG65153313', head['your_ref'])
+        self.assertEqual(head['your_ref'], 'TENDER-2026-001')
         self.assertEqual(
             head['our_ref'],
             'LR-RAD-Abu Dhabi National Oil Company-001 / Q-101883',
@@ -166,13 +167,22 @@ class LetterGenerationTests(TestCase):
             client_code='L-CLIENT', company_name='Abu Dhabi National Oil Company',
             industry_type='oil_gas', account_manager=self.actor,
         )
+        self.contact = Contact.objects.create(
+            client=self.client_record, first_name='Sample', last_name='Recipient',
+            email='recipient@example.test',
+        )
         self.opportunity = Deal.objects.create(
             deal_code='Q-101883', deal_name='Conceptual Facility and Infrastructure Design Study',
-            client=self.client_record, owner=self.actor, stage='proposal', bid_decision='bid',
+            client=self.client_record, client_contact=self.contact, owner=self.actor,
+            stage='proposal', bid_decision='bid',
         )
 
+    def prepare(self, letter_type):
+        return prepare_letter(self.opportunity, self.actor, letter_type,
+                              {'letterhead': {'recipient_name': 'Sample Recipient'}})
+
     def test_prepare_letter_persists_letterhead_and_audits(self):
-        letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        letter = self.prepare('eoi')
         self.assertEqual(letter.subject, 'Conceptual Facility and Infrastructure Design Study')
         self.assertIn('Thank you for your interest', letter.body)
         head = letter.custom_data['letterhead']
@@ -185,13 +195,13 @@ class LetterGenerationTests(TestCase):
         self.opportunity.stage = 'no_bid'
         self.opportunity.bid_decision = 'no_bid'
         self.opportunity.save(update_fields=['stage', 'bid_decision'])
-        letter = prepare_letter(self.opportunity, self.actor, 'regret_expertise')
+        letter = self.prepare('regret_expertise')
         self.assertIn('area of expertise', letter.body)
         head = letter.custom_data['letterhead']
         self.assertEqual(head['confidential'].split(' / ')[-1], 'Rev 0')
 
     def test_refresh_letter_files_bumps_revision(self):
-        letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        letter = self.prepare('eoi')
         letter.body += '\n\nReviewed clarification.'
         refresh_letter_files(letter, self.actor)
         letter.refresh_from_db()
@@ -203,20 +213,72 @@ class LetterGenerationTests(TestCase):
 
     @skipUnless(_docx_available(), 'python-docx not installed')
     def test_docx_generation_produces_word_document(self):
-        letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        from io import BytesIO
+        from docx import Document
+        letter = self.prepare('eoi')
         docx_bytes = generate_letter_docx(letter)
         self.assertTrue(docx_bytes.startswith(b'PK'))
         self.assertGreater(len(docx_bytes), 2000)
         again = get_letter_docx_bytes(letter)
         self.assertTrue(again.startswith(b'PK'))
+        letter.body = 'Dear Sir / Madam,\n\nUpdated draft wording.'
+        updated = Document(BytesIO(get_letter_docx_bytes(letter)))
+        self.assertIn('Updated draft wording.', [p.text for p in updated.paragraphs])
 
     @skipUnless(_weasyprint_available(), 'weasyprint not installed')
     def test_pdf_generation_renders_pdf_document(self):
         from apps.sales.letter_pdf import generate_letter_pdf
-        letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        import fitz
+        letter = self.prepare('eoi')
+        letter.body = 'Dear Sir / Madam,\n\nProject details.\n\nSincerely yours,'
         pdf_bytes = generate_letter_pdf(letter)
         self.assertTrue(pdf_bytes.startswith(b'%PDF'))
         self.assertGreater(len(pdf_bytes), 1000)
+        document = fitz.open(stream=pdf_bytes, filetype='pdf')
+        page = document[0]
+        self.assertEqual(len(page.search_for('Dear Sir / Madam,')), 1)
+        self.assertEqual(len(page.search_for('Sincerely yours,')), 1)
+        self.assertLess(page.search_for('Subject:')[0].x0, page.search_for(letter.subject)[0].x0)
+        self.assertGreater(page.search_for('Rejlers International Engineering Solutions AB')[-1].y0, 750)
+        self.assertEqual(len(page.search_for('1 (1)')), 1)
+        confidential = page.search_for('Confidential')[0]
+        sender = page.search_for('From:')[0]
+        self.assertLess(sender.y0 - confidential.y1, 32)
+        recipient_email = page.search_for(letter.custom_data['letterhead']['recipient_email'])[0]
+        your_reference = page.search_for('Your Ref. No.:')[0]
+        self.assertLess(your_reference.y0 - recipient_email.y1, 45)
+        signature = page.search_for('CEO, Rejlers Abu Dhabi')[0]
+        footer_company = page.search_for('Rejlers International Engineering Solutions AB')[-1]
+        self.assertLess(signature.y1 + 5, footer_company.y0)
+
+    @skipUnless(_docx_available(), 'python-docx not installed')
+    def test_docx_uses_one_greeting_and_aligned_company_footer(self):
+        from io import BytesIO
+        from docx import Document
+        letter = self.prepare('eoi')
+        letter.body = 'Dear Sir / Madam,\n\nProject details.'
+        document = Document(BytesIO(generate_letter_docx(letter)))
+        self.assertEqual([p.text for p in document.paragraphs].count('Dear Sir / Madam,'), 1)
+        self.assertEqual(document.tables[0].cell(1, 0).text, 'Confidential')
+        self.assertEqual(document.tables[-1].cell(0, 0).text, 'Subject:')
+        self.assertEqual(document.sections[0].footer.paragraphs[1].text,
+                         'Rejlers International Engineering Solutions AB')
+
+    @skipUnless(_weasyprint_available(), 'weasyprint not installed')
+    def test_draft_preview_uses_current_layout_without_changing_saved_file(self):
+        import fitz
+        from apps.sales.letter_pdf import get_letter_pdf_bytes
+        letter = self.prepare('eoi')
+        original_file = letter.pdf_file.name
+        letter.body = 'Dear Sir / Madam,\n\nUpdated draft wording.'
+        pdf_bytes = get_letter_pdf_bytes(letter)
+        document = fitz.open(stream=pdf_bytes, filetype='pdf')
+        self.assertEqual(len(document[0].search_for('Updated draft wording.')), 1)
+        self.assertEqual(len(document[0].search_for('Dear Sir / Madam,')), 1)
+        self.assertEqual(letter.pdf_file.name, original_file)
+        letter.status = 'sent'
+        issued = fitz.open(stream=get_letter_pdf_bytes(letter), filetype='pdf')
+        self.assertEqual(len(issued[0].search_for('Updated draft wording.')), 0)
 
 
 @override_settings(SALES_WORKSPACE_ENABLED=False)
@@ -230,9 +292,14 @@ class LetterAttachTests(TestCase):
             client_code='L-CLIENT', company_name='Abu Dhabi National Oil Company',
             industry_type='oil_gas', account_manager=self.actor,
         )
+        self.contact = Contact.objects.create(
+            client=self.client_record, first_name='Sample', last_name='Recipient',
+            email='recipient@example.test',
+        )
         self.opportunity = Deal.objects.create(
             deal_code='Q-101883', deal_name='Conceptual Facility Study',
-            client=self.client_record, owner=self.actor, stage='proposal', bid_decision='bid',
+            client=self.client_record, client_contact=self.contact, owner=self.actor,
+            stage='proposal', bid_decision='bid',
         )
         self.private_root = TemporaryDirectory(prefix='radai-letter-attach-tests-')
         self.addCleanup(self.private_root.cleanup)
@@ -240,9 +307,15 @@ class LetterAttachTests(TestCase):
         override.enable()
         self.addCleanup(override.disable)
 
+    def prepare(self, letter_type):
+        return prepare_letter(
+            self.opportunity, self.actor, letter_type,
+            {'letterhead': {'recipient_name': self.contact.full_name}},
+        )
+
     @skipUnless(_docx_available(), 'python-docx not installed')
     def test_attach_uploads_pdf_and_docx_to_correspondence(self):
-        letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        letter = self.prepare('eoi')
         attachments = attach_letter_files(letter, self.actor)
         self.assertEqual(attachments['folder'], 'correspondence')
         self.assertEqual(attachments['version'], 1)
@@ -285,7 +358,7 @@ class LetterAttachTests(TestCase):
         manual workspace upload endpoint — no cross-provider fallback. A
         failing SharePoint upload surfaces as a failed attach, identical to a
         failed manual upload."""
-        letter = prepare_letter(self.opportunity, self.actor, 'eoi')
+        letter = self.prepare('eoi')
 
         with patch('apps.sales.letter_attachments.workspace_config', return_value=object()), \
              patch('apps.sales.letter_attachments.upload_workspace_file',
@@ -308,7 +381,10 @@ class LetterAttachTests(TestCase):
         api = APIClient()
         api.force_authenticate(self.actor)
         url = f'/api/v1/sales/deals/{self.opportunity.pk}/prepare-letter/'
-        response = api.post(url, {'letter_type': 'eoi'}, format='json')
+        response = api.post(url, {
+            'letter_type': 'eoi',
+            'custom_data': {'letterhead': {'recipient_name': self.contact.full_name}},
+        }, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         letter_id = response.data['id']
         self.assertEqual(response.data['attachments']['version'], 1)
@@ -316,7 +392,10 @@ class LetterAttachTests(TestCase):
             {f['kind'] for f in response.data['attachments']['files']},
             {'pdf', 'docx'},
         )
-        repeated = api.post(url, {'letter_type': 'eoi'}, format='json')
+        repeated = api.post(url, {
+            'letter_type': 'eoi',
+            'custom_data': {'letterhead': {'recipient_name': self.contact.full_name}},
+        }, format='json')
         self.assertEqual(repeated.status_code, 200, repeated.data)
         self.assertEqual(repeated.data['id'], letter_id)
         self.assertEqual(repeated.data['attachments']['version'], 1)

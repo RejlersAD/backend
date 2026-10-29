@@ -67,7 +67,7 @@ def generate_letter_pdf(letter, custom_data=None):
     Returns PDF bytes.
     """
     try:
-        from weasyprint import HTML, CSS
+        from weasyprint import HTML
     except ImportError:
         logger.error("weasyprint not installed. Cannot generate PDF.")
         raise RuntimeError("PDF generation requires weasyprint. Please install it: pip install weasyprint>=60.0")
@@ -85,55 +85,8 @@ def generate_letter_pdf(letter, custom_data=None):
     base_url = logo_path.parent.as_uri() if logo_path else settings.BASE_DIR
     html = HTML(string=html_string, base_url=base_url)
 
-    # Add custom CSS for PDF output - matches template exactly
-    pdf_css = CSS(string='''
-        @page {
-            size: A4;
-            margin: 18mm 18mm 25mm 18mm;
-        }
-        @page :first {
-            margin: 18mm 18mm 25mm 18mm;
-        }
-        .editable:focus { background: transparent; }
-        .editable { border: none; }
-        /* Footer as running element - fixed at page bottom */
-        .letter-footer {
-            position: running(footer);
-        }
-        @page {
-            @bottom-center {
-                content: element(footer);
-                margin-bottom: 6mm;
-                font-size: 7.5pt;
-                color: #333;
-                line-height: 1.3;
-                text-align: center;
-                border-top: 1px solid #666;
-                padding-top: 3mm;
-            }
-        }
-        /* Ensure content area reserves space for footer */
-        .letter-content {
-            padding-bottom: 10mm;
-        }
-        /* Logo rendering */
-        .logo {
-            height: 38px;
-            width: auto;
-            max-width: 170px;
-        }
-        /* Compact spacing - match template exactly */
-        .letter-header { margin-bottom: 1px; }
-        .meta-table { margin-top: 1px; }
-        .meta-table td { padding: 0 0; }
-        .meta-label { width: 125px; padding-right: 8px; }
-        .subject-block { margin: 3px 0 3px 0; }
-        .letter-body p { margin: 0 0 5px 0; }
-        .signature { margin-top: 6px; }
-    ''')
-
     try:
-        pdf_bytes = html.write_pdf(stylesheets=[pdf_css])
+        pdf_bytes = html.write_pdf()
     except Exception as e:
         logger.error(f"PDF generation failed for letter {letter.id}: {e}")
         raise
@@ -177,6 +130,10 @@ def regenerate_letter_pdf(letter, custom_data=None):
 
 def get_letter_pdf_bytes(letter):
     """Get PDF bytes for download (generates if not exists)."""
+    # Drafts are editable: preview the current layout without mutating the
+    # saved letter, revision, or historical correspondence attachment.
+    if letter.status == 'draft':
+        return generate_letter_pdf(letter)
     if not letter.pdf_file:
         save_letter_pdf(letter)
 

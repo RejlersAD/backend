@@ -41,6 +41,34 @@ The Brief UI shows three items per question for quick reading. Upcoming dates
 sort before past/unknown dates using the Dubai calendar. Multiple dates remain
 a review signal, not proof of conflicting versions of the same milestone.
 
+Sales follow-up dated 29 October 2026 adds capability_fit, strategic_fit,
+resources, commercial, schedule and clarification source claim kinds. The
+background pipeline synthesizes `result.manager_review` from the saved
+opportunity and bounded verified claims. It reports capability fit, strategic
+fit, resources, execution risk, commercial attractiveness and schedule, plus a
+cited Go / Conditional Go / No-Go / insufficient-evidence recommendation and
+client clarifications. Evidence IDs must resolve to extracted findings or saved
+Opportunity fields. Internal Rejlers Abu Dhabi capability, strategy, resource
+availability and commercial guardrails remain explicitly unknown unless an
+approved source is supplied. The recommendation is advisory; analysis does not
+write a Deal decision or prepare a letter. The result uses the existing JSON
+field, without a migration. The contract version invalidates old claim caches
+for reprocessing; synthesis failures leave the report partial and retryable.
+Saved attachment IDs for generated outgoing letters are excluded from the
+source inventory, so a prior regret or EOI cannot support its own review.
+The manager output schema uses provider-supported array keywords; exact item
+counts and evidence-ID limits are enforced again by server-side validation.
+Overlong citation lists are bounded, citations on unknown dimensions are
+discarded, and client clarifications without valid citations are omitted.
+The Sales decision risk list is `result.manager_review.business_risks`, with
+`category` (attractiveness, profitability, winnability or commercial_exposure),
+`risk`, `decision_impact` and resolved `evidence`. It contains only cited risks
+that may change a pursue, price or qualification decision. Portal access notices
+and generic delivery tasks are excluded. The legacy `result.sections.risk`
+remains raw extracted evidence and is not the curated Risk view. Changing the
+review version refreshes synthesis from verified source claims without forcing
+source extraction again.
+
 The executive brief is an extractive digest of AI findings across sources,
 not an autonomous legal/commercial interpretation. Document relationships are
 shared reference identifiers and exact content hashes. Semantic precedence,
