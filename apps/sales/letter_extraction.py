@@ -22,7 +22,8 @@ FIELD_LABELS = (
     r'Contact(?: Person| Name)?|Client Contact|Contact person name|Recipient(?: Name)?|Attention|Attn\.?|Name|'
     r'Position|Job Title|Title|Designation|Company(?: Name)?|Organization|Organisation|'
     r'(?:Contact |Recipient )?E-?mail(?: Address)?|E|(?:Postal |Office |Company )?Address|'
-    r'Telephone|Phone|Mobile|Fax|Website|Date|Sent|Subject|From|To|Cc|Message[ -]?ID|Sender'
+    r'Telephone|Phone|Mobile|Fax|Website|Client\s+(?:Reference|Ref(?:\.?\s*No\.?)?)|'
+    r'Customer\s+(?:Reference|Ref(?:\.?\s*No\.?)?)|Date|Sent|Subject|From|To|Cc|Message[ -]?ID|Sender'
 )
 EMAIL_HEADERS = r'(?:(?:From|To|Cc|Subject|Date|Sent|Message[ -]?ID|Sender):[^\n]*(?:\n|$))+'
 
@@ -161,6 +162,7 @@ def extract_letter_fields(text, *, sender_name='', sender_email='', date=None, m
         'recipient_company': company,
         'recipient_email': email_match.group(0) if email_match else (body_email or sender_email),
         'recipient_address': address,
+        'client_reference': _label(body, r'(?:Client|Customer)\s+(?:Reference|Ref(?:\.?\s*No\.?)?)'),
     }
     raw_date = _label(headers, r'Date|Sent')
     if raw_date:

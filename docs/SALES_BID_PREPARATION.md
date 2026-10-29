@@ -17,6 +17,18 @@ policy. Stage/value/currency/reason validation and atomic audit remain. Audit
 JSON records `decision_authority` as `module_rbac` or `configured_route`.
 Other approval operations, database schema and saved history are unchanged.
 
+## Reversing Go/No-Go (29 October 2026)
+
+Authorized users may reverse `proposal`/Go and `no_bid`/No-Go decisions in either
+direction before the opportunity advances. Reversal uses the same domain command
+and authorization policy, and appends an audit event with `previous_decision`
+and the new decision. The request must include `expected_decision` so a stale
+dialog cannot reverse a more recent decision. Repeating the current decision or
+changing it after lifecycle advancement is rejected. A configured business
+route must still list `qualified` as its original pending state; the same route
+approvers may then reverse the decision. Returning from No-Go clears the closed
+date. No schema migration is required.
+
 Local verification passed 27 Sales workflow/access cases and 36 shared RBAC
 regressions, scoped lint and whitespace checks. Logs are
 `artifacts/bid-decision-access-tests.log`,

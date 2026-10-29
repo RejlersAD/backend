@@ -253,6 +253,45 @@ class OpportunityWorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             record_bid_decision(stale, self.approver, 'bid')
 
+    def test_go_and_no_go_decisions_can_be_reversed_before_lifecycle_advances(self):
+        submit_qualification(self.opportunity, self.owner)
+        self.opportunity = record_bid_decision(
+            self.opportunity, self.approver, 'bid', 'Initial Go rationale.',
+        )
+        self.assertEqual(self.opportunity.stage, 'proposal')
+        self.opportunity = record_bid_decision(
+            self.opportunity, self.approver, 'no_bid', 'Circumstances changed; do not pursue.', 'bid',
+        )
+        self.assertEqual(self.opportunity.stage, 'no_bid')
+        self.assertEqual(self.opportunity.bid_decision, 'no_bid')
+        self.assertIsNotNone(self.opportunity.actual_close_date)
+        self.opportunity = record_bid_decision(
+            self.opportunity, self.approver, 'bid', 'Pursuit is now approved.', 'no_bid',
+        )
+        self.assertEqual(self.opportunity.stage, 'proposal')
+        self.assertEqual(self.opportunity.bid_decision, 'bid')
+        self.assertIsNone(self.opportunity.actual_close_date)
+        events = list(OpportunityAuditEvent.objects.filter(
+            opportunity=self.opportunity, event_type='bid_decision',
+        ).order_by('occurred_at'))
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[1].data['previous_decision'], 'bid')
+        self.assertEqual(events[1].data['decision'], 'no_bid')
+        self.assertEqual(events[2].data['previous_decision'], 'no_bid')
+        self.assertEqual(events[2].data['decision'], 'bid')
+
+    def test_repeating_current_decision_and_reversing_after_advance_are_rejected(self):
+        submit_qualification(self.opportunity, self.owner)
+        self.opportunity = record_bid_decision(self.opportunity, self.approver, 'bid')
+        with self.assertRaises(ValidationError):
+            record_bid_decision(self.opportunity, self.approver, 'bid')
+        Deal.objects.filter(pk=self.opportunity.pk).update(stage='negotiation')
+        self.opportunity.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            record_bid_decision(
+                self.opportunity, self.approver, 'no_bid', 'No longer pursuing.', 'bid',
+            )
+
     def test_stale_qualification_cannot_duplicate_review_notifications(self):
         stale = Deal.objects.get(pk=self.opportunity.pk)
         submit_qualification(self.opportunity, self.owner)

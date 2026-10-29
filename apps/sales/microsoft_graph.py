@@ -262,10 +262,14 @@ class SalesMicrosoftGraphService:
         return response.json() if response.content else {}
 
     def _mailbox_messages_url(self):
-        if self.connection.auth_mode != 'application':
-            raise SalesMailboxReadError('Select a shared mailbox to view its emails.', 400)
         if self.base_url != 'https://graph.microsoft.com/v1.0':
-            raise SalesMailboxReadError('Shared mailbox access is not configured.', 503)
+            raise SalesMailboxReadError('Outlook mailbox access is not configured.', 503)
+        if self.connection.auth_mode == 'delegated':
+            if not self.connection.encrypted_refresh_token:
+                raise SalesMailboxReadError('Connect your Outlook account before viewing its emails.', 400)
+            return f'{self.base_url}/me/messages'
+        if self.connection.auth_mode != 'application':
+            raise SalesMailboxReadError('Select a connected mailbox to view its emails.', 400)
         mailbox = quote(self.connection.mailbox_address, safe='')
         return f'{self.base_url}/users/{mailbox}/messages'
 
@@ -275,15 +279,16 @@ class SalesMicrosoftGraphService:
         try:
             parsed = urlsplit(next_link)
             expected = urlsplit(self._mailbox_messages_url())
-            # Graph returns the same mailbox with a literal @ in continuations.
-            # Allow only that exact equivalent, without decoding path separators.
-            raw_at_path = '/v1.0/users/{}/messages'.format(
-                quote(self.connection.mailbox_address, safe='@')
-            )
+            valid_paths = {expected.path}
+            if self.connection.auth_mode == 'application':
+                # Graph can return a literal @ for this exact application mailbox.
+                valid_paths.add('/v1.0/users/{}/messages'.format(
+                    quote(self.connection.mailbox_address, safe='@')
+                ))
             valid = (
                 parsed.scheme == 'https'
                 and parsed.netloc == 'graph.microsoft.com'
-                and parsed.path in {expected.path, raw_at_path}
+                and parsed.path in valid_paths
                 and bool(parsed.query)
                 and not parsed.fragment
                 and not any(ord(character) < 32 for character in next_link)
@@ -295,13 +300,16 @@ class SalesMicrosoftGraphService:
         return next_link
 
     def _mailbox_cursor_scope(self, user_id):
-        return {
+        scope = {
             'user': str(user_id),
             'connection': str(self.connection.pk),
             'mailbox': self.connection.mailbox_address,
             'tenant': self.connection.tenant_id,
             'client': self.connection.client_id,
         }
+        if self.connection.auth_mode == 'delegated':
+            scope['delegated_account'] = self.connection.delegated_account_id
+        return scope
 
     @classmethod
     def _normalize_mailbox_search(cls, search):
@@ -348,7 +356,7 @@ class SalesMicrosoftGraphService:
         try:
             token = self.token()
         except SalesGraphConfigurationError:
-            raise SalesMailboxReadError('Shared mailbox access is not configured.', 503) from None
+            raise SalesMailboxReadError('Outlook mailbox access is not configured.', 503) from None
         except (requests.RequestException, RuntimeError, ValueError, TypeError, AttributeError):
             raise SalesMailboxReadError('Microsoft mailbox access is temporarily unavailable.', 503) from None
         headers = {

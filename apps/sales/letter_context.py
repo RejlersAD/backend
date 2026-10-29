@@ -50,19 +50,29 @@ def split_body_paragraphs(body):
     text = normalize_body_text(body)
     if not text:
         return []
+    text = re.sub(r'(?i)^dear\s+(?:sir|sir\s*/\s*madam|madam)\s*[,.:]?\s*\n', '', text, count=1)
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
     # Remove leading "Dear Sir" variants and trailing "Sincerely yours" variants
     # since these are now rendered in the template
     filtered = []
     for i, p in enumerate(paragraphs):
         # Skip leading salutation
-        if i == 0 and re.fullmatch(r'dear\s+sir\s*[,.:]?', p, re.IGNORECASE):
+        if i == 0 and re.fullmatch(r'dear\s+(?:sir|sir\s*/\s*madam|madam)\s*[,.:]?', p, re.IGNORECASE):
             continue
         # Skip trailing complimentary close
         if i == len(paragraphs) - 1 and re.fullmatch(r'sincerely\s+yours\s*[,.:]?', p, re.IGNORECASE):
             continue
         filtered.append(p)
     return filtered
+
+
+def letter_salutation(body):
+    """Use a greeting already in the saved body, otherwise the company greeting."""
+    text = normalize_body_text(body)
+    first = re.split(r'\n\s*\n|\n', text, maxsplit=1)[0].strip()
+    if re.fullmatch(r'dear\s+(?:sir|sir\s*/\s*madam|madam)\s*[,.:]?', first, re.IGNORECASE):
+        return first
+    return 'Dear Sir / Madam,'
 
 
 def _client_address(client):
@@ -86,7 +96,7 @@ def build_letterhead(deal, custom_data=None):
     client = deal.client
 
     earliest_intake = deal.email_intakes.order_by('received_at').first()
-    if earliest_intake is not None:
+    if earliest_intake is not None and not deal.client_reference and not provided.get('your_ref'):
         your_ref = f"{earliest_intake.sender_name or 'Email notification'} dated " \
                    f"{format_date_ordinal(earliest_intake.received_at)}"
         if earliest_intake.source_message_id:
@@ -191,6 +201,7 @@ def build_letter_context(deal, letter=None, custom_data=None):
     if letter is not None:
         context.update({
             'subject': letter.subject,
+            'salutation': letter_salutation(letter.body),
             'body_paragraphs': [
                 {'field': f'body_p{i + 1}', 'content': para, 'is_first': i == 0}
                 for i, para in enumerate(split_body_paragraphs(letter.body))

@@ -1,5 +1,7 @@
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 from io import BytesIO
+import json
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -10,7 +12,7 @@ from rest_framework.test import APIClient
 
 from apps.sales.analysis_content import CHUNK_CHARS, extract_analysis_chunks
 from apps.sales.analysis_models import OpportunityAnalysis as Report, OpportunityAnalysisChunk as Chunk, OpportunityAnalysisSource as Source
-from apps.sales.models import Client, Deal, OpportunityDocument, OpportunityWorkspace, OpportunityWorkspaceUpload
+from apps.sales.models import Client, Deal, OpportunityDocument, OpportunityWorkspace, OpportunityWorkspaceUpload, SalesLetter, SalesLetterTemplate
 from apps.sales.opportunity_analysis import (_same_document, analysis_projection, inventory, mark_dirty, request_analysis,
                                            run_analysis_step, validate_claims)
 from apps.sales.tests.access_fixtures import grant_sales_actions
@@ -23,6 +25,16 @@ def proposal(text=TEXT):
         {'kind': 'submission', 'text': 'Submit a technical proposal and inspection plan.', 'excerpt': text, 'date': ''},
         {'kind': 'deadline', 'text': 'Technical proposal submission deadline.', 'excerpt': text, 'date': '2026-12-01'},
     ]}}
+
+
+def manager_proposal(*_args):
+    return {'status': 'completed', 'proposal': {
+        'recommendation': 'insufficient_evidence', 'rationale': 'Internal fit is unverified.',
+        'rationale_evidence_ids': [], 'dimensions': [
+            {'dimension': dimension, 'assessment': 'unknown', 'summary': 'Not verified.', 'evidence_ids': []}
+            for dimension in ('capability_fit', 'strategic_fit', 'resources', 'execution_risk', 'commercial', 'schedule')
+        ], 'business_risks': [], 'clarifications': [], 'suggested_letter': 'none',
+    }}
 
 
 class AnalysisContentTests(SimpleTestCase):
@@ -160,6 +172,7 @@ class OpportunityAnalysisTests(TestCase):
                               side_effect=lambda *args: (BytesIO(TEXT.encode()), 'scope.txt')).start()
         self.addCleanup(patch.stopall)
         self.ai = patch('apps.sales.opportunity_analysis.analyze_opportunity_sources', return_value=proposal()).start()
+        self.review_ai = patch('apps.sales.email_ai_provider.analyze_opportunity_review_sources', side_effect=manager_proposal).start()
 
     def make_upload(self, **changes):
         return OpportunityWorkspaceUpload.objects.create(workspace=self.workspace, request_id=uuid4(),
@@ -196,6 +209,73 @@ class OpportunityAnalysisTests(TestCase):
         self.deal.refresh_from_db()
         self.assertEqual(self.deal.stage, 'qualified')
         self.assertIsNone(self.deal.submission_due_date)
+
+    def test_manager_review_payload_uses_json_safe_saved_opportunity_values(self):
+        self.deal.estimated_value = Decimal('125000.50')
+        self.deal.submission_due_date = date(2026, 12, 1)
+        self.deal.save(update_fields=['estimated_value', 'submission_due_date'])
+        request_analysis(self.deal, self.actor)
+        report = self.finish()
+        self.assertEqual(report.result['manager_review']['status'], 'ready')
+        payload = self.review_ai.call_args.args[0]
+        json.dumps(payload, allow_nan=False)
+        self.assertEqual(payload['opportunity']['estimated_value'], '125000.50')
+        self.assertEqual(payload['opportunity']['submission_due_date'], '2026-12-01')
+
+    def test_generated_regret_attachment_is_not_tender_evidence(self):
+        upload = OpportunityWorkspaceUpload.objects.create(
+            workspace=self.workspace, request_id=uuid4(), actor=self.actor,
+            folder_key='correspondence', name='Q-ANALYSIS-regret_expertise.pdf',
+            size=10, sha256='b' * 64, provider='radai', status='ready')
+        template = SalesLetterTemplate.objects.create(
+            letter_type='regret_expertise', subject_template='Subject', body_template='Body')
+        SalesLetter.objects.create(
+            opportunity=self.deal, template=template, letter_type='regret_expertise',
+            subject='Subject', body='Body', generated_by=self.actor,
+            custom_data={'attachments': {'files': [{
+                'status': 'ready', 'provider': 'radai',
+                'file': {'id': 'radai-' + str(upload.pk)},
+            }]}})
+        names = [item['metadata']['name'] for item in inventory(self.deal, self.actor)]
+        self.assertEqual(names, ['scope.txt'])
+
+    def test_manager_review_limits_citations_and_clears_unknown_dimension_evidence(self):
+        def overcited(payload, _schema):
+            result = manager_proposal()
+            source_id = next(item['id'] for item in payload['evidence'] if item['kind'] == 'submission')
+            result['proposal']['rationale_evidence_ids'] = [source_id] * 8
+            for item in result['proposal']['dimensions']:
+                item['evidence_ids'] = [source_id] * 7
+                if item['dimension'] == 'execution_risk':
+                    item['assessment'] = 'mixed'
+            return result
+        self.review_ai.side_effect = overcited
+        request_analysis(self.deal, self.actor)
+        report = self.finish()
+        review = report.result['manager_review']
+        self.assertEqual(review['status'], 'ready')
+        self.assertEqual(len(review['rationale_evidence']), 6)
+        self.assertEqual(len(next(item for item in review['dimensions'] if item['dimension'] == 'execution_risk')['evidence']), 4)
+        self.assertEqual(next(item for item in review['dimensions'] if item['dimension'] == 'capability_fit')['evidence'], [])
+
+    def test_business_risks_require_cited_decision_impact(self):
+        def focused_review(payload, _schema):
+            result = manager_proposal()
+            source_id = next(item['id'] for item in payload['evidence'] if item['kind'] == 'submission')
+            result['proposal']['business_risks'] = [
+                {'category': 'winnability', 'risk': 'Qualification requirement may prevent a compliant bid.',
+                 'decision_impact': 'Confirm eligibility before committing bid effort.', 'evidence_ids': [source_id]},
+                {'category': 'profitability', 'risk': 'Unsupported margin assumption.',
+                 'decision_impact': 'Could reduce profit.', 'evidence_ids': []},
+            ]
+            return result
+        self.review_ai.side_effect = focused_review
+        request_analysis(self.deal, self.actor)
+        report = self.finish()
+        risks = report.result['manager_review']['business_risks']
+        self.assertEqual(len(risks), 1)
+        self.assertEqual(risks[0]['category'], 'winnability')
+        self.assertEqual(risks[0]['evidence'][0]['name'], 'scope.txt')
 
     def test_source_change_hides_stale_output_and_reuses_unchanged_sources(self):
         request_analysis(self.deal, self.actor)
@@ -292,7 +372,7 @@ class OpportunityAnalysisTests(TestCase):
                 request_analysis(self.deal, self.actor)
                 self.finish()
         self.assertEqual(Report.objects.get().sources.count(), 1)
-        self.assertEqual(self.ai.call_count, 1)
+        self.assertEqual(self.ai.call_count, 2)
 
     def test_first_ready_upload_enqueues_requester_analysis_without_tab_open(self):
         self.assertFalse(Report.objects.exists())

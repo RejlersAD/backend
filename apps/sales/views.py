@@ -999,6 +999,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         deal = record_bid_decision(
             self.get_object(), request.user,
             request.data.get('decision'), request.data.get('reason', ''),
+            request.data.get('expected_decision'),
         )
         return self._detail_response(
             deal,
@@ -1033,6 +1034,34 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         )
         self._attach_letter_files(letter, request.user)
         return Response(SalesLetterSerializer(letter, context={'request': request}).data)
+
+    @action(detail=True, methods=['get'], url_path='letter-preparation-context')
+    def letter_preparation_context(self, request, pk=None):
+        deal = self.get_object()
+        from .letter_context import build_letterhead
+        from .letter_extraction import extract_opportunity_letter_fields, recipient_present
+        extracted = extract_opportunity_letter_fields(deal, request.user)
+        letterhead = build_letterhead(deal, {'letterhead': extracted})
+        fields = {
+            'recipient_name': letterhead['recipient_name'],
+            'recipient_email': letterhead['recipient_email'],
+            'your_ref': (deal.client_reference or extracted.get('client_reference')
+                         or extracted.get('your_ref') or ''),
+            'confidential_date': letterhead['confidential_date'],
+        }
+        missing = []
+        if not recipient_present(fields):
+            missing.append('recipient_name')
+        for key in ('recipient_email', 'your_ref'):
+            if not fields[key]:
+                missing.append(key)
+        # The response date is an outgoing-letter decision, not the tender's
+        # submission deadline. Ask the reviewer to confirm the current default.
+        missing.append('confidential_date')
+        return Response({
+            'opportunity_id': str(deal.pk), 'deal_code': deal.deal_code,
+            'letterhead': fields, 'missing_fields': missing,
+        }, headers={'Cache-Control': 'private, no-store'})
 
     def _attach_letter_files(self, letter, actor):
         """Best-effort attach of the generated PDF+DOCX to the Correspondence folder."""
