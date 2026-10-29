@@ -88,6 +88,10 @@ class OrganizationCatalogDataTests(SimpleTestCase):
             'value': 'head_hr_administration',
             'label': 'Head of HR & Administration (Acting)',
             'department_code': 'hr',
+        }, {
+            'value': 'administrator',
+            'label': 'Administrator',
+            'department_code': 'hr',
         }])
 
     def test_consumers_cannot_mutate_catalog_between_requests(self):
