@@ -1149,6 +1149,15 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 }
 print(f"[CELERY] Broker connect timeout: {CELERY_BROKER_CONNECTION_TIMEOUT}s")
 
+# AI Model hub — SSRF guard: plain http is allowed only for these on-prem hosts
+AI_HUB_HTTP_ALLOW_HOSTS = [
+    h.strip() for h in config('AI_HUB_HTTP_ALLOW_HOSTS',
+                              default='localhost,127.0.0.1,host.docker.internal').split(',')
+    if h.strip()
+]
+# Optional server-side env credentials: {"openai": "sk-...", "ollama": {"base_url": "http://..."}}
+AI_HUB_SERVER_KEYS = config('AI_HUB_SERVER_KEYS', default='{}', cast=lambda v: __import__('json').loads(v))
+
 # Never print broker URLs: Railway Redis URLs contain credentials.
 if CELERY_BROKER_URL:
     print("[CELERY] Broker: configured")
@@ -1181,6 +1190,10 @@ CELERY_BEAT_SCHEDULE = {
         # imported by the generate_payroll_automated management command),
         # so this dispatches to apps/finance/tasks.py's implementation.
         'task': 'finance.auto_generate_monthly_payroll',
+        'schedule': crontab(hour=2, minute=0),
+    },
+    'ai-hub-catalogue-sync': {
+        'task': 'core.sync_ai_catalogue',
         'schedule': crontab(hour=2, minute=0),
     },
     'hr-process-overdue-workflows': {
@@ -1734,11 +1747,6 @@ LOGGING = {
         # avoid flooding the log with third-party INFO chatter (boto3,
         # urllib3, django.db.backends, etc.).
         'apps.pid_checker_v2': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'apps.pid_verification': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
             'propagate': False,

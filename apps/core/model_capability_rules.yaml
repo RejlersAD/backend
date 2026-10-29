@@ -1,0 +1,67 @@
+# Family-regex → capabilities for the AI Model hub catalogue.
+# First matching rule wins; rules are applied to the lower-cased model_id.
+# Capability vocabulary: text, vision, reasoning, embedding, image, tools, json.
+rules:
+  # Embeddings first so they are not swallowed by family text rules
+  - pattern: 'embedding|^text-embedding|^embed-'
+    capabilities: [embedding]
+    weights: closed
+  # Image generators
+  - pattern: 'image|dall-e|imagen|flux'
+    capabilities: [image, text]
+    weights: closed
+  # OpenAI families
+  - pattern: '^gpt-'
+    capabilities: [text, vision, reasoning, tools, json]
+    weights: closed
+  - pattern: '^o\d'
+    capabilities: [text, reasoning, tools, json]
+    weights: closed
+  # Anthropic
+  - pattern: '^claude-'
+    capabilities: [text, vision, reasoning, tools, json]
+    weights: closed
+  # Google
+  - pattern: '^gemini-'
+    capabilities: [text, vision, reasoning, tools, json]
+    weights: closed
+  - pattern: '^gemma-'
+    capabilities: [text, vision, tools, json]
+    weights: open
+    licence: Gemma Terms of Use
+  # DeepSeek
+  - pattern: '^deepseek-'
+    capabilities: [text, reasoning, tools, json]
+    weights: open
+    licence: MIT
+  # Alibaba Qwen
+  - pattern: '^qwen'
+    capabilities: [text, vision, tools, json]
+    weights: open
+    licence: Apache-2.0
+  # Moonshot Kimi
+  - pattern: '^kimi-|^moonshot-'
+    capabilities: [text, vision, tools, json]
+    weights: open
+  # Zhipu GLM
+  - pattern: '^glm-'
+    capabilities: [text, vision, tools, json]
+    weights: open
+  # Meta Llama
+  - pattern: '^llama-|^meta/llama'
+    capabilities: [text, vision, tools, json]
+    weights: open
+    licence: Llama Community License
+  # Mistral
+  - pattern: '^mistral-|^mixtral|^codestral|^pixtral'
+    capabilities: [text, tools, json]
+    weights: open
+    licence: Apache-2.0
+  # xAI
+  - pattern: '^grok-'
+    capabilities: [text, vision, reasoning, tools, json]
+    weights: closed
+  # Fallback
+  - pattern: '.*'
+    capabilities: [text]
+    weights: closed

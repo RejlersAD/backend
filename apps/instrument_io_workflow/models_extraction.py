@@ -52,6 +52,8 @@ class IOListExtraction(models.Model):
     untagged_payload = models.JSONField(default=list, blank=True)
     setpoints_payload = models.JSONField(default=list, blank=True)
     vendor_payload = models.JSONField(default=dict, blank=True)
+    cause_notes_payload = models.JSONField(default=list, blank=True)
+    alarmtrip_payload = models.JSONField(default=dict, blank=True)
     warnings = models.JSONField(default=list, blank=True)
 
     is_outdated = models.BooleanField(default=False)   # input replaced later

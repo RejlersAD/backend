@@ -4,7 +4,8 @@ VendorFill shapes)."""
 import time
 
 from . import baseline as baseline_mod
-from . import connections, ioclass, pipes, service, setpoints, spans, tags, vendor as vendor_mod
+from . import (alarmtrip, connections, ioclass, pipes, service, setpoints,
+               spans, tags, vendor as vendor_mod)
 
 
 def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=None,
@@ -31,6 +32,7 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
             pg.page_no = len(pages)      # continuous sheet numbering
             pages.append(pg)
     all_tags, all_untagged, all_labels = [], [], []
+    all_cause_notes = []
     conns_by_page, pages_by_no, eq_by_page = {}, {}, {}
     scales_by_page, psv_by_page = {}, {}
 
@@ -44,6 +46,7 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
         tags.confirm_with_smart_tags(page, t)
         all_tags += t
         all_untagged += tags.classify_untagged(page, t)
+        all_cause_notes += spans.extract_cause_notes(page)
 
         mark('pipes', f'Sheet {page.page_no + 1}: pipes, lines, equipment')
         eq = pipes.find_equipment(page)
@@ -148,27 +151,41 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
                      and p.get('ioClass') in ('AI', 'AO', 'DI', 'DO', 'soft')]
     ai_loops = sorted({p['loopKey'] for p in ai_candidates})
 
+    vendor_payload = {
+        'fills': vendor_fills,
+        'conflicts': vendor_conflicts,
+        'noRecord': no_vendor,
+        'baseline': {k: v for k, v in baseline_info.items() if k != 'rows'} if baseline_info else {},
+        # full baseline row set (stringified) so exports rebuild the
+        # 53-column layout without re-reading the workbook
+        'baselineRows': [
+            {k: ('' if v is None else str(v)) for k, v in row.items()}
+            for row in (baseline_info.get('rows') if baseline_info else [])
+        ],
+    }
+
+    # ── Rev 2: cause notes + alarm & trip register ─────────────────────
+    mark('alarmtrip', 'Building the alarm & trip register')
+    setpoint_rows = [{'tag': s.tag, 'point': s.point, 'value': s.value, 'unit': s.unit,
+                      'label': s.label, 'column': s.column, 'sheet': s.page + 1,
+                      'evidence': s.evidence} for s in all_setpoints]
+    alarmtrip_payload = {
+        scope: alarmtrip.build(pid_tags, setpoint_rows,
+                               vendor_payload['baselineRows'], all_cause_notes,
+                               scope=scope)
+        for scope in ('pid', 'all')
+    }
+
     return {
         'tags': pid_tags,
         'lines': line_rows,
         'untagged': [{'sheet': u['page'] + 1, 'text': u['text'], 'kind': u['kind'],
                       'nearestTag': u['nearest_tag'], 'distancePt': u['distance_pt']}
                      for u in all_untagged],
-        'setpoints': [{'tag': s.tag, 'point': s.point, 'value': s.value, 'unit': s.unit,
-                       'label': s.label, 'column': s.column, 'sheet': s.page + 1,
-                       'evidence': s.evidence} for s in all_setpoints],
-        'vendor': {
-            'fills': vendor_fills,
-            'conflicts': vendor_conflicts,
-            'noRecord': no_vendor,
-            'baseline': {k: v for k, v in baseline_info.items() if k != 'rows'} if baseline_info else {},
-            # full baseline row set (stringified) so exports rebuild the
-            # 53-column layout without re-reading the workbook
-            'baselineRows': [
-                {k: ('' if v is None else str(v)) for k, v in row.items()}
-                for row in (baseline_info.get('rows') if baseline_info else [])
-            ],
-        },
+        'setpoints': setpoint_rows,
+        'vendor': vendor_payload,
+        'cause_notes': all_cause_notes,
+        'alarmtrip': alarmtrip_payload,
         'summary': {
             'sheets': len(pages),
             'tags': len(all_classified),
@@ -185,6 +202,7 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
             'vendorMatched': len(vendor_fills),
             'vendorCells': sum(len(f['cells']) for f in vendor_fills.values()) if vendor_fills else 0,
             'vendorConflicts': sum(1 for c in vendor_conflicts if c['type'] == 'engineering'),
+            'causeNotes': len(all_cause_notes),
             'elapsed_s': round(time.monotonic() - t0, 1),
         },
         'warnings': warnings,

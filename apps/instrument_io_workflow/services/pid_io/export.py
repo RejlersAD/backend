@@ -1,12 +1,17 @@
 """§7.6 — workbook exports for an IOListExtraction.
 
-`iolist`: the 53-column baseline layout, vendor-filled cells in green,
-conflict cells in amber, plus `Set point` (after High_High_Alarm_Value),
-`Vendor source` and `Conflicts` columns.
+`iolist` (default, Rev 2): ONE workbook with sheets in order
+IO_LIST · LINE_TAGS · ALARM_TRIP · SETPOINTS · SERVICE_CHECK · UNTAGGED ·
+VENDOR_CONFLICTS · NOT_IN_VENDOR · README.
+IO_LIST keeps the 53-column baseline layout with vendor-filled cells in
+green, conflict cells in amber, plus `Set point` (after
+High_High_Alarm_Value), `Vendor source` and `Conflicts` columns.
+LINE_TAGS is expanded one row per tag; ALARM_TRIP uses the scope='all'
+register (P&ID-letter rows first, then IO-list-only rows).
 
-`review`: README, PID_TAGS, LINE_TAGS, SETPOINTS, SERVICE_CHECK,
-IOL_NOT_ON_PID, UNTAGGED, IO_LIST_AUTOFILLED, VENDOR_CONFLICTS,
-NOT_IN_VENDOR.
+`review` (backwards compatibility): README, PID_TAGS, LINE_TAGS, SETPOINTS,
+SERVICE_CHECK, IOL_NOT_ON_PID, UNTAGGED, IO_LIST_AUTOFILLED,
+VENDOR_CONFLICTS, NOT_IN_VENDOR.
 """
 import tempfile
 
@@ -30,15 +35,95 @@ def build_workbook(extraction, fmt):
     if fmt == 'review':
         _review_sheets(wb, extraction)
     else:
-        _iolist_sheet(wb, extraction)
+        _iolist_workbook(wb, extraction)
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
     wb.save(tmp.name)
     return tmp.name
 
 
+def _iolist_workbook(wb, extraction):
+    """Rev 2 single workbook: IO_LIST · LINE_TAGS · ALARM_TRIP · SETPOINTS ·
+    SERVICE_CHECK · UNTAGGED · VENDOR_CONFLICTS · NOT_IN_VENDOR · README."""
+    _iolist_sheet(wb, extraction)
+    _line_tags_sheet(wb, extraction)
+    _alarm_trip_sheet(wb, extraction)
+
+    def _sheet(name, headers, rows):
+        w = wb.create_sheet(name)
+        w.append(headers)
+        for r in rows:
+            w.append(r)
+
+    tags = extraction.tags_payload
+    _sheet('SETPOINTS',
+           ['Sheet', 'Tag', 'Point', 'Set point (P&ID)', 'Scale label', 'IO list column'],
+           [[sp['sheet'], sp['tag'], sp['point'],
+             f"{sp['value']} {sp['unit']}" if sp['value'] else 'Letter only — C&E',
+             sp['label'], sp['column']] for sp in extraction.setpoints_payload])
+    _sheet('SERVICE_CHECK',
+           ['Tag', 'Generated from drawing', 'Confidence', 'Why'],
+           [[t['tag'], t.get('service', ''), t.get('serviceConfidence', 0),
+             t.get('serviceEvidence', '')] for t in tags if t.get('service')])
+    _sheet('UNTAGGED', ['Sheet', 'Text in bubble', 'Classified as', 'Nearest tag', 'Distance pt'],
+           [[u['sheet'], u['text'], u['kind'], u['nearestTag'], u['distancePt']]
+            for u in extraction.untagged_payload])
+    vendor = extraction.vendor_payload or {}
+    _sheet('VENDOR_CONFLICTS', ['Tag', 'Field', 'IO List Rev Q1', 'Vendor database', 'Type'],
+           [[c['tag'], c['field'], c.get('io_list', ''), c['vendor'], c['type']]
+            for c in vendor.get('conflicts', [])])
+    _sheet('NOT_IN_VENDOR', ['Tag'], [[t] for t in vendor.get('noRecord', [])])
+
+    ws = wb.create_sheet('README')
+    ws.append(['IO List extraction — IO list workbook'])
+    ws.append(['Document', extraction.doc_number or ''])
+    ws.append(['Revision', extraction.revision or ''])
+    for k, v in (extraction.summary or {}).items():
+        ws.append([k, v])
+
+
+def _line_tags_sheet(wb, extraction):
+    """LINE_TAGS expanded one row per tag (same expansion as the UI):
+    Sheet · Line number · Tag · On the line · Via · Loop · Anchored by."""
+    ws = wb.create_sheet('LINE_TAGS')
+    ws.append(['Sheet', 'Line number', 'Tag', 'On the line', 'Via', 'Loop', 'Anchored by'])
+    loop_by_tag = {t['tag']: t.get('loopKey', '') for t in extraction.tags_payload}
+    for line in extraction.lines_payload:
+        own = list(line.get('tagsOwn') or [])
+        inherited = list(line.get('tagsLoop') or [])
+        for tag in own:
+            ws.append([line['sheet'], line['line'], tag, 'Tapped', '',
+                       loop_by_tag.get(tag, ''), line.get('anchoredBy', '')])
+        for tag in inherited:
+            loop = loop_by_tag.get(tag, '')
+            via = next((o for o in own if loop_by_tag.get(o, '') == loop and loop), '')
+            ws.append([line['sheet'], line['line'], tag, 'Inherited', via,
+                       loop, line.get('anchoredBy', '')])
+
+
+def _alarm_trip_sheet(wb, extraction):
+    """ALARM_TRIP — final register (P&ID rows first, then IO list only).
+    Columns: Tag · Alarm / trip tag (ISA) · Alarm · Tag + alarm ·
+    In IO list Rev Q1 · Type · System · Set point · Value from ·
+    Check on the P&ID."""
+    from . import alarmtrip
+    payload = alarmtrip.for_extraction(extraction, 'all')
+    ws = wb.create_sheet('ALARM_TRIP')
+    ws.append(['Tag', 'Alarm / trip tag (ISA)', 'Alarm', 'Tag + alarm',
+               'In IO list Rev Q1', 'Type', 'System', 'Set point',
+               'Value from', 'Check on the P&ID'])
+    labels = {'same': 'Same ISA tag', 'type-differs': 'Type differs',
+              'not-in-io-list': 'Not in IO list', 'io-list-only': 'IO list only'}
+    for r in payload['rows']:
+        in_io = labels.get(r['inIoList'], r['inIoList'])
+        if r.get('inIoListDetail'):
+            in_io = f"{in_io} ({r['inIoListDetail']})"
+        ws.append([r['tag'], r['isaTag'], r['letter'], r['tagAlarm'], in_io,
+                   r['type'], r['system'], r['setpoint'], r['valueFrom'], r['check']])
+
+
 def _iolist_sheet(wb, extraction):
     ws = wb.active
-    ws.title = 'IO List'
+    ws.title = 'IO_LIST'
     baseline, fills, conflicts, rows = _baseline_rows(extraction)
     headers = list(baseline.get('headers') or [])
     if 'Set point' not in headers:
