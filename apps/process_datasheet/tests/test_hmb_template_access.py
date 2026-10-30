@@ -1,5 +1,6 @@
 import tempfile
 from unittest.mock import patch
+from uuid import uuid4
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -389,6 +390,36 @@ class HMBConsolidatorArchiveTests(TestCase):
         request = getattr(self.factory, method)(path, data or {}, format=format)
         force_authenticate(request, user=user)
         return request
+
+    def test_missing_project_is_distinguished_from_missing_archive_route(self):
+        missing_project_id = str(uuid4())
+        with patch('apps.process_datasheet.hmb_extractor_view.store_hmb_source') as store:
+            for method in ('get', 'post'):
+                with self.subTest(method=method):
+                    data = {'project_id': missing_project_id}
+                    if method == 'post':
+                        data['archive_file'] = SimpleUploadedFile('Comparison.xlsx', b'workbook')
+                    request = self._request(method, '/archive/', self.owner, data, format='multipart')
+                    response = archive_hmb_stream_consolidator_export_view(request)
+                    self.assertEqual(response.status_code, 404)
+                    self.assertEqual(response.data['code'], 'project_not_found')
+                    self.assertEqual(response.data['error'], 'Project not found.')
+            store.assert_not_called()
+        self.assertFalse(HMBSourceUpload.objects.exists())
+
+    def test_denied_project_does_not_store_or_reassign_the_workbook(self):
+        request = self._request('post', '/archive/', self.outsider, {
+            'project_id': str(self.project.project_id),
+            'archive_file': SimpleUploadedFile('Comparison.xlsx', b'workbook'),
+        }, format='multipart')
+        with (
+            patch.dict('apps.process_datasheet.hmb_extractor_view.HMB_ACCESS_CONFIG', {'strategy': 'owner'}),
+            patch('apps.process_datasheet.hmb_extractor_view.store_hmb_source') as store,
+        ):
+            response = archive_hmb_stream_consolidator_export_view(request)
+        self.assertEqual(response.status_code, 403)
+        store.assert_not_called()
+        self.assertFalse(HMBSourceUpload.objects.exists())
 
     def test_local_archive_round_trip_is_retained_and_downloadable(self):
         workbook_content = b'comparison-workbook-content'

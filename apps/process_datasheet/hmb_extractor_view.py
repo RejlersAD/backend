@@ -155,7 +155,10 @@ def _get_accessible_project(user, project_id: str):
     try:
         project = Project.objects.select_related('created_by').get(project_id=project_id)
     except Project.DoesNotExist:
-        return None, Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return None, Response(
+            {'error': 'Project not found.', 'code': 'project_not_found'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
     if _is_admin(user) or project.created_by_id == getattr(user, 'id', None):
         return project, None
