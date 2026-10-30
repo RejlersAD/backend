@@ -32,10 +32,10 @@ def _profile_photo_url(serializer, profile):
             from django.conf import settings
             if getattr(settings, 'USE_S3', False):
                 from apps.core.s3_service import S3Service
-                url = S3Service().get_presigned_url(employee.photo_file_path, expiration=604800)
+                url = S3Service().get_presigned_url(employee.photo_file_path, expiration=604800) or employee.photo_url
             else:
                 from django.core.files.storage import default_storage
-                url = default_storage.url(employee.photo_file_path)
+                url = default_storage.url(employee.photo_file_path) or employee.photo_url
         elif employee:
             url = employee.photo_url
     except Exception:
@@ -292,7 +292,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
         allow_null=True
     )
     organization_name = serializers.CharField(source='organization.name', read_only=True)
-    organization_id = serializers.UUIDField(write_only=True, required=False)
+    organization_id = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
     primary_role = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
     role_ids = serializers.ListField(
@@ -627,7 +632,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         
         # Set organization from organization_id if provided
         if organization_id:
-            validated_data['organization'] = Organization.objects.get(id=organization_id)
+            validated_data['organization'] = organization_id
         
         # Auto-assign organization if not provided
         if 'organization' not in validated_data or validated_data['organization'] is None:
@@ -895,6 +900,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
     
     def update(self, instance, validated_data):
         role_ids = validated_data.pop('role_ids', None)
+        organization_id = validated_data.pop('organization_id', None)
+        if organization_id is not None:
+            validated_data['organization'] = organization_id
         
         # Update user if email/name provided
         if 'email' in validated_data:
