@@ -109,6 +109,8 @@ class MonthlyChampionTests(TestCase):
         report = monthly_report(2025, 7)
         self.assertEqual(report['publication']['podium'][0]['requests'], 1)
         self.assertEqual(report['candidates'][0]['requests'], 2)
+        profile = UserProfile.objects.get(user=self.user)
+        self.assertEqual(report['profile_photo_profile_ids'][str(self.user.pk)], str(profile.pk))
         with self.assertRaises(ValidationError):
             publish(2025, 7, snapshot(2025, 7)['fingerprint'], 'Another decision.', self.root)
         self.assertEqual(MonthlyChampionPublication.objects.count(), 1)

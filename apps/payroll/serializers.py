@@ -217,6 +217,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     substitute_employee_name = serializers.SerializerMethodField()
     can_review = serializers.SerializerMethodField()
     employee_photo_url = serializers.SerializerMethodField()
+    employee_profile_id = serializers.SerializerMethodField()
     line_manager_name = serializers.SerializerMethodField()
     review_stage = serializers.SerializerMethodField()
     workflow_status = serializers.SerializerMethodField()
@@ -241,7 +242,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
             # Stage-1 Reporting Manager fields
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at', 'rm_note',
-            'workflow_instance', 'workflow_status', 'workflow_stage', 'can_review', 'line_manager_name', 'review_stage', 'employee_photo_url',
+            'workflow_instance', 'workflow_status', 'workflow_stage', 'can_review', 'line_manager_name', 'review_stage', 'employee_photo_url', 'employee_profile_id',
             'created_at', 'updated_at',
             'approval_steps',
             'can_refer', 'referral_history',
@@ -313,6 +314,14 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             canonical_employee=employee, canonical_employee_id=employee.pk if employee else None,
             user=obj.employee, profile_photo=None,
         ))
+
+    def get_employee_profile_id(self, obj):
+        from apps.rbac.models import UserProfile
+        from .services.leave_approval import employee_for_request
+        user_id = obj.employee_id or getattr(employee_for_request(obj), 'user_id', None)
+        if not user_id:
+            return None
+        return UserProfile.objects.filter(user_id=user_id, is_deleted=False).values_list('id', flat=True).first()
 
     def get_review_stage(self, obj):
         from .services.leave_approval import manager_for_request

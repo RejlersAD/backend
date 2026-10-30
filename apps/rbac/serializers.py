@@ -32,10 +32,10 @@ def _profile_photo_url(serializer, profile):
             from django.conf import settings
             if getattr(settings, 'USE_S3', False):
                 from apps.core.s3_service import S3Service
-                url = S3Service().get_presigned_url(employee.photo_file_path, expiration=604800)
+                url = S3Service().get_presigned_url(employee.photo_file_path, expiration=604800) or employee.photo_url
             else:
                 from django.core.files.storage import default_storage
-                url = default_storage.url(employee.photo_file_path)
+                url = default_storage.url(employee.photo_file_path) or employee.photo_url
         elif employee:
             url = employee.photo_url
     except Exception:
