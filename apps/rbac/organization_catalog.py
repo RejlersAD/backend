@@ -61,6 +61,8 @@ DEPARTMENTS = [
     _department('radai', 'Artificial Intelligence (AI)', 'operations', None, (
         'Artificial Intelligence (AI) Team', 'RIN Growth',
     ), ('RadAI', 'AI')),
+    _department('digitalisation', 'Digitalisation', 'operations', None,
+                aliases=('Digitalization', 'Digitization', 'Digital')),
     _department('project_controls', 'Project Controls', 'project_management', 'senior_manager_project_controls'),
     _department('process', 'Process Engineering', 'engineering', 'hod_process'),
     _department('civil', 'Civil & Structural', 'engineering', 'hod_civil_structural',
@@ -122,6 +124,7 @@ ORGANIZATIONAL_ROLES = [
     # line manager is specified for either generic position.
     _role('engineer', 'Engineer', 'engineering'),
     _role('designer', 'Designer', 'engineering'),
+    _role('administrator', 'Administrator', 'hr', 'head_hr_administration'),
 ]
 
 

@@ -185,6 +185,29 @@ def read_page(doc, page_no: int) -> PageData:
     )
 
 
+_CAUSE_NOTE_RE = re.compile(r'^\s*C\s*:\s*(\S.*)$')
+_NOTE_TAG_RE = re.compile(r'\b\d{2}-[A-Z]{1,6}-\d{3,5}[A-Z]?\b')
+
+
+def extract_cause_notes(page: PageData) -> list:
+    """Rev 2 — cause notes: `C : <text>` lines on the sheet (e.g.
+    `C : 13-PSLL-7204 / PSA2FGCSD`). Returns one dict per note line with the
+    tags mentioned in it (alarm-trip cause-note checks)."""
+    notes = []
+    for line in (page.text or '').splitlines():
+        m = _CAUSE_NOTE_RE.match(line)
+        if not m:
+            continue
+        text = m.group(1).strip()
+        notes.append({
+            'sheet': page.page_no + 1,
+            'page': page.page_no + 1,
+            'text': text,
+            'tags': sorted(set(_NOTE_TAG_RE.findall(text.upper()))),
+        })
+    return notes
+
+
 def read_document(pdf_path: str) -> list:
     import pymupdf
     doc = pymupdf.open(pdf_path)

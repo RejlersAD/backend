@@ -290,6 +290,8 @@ def start_extraction(request, project_id):
             extraction.untagged_payload = result['untagged']
             extraction.setpoints_payload = result['setpoints']
             extraction.vendor_payload = result['vendor']
+            extraction.cause_notes_payload = result.get('cause_notes', [])
+            extraction.alarmtrip_payload = result.get('alarmtrip', {})
             extraction.warnings = result['warnings']
             extraction.status = IOListExtraction.STATUS_COMPLETED
             extraction.stage_state = {**(extraction.stage_state or {}), '1': 'complete'}
@@ -435,6 +437,11 @@ def get_extraction(request, project_id, extraction_id):
         return Response({'tab': tab, **ext.vendor_payload})
     if tab == 'conflicts':
         return Response({'tab': tab, 'rows': ext.vendor_payload.get('conflicts', [])})
+    if tab == 'alarmtrip':
+        from .services.pid_io import alarmtrip
+        scope = request.query_params.get('scope', 'pid')
+        payload = alarmtrip.for_extraction(ext, scope)
+        return Response({'tab': tab, **payload})
     return Response({'error': f'Unknown tab {tab!r}.'}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -512,7 +519,7 @@ def export_extraction(request, project_id, extraction_id):
     ext = IOListExtraction.objects.filter(id=extraction_id, project_id=project_id).first()
     if not ext:
         return Response({'error': 'Extraction not found.'}, status=status.HTTP_404_NOT_FOUND)
-    fmt = request.query_params.get('fmt', 'iolist')
+    fmt = request.query_params.get('fmt') or request.query_params.get('format') or 'iolist'
     try:
         from .services.pid_io import export as export_mod
         path = export_mod.build_workbook(ext, fmt)
@@ -523,8 +530,13 @@ def export_extraction(request, project_id, extraction_id):
         with open(path, 'rb') as fh:
             payload = _io.BytesIO(fh.read())
         _os.unlink(path)
-        return FileResponse(payload, as_attachment=True,
-                            filename=f'{ext.doc_number or "io-list"}-{fmt}.xlsx')
+        if fmt == 'review':
+            filename = f'{ext.doc_number or "io-list"}-review.xlsx'
+        else:
+            doc = ext.doc_number or 'io-list'
+            rev = ext.revision or ''
+            filename = f'{doc}_IO_List_{rev}.xlsx' if rev else f'{doc}_IO_List.xlsx'
+        return FileResponse(payload, as_attachment=True, filename=filename)
     except Exception as exc:
         logger.exception('io-list export failed')
         return Response({'error': f'Export failed: {exc}'},

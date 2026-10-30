@@ -17,8 +17,8 @@ class OrganizationCatalogDataTests(SimpleTestCase):
         self.assertEqual(catalog['source']['document_id'], 'RAD-HM-CHT-0001')
         self.assertEqual(catalog['source']['revision'], 6)
         self.assertEqual(catalog['source']['date'], '2025-12-12')
-        self.assertEqual(len(catalog['departments']), 16)
-        self.assertEqual(len(catalog['organizational_roles']), 21)
+        self.assertEqual(len(catalog['departments']), 17)
+        self.assertEqual(len(catalog['organizational_roles']), 22)
         holders = {role['code']: role['holder_name'] for role in ORGANIZATIONAL_ROLES if role['holder_name']}
         self.assertEqual(holders, {
             'ceo': 'Jarmo Suominen',
@@ -87,6 +87,10 @@ class OrganizationCatalogDataTests(SimpleTestCase):
         self.assertEqual(get_organizational_role_choices('HR & Administration'), [{
             'value': 'head_hr_administration',
             'label': 'Head of HR & Administration (Acting)',
+            'department_code': 'hr',
+        }, {
+            'value': 'administrator',
+            'label': 'Administrator',
             'department_code': 'hr',
         }])
 

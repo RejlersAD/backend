@@ -208,10 +208,13 @@ if is_app_installed('apps.data_mining'):
     urlpatterns.append(path('api/v1/data-mining/', include('apps.data_mining.urls')))
     logger.debug("[URL] ✅ Data Mining Platform URLs registered")
 
-# P&ID Verification — deterministic quality checker (V1)
+# P&ID Verification V1 — analysis pipeline removed (app being redesigned from
+# scratch). Only the shared projects-registry endpoints remain mounted, because
+# P&ID Checker V2 consumes them via frontend pidProjectsService.js.
+# See docs/pidv1-removal-inventory.md §4.
 if is_app_installed('apps.pid_verification'):
     urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
-    logger.debug("[URL] ✅ P&ID Verification V1 URLs registered")
+    logger.debug("[URL] ✅ P&ID Projects Registry URLs registered (V1 pipeline removed)")
 
 # P&ID Verification V2 — Re-enabled with isolated database and V2 endpoints
 if is_app_installed('apps.pid_verification_v2'):
