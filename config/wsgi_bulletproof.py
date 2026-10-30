@@ -29,9 +29,8 @@ try:
     logger.debug("✅ Django WSGI application loaded successfully")
 except Exception as e:
     DJANGO_ERROR = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-    logger.debug(f"⚠️  Django failed to load: {type(e).__name__}: {str(e)}")
+    logger.exception("⚠️  Django failed to load: %s: %s", type(e).__name__, e)
     logger.debug("   Fallback WSGI app will handle requests")
-    logger.debug(traceback.format_exc())
 
 
 # SOFT-CODED CORS Configuration for fallback mode
@@ -135,8 +134,7 @@ def application(environ, start_response):
             return DJANGO_APP(environ, start_response)
         except Exception as e:
             # Log the error but don't crash - use fallback
-            logger.debug(f"⚠️  Django request failed: {type(e).__name__}: {str(e)}")
-            logger.debug(traceback.format_exc())
+            logger.exception("⚠️  Django request failed: %s: %s", type(e).__name__, e)
             return fallback_app(environ, start_response)
     else:
         return fallback_app(environ, start_response)

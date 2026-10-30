@@ -485,7 +485,7 @@ class DealCreateSerializer(serializers.ModelSerializer):
         model = Deal
         exclude = ['weighted_value', 'ai_win_probability', 'ai_recommended_actions', 'created_at', 'updated_at']
         read_only_fields = [
-            'deal_code', 'created_by',
+            'deal_code', 'created_by', 'is_deleted', 'deleted_at',
             'stage', 'stage_entered_at', 'bid_decision', 'bid_decision_reason',
             'bid_decided_by', 'bid_decided_at', 'award_status', 'award_submitted_by',
             'award_submitted_at', 'award_approved_by', 'award_approved_at',
