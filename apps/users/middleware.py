@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from django.db.utils import OperationalError
 from config.password_policy import get_password_expiry_status
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class PasswordExpiryMiddleware:
         '/api/users/verify-reset-token/',
         '/api/users/reset-password/',
         '/api/users/check-password-expiry/',
+        '/api/auth/',
         '/api/auth/login/',
         '/api/auth/logout/',
         '/api/auth/token/refresh/',
@@ -69,13 +71,17 @@ class PasswordExpiryMiddleware:
         Returns:
             JsonResponse if password expired and action required, None otherwise
         """
+        # Authentication endpoints must bypass this check before request.user is
+        # evaluated. AuthenticationMiddleware may load a DB-backed session when
+        # that property is accessed, which can turn login into a 500 if session
+        # tables are unavailable or the browser carries a stale session cookie.
+        path = request.path
+        normalized_path = re.sub(r'^(/api)/v\d+/', r'\1/', path)
+        if any(normalized_path.startswith(exempt) for exempt in self.EXEMPT_PATHS):
+            return None
+
         # Skip if user not authenticated
         if not hasattr(request, 'user') or not request.user.is_authenticated:
-            return None
-        
-        # Skip exempt paths
-        path = request.path
-        if any(path.startswith(exempt) for exempt in self.EXEMPT_PATHS):
             return None
         
         user = request.user
