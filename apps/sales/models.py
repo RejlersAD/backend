@@ -6,7 +6,7 @@ Comprehensive CRM and Pipeline Management with AI-powered insights
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from apps.core.models import TimeStampedModel
+from apps.core.models import TimeStampedModel, SoftDeleteModel
 import uuid
 from decimal import Decimal
 from .workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload, OpportunityFolderTag, OpportunityDocument  # noqa: F401
@@ -356,7 +356,7 @@ class OpportunityNumberSequence(models.Model):
         ]
 
 
-class Deal(TimeStampedModel):
+class Deal(TimeStampedModel, SoftDeleteModel):
     """
     Sales opportunities and deals
     Tracks the entire sales pipeline
@@ -513,6 +513,25 @@ class Deal(TimeStampedModel):
             self.actual_close_date = timezone.now().date()
         
         super().save(*args, **kwargs)
+
+
+class Opportunity(Deal):
+    """
+    Domain vocabulary alias for Deal.
+
+    The Enterprise Sales-to-Project Redesign specifies the canonical domain
+    term as "Opportunity".  This proxy model provides `Opportunity` as a
+    first-class name while sharing the same database table (`sales_deals`) as
+    `Deal`, so existing consumers keyed on `Deal` continue to work unchanged.
+
+    Use `Opportunity` for all new code; `Deal` remains supported for backwards
+    compatibility.
+    """
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Opportunity'
+        verbose_name_plural = 'Opportunities'
 
 
 class OpportunityAuditEvent(models.Model):
