@@ -54,7 +54,7 @@ class PurchaseRecommendationCIRunner(NonInteractiveKeepDbRunner):
         connection.ensure_connection()
         with connection.cursor() as cursor:
             cursor.execute('SELECT version()')
-            logger.debug('CI PostgreSQL service:', cursor.fetchone()[0])
+            logger.debug('CI PostgreSQL service: %s', cursor.fetchone()[0])
         return super().setup_databases(**kwargs)
 
     def suite_result(self, suite, result, **kwargs):

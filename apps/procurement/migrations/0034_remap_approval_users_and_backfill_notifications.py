@@ -211,7 +211,11 @@ def remap_approval_users_and_backfill_notifications(apps, schema_editor):
             order.save(update_fields=['approval_log'])
             repaired_pos += 1
 
-    logger.debug('Approval notification repair:', f'{repaired_prs} requisitions remapped,', f'{repaired_pos} purchase orders remapped,', f'{created_notifications} notifications created.')
+    logger.debug(
+        'Approval notification repair: %s requisitions remapped, %s purchase orders remapped, '
+        '%s notifications created.',
+        repaired_prs, repaired_pos, created_notifications,
+    )
 
 
 class Migration(migrations.Migration):
