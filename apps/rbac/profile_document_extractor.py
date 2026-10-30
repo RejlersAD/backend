@@ -125,10 +125,10 @@ def extract_text(
     is_pdf = suffix == ".pdf" or content_type == "application/pdf"
 
     if is_pdf:
-        import fitz
+        import pymupdf
 
         text_parts = []
-        with fitz.open(stream=file_bytes, filetype="pdf") as document:
+        with pymupdf.open(stream=file_bytes, filetype="pdf") as document:
             for page in list(document)[:3]:
                 embedded = page.get_text("text").strip()
                 if embedded:
@@ -137,7 +137,7 @@ def extract_text(
                 if len(embedded) < 80:
                     from PIL import Image
 
-                    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                    pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
                     image = Image.open(io.BytesIO(pixmap.tobytes("png")))
                     text_parts.append(_ocr_image(image, document_type))
         return "\n".join(text_parts)

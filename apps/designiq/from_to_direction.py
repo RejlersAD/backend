@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional, Set
 import math
 import logging
-
 logger = logging.getLogger(__name__)
+
 
 
 # ============================================================================
@@ -717,9 +717,9 @@ if __name__ == "__main__":
         config=config
     )
     
-    print("\n=== FROM-TO Detection Results ===")
+    logger.debug("\n=== FROM-TO Detection Results ===")
     for r in result:
-        print(f"{r.original_detection}:")
-        print(f"  FROM: {r.from_line}")
-        print(f"  TO: {r.to_line}")
-        print()
+        logger.debug(f"{r.original_detection}:")
+        logger.debug(f"  FROM: {r.from_line}")
+        logger.debug(f"  TO: {r.to_line}")
+        logger.debug('')

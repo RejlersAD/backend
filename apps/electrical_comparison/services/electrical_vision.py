@@ -23,10 +23,10 @@ import io
 import logging
 import math
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image, ImageEnhance, ImageFilter, ImageStat
-
 logger = logging.getLogger(__name__)
+
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -75,15 +75,15 @@ def _render_single_page(pdf_bytes: bytes, page_index: int, dpi: int | None = Non
     ELECTRICAL_VISION_RENDER_DPI (or `dpi`, if given).
 
     Unlike rendering every page, this does NOT rasterize any page other
-    than `page_index` — fitz.open() only parses the document's xref
+    than `page_index` — pymupdf.open() only parses the document's xref
     table; get_pixmap() is what actually does the (expensive) rendering
     work, and it's called here for a single page only. Used by callers
     that process pages independently (one Vision call per page) so N
     page-calls cost O(N) total renders instead of O(N^2).
     """
     resolved_dpi = dpi or ELECTRICAL_VISION_RENDER_DPI
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-    mat = fitz.Matrix(resolved_dpi / 72, resolved_dpi / 72)
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+    mat = pymupdf.Matrix(resolved_dpi / 72, resolved_dpi / 72)
     pix = doc[page_index].get_pixmap(matrix=mat, alpha=False)
     return Image.open(io.BytesIO(pix.tobytes('png')))
 
@@ -228,7 +228,7 @@ def _render_electrical_regions(pdf_bytes: bytes, page_index: int) -> list[tuple[
     sheet as one giant pixmap (the "Overly large image" failure a
     single whole-page render at a high DPI can hit directly on a big
     engineering drawing) — each region is clipped and rasterized
-    straight from the PDF's own vector data (fitz's `clip` param), never
+    straight from the PDF's own vector data (pymupdf's `clip` param), never
     cropped from an already-rendered bitmap, so no detail is lost
     compared to a whole-page render at the same DPI.
 
@@ -255,7 +255,7 @@ def _render_electrical_regions(pdf_bytes: bytes, page_index: int) -> list[tuple[
     against region bounds: electrical tags are plain text, so simple
     text-based dedup across regions — already done by every caller's own
     page-level `seen_tags` set — is enough, no bbox tracking needed)."""
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         page = doc[page_index]
         width, height = page.rect.width, page.rect.height
@@ -277,17 +277,17 @@ def _render_electrical_regions(pdf_bytes: bytes, page_index: int) -> list[tuple[
         regions: list[tuple[str, dict]] = []
         for r in range(rows):
             for c in range(columns):
-                core = fitz.Rect(c * width / columns, r * height / rows,
+                core = pymupdf.Rect(c * width / columns, r * height / rows,
                                  (c + 1) * width / columns, (r + 1) * height / rows)
                 margin_x = width / columns * ELECTRICAL_VISION_REGION_OVERLAP
                 margin_y = height / rows * ELECTRICAL_VISION_REGION_OVERLAP
-                clip = fitz.Rect(max(0, core.x0 - margin_x), max(0, core.y0 - margin_y),
+                clip = pymupdf.Rect(max(0, core.x0 - margin_x), max(0, core.y0 - margin_y),
                                  min(width, core.x1 + margin_x), min(height, core.y1 + margin_y))
                 # Raster bounds round outwards at both edges, same as
                 # piping_valve_mto_extractor's own region renderer.
                 zoom = min(ELECTRICAL_VISION_DETAIL_DPI / 72,
                            (ELECTRICAL_VISION_REGION_EDGE_PX - 2) / max(clip.width, clip.height))
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, alpha=False)
                 image = Image.open(io.BytesIO(pix.tobytes('png')))
                 processed = _preprocess_for_vision(image)
                 regions.append((

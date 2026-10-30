@@ -31,7 +31,7 @@ def local_capabilities(config):
         'mode': 'local_only' if config.get('local_only', True) else 'local_first', 'structured_tables': True,
         'engineering_acceptance_verified': False,
         'engines': [
-            {'id': 'pymupdf_text', 'label': 'PDF text tables', 'available': installed('fitz')},
+            {'id': 'pymupdf_text', 'label': 'PDF text tables', 'available': installed('pymupdf')},
             {'id': 'rapidocr', 'label': 'RapidOCR', 'available': rapid_assets,
              'readiness': 'installation_only; packaged model assets required'},
             {'id': 'paddleocr', 'label': 'PaddleOCR',
@@ -146,7 +146,7 @@ def _rapidocr_reader(config):
 
 
 def extract_local(request, on_progress=None):
-    import fitz
+    import pymupdf
     config = request['config']
     engine = request['engine']
     parser = LocalTableParser(config['piping_class_header_regex'], engine)
@@ -174,7 +174,7 @@ def extract_local(request, on_progress=None):
         return {**parser.result(), 'page_text_chars': chars, 'available': True,
                 'ocr_pages': list(ocr_pages), 'pages_processed': list(processed),
                 'pages_with_components': list(pages_with_components)}
-    with fitz.open(request['pdf_path']) as document:
+    with pymupdf.open(request['pdf_path']) as document:
         for index in range(request['start'], min(request['end'] + 1, len(document))):
             if request.get('pages') is not None and index + 1 not in request['pages']:
                 continue
@@ -186,7 +186,7 @@ def extract_local(request, on_progress=None):
                 # Scanned tables may have a readable native title/footer. Do not
                 # mistake that overlay for a fully readable native page.
                 images = page.get_image_info()
-                image_dominated = any((fitz.Rect(item['bbox']) & page.rect).get_area() >= page.rect.get_area() * .5 for item in images)
+                image_dominated = any((pymupdf.Rect(item['bbox']) & page.rect).get_area() >= page.rect.get_area() * .5 for item in images)
                 if images and (len(text.strip()) < 100 or image_dominated):
                     ocr_pages.append(index + 1)
                     parser.issues.append({'page': index + 1, 'reason': 'image_page_requires_ocr'})
@@ -202,7 +202,7 @@ def extract_local(request, on_progress=None):
                 from PIL import Image
                 scale = min(config.get('render_dpi', 150) / 72,
                             config.get('max_image_size', 3072) / max(page.rect.width, page.rect.height))
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False, colorspace=fitz.csRGB)
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False, colorspace=pymupdf.csRGB)
                 image = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
                 parser.read_rows(positioned_rows(_ocr_words(engine, image, reader)), index + 1)
                 if parser.component_count == previous_count:

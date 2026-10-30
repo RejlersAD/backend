@@ -6,13 +6,14 @@ Handles both horizontal and vertical text orientations
 """
 
 import re
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 import io
 import logging
 import json
 from typing import List, Dict, Optional
 import numpy as np
+logger = logging.getLogger(__name__)
 
 # Conditional import for pytesseract (graceful fallback if not installed)
 try:
@@ -22,7 +23,6 @@ except ImportError:
     pytesseract = None
     PYTESSERACT_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
 
 
 class PIDLineExtractor:
@@ -137,7 +137,7 @@ class PIDLineExtractor:
             List of extracted line items with parsed components
         """
         try:
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             all_line_items = []
             
             logger.info(f"📄 Processing P&ID PDF: {pdf_path}")
@@ -157,7 +157,7 @@ class PIDLineExtractor:
                     logger.info(f"  → No line numbers in native text, trying OCR...")
                     
                     # Convert page to image with higher resolution
-                    pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))  # 3x resolution for better OCR
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(3, 3))  # 3x resolution for better OCR
                     img = Image.open(io.BytesIO(pix.tobytes("png")))
                     
                     # Enhance image for better OCR

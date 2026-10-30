@@ -5,7 +5,7 @@ from io import BytesIO
 import json
 from unittest.mock import patch
 
-import fitz
+import pymupdf
 from docx import Document
 from docx.oxml.ns import qn
 from django.core.cache import cache
@@ -50,14 +50,14 @@ class PurchaseOrderWordPacketTests(SimpleTestCase):
 
     def assert_pdf_tail_matches(self, order, word, pdf):
         images = list(page_images(word))
-        with fitz.open(stream=_main_pdf(order), filetype='pdf') as main:
+        with pymupdf.open(stream=_main_pdf(order), filetype='pdf') as main:
             body_count = len(main)
-        with fitz.open(stream=pdf, filetype='pdf') as canonical:
+        with pymupdf.open(stream=pdf, filetype='pdf') as canonical:
             self.assertEqual(len(images), len(canonical) - body_count)
             for image_bytes, page in zip(images, list(canonical)[body_count:]):
                 scale = min(PDF_PAGE_DPI / 72,
                             MAX_PAGE_IMAGE_EDGE / max(page.rect.width, page.rect.height))
-                rendered = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                rendered = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
                 expected = Image.frombytes('RGB', (rendered.width, rendered.height), rendered.samples)
                 with Image.open(BytesIO(image_bytes)) as embedded:
                     self.assertEqual(embedded.size, expected.size)

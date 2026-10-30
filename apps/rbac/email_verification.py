@@ -2,6 +2,8 @@
 Email Verification System
 Handles email verification tokens and sending verification emails
 """
+
+import logging
 import secrets
 from datetime import timedelta
 from django.utils import timezone
@@ -9,6 +11,7 @@ from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.conf import settings
 from apps.rbac.models import UserProfile
+logger = logging.getLogger(__name__)
 
 
 def generate_verification_token():
@@ -35,7 +38,7 @@ def send_verification_email(user_profile, request=None):
         )
         
         if not email_configured:
-            print(f"⚠️  Email not configured. Cannot send verification email to {user_profile.user.email}")
+            logger.debug(f"⚠️  Email not configured. Cannot send verification email to {user_profile.user.email}")
             return False
         
         # Generate verification token
@@ -83,11 +86,11 @@ def send_verification_email(user_profile, request=None):
             fail_silently=False,
         )
         
-        print(f"✅ Verification email sent to {user_profile.user.email}")
+        logger.debug(f"✅ Verification email sent to {user_profile.user.email}")
         return True
         
     except Exception as e:
-        print(f"❌ Failed to send verification email to {user_profile.user.email}: {str(e)}")
+        logger.debug(f"❌ Failed to send verification email to {user_profile.user.email}: {str(e)}")
         import traceback
         traceback.print_exc()
         return False
@@ -150,11 +153,11 @@ def verify_email_token(email, token):
         
         user_profile.save()
         
-        print(f"✅ Email verified for {email}")
+        logger.debug(f"✅ Email verified for {email}")
         return True, "Email verified successfully", user_profile
         
     except Exception as e:
-        print(f"❌ Email verification error: {e}")
+        logger.debug(f"❌ Email verification error: {e}")
         return False, f"Verification error: {str(e)}", None
 
 
@@ -182,9 +185,9 @@ def send_welcome_email(user_profile):
             fail_silently=True,
         )
         
-        print(f"✅ Welcome email sent to {user_profile.user.email}")
+        logger.debug(f"✅ Welcome email sent to {user_profile.user.email}")
         return True
         
     except Exception as e:
-        print(f"⚠️ Failed to send welcome email: {e}")
+        logger.debug(f"⚠️ Failed to send welcome email: {e}")
         return False

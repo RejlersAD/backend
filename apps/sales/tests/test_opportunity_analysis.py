@@ -49,10 +49,10 @@ class AnalysisContentTests(SimpleTestCase):
         self.assertFalse(_same_document(original, [('Document text', original[0][1].replace('clause 10', 'clause 11', 1))]))
 
     def test_pdf_and_word_extracted_text_match_across_formatting(self):
-        import fitz
+        import pymupdf
         from docx import Document
         text = 'Submit the technical proposal and inspection plan by 1 December 2026'
-        pdf = fitz.open()
+        pdf = pymupdf.open()
         pdf.new_page().insert_text((72, 72), text + '.')
         pdf_data = pdf.tobytes()
         pdf.close()
@@ -91,8 +91,8 @@ class AnalysisContentTests(SimpleTestCase):
         self.assertTrue(all(len(text) <= CHUNK_CHARS for _, text in chunks))
 
     def test_pdf_all_pages_have_page_evidence(self):
-        import fitz
-        doc = fitz.open()
+        import pymupdf
+        doc = pymupdf.open()
         for number in range(3):
             doc.new_page().insert_text((72, 72), f'Requirement on page {number + 1}')
         data = doc.tobytes()
@@ -103,8 +103,8 @@ class AnalysisContentTests(SimpleTestCase):
         self.assertIn('page 3', chunks[-1][1])
 
     def test_scan_and_unsupported_formats_are_not_claimed_as_read(self):
-        import fitz
-        doc = fitz.open()
+        import pymupdf
+        doc = pymupdf.open()
         doc.new_page()
         data = doc.tobytes()
         chunks, diagnostic = extract_analysis_chunks(BytesIO(data), 'scan.pdf', len(data))

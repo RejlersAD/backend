@@ -21,7 +21,10 @@ tag check at all.
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 TAG_REGISTER_SECTION = 'tag_register'
 
@@ -77,12 +80,12 @@ def apply_forward(apps, schema_editor):
     IOListLegendSheet = apps.get_model('instrument_io_workflow', 'IOListLegendSheet')
 
     deleted, _ = IOListLegendSheet.objects.filter(section=TAG_REGISTER_SECTION).delete()
-    print(f'[instrument_io_workflow] Deleted {deleted} {TAG_REGISTER_SECTION!r} legend row(s).')
+    logger.debug(f'[instrument_io_workflow] Deleted {deleted} {TAG_REGISTER_SECTION!r} legend row(s).')
 
     updated = IOListLegendSheet.objects.filter(
         section=INSTRUMENT_INDEX_SECTION, name=INSTRUMENT_INDEX_OLD_NAME,
     ).update(name=INSTRUMENT_INDEX_NEW_NAME)
-    print(f'[instrument_io_workflow] Relabelled {INSTRUMENT_INDEX_SECTION!r} legend name on {updated} row(s).')
+    logger.debug(f'[instrument_io_workflow] Relabelled {INSTRUMENT_INDEX_SECTION!r} legend name on {updated} row(s).')
 
 
 def apply_backward(apps, schema_editor):

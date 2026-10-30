@@ -263,6 +263,7 @@ def _normalise_key(value: Any) -> str:
 
 def _normalise_unit(value: Any) -> str:
     key = _normalise_key(value)
+    key = key.strip('()[]').strip()
     key = key.replace('lbm/', 'lb/').replace('lbm ', 'lb ')
     key = {
         'btu/hr/ft/f': 'btu/hr-ft-f',
@@ -356,6 +357,104 @@ def _parse_phase_property_sheet(ws):
         'stream_ids': [s['stream_id'] for s in streams],
         'rows': rows,
     }
+
+
+def _parse_long_phase_properties_sheet(ws):
+    """Split the HYSYS long phase-property table by stream phase."""
+    header_row = None
+    headers = []
+    for row in range(1, min(ws.max_row, 8) + 1):
+        values = [_normalise_text(ws.cell(row, col).value) for col in range(1, ws.max_column + 1)]
+        keys = [_normalise_key(value) for value in values]
+        if len(keys) > 1 and keys[0] == 'stream' and keys[1] == 'phase':
+            header_row, headers = row, values
+            break
+    phase_keys = {'vapour': {}, 'light_liquid': {}, 'heavy_liquid': {}}
+    if header_row is None:
+        return {key: {'layout': None, 'stream_ids': [], 'rows': rows} for key, rows in phase_keys.items()}
+
+    units_row = header_row + 1
+    seen_streams = {key: [] for key in phase_keys}
+    for row in range(units_row + 1, ws.max_row + 1):
+        stream_id = _normalise_text(ws.cell(row, 1).value)
+        phase = _normalise_key(ws.cell(row, 2).value)
+        section_key = (
+            'vapour' if 'vapour' in phase or 'vapor' in phase
+            else 'light_liquid' if 'liquid' in phase
+            else 'heavy_liquid' if 'aqueous' in phase
+            else None
+        )
+        if not stream_id or not section_key:
+            continue
+        if stream_id not in seen_streams[section_key]:
+            seen_streams[section_key].append(stream_id)
+        rows = phase_keys[section_key]
+        for col in range(3, len(headers) + 1):
+            property_name = headers[col - 1]
+            value = ws.cell(row, col).value
+            if not property_name or value in (None, '', '---') or _is_formula_or_ref_error(value):
+                continue
+            key = _normalise_key(property_name)
+            entries = rows.setdefault(key, [])
+            entry = next((item for item in entries if item.get('unit') == _normalise_text(ws.cell(units_row, col).value)), None)
+            if entry is None:
+                entry = {
+                    'raw_property': property_name,
+                    'unit': _normalise_text(ws.cell(units_row, col).value),
+                    'values': {},
+                    'cells': {},
+                    'sheet': ws.title,
+                }
+                entries.append(entry)
+            entry['values'][stream_id] = value
+            entry['cells'][stream_id] = ws.cell(row, col).coordinate
+    return {
+        key: {'layout': {'header_row': header_row}, 'stream_ids': ids, 'rows': phase_keys[key]}
+        for key, ids in seen_streams.items()
+    }
+
+
+def _parse_streams_matrix_sheet(ws):
+    """Parse HYSYS' Streams sheet, where each stream occupies one data row."""
+    header_row = None
+    headers = []
+    for row in range(1, min(ws.max_row, 8) + 1):
+        values = [_normalise_text(ws.cell(row, col).value) for col in range(1, ws.max_column + 1)]
+        if values and _normalise_key(values[0]) == 'stream':
+            header_row, headers = row, values
+            break
+    if header_row is None:
+        return {'layout': None, 'stream_ids': [], 'rows': {}}
+
+    units_row = header_row + 1
+    stream_ids = []
+    rows = {}
+    for row in range(units_row + 1, ws.max_row + 1):
+        stream_id = _normalise_text(ws.cell(row, 1).value)
+        if not stream_id:
+            continue
+        stream_ids.append(stream_id)
+        for col in range(2, len(headers) + 1):
+            property_name = headers[col - 1]
+            value = ws.cell(row, col).value
+            if not property_name or value in (None, '', '---') or _is_formula_or_ref_error(value):
+                continue
+            key = _normalise_key(property_name)
+            unit = _normalise_text(ws.cell(units_row, col).value)
+            entries = rows.setdefault(key, [])
+            entry = next((item for item in entries if item.get('unit') == unit), None)
+            if entry is None:
+                entry = {
+                    'raw_property': property_name,
+                    'unit': unit,
+                    'values': {},
+                    'cells': {},
+                    'sheet': ws.title,
+                }
+                entries.append(entry)
+            entry['values'][stream_id] = value
+            entry['cells'][stream_id] = ws.cell(row, col).coordinate
+    return {'layout': {'header_row': header_row}, 'stream_ids': stream_ids, 'rows': rows}
 
 
 def _extract_case_name(wb, source_filename: str = '') -> str:
@@ -1167,7 +1266,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
     case_name = _extract_case_name(wb, source_filename=source_filename)
 
     normalized_summary = _is_normalized_summary_workbook(wb)
-    is_phase_workbook = any(name in wb.sheetnames for name in ('Overall', 'Vapour Phase', 'Liquid Phase', 'Aqueous Phase'))
+    is_phase_workbook = any(name in wb.sheetnames for name in ('Overall', 'Vapour Phase', 'Liquid Phase', 'Aqueous Phase', 'Phase Properties'))
     if not normalized_summary and ('Master' in wb.sheetnames or not is_phase_workbook) and (template_profile_payload or {}).get('stream_columns'):
         try:
             return _parse_master_case_workbook(wb, source_filename, template_profile_payload, extract_all_streams=extract_all_streams)
@@ -1177,6 +1276,7 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
         'general': 'Overall',
         'vapour': 'Vapour Phase',
         'light_liquid': 'Liquid Phase',
+        # HYSYS exports all three phases as rows in this companion sheet.
         'heavy_liquid': 'Aqueous Phase',
     }
 
@@ -1198,11 +1298,21 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
         sheet_map = {key: 'Conditions / Properties' for key in sheet_map}
     else:
         phase_data = {}
-        for key, sheet_name in sheet_map.items():
-            if sheet_name in wb.sheetnames:
-                phase_data[key] = _parse_phase_property_sheet(wb[sheet_name])
-            else:
-                phase_data[key] = {'stream_ids': [], 'rows': {}, 'layout': None}
+        if 'Phase Properties' in wb.sheetnames:
+            phase_data = _parse_long_phase_properties_sheet(wb['Phase Properties'])
+            phase_data['general'] = (
+                _parse_streams_matrix_sheet(wb['Streams'])
+                if 'Streams' in wb.sheetnames
+                else {'stream_ids': [], 'rows': {}, 'layout': None}
+            )
+            sheet_map = {key: 'Phase Properties' for key in sheet_map}
+            sheet_map['general'] = 'Streams'
+        else:
+            for key, sheet_name in sheet_map.items():
+                if sheet_name in wb.sheetnames:
+                    phase_data[key] = _parse_phase_property_sheet(wb[sheet_name])
+                else:
+                    phase_data[key] = {'stream_ids': [], 'rows': {}, 'layout': None}
         source_stream_ids = phase_data['general']['stream_ids'] or phase_data['vapour']['stream_ids'] or phase_data['light_liquid']['stream_ids']
         if not source_stream_ids:
             adaptive_sheet = _pick_case_sheet(wb, HMB_CASE_PARSER_CONFIG['preferred_sheet_names'])
@@ -1238,6 +1348,13 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
     elif 'Composition (Overall)' in wb.sheetnames:
         comp_all = _parse_composition_overall(
             wb['Composition (Overall)'],
+            source_refs=composition_sources,
+            allowed_streams=source_stream_ids,
+            allowed_components=allowed_components,
+        )
+    elif 'Compositions' in wb.sheetnames:
+        comp_all = _parse_composition_all(
+            wb['Compositions'],
             source_refs=composition_sources,
             allowed_streams=source_stream_ids,
             allowed_components=allowed_components,
@@ -1361,7 +1478,9 @@ def parse_hmb_case_workbook(workbook_path: str, source_filename: str = '', templ
                 source_metadata = {}
 
                 if section_key == 'composition':
-                    source_sheet = 'Mole Fraction' if normalized_summary else 'Composition (All)'
+                    source_sheet = 'Mole Fraction' if normalized_summary else (
+                        'Compositions' if 'Compositions' in wb.sheetnames else 'Composition (All)'
+                    )
                     comp_key = _normalise_component(prop_name)
                     comp_val = comp_all.get((source_stream_id, comp_key))
                     if comp_val is None:

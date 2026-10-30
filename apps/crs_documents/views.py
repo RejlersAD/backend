@@ -14,6 +14,8 @@ import os
 
 from .models import CRSDocument, CRSDocumentVersion
 from .serializers import CRSDocumentSerializer, CRSDocumentVersionSerializer
+import logging
+logger = logging.getLogger(__name__)
 
 # NEW: Import helper modules for PDF extraction and CRS population
 try:
@@ -395,7 +397,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             
             # Extract comments from PDF with intelligent limits
             import time
-            import fitz  # PyMuPDF for page count check
+            import pymupdf  # PyMuPDF for page count check
             start_time = time.time()
             logger.info(f"[PERF] Starting PDF processing for file: {uploaded_file.name}")
             
@@ -408,7 +410,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             pdf_buffer.seek(0)
             
             try:
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
                 page_count = len(doc)
                 doc.close()
                 logger.info(f"[PDF INFO] Pages: {page_count}")

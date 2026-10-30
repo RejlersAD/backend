@@ -21,7 +21,10 @@ environment migrating up from the old copy-based 0006/0008 pair.
 
 Irreversible on purpose, same reasoning as 0006: nothing safe to revert.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # name -> correct section, taken directly from the source
 # PidCheckerV2LegendSheet rows at the time this was originally written.
@@ -67,7 +70,7 @@ def fix_sections_forward(apps, schema_editor):
         fixed += 1
 
     if fixed:
-        print(f'[instrument_io_workflow] Corrected {fixed} legend(s).')
+        logger.debug(f'[instrument_io_workflow] Corrected {fixed} legend(s).')
 
 
 class Migration(migrations.Migration):

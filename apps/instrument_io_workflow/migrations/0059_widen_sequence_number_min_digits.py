@@ -19,7 +19,10 @@ already customized to something else is left untouched. Only
 instrument_io_workflow; apps.pid_checker_v2 is not touched by, and does
 not read, this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 FIELDS_TO_WIDEN = [
     ('instrument_index', 'sequence_number', r'\d{3,5}[A-Z]?', r'\d{2,5}[A-Z]?'),
@@ -44,7 +47,7 @@ def _apply(apps, old_to_new: bool):
                 row.save(update_fields=['definition'])
                 updated += 1
         direction = 'widened' if old_to_new else 'reverted'
-        print(f'[instrument_io_workflow] {direction} {field_key!r} regex on {updated} '
+        logger.debug(f'[instrument_io_workflow] {direction} {field_key!r} regex on {updated} '
               f'{section!r} legend row(s).')
 
 

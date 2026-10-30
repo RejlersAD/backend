@@ -90,8 +90,8 @@ class ExtractionCompletenessTests(SimpleTestCase):
         ]))
 
     def test_appendix_summary_finds_multiline_header_near_page_29(self):
-        import fitz
-        doc = fitz.open()
+        import pymupdf
+        doc = pymupdf.open()
         for index in range(33):
             page = doc.new_page()
             if index == 28:
@@ -114,8 +114,8 @@ class ExtractionCompletenessTests(SimpleTestCase):
         self.assertEqual(result["piping_classes"][-1]["_source_pages"], [30, 30])
 
     def test_appendix_code_fallback_when_table_header_is_missing(self):
-        import fitz
-        doc = fitz.open()
+        import pymupdf
+        doc = pymupdf.open()
         page = doc.new_page()
         page.insert_text((50, 60), "APPENDIX-A: PIPE CLASS SUMMARY\nCodes: 011440-X, 011412-Z")
         with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
@@ -152,8 +152,8 @@ class ExtractionCompletenessTests(SimpleTestCase):
         self.assertTrue(merged[0]["_appendix_summary"])
 
     def test_zero_class_diagnostics_log_page_numbers_and_debug_raw_excerpts(self):
-        import fitz
-        doc = fitz.open()
+        import pymupdf
+        doc = pymupdf.open()
         doc.new_page().insert_text((50, 60), "NO CLASSES HERE")
         with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
             doc.save(pdf.name)

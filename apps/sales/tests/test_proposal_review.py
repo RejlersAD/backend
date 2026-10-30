@@ -10,7 +10,7 @@ from unittest import skipUnless
 from unittest.mock import patch
 from uuid import uuid4
 
-import fitz
+import pymupdf
 from django.db import close_old_connections, connection
 from django.db.models import Q
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
@@ -30,14 +30,14 @@ from apps.sales.views import QuoteViewSet
 
 
 def pdf_bytes(pages=2):
-    with fitz.open() as pdf:
+    with pymupdf.open() as pdf:
         for index in range(pages):
             pdf.new_page().insert_text((72, 72), f'Synthetic proposal page {index + 1}')
         return pdf.tobytes()
 
 
 def large_pdf_bytes():
-    with fitz.open(stream=pdf_bytes(), filetype='pdf') as pdf:
+    with pymupdf.open(stream=pdf_bytes(), filetype='pdf') as pdf:
         content = pdf[0].get_contents()[0]
         # Valid PDF comments retain original document bytes while making the
         # fixture larger than the previous independent review/upload ceiling.
@@ -69,7 +69,7 @@ class ProposalPdfDiskValidationTests(SimpleTestCase):
     def test_invalid_and_repaired_pdf_restore_position_and_remove_temporary_files(self):
         valid = pdf_bytes()
         repaired = valid[:valid.index(b'xref\n')]
-        with fitz.open(stream=repaired, filetype='pdf') as pdf:
+        with pymupdf.open(stream=repaired, filetype='pdf') as pdf:
             self.assertTrue(pdf.is_repaired)
         with TemporaryDirectory(prefix='radai-pdf-validation-test-') as scratch:
             for data in (b'not a PDF', b'%PDF-1.7\ninvalid', repaired):
@@ -190,8 +190,8 @@ class ProposalReviewTests(ReviewFixtures, TestCase):
         for index, content in enumerate((b'not a PDF', pdf_bytes(501))):
             result = self.bind(name=f'Invalid-{index}.pdf', content=content)
             self.assertEqual(result.status_code, 400, result.data)
-        with fitz.open(stream=self.pdf, filetype='pdf') as pdf:
-            encrypted = pdf.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw='synthetic', user_pw='synthetic')
+        with pymupdf.open(stream=self.pdf, filetype='pdf') as pdf:
+            encrypted = pdf.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw='synthetic', user_pw='synthetic')
         self.assertEqual(self.bind(name='Encrypted.pdf', content=encrypted).status_code, 400)
         self.assertFalse(ProposalReviewDocument.objects.exists())
 

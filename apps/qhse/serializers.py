@@ -2,8 +2,11 @@
 QHSE Serializers - Soft-coded serialization for API responses
 Maintains compatibility with existing frontend structure
 """
+
+import logging
 from rest_framework import serializers
 from .models import QHSERunningProject, QHSEAudit  # QHSESpotCheckRegister - Disabled
+logger = logging.getLogger(__name__)
 
 
 class QHSERunningProjectSerializer(serializers.ModelSerializer):
@@ -102,12 +105,12 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
                     .aggregate(Max('sr_no'))['sr_no__max']
                 )
                 validated_data['sr_no'] = (max_sr_no or 0) + 1
-                print(f"[QHSE Serializer] Auto-generated sr_no: {validated_data['sr_no']}")
+                logger.debug(f"[QHSE Serializer] Auto-generated sr_no: {validated_data['sr_no']}")
 
-            print(f"[QHSE Serializer] Creating project with data: {list(validated_data.keys())}")
-            print(f"[QHSE Serializer] sr_no={validated_data.get('sr_no')}, project_no={validated_data.get('project_no')}")
+            logger.debug(f"[QHSE Serializer] Creating project with data: {list(validated_data.keys())}")
+            logger.debug(f"[QHSE Serializer] sr_no={validated_data.get('sr_no')}, project_no={validated_data.get('project_no')}")
             instance = super().create(validated_data)
-            print(f"[QHSE Serializer] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
+            logger.debug(f"[QHSE Serializer] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
             return instance
     
     def update(self, instance, validated_data):
@@ -120,17 +123,17 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
         # Convert None to empty string for CharField fields that don't allow null in DB
         if 'project_quality_eng' in validated_data and validated_data['project_quality_eng'] is None:
             validated_data['project_quality_eng'] = ''
-            print(f"[QHSE Serializer] Converted project_quality_eng from None to empty string")
+            logger.debug(f"[QHSE Serializer] Converted project_quality_eng from None to empty string")
         
-        print(f"[QHSE Serializer] Updating project ID: {instance.id}")
-        print(f"[QHSE Serializer] Fields to update: {list(validated_data.keys())}")
-        print(f"[QHSE Serializer] Before update - sr_no: {instance.sr_no}, project_no: {instance.project_no}")
+        logger.debug(f"[QHSE Serializer] Updating project ID: {instance.id}")
+        logger.debug(f"[QHSE Serializer] Fields to update: {list(validated_data.keys())}")
+        logger.debug(f"[QHSE Serializer] Before update - sr_no: {instance.sr_no}, project_no: {instance.project_no}")
         
         # Perform the update
         instance = super().update(instance, validated_data)
         
-        print(f"[QHSE Serializer] After update - sr_no: {instance.sr_no}, project_no: {instance.project_no}")
-        print(f"[QHSE Serializer] Successfully updated project ID: {instance.id}")
+        logger.debug(f"[QHSE Serializer] After update - sr_no: {instance.sr_no}, project_no: {instance.project_no}")
+        logger.debug(f"[QHSE Serializer] Successfully updated project ID: {instance.id}")
         
         return instance
 

@@ -3,6 +3,8 @@ PFD Analysis Service — Advanced 4-Pass AI Engine
 Multi-stage GPT-4o Vision analysis with reference document text extraction,
 visual inventory scan, deep systematic checks, and gap analysis.
 """
+
+import logging
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import re
@@ -14,8 +16,9 @@ from typing import Dict, List, Any, Optional, Set
 from django.conf import settings
 from django.core.files.storage import default_storage
 from openai import OpenAI
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +109,7 @@ class PFDAnalysisService:
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
         self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key))
-        print(f"[PFD_ANALYSIS] Initialized — model: {self.MODEL}, passes: 4")
+        logger.debug(f"[PFD_ANALYSIS] Initialized — model: {self.MODEL}, passes: 4")
 
     # -----------------------------------------------------------------------
     # Public API (unchanged contract)
@@ -131,38 +134,38 @@ class PFDAnalysisService:
         """
         try:
             fname = getattr(pfd_file, "name", "Unknown")
-            print(f"[PFD_ANALYSIS] ▶ Starting 4-pass analysis — file: {fname}")
+            logger.debug(f"[PFD_ANALYSIS] ▶ Starting 4-pass analysis — file: {fname}")
 
             # ── Render PFD pages ────────────────────────────────────────────
             pfd_images = self._render_pdf_pages(pfd_file)
-            print(f"[PFD_ANALYSIS] Rendered {len(pfd_images)} page(s) at {self.PDF_ZOOM}× zoom")
+            logger.debug(f"[PFD_ANALYSIS] Rendered {len(pfd_images)} page(s) at {self.PDF_ZOOM}× zoom")
 
             # ── Pass 1: Visual inventory ────────────────────────────────────
             inventory = self._pass1_visual_inventory(pfd_images)
-            print(f"[PFD_ANALYSIS] Pass 1 complete — inventory extracted")
+            logger.debug(f"[PFD_ANALYSIS] Pass 1 complete — inventory extracted")
 
             # ── Pass 2: Reference document text extraction ──────────────────
             ref_context = self._pass2_extract_reference_content(reference_documents or {})
-            print(f"[PFD_ANALYSIS] Pass 2 complete — ref context: {len(ref_context)} chars")
+            logger.debug(f"[PFD_ANALYSIS] Pass 2 complete — ref context: {len(ref_context)} chars")
 
             # ── Pass 3: Deep systematic analysis ───────────────────────────
             issues_p3 = self._pass3_deep_systematic_check(
                 pfd_images, inventory, ref_context, drawing_metadata or {}
             )
-            print(f"[PFD_ANALYSIS] Pass 3 complete — {len(issues_p3)} raw issues")
+            logger.debug(f"[PFD_ANALYSIS] Pass 3 complete — {len(issues_p3)} raw issues")
 
             # ── Pass 4: Gap & missing element review ────────────────────────
             issues_p4 = self._pass4_gap_analysis(
                 pfd_images, inventory, ref_context, drawing_metadata or {}
             )
-            print(f"[PFD_ANALYSIS] Pass 4 complete — {len(issues_p4)} gap issues")
+            logger.debug(f"[PFD_ANALYSIS] Pass 4 complete — {len(issues_p4)} gap issues")
 
             # ── Merge, deduplicate, renumber ────────────────────────────────
             all_issues = self._merge_and_deduplicate(issues_p3, issues_p4)
-            print(f"[PFD_ANALYSIS] Final merged issues: {len(all_issues)}")
+            logger.debug(f"[PFD_ANALYSIS] Final merged issues: {len(all_issues)}")
             # ── CAG post-filter: remove hallucinated findings ─────────────────
             all_issues = self._cag_post_filter(all_issues, inventory)
-            print(f"[PFD_ANALYSIS] After CAG post-filter: {len(all_issues)} issues")
+            logger.debug(f"[PFD_ANALYSIS] After CAG post-filter: {len(all_issues)} issues")
             # ── Build drawing_info from inventory ───────────────────────────
             drawing_info = self._extract_drawing_info(inventory, drawing_metadata or {})
 
@@ -193,7 +196,7 @@ class PFDAnalysisService:
             }
 
         except Exception as e:
-            print(f"[PFD_ANALYSIS ERROR] {type(e).__name__}: {e}")
+            logger.debug(f"[PFD_ANALYSIS ERROR] {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
             raise
@@ -243,7 +246,7 @@ Return a JSON object with EXACTLY these keys:
             if isinstance(result, dict):
                 return result
         except Exception as e:
-            print(f"[PFD_ANALYSIS] Pass 1 error: {e}")
+            logger.debug(f"[PFD_ANALYSIS] Pass 1 error: {e}")
         return {}
 
     # -----------------------------------------------------------------------
@@ -289,7 +292,7 @@ Return a JSON object with EXACTLY these keys:
                 raw = f.read()
 
             # Try PyMuPDF text extraction
-            doc = fitz.open(stream=raw, filetype="pdf")
+            doc = pymupdf.open(stream=raw, filetype="pdf")
             pages_text = []
             for page in doc:
                 pages_text.append(page.get_text("text"))
@@ -298,7 +301,7 @@ Return a JSON object with EXACTLY these keys:
             if text:
                 return text
         except Exception as e:
-            print(f"[PFD_ANALYSIS] ref doc read error ({storage_path}): {e}")
+            logger.debug(f"[PFD_ANALYSIS] ref doc read error ({storage_path}): {e}")
         return ""
 
     # -----------------------------------------------------------------------
@@ -478,7 +481,7 @@ Return ONLY a valid JSON object:
             result = self._vision_call(prompt, pfd_images, max_tokens=self.MAX_TOKENS)
             return result.get("issues", [])
         except Exception as e:
-            print(f"[PFD_ANALYSIS] Pass 3 error: {e}")
+            logger.debug(f"[PFD_ANALYSIS] Pass 3 error: {e}")
             return []
 
     # -----------------------------------------------------------------------
@@ -581,7 +584,7 @@ Return ONLY a valid JSON object:
             result = self._vision_call(prompt, pfd_images, max_tokens=8000)
             return result.get("issues", [])
         except Exception as e:
-            print(f"[PFD_ANALYSIS] Pass 4 error: {e}")
+            logger.debug(f"[PFD_ANALYSIS] Pass 4 error: {e}")
             return []
 
     # -----------------------------------------------------------------------
@@ -802,7 +805,7 @@ Return ONLY a valid JSON object:
             kept.append(issue)
 
         if removed_count:
-            print(f'[CAG-PFD] Post-filter removed {removed_count} hallucinated note findings')
+            logger.debug(f'[CAG-PFD] Post-filter removed {removed_count} hallucinated note findings')
         return kept
 
     # -----------------------------------------------------------------------
@@ -937,9 +940,9 @@ Return ONLY a valid JSON object:
             with open(pdf_file, "rb") as f:
                 pdf_bytes = f.read()
 
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         images = []
-        mat = fitz.Matrix(self.PDF_ZOOM, self.PDF_ZOOM)
+        mat = pymupdf.Matrix(self.PDF_ZOOM, self.PDF_ZOOM)
 
         for page in doc:
             pix = page.get_pixmap(matrix=mat)

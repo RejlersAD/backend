@@ -5,8 +5,8 @@ Bundled templates stored with the application code
 import os
 import logging
 from pathlib import Path
-
 logger = logging.getLogger(__name__)
+
 
 
 class SDVTemplateManager:
@@ -246,13 +246,13 @@ class SDVTemplateManager:
 # Example usage
 if __name__ == "__main__":
     # Check template availability
-    print(f"Default template exists: {SDVTemplateManager.template_exists()}")
-    print(f"Available templates: {SDVTemplateManager.list_templates()}")
+    logger.debug(f"Default template exists: {SDVTemplateManager.template_exists()}")
+    logger.debug(f"Available templates: {SDVTemplateManager.list_templates()}")
     
     # Get template info
     info = SDVTemplateManager.get_template_info()
-    print(f"Template info: {info}")
+    logger.debug(f"Template info: {info}")
     
     # Get template path for processing
     path = SDVTemplateManager.get_template_path()
-    print(f"Template path: {path}")
+    logger.debug(f"Template path: {path}")

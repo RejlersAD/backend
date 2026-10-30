@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
-import fitz
+import pymupdf
 from docx import Document
 from docx.oxml.ns import qn
 from PIL import Image as PILImage
@@ -40,7 +40,7 @@ class PurchaseOrderExportTests(TestCase):
                                              'show_scope_heading': show_heading}
                     content, warnings = build_purchase_order_pdf(order)
                     self.assertEqual(warnings, [])
-                    with fitz.open(stream=content, filetype='pdf') as pdf:
+                    with pymupdf.open(stream=content, filetype='pdf') as pdf:
                         self.assertEqual(len(pdf), 2)
                         self.assertIn('SUMMARY OF PRICES', pdf[1].get_text())
                         text = '\n'.join(page.get_text() for page in pdf)
@@ -69,7 +69,7 @@ class PurchaseOrderExportTests(TestCase):
                 order.contact_persons = {**contacts, 'show_scope_heading': False}
                 content, warnings = build_purchase_order_pdf(order)
                 self.assertEqual(warnings, [])
-                with fitz.open(stream=content, filetype='pdf') as pdf:
+                with pymupdf.open(stream=content, filetype='pdf') as pdf:
                     self.assertEqual(len(pdf), 3)
                     scope = pdf[1].get_text()
                     self.assertIn('PURCHASE ORDER:', scope)
@@ -93,7 +93,7 @@ class PurchaseOrderExportTests(TestCase):
         order.description = f'<p><br></p><img src="data:image/png;base64,{encoded}" width="100"><p>&nbsp;</p>'
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertEqual(len(pdf), 3)
             self.assertTrue(any(image[2:4] == (19, 11) for image in pdf[1].get_images()))
             self.assertEqual(pdf[1].get_text().count(order.title), 1)
@@ -109,7 +109,7 @@ class PurchaseOrderExportTests(TestCase):
                 order.description = f'<table><tr><td>{first_cell}</td><td><br></td></tr></table>'
                 content, warnings = build_purchase_order_pdf(order)
                 self.assertEqual(warnings, [])
-                with fitz.open(stream=content, filetype='pdf') as pdf:
+                with pymupdf.open(stream=content, filetype='pdf') as pdf:
                     self.assertEqual(len(pdf), 3)
                     self.assertTrue(pdf[1].get_drawings())
                     if first_cell != '&nbsp;':
@@ -126,7 +126,7 @@ class PurchaseOrderExportTests(TestCase):
         order.approved_by_name = 'Preselected Approver'
         order.approval_log = [{'user_id': 'po-reviewer', 'stage': 'Final Management Sign-off', 'status': 'Pending'}]
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             text = '\n'.join(page.get_text() for page in pdf)
         self.assertIn('PO status: Draft', text)
         self.assertIn('Approval pending:', text)
@@ -149,7 +149,7 @@ class PurchaseOrderExportTests(TestCase):
         order.approval_log = []
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertEqual(len(pdf), 3)
             text = '\n'.join(page.get_text() for page in pdf)
             self.assertTrue(pdf[0].search_for('Order Confirmation:'))
@@ -180,7 +180,7 @@ class PurchaseOrderExportTests(TestCase):
             'evidence_document_id': 'retained-pr-source',
         }]
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             text = '\n'.join(page.get_text() for page in pdf)
         document = Document(BytesIO(build_purchase_order_docx(order)))
         word_text = '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
@@ -234,7 +234,7 @@ class PurchaseOrderExportTests(TestCase):
         }]
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertIn('Approval review is required', ' '.join(page.get_text() for page in pdf))
             self.assertFalse(any(image[2:4] == (181, 51) for page in pdf for image in page.get_images()))
         document = Document(BytesIO(build_purchase_order_docx(order)))
@@ -250,7 +250,7 @@ class PurchaseOrderExportTests(TestCase):
                 order = self._order()
                 order.status, order.approved_at, order.approved_by_name = status, None, ''
                 content, _ = build_purchase_order_pdf(order)
-                with fitz.open(stream=content, filetype='pdf') as pdf:
+                with pymupdf.open(stream=content, filetype='pdf') as pdf:
                     text = '\n'.join(page.get_text() for page in pdf)
                 self.assertIn('Approval record:', text)
                 self.assertIn('Not recorded', text)
@@ -265,7 +265,7 @@ class PurchaseOrderExportTests(TestCase):
         order = self._order()
         self.assertIsNone(order.approved_date)
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             text = pdf[0].get_text()
         self.assertIn('Approved by:', text)
         self.assertIn('2026-09-03', text)
@@ -509,7 +509,7 @@ class PurchaseOrderExportTests(TestCase):
         word = Document(BytesIO(build_purchase_order_docx(order)))
         self.assertTrue(any(paragraph.text == custom for paragraph in word.paragraphs))
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             text = pdf[1].get_text()
             for line in custom.splitlines():
                 self.assertIn(line, text)
@@ -518,7 +518,7 @@ class PurchaseOrderExportTests(TestCase):
         word = Document(BytesIO(build_purchase_order_docx(order)))
         self.assertFalse(any('We, Rejlers' in p.text for p in word.paragraphs))
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertNotIn('We, Rejlers', pdf[1].get_text())
         del order.contact_persons['order_introduction']
         word = Document(BytesIO(build_purchase_order_docx(order)))
@@ -604,7 +604,7 @@ class PurchaseOrderExportTests(TestCase):
         order = self._realistic_long_contact_order()
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertEqual(len(pdf), 3)
             self._assert_body_clear_of_footer(pdf)
             page = pdf[0]
@@ -662,7 +662,7 @@ class PurchaseOrderExportTests(TestCase):
         order = self._long_order()
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self._assert_body_clear_of_footer(pdf)
             text = pdf[0].get_text()
             compact_text = ''.join(text.split())
@@ -692,7 +692,7 @@ class PurchaseOrderExportTests(TestCase):
         order.seller_address = '\n'.join(address_lines)
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self._assert_body_clear_of_footer(pdf)
             text = pdf[0].get_text()
             for index in range(125):
@@ -713,7 +713,7 @@ class PurchaseOrderExportTests(TestCase):
         order.approval_signature = 'data:image/png;base64,' + base64.b64encode(signature.getvalue()).decode()
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self._assert_body_clear_of_footer(pdf)
             approval_pages = [page for page in pdf if page.search_for('Approved by:')]
             self.assertEqual(len(approval_pages), 1)
@@ -747,7 +747,7 @@ class PurchaseOrderExportTests(TestCase):
         order.approval_log = [{'user_id': 'po-reviewer', 'stage': 'Final Management Sign-off', 'status': 'Pending'}]
         content, warnings = build_purchase_order_pdf(order)
         self.assertFalse(warnings)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertEqual(len(pdf), 3)
             self._assert_body_clear_of_footer(pdf)
             page = pdf[0]
@@ -781,7 +781,7 @@ class PurchaseOrderExportTests(TestCase):
             word_content = build_purchase_order_docx(order)
         artwork.assert_not_called()
         self.assertFalse(warnings)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             cover = pdf[0].get_text()
             self.assertIn('590001, 590002, 590003', cover)
             self.assertIn('Jarmo Suominen', cover)
@@ -822,7 +822,7 @@ class PurchaseOrderExportTests(TestCase):
         order.approval_log = [{'status': 'Approved'}]
         self.assertEqual(purchase_order_project_reference(order), '590001')
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertNotIn('590002', pdf[0].get_text())
         self.assertEqual(order.project_number, '590001')
 
@@ -836,7 +836,7 @@ class PurchaseOrderExportTests(TestCase):
             {'source': 'historical', 'value': 'Detailed Engineering for (NEB) (10522 & 10523), 5901056'},
         ])
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertIn('5901142, 5901086, 5901056', pdf[0].get_text())
         word = Document(BytesIO(build_purchase_order_docx(order)))
         text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)
@@ -864,7 +864,7 @@ class PurchaseOrderExportTests(TestCase):
                 self.assertEqual(purchase_order_project_reference(order), number)
                 self.assertEqual(PurchaseOrderSerializer().get_project_display(order), number or None)
                 content, _ = build_purchase_order_pdf(order)
-                with fitz.open(stream=content, filetype='pdf') as pdf:
+                with pymupdf.open(stream=content, filetype='pdf') as pdf:
                     cover = pdf[0].get_text()
                 word = Document(BytesIO(build_purchase_order_docx(order)))
                 word_text = '\n'.join(cell.text for table in word.tables for row in table.rows for cell in row.cells)

@@ -3,14 +3,17 @@ Reference Document Intelligence Processor
 Extracts and structures data from reference documents for P&ID cross-verification
 SOFT-CODED: AI-powered extraction from equipment datasheets, legends, standards
 """
+
+import logging
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import base64
 import io
 from typing import Dict, List, Any
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
 import os
+logger = logging.getLogger(__name__)
 
 
 class ReferenceDocumentProcessor:
@@ -23,7 +26,7 @@ class ReferenceDocumentProcessor:
             self.client = lazy_provider_client('openai', OpenAI, api_key=lambda: (api_key), timeout=120.0)
         else:
             self.client = None
-            print("[WARNING] OpenAI API key not found - reference processing will be limited")
+            logger.debug("[WARNING] OpenAI API key not found - reference processing will be limited")
     
     def process_reference_documents(self, documents: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -39,7 +42,7 @@ class ReferenceDocumentProcessor:
         
         for doc_type, doc_file in documents.items():
             try:
-                print(f"[INFO] Processing reference document: {doc_type}")
+                logger.debug(f"[INFO] Processing reference document: {doc_type}")
                 
                 # NEW: Equipment List - Structured equipment data
                 if doc_type in ['equipment_list']:
@@ -62,7 +65,7 @@ class ReferenceDocumentProcessor:
                     extracted_data['legend_symbols'] = self._extract_legend_symbols(doc_file)
                 
             except Exception as e:
-                print(f"[ERROR] Failed to process {doc_type}: {e}")
+                logger.debug(f"[ERROR] Failed to process {doc_type}: {e}")
                 continue
         
         return extracted_data
@@ -140,7 +143,7 @@ class ReferenceDocumentProcessor:
             return result
         
         except Exception as e:
-            print(f"[ERROR] Equipment spec extraction failed: {e}")
+            logger.debug(f"[ERROR] Equipment spec extraction failed: {e}")
             return {}
     
     def _extract_instrument_specs(self, doc_file) -> Dict[str, Any]:
@@ -205,7 +208,7 @@ OUTPUT JSON:
             return json.loads(response.choices[0].message.content)
         
         except Exception as e:
-            print(f"[ERROR] Instrument spec extraction failed: {e}")
+            logger.debug(f"[ERROR] Instrument spec extraction failed: {e}")
             return {}
     
     def _extract_legends(self, doc_file) -> Dict[str, Any]:
@@ -218,7 +221,7 @@ OUTPUT JSON:
         try:
             # Handle both Django FieldFile and string paths
             pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -229,7 +232,7 @@ OUTPUT JSON:
                 "abbreviations": self._parse_abbreviations(text)
             }
         except Exception as e:
-            print(f"[ERROR] Legend extraction failed: {e}")
+            logger.debug(f"[ERROR] Legend extraction failed: {e}")
             return {}
     
     def _extract_standards(self, doc_file) -> Dict[str, Any]:
@@ -240,7 +243,7 @@ OUTPUT JSON:
         """
         try:
             pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -251,7 +254,7 @@ OUTPUT JSON:
                 "key_requirements": self._parse_standards(text)
             }
         except Exception as e:
-            print(f"[ERROR] Standards extraction failed: {e}")
+            logger.debug(f"[ERROR] Standards extraction failed: {e}")
             return {}
     
     def _extract_safety_requirements(self, doc_file) -> Dict[str, Any]:
@@ -262,7 +265,7 @@ OUTPUT JSON:
         """
         try:
             pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -274,7 +277,7 @@ OUTPUT JSON:
                 "hazop_actions": self._parse_hazop_actions(text)
             }
         except Exception as e:
-            print(f"[ERROR] Safety requirements extraction failed: {e}")
+            logger.debug(f"[ERROR] Safety requirements extraction failed: {e}")
             return {}
     
     def _extract_process_conditions(self, doc_file) -> Dict[str, Any]:
@@ -285,7 +288,7 @@ OUTPUT JSON:
         """
         try:
             pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -296,7 +299,7 @@ OUTPUT JSON:
                 "operating_conditions": self._parse_operating_conditions(text)
             }
         except Exception as e:
-            print(f"[ERROR] Process description extraction failed: {e}")
+            logger.debug(f"[ERROR] Process description extraction failed: {e}")
             return {}
     
     def _extract_iso_standards(self, doc_file) -> Dict[str, Any]:
@@ -307,7 +310,7 @@ OUTPUT JSON:
         """
         try:
             pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -318,7 +321,7 @@ OUTPUT JSON:
                 "compliance_requirements": text[:1500]
             }
         except Exception as e:
-            print(f"[ERROR] ISO standards extraction failed: {e}")
+            logger.debug(f"[ERROR] ISO standards extraction failed: {e}")
             return {}
     
     def _pdf_to_images(self, pdf_file) -> List[str]:
@@ -338,15 +341,15 @@ OUTPUT JSON:
                 # Try to get path attribute
                 pdf_path = str(pdf_file)
             
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             page = doc[0]  # First page only
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))  # 2x zoom
             img_data = pix.tobytes("png")
             base64_img = base64.b64encode(img_data).decode('utf-8')
             doc.close()
             return [base64_img]
         except Exception as e:
-            print(f"[ERROR] PDF to image conversion failed: {e}")
+            logger.debug(f"[ERROR] PDF to image conversion failed: {e}")
             return []
     
     def _parse_abbreviations(self, text: str) -> Dict[str, str]:
@@ -481,7 +484,7 @@ Extract ALL equipment accurately."""
             return json.loads(result)
         
         except Exception as e:
-            print(f"[ERROR] Equipment List extraction failed: {e}")
+            logger.debug(f"[ERROR] Equipment List extraction failed: {e}")
             return {}
     
     def _extract_line_list(self, doc_file) -> Dict[str, Any]:
@@ -556,7 +559,7 @@ Extract ALL line numbers accurately. Line numbers are CRITICAL for verification.
             return json.loads(result)
         
         except Exception as e:
-            print(f"[ERROR] Line List extraction failed: {e}")
+            logger.debug(f"[ERROR] Line List extraction failed: {e}")
             return {}
 
     def _extract_critical_stress_list(self, doc_file) -> Dict[str, Any]:
@@ -626,7 +629,7 @@ Extract ALL stress-critical line numbers carefully. These are safety-critical fo
             return json.loads(result)
 
         except Exception as e:
-            print(f"[ERROR] Critical Stress List extraction failed: {e}")
+            logger.debug(f"[ERROR] Critical Stress List extraction failed: {e}")
             return {}
 
     def _extract_alarm_trip_schedule(self, doc_file) -> Dict[str, Any]:
@@ -709,7 +712,7 @@ Extract ALL setpoints accurately. These will be verified against P&ID."""
             return json.loads(result)
         
         except Exception as e:
-            print(f"[ERROR] Alarm/Trip Schedule extraction failed: {e}")
+            logger.debug(f"[ERROR] Alarm/Trip Schedule extraction failed: {e}")
             return {}
     
     def _extract_legend_symbols(self, doc_file) -> Dict[str, Any]:
@@ -814,7 +817,7 @@ Extract ALL information. This is the key reference for P&ID interpretation."""
             return json.loads(result)
         
         except Exception as e:
-            print(f"[ERROR] Legend/Symbol Sheet extraction failed: {e}")
+            logger.debug(f"[ERROR] Legend/Symbol Sheet extraction failed: {e}")
             return {}
     
     def _extract_pfd_data(self, doc_file) -> Dict[str, Any]:
@@ -989,13 +992,13 @@ Extract ALL visible information accurately. This will be used for P&ID quality v
             
             try:
                 pfd_data = json.loads(result)
-                print(f"[INFO] Extracted PFD data: {len(pfd_data.get('equipment', []))} equipment, "
+                logger.debug(f"[INFO] Extracted PFD data: {len(pfd_data.get('equipment', []))} equipment, "
                       f"{len(pfd_data.get('streams', []))} streams")
                 return pfd_data
             except json.JSONDecodeError:
-                print(f"[WARNING] Could not parse PFD JSON response, using text extraction")
+                logger.debug(f"[WARNING] Could not parse PFD JSON response, using text extraction")
                 return {"raw_text": result}
         
         except Exception as e:
-            print(f"[ERROR] PFD extraction failed: {e}")
+            logger.debug(f"[ERROR] PFD extraction failed: {e}")
             return {}

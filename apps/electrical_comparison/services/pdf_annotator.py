@@ -6,7 +6,7 @@ only in the results table.
 """
 import base64
 
-import fitz
+import pymupdf
 
 _STATUS_COLORS = {
     'matched': (0, 1, 0),   # green
@@ -37,7 +37,7 @@ def annotate_sld_pdf(pdf_bytes, results):
 
     Returns the annotated PDF as bytes.
     """
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         for result in results:
             tag_number = str(result.get('tag_number') or '').strip()
@@ -48,7 +48,7 @@ def annotate_sld_pdf(pdf_bytes, results):
             for page in doc:
                 for rect in page.search_for(tag_number):
                     page.draw_rect(rect, color=color, width=_BOX_WIDTH)
-                    label_point = fitz.Point(rect.x0, max(rect.y0 - 2, 0))
+                    label_point = pymupdf.Point(rect.x0, max(rect.y0 - 2, 0))
                     page.insert_text(label_point, label, fontsize=_LABEL_FONT_SIZE, color=color)
         return doc.tobytes()
     finally:
@@ -123,7 +123,7 @@ def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located
         if tag_number and color:
             wanted.append((tag_number, result['status'], color))
 
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         located = located or {}
         tag_statuses = tag_statuses or {}
@@ -131,7 +131,7 @@ def get_annotated_pages(pdf_bytes, results, max_pixels=_MAX_PAGE_PIXELS, located
         for page_index, page in enumerate(doc):
             zoom = min(max_pixels / page.rect.width, max_pixels / page.rect.height, 3.0)
             zoom = max(zoom, 0.5)
-            matrix = fitz.Matrix(zoom, zoom)
+            matrix = pymupdf.Matrix(zoom, zoom)
 
             boxes = []
             for tag_number, status_val, color in wanted:

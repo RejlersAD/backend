@@ -28,7 +28,10 @@ read, this migration.
    or silently make the other section's default legend inactive/
    inaccessible. This keeps both tabs' data intact under distinct ids.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 DELETE_SECTIONS = [
     'piping', 'pipe_connection', 'pipe_end', 'special_piping',
@@ -53,13 +56,13 @@ def restructure_forward(apps, schema_editor):
     IOListLegendSheet = apps.get_model('instrument_io_workflow', 'IOListLegendSheet')
 
     deleted, _ = IOListLegendSheet.objects.filter(section__in=DELETE_SECTIONS).delete()
-    print(f'[instrument_io_workflow] Deleted {deleted} legend row(s) across '
+    logger.debug(f'[instrument_io_workflow] Deleted {deleted} legend row(s) across '
           f'{len(DELETE_SECTIONS)} removed section(s).')
 
     for old, new in RENAMES:
         updated = IOListLegendSheet.objects.filter(section=old).update(section=new)
         if updated:
-            print(f'[instrument_io_workflow] Renamed section {old!r} -> {new!r} '
+            logger.debug(f'[instrument_io_workflow] Renamed section {old!r} -> {new!r} '
                   f'on {updated} row(s).')
 
 

@@ -19,7 +19,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 import pytesseract
 
@@ -34,8 +34,8 @@ from apps.process_datasheet.tag_validator import (
     VALID_TAG_PREFIXES,
     has_valid_engineering_prefix,
 )
-
 logger = logging.getLogger(__name__)
+
 
 # ─── Drawing number extraction — soft-coded patterns ─────────────────────────
 # Patterns are tried in order; first match wins.
@@ -249,11 +249,11 @@ def _extract_page_ocr_only(ocr_text: str, page_num: int) -> list:
 def _run_ocr(pdf_path: str) -> str:
     """Run EasyOCR + Tesseract on all pages and return combined text."""
     try:
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         texts = []
         for page_num in range(len(doc)):
             page = doc[page_num]
-            pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(3.0, 3.0))
             img_data = pix.tobytes("png")
 
             # EasyOCR
@@ -307,12 +307,12 @@ class GeminiPIDExtractor:
         logger.info(f"[GeminiPIDExtractor] OCR extracted {len(ocr_text)} chars")
 
         # Render all pages once
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         num_pages = len(doc)
         pages_data = []  # list of (img_bytes, img_b64)
         for page_num in range(num_pages):
             page = doc[page_num]
-            pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(3.0, 3.0))
             # Resize if too large (prevent token overload)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             max_dim = 3072

@@ -49,10 +49,10 @@ def main():
     parser.add_argument('--labels', type=Path)
     parser.add_argument('--engine', choices=['pymupdf_text', 'rapidocr', 'paddleocr', 'tesseract'], default='pymupdf_text')
     args = parser.parse_args()
-    import fitz
+    import pymupdf
     with args.source.open('rb') as source:
         source_hash = hashlib.file_digest(source, 'sha256').hexdigest()
-    with fitz.open(args.source) as doc:
+    with pymupdf.open(args.source) as doc:
         pages = len(doc)
     started = time.monotonic()
     rows, issues, page_counts = [], [], []

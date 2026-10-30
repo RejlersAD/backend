@@ -228,13 +228,13 @@ class LetterGenerationTests(TestCase):
     @skipUnless(_weasyprint_available(), 'weasyprint not installed')
     def test_pdf_generation_renders_pdf_document(self):
         from apps.sales.letter_pdf import generate_letter_pdf
-        import fitz
+        import pymupdf
         letter = self.prepare('eoi')
         letter.body = 'Dear Sir / Madam,\n\nProject details.\n\nSincerely yours,'
         pdf_bytes = generate_letter_pdf(letter)
         self.assertTrue(pdf_bytes.startswith(b'%PDF'))
         self.assertGreater(len(pdf_bytes), 1000)
-        document = fitz.open(stream=pdf_bytes, filetype='pdf')
+        document = pymupdf.open(stream=pdf_bytes, filetype='pdf')
         page = document[0]
         self.assertEqual(len(page.search_for('Dear Sir / Madam,')), 1)
         self.assertEqual(len(page.search_for('Sincerely yours,')), 1)
@@ -266,18 +266,18 @@ class LetterGenerationTests(TestCase):
 
     @skipUnless(_weasyprint_available(), 'weasyprint not installed')
     def test_draft_preview_uses_current_layout_without_changing_saved_file(self):
-        import fitz
+        import pymupdf
         from apps.sales.letter_pdf import get_letter_pdf_bytes
         letter = self.prepare('eoi')
         original_file = letter.pdf_file.name
         letter.body = 'Dear Sir / Madam,\n\nUpdated draft wording.'
         pdf_bytes = get_letter_pdf_bytes(letter)
-        document = fitz.open(stream=pdf_bytes, filetype='pdf')
+        document = pymupdf.open(stream=pdf_bytes, filetype='pdf')
         self.assertEqual(len(document[0].search_for('Updated draft wording.')), 1)
         self.assertEqual(len(document[0].search_for('Dear Sir / Madam,')), 1)
         self.assertEqual(letter.pdf_file.name, original_file)
         letter.status = 'sent'
-        issued = fitz.open(stream=get_letter_pdf_bytes(letter), filetype='pdf')
+        issued = pymupdf.open(stream=get_letter_pdf_bytes(letter), filetype='pdf')
         self.assertEqual(len(issued[0].search_for('Updated draft wording.')), 0)
 
 

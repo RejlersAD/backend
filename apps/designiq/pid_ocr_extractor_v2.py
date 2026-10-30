@@ -7,7 +7,7 @@ from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import re
 import os
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 import io
 import logging
@@ -613,7 +613,7 @@ class PIDLineExtractorV2:
             # ----------------------------------------------------------------
             span_texts = []
             try:
-                raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+                raw = page.get_text("rawdict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
                 # Bucket: direction_key -> list of (origin_y, origin_x, text)
                 dir_buckets: dict = {}
                 for block in raw.get("blocks", []):
@@ -2385,11 +2385,11 @@ Example 4: "10\"-PG-0003-033842-X-H"
         and sequential extraction are byte-identical per page (no compromise
         in extraction logic either way).
 
-        Opens its OWN PyMuPDF document handle because fitz documents are not
+        Opens its OWN PyMuPDF document handle because pymupdf documents are not
         thread-safe.  Returns only text + line items — never the (large) page
         render, which the main loop re-creates cheaply for FROM-TO phases.
         """
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         try:
             try:
                 ocgs = doc.get_ocgs()
@@ -2412,7 +2412,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # via _ocr_zoom_for_page (OCR_RENDER_MAX_PIXELS) to bound OCR
                 # time and peak memory on very large drawings.
                 _zoom = _ocr_zoom_for_page(page)
-                pix = page.get_pixmap(matrix=fitz.Matrix(_zoom, _zoom))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(_zoom, _zoom))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_results = self.extract_all_text_from_image(img)
                 combined_text = self.combine_and_deduplicate_text(ocr_results) if ocr_results else ''
@@ -2429,7 +2429,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             # content is image-based; run the full OCR pipeline once.
             if not line_items and not use_ocr:
                 _zoom = _ocr_zoom_for_page(page)
-                pix = page.get_pixmap(matrix=fitz.Matrix(_zoom, _zoom))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(_zoom, _zoom))
                 img_fb = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_results_fb = self.extract_all_text_from_image(img_fb)
                 if ocr_results_fb:
@@ -2489,7 +2489,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             except Exception as _cb_err:
                 logger.debug(f"progress_callback raised (ignored): {_cb_err}")
         try:
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             all_line_items = []
             # Per-page combined text snapshot (used by the coverage audit at
             # the end).  Populated each page AFTER we decide which text was
@@ -2626,7 +2626,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 if use_ocr:
                     try:
                         _zoom_ft = _ocr_zoom_for_page(page)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(_zoom_ft, _zoom_ft))
+                        pix = page.get_pixmap(matrix=pymupdf.Matrix(_zoom_ft, _zoom_ft))
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
                     except Exception as _img_err:
                         logger.warning(f"  ?? Could not render page for FROM-TO detection: {_img_err}")
@@ -2635,7 +2635,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 else:
                     # Fast path (embedded text): low resolution is fine here
                     try:
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                        pix = page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5))
                         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert('L')
                     except Exception as _img_err:
                         logger.warning("  Could not render page for FROM-TO detection")

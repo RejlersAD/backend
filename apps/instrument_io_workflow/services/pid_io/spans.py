@@ -209,8 +209,8 @@ def extract_cause_notes(page: PageData) -> list:
 
 
 def read_document(pdf_path: str) -> list:
-    import fitz
-    doc = fitz.open(pdf_path)
+    import pymupdf
+    doc = pymupdf.open(pdf_path)
     try:
         return [read_page(doc, i) for i in range(doc.page_count)]
     finally:

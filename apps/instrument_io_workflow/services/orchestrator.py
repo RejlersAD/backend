@@ -58,8 +58,8 @@ from .io_table_extractor import (
     extract_pid_drawing_row_for_page_via_local_ocr,
 )
 from .comment_row_linker import link_comments_to_rows
-
 logger = logging.getLogger(__name__)
+
 
 
 # No in-process/hash-based extraction cache — deliberately. Both
@@ -403,16 +403,16 @@ def extract_document(
                     '[IOWF] Vision extraction failed outright — falling back to local OCR',
                 )
                 io_rows = []
-                import fitz
-                doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+                import pymupdf
+                doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
                 page_count = doc.page_count
                 doc.close()
                 for idx in range(page_count):
                     io_rows.extend(extract_pid_drawing_row_for_page_via_local_ocr(pdf_bytes, idx))
                 warnings.append('Vision extraction failed — used local OCR instead')
         else:
-            import fitz
-            doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+            import pymupdf
+            doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
             page_count = doc.page_count
             doc.close()
             io_rows = []

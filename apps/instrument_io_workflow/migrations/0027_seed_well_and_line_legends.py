@@ -13,7 +13,10 @@ explicitly and is included as specified.
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 WELL_INSTRUMENT_TAGGING_DEFINITION = {
     'separator': '-',
@@ -98,7 +101,7 @@ def seed_forward(apps, schema_editor):
             definition=definition,
             is_active=True,
         )
-        print(f'[instrument_io_workflow] Seeded 1 legend for section={section!r}.')
+        logger.debug(f'[instrument_io_workflow] Seeded 1 legend for section={section!r}.')
 
 
 class Migration(migrations.Migration):

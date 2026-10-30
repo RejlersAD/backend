@@ -27,7 +27,10 @@ migrations 0054/0056. I/O List only — apps.pid_checker_v2 /
 apps.pid_verification are not touched by, and do not read, this
 migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'instrument_index'
 NAME = 'Instrument Tagging — [XX-[XX-]]AAAA-XXXXB[-X] (default)'
@@ -60,7 +63,7 @@ def apply_forward(apps, schema_editor):
             field['lookup'] = {**field.get('lookup', {}), **NEW_CODES}
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[instrument_io_workflow] Added {len(NEW_CODES)} instrument_classification '
+    logger.debug(f'[instrument_io_workflow] Added {len(NEW_CODES)} instrument_classification '
           f'codes to {SECTION!r}: {sorted(NEW_CODES)}')
 
 

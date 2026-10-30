@@ -15,7 +15,10 @@ exactly as they are. `equipment_symbols` and `instrument_typical_letter`
 are excluded — their ids/labels were never renamed, so their names already
 matched.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # section -> (old exact name, new name)
 RENAMES = {
@@ -63,7 +66,7 @@ def rename_forward(apps, schema_editor):
     for section, (old_name, new_name) in RENAMES.items():
         updated = IOListLegendSheet.objects.filter(section=section, name=old_name).update(name=new_name)
         if updated:
-            print(f'[instrument_io_workflow] Renamed {section!r} legend name '
+            logger.debug(f'[instrument_io_workflow] Renamed {section!r} legend name '
                   f'{old_name!r} -> {new_name!r} on {updated} row(s).')
 
 

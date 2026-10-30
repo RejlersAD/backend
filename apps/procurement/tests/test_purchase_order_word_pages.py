@@ -1,7 +1,7 @@
 from io import BytesIO
 from unittest import TestCase
 
-import fitz
+import pymupdf
 from docx import Document
 from docx.enum.section import WD_ORIENT, WD_SECTION_START
 from docx.oxml.ns import qn
@@ -16,7 +16,7 @@ from apps.procurement.services.purchase_order_word_pages import (
 
 def supporting_pdf():
     """Synthetic cover, portrait evidence, and a rotated landscape drawing."""
-    with fitz.open() as source:
+    with pymupdf.open() as source:
         for index, (width, height, color, rotation) in enumerate((
             (595, 842, (1, 0, 0), 0),
             (420, 595, (0, 1, 0), 0),
@@ -106,7 +106,7 @@ class PurchaseOrderWordPageTests(TestCase):
         self.assertEqual(len(list(image_parts(document))), 1)
 
     def test_oversize_drawing_is_bounded_without_changing_its_aspect_ratio(self):
-        with fitz.open() as source:
+        with pymupdf.open() as source:
             source.new_page(width=4000, height=2000)
             content = source.tobytes()
         document = Document()
@@ -131,9 +131,9 @@ class PurchaseOrderWordPageTests(TestCase):
         self.assertEqual(document._element.xml, original)
 
     def test_password_protected_pdf_is_not_silently_omitted(self):
-        with fitz.open() as source:
+        with pymupdf.open() as source:
             source.new_page()
-            content = source.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256,
+            content = source.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256,
                                     owner_pw='owner-test', user_pw='reader-test')
         document = Document()
         with self.assertRaisesRegex(ValueError, 'password'):

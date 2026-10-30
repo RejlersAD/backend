@@ -2,8 +2,11 @@
 Deterministic Validation Rules
 NO LLM - Pure logic-based validation
 """
+
+import logging
 from typing import Dict, List, Any, Set
 from abc import ABC, abstractmethod
+logger = logging.getLogger(__name__)
 
 
 class ValidationRule(ABC):
@@ -96,7 +99,7 @@ class NoteHandlingRule(ValidationRule):
                 })
         
         if deleted_notes:
-            print(f"[RULE] Ignoring {len(deleted_notes)} deleted note(s): {deleted_notes}")
+            logger.debug(f"[RULE] Ignoring {len(deleted_notes)} deleted note(s): {deleted_notes}")
         
         return issues
 
@@ -128,7 +131,7 @@ class SpecBreakRule(ValidationRule):
                 'rule_name': self.rule_name
             })
         
-        print(f"[RULE] Found {len(spec_breaks)} spec break(s) in drawing")
+        logger.debug(f"[RULE] Found {len(spec_breaks)} spec break(s) in drawing")
         return issues
 
 
@@ -162,7 +165,7 @@ class ReducerValidationRule(ValidationRule):
         # Group by line series to detect transitions
         # This is a simplified check - real implementation would be more sophisticated
         
-        print(f"[RULE] Detected {len(reducers)} reducer(s) in drawing")
+        logger.debug(f"[RULE] Detected {len(reducers)} reducer(s) in drawing")
         return issues
 
 
@@ -196,7 +199,7 @@ class ArrowHandlingRule(ValidationRule):
                     'rule_name': self.rule_name
                 })
         
-        print(f"[RULE] Found {len(arrows)} arrow(s) and {len(connectors)} connector(s)")
+        logger.debug(f"[RULE] Found {len(arrows)} arrow(s) and {len(connectors)} connector(s)")
         return issues
 
 
@@ -233,7 +236,7 @@ class DuplicateLineRule(ValidationRule):
             })
         
         if duplicates:
-            print(f"[RULE] Found {len(duplicates)} duplicate line number(s)")
+            logger.debug(f"[RULE] Found {len(duplicates)} duplicate line number(s)")
         
         return issues
 

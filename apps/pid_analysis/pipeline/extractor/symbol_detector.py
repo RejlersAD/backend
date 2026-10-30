@@ -2,8 +2,11 @@
 Symbol Detector - Computer Vision for P&ID Symbols
 NO LLM - Heuristic detection (can be upgraded to CV model later)
 """
+
+import logging
 from typing import List, Dict, Any
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
+logger = logging.getLogger(__name__)
 
 
 class SymbolDetector:
@@ -40,7 +43,7 @@ class SymbolDetector:
                 with open(pdf_file, 'rb') as f:
                     pdf_bytes = f.read()
             
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             for page_num in range(len(doc)):
                 page = doc[page_num]
@@ -65,7 +68,7 @@ class SymbolDetector:
             }
             
         except Exception as e:
-            print(f"[ERROR] Symbol detection failed: {e}")
+            logger.debug(f"[ERROR] Symbol detection failed: {e}")
             return {
                 'reducers': [],
                 'spec_breaks': [],

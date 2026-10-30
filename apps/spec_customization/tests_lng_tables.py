@@ -15,7 +15,7 @@ from .services.data_quality import process_extracted_classes
 
 def add_lng_page(document, code='A', logical=10, total=20, table=True,
                  invalid_size=False, blank_name=False, commodity=True, last_name='GATE VALVE', broken_header=False):
-    import fitz
+    import pymupdf
     page = document.new_page()
     page.insert_text((30, 40), 'ADNOC LNG PIPING SPECIFICATIONS', fontsize=9)
     page.insert_text((30, 60), 'A-100-A4Z-0-25020', fontsize=9)
@@ -29,7 +29,7 @@ def add_lng_page(document, code='A', logical=10, total=20, table=True,
     ys = [200, 220, 240, 270, 300, 330]
 
     def cell(r0, r1, c0, c1, text):
-        box = fitz.Rect(xs[c0], ys[r0], xs[c1], ys[r1])
+        box = pymupdf.Rect(xs[c0], ys[r0], xs[c1], ys[r1])
         page.draw_rect(box, width=.5)
         if text:
             result = page.insert_textbox(box + (2, 2, -2, -2), text, fontsize=7)
@@ -55,10 +55,10 @@ def add_lng_page(document, code='A', logical=10, total=20, table=True,
 
 
 def parse_pages(pages, start=0, end=None, config=None):
-    import fitz
+    import pymupdf
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / 'synthetic-lng.pdf'
-        with fitz.open() as document:
+        with pymupdf.open() as document:
             for options in pages:
                 add_lng_page(document, **options)
             document.save(path)

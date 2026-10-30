@@ -12,11 +12,11 @@ from __future__ import annotations
 import logging
 from typing import List, Dict
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 
 from .config import PAGE_TYPES, PAGE_TYPE_MIN_HITS
-
 logger = logging.getLogger(__name__)
+
 
 
 def classify_pages(pdf_bytes: bytes) -> List[Dict]:
@@ -25,7 +25,7 @@ def classify_pages(pdf_bytes: bytes) -> List[Dict]:
     Page indices are 0-based.
     """
     out: List[Dict] = []
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         for i in range(len(doc)):
             page = doc[i]

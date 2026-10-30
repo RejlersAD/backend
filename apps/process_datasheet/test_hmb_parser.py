@@ -198,6 +198,50 @@ class HMBWorkbookParserTests(TestCase):
         self.assertNotIn('kinematic viscosity', _property_candidates('vapour', 'Viscosity'))
         self.assertNotIn('liq. mass density (std. cond)', _property_candidates('light_liquid', 'Mass Density'))
 
+    def test_phase_properties_map_aqueous_to_heavy_liquid_not_light_liquid(self):
+        path = self.root / 'Case_C1b_HYSYS_Streams.xlsx'
+        workbook = Workbook()
+        streams = workbook.active
+        streams.title = 'Streams'
+        streams['A4'] = 'Property'
+        streams['B4'] = 'Unit'
+        streams['C4'] = '2'
+        streams['A5'] = 'Temperature'
+        streams['B5'] = 'F'
+        streams['C5'] = 112.2
+        phases = workbook.create_sheet('Phase Properties')
+        phases.append(['Stream', 'Phase', 'Mass Flow', 'Std Ideal Liq Vol Flow', 'Act. Volume Flow', 'Molecular Weight', 'Mass Density', 'Viscosity'])
+        phases.append([None, None, 'lb/hr', 'barrel/day', 'barrel/day', '<none>', 'lb/ft3', 'cP'])
+        phases.append(['2', 'Vapour Phase', 135, 0, 0, 24, 0.8, 0.01])
+        phases.append(['2', 'Liquid Phase', 3013, 250, 251, 180, 51, 2.1])
+        phases.append(['2', 'Aqueous Phase', 49720, 2923, 3357, 18, 62, 0.6])
+        composition = workbook.create_sheet('Compositions')
+        composition.append(['Stream', 'Phase', 'Phase fraction', 'Component', 'Molar Flow', 'Mole Fraction'])
+        composition.append([None, None, None, None, '(lbmole/hr)', None])
+        composition.append(['2', 'Overall', 0.002, 'H2S', 1, 0.0011])
+        workbook.save(path)
+        workbook.close()
+
+        sections = [
+            {'key': 'general', 'label': 'General', 'properties': [{'property': 'Temperature', 'unit': 'F', 'row': 1}]},
+            {'key': 'vapour', 'label': 'Vapour', 'properties': [{'property': 'Mass Flow', 'unit': 'lb/hr', 'row': 2}]},
+            {'key': 'light_liquid', 'label': 'Light Liquid', 'properties': [{'property': 'Mass Flow', 'unit': 'lb/hr', 'row': 3}]},
+            {'key': 'heavy_liquid', 'label': 'Heavy Liquid', 'properties': [{'property': 'Mass Flow', 'unit': 'lb/hr', 'row': 4}]},
+            {'key': 'composition', 'label': 'Composition', 'properties': [{'property': 'H2S', 'unit': 'mol frac.', 'row': 5}]},
+        ]
+        template = {
+            'sections': sections,
+            'stream_columns': [{'stream_id': '2', 'description': ''}],
+        }
+        parsed = parse_hmb_case_workbook(str(path), path.name, template)
+        values = {(item['section_key'], item['property_name']): item for item in parsed['records']}
+
+        self.assertEqual(values[('vapour', 'Mass Flow')]['value_text'], '135')
+        self.assertEqual(values[('light_liquid', 'Mass Flow')]['value_text'], '3013')
+        self.assertEqual(values[('heavy_liquid', 'Mass Flow')]['value_text'], '49720')
+        self.assertEqual(values[('heavy_liquid', 'Mass Flow')]['source_metadata']['sheet'], 'Phase Properties')
+        self.assertEqual(values[('composition', 'H2S')]['value_text'], '0.0011')
+
     def test_populated_master_is_case_data(self):
         path = self.root / 'Case 1A Template.xlsx'
         self._write_master(path, populated=True)

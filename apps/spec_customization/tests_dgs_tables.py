@@ -86,10 +86,10 @@ class DgsTableTests(SimpleTestCase):
         self.assertEqual(len(merged[0]['components']), 3)
 
     def test_native_pdf_dispatch_reaches_dgs_parser_in_bounded_child(self):
-        import fitz
+        import pymupdf
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'dgs-fixture.pdf'
-            with fitz.open() as doc:
+            with pymupdf.open() as doc:
                 page = doc.new_page()
                 for x, y, _, _, value in fixture_words():
                     page.insert_text((x, y + 8), value.replace('–', '-'), fontsize=7)
@@ -99,14 +99,14 @@ class DgsTableTests(SimpleTestCase):
         self.assertEqual(result['local_report']['issues'], [])
 
     def test_image_only_page_is_flagged_but_blank_page_is_not(self):
-        import fitz
+        import pymupdf
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'image-fixture.pdf'
-            with fitz.open() as doc:
+            with pymupdf.open() as doc:
                 page = doc.new_page()
-                image = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), False)
+                image = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False)
                 image.clear_with(255)
-                page.insert_image(fitz.Rect(20, 20, 200, 200), pixmap=image)
+                page.insert_image(pymupdf.Rect(20, 20, 200, 200), pixmap=image)
                 doc.new_page()
                 doc.save(path)
             result = run_local_engine(path, 0, 1, 'pymupdf_text', SPEC_EXTRACTION_CONFIG, 30)

@@ -1,6 +1,9 @@
+import logging
+
 import re
 
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 PENDING_STATUSES = {'pending', 'in_review'}
@@ -208,12 +211,7 @@ def remap_approval_users_and_backfill_notifications(apps, schema_editor):
             order.save(update_fields=['approval_log'])
             repaired_pos += 1
 
-    print(
-        'Approval notification repair:',
-        f'{repaired_prs} requisitions remapped,',
-        f'{repaired_pos} purchase orders remapped,',
-        f'{created_notifications} notifications created.',
-    )
+    logger.debug('Approval notification repair:', f'{repaired_prs} requisitions remapped,', f'{repaired_pos} purchase orders remapped,', f'{created_notifications} notifications created.')
 
 
 class Migration(migrations.Migration):

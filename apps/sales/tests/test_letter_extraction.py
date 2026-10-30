@@ -389,7 +389,7 @@ class LetterExtractionWorkflowTests(TestCase):
         self.assertEqual(pdf.call_count, 1)
 
     def test_updated_source_fields_appear_in_real_pdf_and_word_output(self):
-        import fitz
+        import pymupdf
         from docx import Document
         from apps.sales.letter_pdf import generate_letter_pdf
         from apps.sales.letter_docx import generate_letter_docx
@@ -399,7 +399,7 @@ class LetterExtractionWorkflowTests(TestCase):
         self.intake.internet_message_id = '<current-source@ariba.com>'
         self.intake.save()
         letter = self.prepare()
-        with fitz.open(stream=generate_letter_pdf(letter), filetype='pdf') as pdf:
+        with pymupdf.open(stream=generate_letter_pdf(letter), filetype='pdf') as pdf:
             pdf_text = '\n'.join(page.get_text() for page in pdf)
         word = Document(BytesIO(generate_letter_docx(letter)))
         word_text = '\n'.join(
@@ -617,11 +617,11 @@ class LetterExtractionWorkflowTests(TestCase):
         download.assert_called_once_with(self.deal, self.actor, 'tender', 'remote-file-id')
 
     def test_readable_pdf_docx_and_html_uploads(self):
-        import fitz
+        import pymupdf
         from docx import Document
         upload = self.upload()
         text = 'Contact Name: Document Buyer\nPosition: Procurement Manager\nCompany: Example Ltd\nEmail: buyer@example.test\nAddress: PO Box 123'
-        pdf = fitz.open()
+        pdf = pymupdf.open()
         page = pdf.new_page()
         page.insert_text((72, 72), text)
         pdf_data = pdf.tobytes()
@@ -642,13 +642,13 @@ class LetterExtractionWorkflowTests(TestCase):
                 self.assertEqual(letter.custom_data['letterhead']['recipient_email'], 'buyer@example.test')
 
     def test_vertical_upload_fields_populate_all_letter_types_and_reopen_without_render(self):
-        import fitz
+        import pymupdf
         from docx import Document
         from apps.sales.models import SalesLetterTemplate
         text = ('Contact Name:\nDocument Buyer\nPosition:\nProcurement Manager\n'
                 'Company:\nExample Ltd\nEmail:\nbuyer@example.test\n'
                 'Address:\nTower 7\nAbu Dhabi, UAE')
-        pdf = fitz.open()
+        pdf = pymupdf.open()
         pdf.new_page().insert_text((72, 72), text)
         pdf_data = pdf.tobytes()
         pdf.close()

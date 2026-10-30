@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Iterable
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 import pdfplumber
 import pytesseract
 from PIL import Image, ImageOps, ImageFilter
@@ -114,7 +114,7 @@ def _extract_from_embedded_text(pdf_bytes: bytes, found: dict[str, LineTag]) -> 
         pass
     # PyMuPDF
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
         for page in doc:
             _scan_text_blob(page.get_text('text') or '', found)
             _scan_text_blob(' '.join(w[4] for w in page.get_text('words')), found)
@@ -144,8 +144,8 @@ def _preprocess_for_ocr(img: Image.Image) -> Image.Image:
 
 
 def _extract_via_ocr(pdf_bytes: bytes, found: dict[str, LineTag]) -> None:
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-    mat = fitz.Matrix(OCR_RENDER_DPI / 72, OCR_RENDER_DPI / 72)
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+    mat = pymupdf.Matrix(OCR_RENDER_DPI / 72, OCR_RENDER_DPI / 72)
     for page in doc:
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.open(io.BytesIO(pix.tobytes('png')))

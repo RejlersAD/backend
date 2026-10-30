@@ -1301,12 +1301,12 @@ def process_pid_upload_async(
         # logged and NEVER affects the core extraction result above.
         if source_pdf_bytes and 'output_record' in locals() and output_record is not None:
             try:
-                import fitz  # PyMuPDF
+                import pymupdf  # PyMuPDF
                 from django.core.files.base import ContentFile
                 from .models import PIDSourceDrawing
 
                 try:
-                    pdf_doc = fitz.open(stream=source_pdf_bytes, filetype='pdf')
+                    pdf_doc = pymupdf.open(stream=source_pdf_bytes, filetype='pdf')
                     page_count = len(pdf_doc)
                     pdf_doc.close()
                 except Exception as page_count_err:

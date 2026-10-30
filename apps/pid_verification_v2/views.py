@@ -54,8 +54,8 @@ from .services.legend_knowledge import (
     load_legend_knowledge,
     save_legend_knowledge,
 )
-
 logger = logging.getLogger(__name__)
+
 
 # SOFT-CODED: Worker availability cache TTL (seconds).
 # Adjust via PIDV_WORKER_CHECK_TTL env var.
@@ -2151,14 +2151,14 @@ def drawing_image(request, document_id, page_index):
 
     if ext == "pdf":
         try:
-            import fitz  # PyMuPDF
-            pdf_doc = fitz.open(stream=raw, filetype="pdf")
+            import pymupdf  # PyMuPDF
+            pdf_doc = pymupdf.open(stream=raw, filetype="pdf")
             if page_index >= len(pdf_doc):
                 pdf_doc.close()
                 return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
             page = pdf_doc[page_index]
             # 2× zoom → ~150 dpi for typical A1 drawings
-            mat = fitz.Matrix(2.0, 2.0)
+            mat = pymupdf.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             png_data = pix.tobytes("png")
             pdf_doc.close()

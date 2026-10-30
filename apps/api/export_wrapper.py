@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions
 from rest_framework.response import Response
@@ -6,6 +8,7 @@ import traceback
 # Importing models/service from pid_analysis
 from apps.pid_analysis.models import PIDDrawing
 from apps.pid_analysis.export_service import PIDReportExportService
+logger = logging.getLogger(__name__)
 
 
 @api_view(['GET'])
@@ -14,7 +17,7 @@ def pid_export_wrapper(request, pk):
     """Lightweight wrapper that calls PIDReportExportService for exports.
     This avoids touching existing core export logic and provides a stable URL.
     """
-    print(f"[WRAPPER EXPORT] Called PK={pk}")
+    logger.debug(f"[WRAPPER EXPORT] Called PK={pk}")
     try:
         drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
     except PIDDrawing.DoesNotExist:

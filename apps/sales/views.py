@@ -934,6 +934,18 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
         instance = Deal.objects.select_for_update(no_key=True).get(pk=self.get_object().pk)
+
+        # 🔐 GATE: Direct stage changes via PATCH/PUT are prohibited.
+        # Stage transitions must go through the governed command endpoints
+        # (submit-qualification, bid-decision, ceo-decision, enter-negotiation,
+        # submit-award, decide-award, close-opportunity, convert-to-project)
+        # which enforce dual-custody and permission checks.
+        if 'stage' in request.data and str(request.data['stage']) != instance.stage:
+            raise ValidationError({
+                'stage': 'Direct stage changes are not allowed via PATCH/PUT. '
+                         'Use the governed lifecycle command endpoint for the current stage.'
+            })
+
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)

@@ -25,8 +25,8 @@ import re
 
 from decouple import config
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
-
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -713,18 +713,18 @@ def learn_from_your_examples(pfd_folder: str, pid_folder: str = None):
 
 if __name__ == "__main__":
     # Example usage
-    print("="*70)
-    print("INTELLIGENT PATTERN LEARNING SYSTEM")
-    print("="*70)
-    print("\nThis system learns from your PFD-P&ID examples and replicates")
-    print("the exact patterns to generate new P&IDs.\n")
+    logger.debug("="*70)
+    logger.debug("INTELLIGENT PATTERN LEARNING SYSTEM")
+    logger.debug("="*70)
+    logger.debug("\nThis system learns from your PFD-P&ID examples and replicates")
+    logger.debug("the exact patterns to generate new P&IDs.\n")
     
     # Learn from examples
     learner = learn_from_your_examples("Documents/PFD to P&ID/1601")
     
     if learner:
-        print("\n✅ Learning complete!")
-        print(f"   Patterns learned: {len(learner.learned_patterns)}")
+        logger.debug("\n✅ Learning complete!")
+        logger.debug(f"   Patterns learned: {len(learner.learned_patterns)}")
         
         # Now you can generate new P&IDs using the learned patterns
         # new_pid = learner.generate_pid_from_pfd("path/to/new/pfd.pdf")

@@ -21,8 +21,8 @@ import re
 from celery import shared_task
 from django.core.cache import cache
 from django.core.files.uploadedfile import InMemoryUploadedFile
-
 logger = logging.getLogger(__name__)
+
 
 # ── Soft-coded task & cache configuration ─────────────────────────────────────
 # Single-file limits: allow up to 50-min processing per drawing.
@@ -48,8 +48,8 @@ EQ_DOC_EXCERPT_CHARS = 24000
 def _eq_doc_excerpt(file_bytes: bytes) -> str:
     """Text-layer excerpt of the uploaded PDF (fast; empty for pure scans)."""
     try:
-        import fitz
-        with fitz.open(stream=file_bytes, filetype='pdf') as doc:
+        import pymupdf
+        with pymupdf.open(stream=file_bytes, filetype='pdf') as doc:
             text = '\n'.join(page.get_text() for page in doc)
         return text[:EQ_DOC_EXCERPT_CHARS]
     except Exception:  # noqa: BLE001 — excerpt is best-effort
@@ -84,7 +84,7 @@ def _make_inmemory_file(file_bytes: bytes, filename: str) -> InMemoryUploadedFil
 
 
 # ── Soft-coded: PDF repair & validation ───────────────────────────────────────
-# When fitz reports 0 pages (corrupted xref / damaged streams) we attempt a
+# When pymupdf reports 0 pages (corrupted xref / damaged streams) we attempt a
 # qpdf repair pass before giving up.  This handles PDFs that were damaged during
 # upload or file transfer (e.g. binary bytes mangled by a UTF-8 codec).
 _QPDF_REPAIR_TIMEOUT_S = int(60)   # seconds — soft-coded
@@ -137,13 +137,13 @@ def _try_qpdf_repair(file_bytes: bytes) -> bytes:
 
 def _validate_pdf_pages(file_bytes: bytes, filename: str) -> tuple:
     """
-    Open the PDF with fitz and return (page_count, file_bytes).
+    Open the PDF with pymupdf and return (page_count, file_bytes).
     If page_count == 0, attempts qpdf repair and re-checks.
     Raises ValueError with a user-friendly message if PDF is unreadable.
     """
-    import fitz as _fitz
+    import pymupdf as _pymupdf
     try:
-        doc  = _fitz.open(stream=file_bytes, filetype='pdf')
+        doc  = _pymupdf.open(stream=file_bytes, filetype='pdf')
         count = doc.page_count
         doc.close()
     except Exception as exc:
@@ -156,7 +156,7 @@ def _validate_pdf_pages(file_bytes: bytes, filename: str) -> tuple:
         logger.warning('[PDFValidate] "%s" opened with 0 pages — attempting qpdf repair', filename)
         repaired = _try_qpdf_repair(file_bytes)
         try:
-            doc2   = _fitz.open(stream=repaired, filetype='pdf')
+            doc2   = _pymupdf.open(stream=repaired, filetype='pdf')
             count2 = doc2.page_count
             doc2.close()
         except Exception:

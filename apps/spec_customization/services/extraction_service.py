@@ -36,8 +36,8 @@ from .advanced_validation import (
     validate_extracted_classes,
     ADVANCED_VALIDATION_CONFIG,
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 class ExtractionProviderConfigurationError(RuntimeError):
@@ -260,8 +260,8 @@ class PaperSpecExtractionService:
     # ── PDF helpers ─────────────────────────────────────────────────────
     def get_page_count(self, pdf_path: str) -> int:
         try:
-            import fitz
-            with fitz.open(pdf_path) as doc:
+            import pymupdf
+            with pymupdf.open(pdf_path) as doc:
                 return doc.page_count
         except Exception as e:
             logger.warning("[SpecExtraction] page count failed: %s", e)
@@ -282,12 +282,12 @@ class PaperSpecExtractionService:
 
     def extract_appendix_a_summary(self, pdf_path: str) -> Dict[str, Any]:
         """Locate Appendix-A ahead of the chunk waterfall and retain source-page evidence."""
-        import fitz
+        import pymupdf
 
         heading = re.compile(self.config["appendix_a_summary_regex"], re.IGNORECASE)
         table_header = re.compile(self.config["appendix_table_header_regex"], re.IGNORECASE)
         code_pattern = re.compile(self.config["appendix_class_code_regex"], re.IGNORECASE)
-        with fitz.open(pdf_path) as doc:
+        with pymupdf.open(pdf_path) as doc:
             # Printed page 29 may differ from the PDF index by cover pages.
             nearby = list(range(max(0, 28 - 6), min(doc.page_count, 28 + 7)))
             nearby_set = set(nearby)
@@ -362,9 +362,9 @@ class PaperSpecExtractionService:
         logger.warning("[SpecExtraction] Zero piping classes; scanned PDF pages: %s", pages)
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        import fitz
+        import pymupdf
         limit = self.config["zero_class_log_chars_per_page"]
-        with fitz.open(pdf_path) as doc:
+        with pymupdf.open(pdf_path) as doc:
             for page_number in pages:
                 raw = doc[page_number - 1].get_text("text") or ""
                 logger.debug(
@@ -377,8 +377,8 @@ class PaperSpecExtractionService:
         header/footer furniture stripped (soft-coded, HEADER_FOOTER_STRIP_CONFIG)."""
         texts: List[str] = []
         try:
-            import fitz
-            with fitz.open(pdf_path) as doc:
+            import pymupdf
+            with pymupdf.open(pdf_path) as doc:
                 for i in range(start, end + 1):
                     self.remaining_seconds()
                     if i >= doc.page_count:
@@ -452,8 +452,8 @@ class PaperSpecExtractionService:
         """Render the requested pages as JPEG base64 strings."""
         out: List[str] = []
         try:
-            import fitz
-            with fitz.open(pdf_path) as doc:
+            import pymupdf
+            with pymupdf.open(pdf_path) as doc:
                 dpi = self.config["render_dpi"]
                 for i in range(start, end + 1):
                     self.remaining_seconds()
@@ -461,7 +461,7 @@ class PaperSpecExtractionService:
                         break
                     page = doc[i]
                     scale = min(dpi / 72, self.config['max_image_size'] / max(page.rect.width, page.rect.height))
-                    mat = fitz.Matrix(scale, scale)
+                    mat = pymupdf.Matrix(scale, scale)
                     pix = page.get_pixmap(matrix=mat)
                     img_bytes = pix.tobytes("jpeg", jpg_quality=self.config["jpeg_quality"])
                     out.append(base64.b64encode(img_bytes).decode("ascii"))
@@ -660,16 +660,16 @@ class PaperSpecExtractionService:
             return None
 
     def _collect_pages_as_images(self, pdf_path: str, start: int, end: int) -> List[Any]:
-        import fitz
+        import pymupdf
         from PIL import Image
 
         images: List[Any] = []
-        with fitz.open(pdf_path) as doc:
+        with pymupdf.open(pdf_path) as doc:
             for i in range(start, end + 1):
                 if i >= doc.page_count:
                     break
                 page = doc[i]
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
                 image = Image.open(io.BytesIO(pix.tobytes("png")))
                 images.append(image)
         return images

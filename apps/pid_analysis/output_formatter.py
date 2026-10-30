@@ -2,9 +2,12 @@
 Output Formatter - Deterministic Results & Confidence Scoring
 Ensures consistent output formatting and prevents non-deterministic variations
 """
+
+import logging
 import json
 from typing import List, Dict, Any
 from dataclasses import dataclass
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -224,7 +227,7 @@ class DeterministicOutputFormatter:
         Returns:
             Formatted output dictionary with deterministic ordering
         """
-        print(f"[FORMAT] Session {self.session_id[:8]}: Processing {len(issues)} raw issues")
+        logger.debug(f"[FORMAT] Session {self.session_id[:8]}: Processing {len(issues)} raw issues")
         
         # Step 1: Calculate confidence for all issues
         for issue in issues:
@@ -236,14 +239,14 @@ class DeterministicOutputFormatter:
             original_count = len(issues)
             issues = self.remove_duplicates(issues)
             if len(issues) < original_count:
-                print(f"[FORMAT] Session {self.session_id[:8]}: Removed {original_count - len(issues)} duplicates")
+                logger.debug(f"[FORMAT] Session {self.session_id[:8]}: Removed {original_count - len(issues)} duplicates")
         
         # Step 3: Filter low-confidence issues
         if apply_confidence_filter:
             original_count = len(issues)
             issues = self.filter_low_confidence(issues, min_confidence="medium")
             if len(issues) < original_count:
-                print(f"[FORMAT] Session {self.session_id[:8]}: Filtered {original_count - len(issues)} low-confidence issues")
+                logger.debug(f"[FORMAT] Session {self.session_id[:8]}: Filtered {original_count - len(issues)} low-confidence issues")
         
         # Step 4: Sort deterministically
         issues = self.sort_issues(issues)
@@ -252,7 +255,7 @@ class DeterministicOutputFormatter:
         for idx, issue in enumerate(issues, 1):
             issue['serial_number'] = idx
         
-        print(f"[FORMAT] Session {self.session_id[:8]}: Final output: {len(issues)} issues")
+        logger.debug(f"[FORMAT] Session {self.session_id[:8]}: Final output: {len(issues)} issues")
         
         # Group by category for summary
         category_counts = {}

@@ -7,8 +7,8 @@ from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied
 from .models import UserProfile
 from .utils import create_audit_log
-
 logger = logging.getLogger(__name__)
+
 
 
 class IsSuperAdmin(permissions.BasePermission):
@@ -205,7 +205,7 @@ class CanManageUsers(permissions.BasePermission):
             if profile.roles.filter(
                 code__in=[
                     'super_admin', 'admin', 'ict_admin',
-                    'hr_admin', 'hr_manager', 'human_resource',
+                    'hr_admin', 'hr_manager',
                 ],
                 is_active=True
             ).exists():

@@ -44,8 +44,8 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
-
 logger = logging.getLogger(__name__)
+
 
 # ─── Soft-coded constants (env-overridable) ─────────────────────────────────────
 TEXT_SUFFICIENT_CHARS  = int(os.getenv('VALVE_MTO_TEXT_THRESHOLD', '1500'))
@@ -687,8 +687,8 @@ VISION_PROMPT_TEMPLATE = VISION_PROMPT_TEMPLATE.replace(
 # ─── Helpers ────────────────────────────────────────────────────────────
 def _page_count(pdf_path: str) -> int:
     try:
-        import fitz
-        doc = fitz.open(pdf_path)
+        import pymupdf
+        doc = pymupdf.open(pdf_path)
         n = doc.page_count
         doc.close()
         return n
@@ -709,8 +709,8 @@ def _extract_text(pdf_path: str, on_text_progress=None) -> str:
     """
     parts: List[str] = []
     try:
-        import fitz
-        doc = fitz.open(pdf_path)
+        import pymupdf
+        doc = pymupdf.open(pdf_path)
         total = doc.page_count
         for i, page in enumerate(doc):
             t = page.get_text() or ''
@@ -753,12 +753,12 @@ def _ocr_pages_text(pdf_path: str, on_progress=None) -> str:
         return ''
     parts: List[str] = []
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         total = doc.page_count
         zoom = VALVE_MTO_OCR_DPI / 72.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         for i, page in enumerate(doc):
             try:
                 pix = page.get_pixmap(matrix=mat, alpha=False)
@@ -822,12 +822,12 @@ def _render_pages_b64(pdf_path: str, max_pages: int, dpi: int, on_render_progres
     """
     images: List[str] = []
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         total_to_render = min(doc.page_count, max_pages)
         zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         for i, page in enumerate(doc):
             if i >= max_pages:
                 break
@@ -867,22 +867,22 @@ def _enhance_native_drawing(image):
 
 
 def _drawing_titles(pdf_path, max_pages):
-    import fitz
+    import pymupdf
     from .local_valve_mto import drawing_title
-    with fitz.open(pdf_path) as document:
+    with pymupdf.open(pdf_path) as document:
         return {index: drawing_title(document[index]) for index in range(min(max_pages, len(document)))}
 
 
 def _render_native_regions(pdf_path, max_pages, on_render_progress=None):
     """Clip the original PDF before rasterization; never enlarge a low-res preview."""
-    import fitz
+    import pymupdf
     from PIL import Image
     from .local_valve_mto import embedded_text_boxes, drawing_title
 
     if VISION_DETAIL_DPI <= 0 or VISION_REGION_EDGE_PX < 3:
         raise ValueError('Valve MTO detail DPI and region edge must be positive.')
     regions = []
-    with fitz.open(pdf_path) as document:
+    with pymupdf.open(pdf_path) as document:
         for page_index, page in enumerate(document):
             if page_index >= max_pages:
                 break
@@ -913,18 +913,18 @@ def _render_native_regions(pdf_path, max_pages, on_render_progress=None):
             identifier = next(iter(identifiers)) if len(identifiers) == 1 else ''
             for r in range(rows):
                 for c in range(columns):
-                    core = fitz.Rect(c * width / columns, r * height / rows,
+                    core = pymupdf.Rect(c * width / columns, r * height / rows,
                                      (c + 1) * width / columns, (r + 1) * height / rows)
                     margin_x, margin_y = width / columns * VISION_REGION_OVERLAP, height / rows * VISION_REGION_OVERLAP
-                    clip = fitz.Rect(max(0, core.x0 - margin_x), max(0, core.y0 - margin_y),
+                    clip = pymupdf.Rect(max(0, core.x0 - margin_x), max(0, core.y0 - margin_y),
                                      min(width, core.x1 + margin_x), min(height, core.y1 + margin_y))
                     # Raster bounds round outwards at both edges.
                     zoom = min(VISION_DETAIL_DPI / 72, (VISION_REGION_EDGE_PX - 2) / max(clip.width, clip.height))
-                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, alpha=False)
                     image = _enhance_native_drawing(Image.frombytes('RGB', (pix.width, pix.height), pix.samples))
                     buffer = io.BytesIO()
                     image.save(buffer, format='JPEG', quality=95)
-                    native_text = '\n'.join(item.text for item in words if fitz.Rect(item.box).intersects(clip))
+                    native_text = '\n'.join(item.text for item in words if pymupdf.Rect(item.box).intersects(clip))
                     regions.append({
                         'page': page_index, 'box': tuple(clip), 'core': tuple(core),
                         'page_size': (width, height), 'pid_number': identifier, 'sheet_title': sheet_title,

@@ -15,7 +15,6 @@ from django.db.models import Q, Count, Prefetch
 from django_filters.rest_framework import DjangoFilterBackend
 from django.http import FileResponse
 
-logger = logging.getLogger(__name__)
 
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
@@ -36,6 +35,7 @@ from .permissions import (
 from .utils import create_audit_log
 from .s3_service import S3Service
 from .pagination import FlexiblePageNumberPagination
+logger = logging.getLogger(__name__)
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -1315,7 +1315,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 profile.must_change_password = False
                 profile.save()
         except Exception as e:
-            print(f"Warning: Could not clear must_change_password flag: {e}")
+            logger.debug(f"Warning: Could not clear must_change_password flag: {e}")
         
         # Log the action
         create_audit_log(
@@ -1402,7 +1402,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             profile.roles.remove(custom_role)
         
         if removed_count > 0:
-            print(f"[RBAC] 🗑️  Removed {removed_count} custom role(s) for {profile.user.email}: {removed_names}")
+            logger.debug(f"[RBAC] 🗑️  Removed {removed_count} custom role(s) for {profile.user.email}: {removed_names}")
         
         # ── Assign new role ─────────────────────────────────────────────────────
         user_role, created = UserRole.objects.get_or_create(
@@ -1425,7 +1425,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         from django.core.cache import cache
         cache.delete(f'user_modules_{profile.id}')
         cache.delete(f'user_permissions_{profile.id}')
-        print(f"[RBAC] ✅ Cleared module/permission cache for user {profile.user.email}")
+        logger.debug(f"[RBAC] ✅ Cleared module/permission cache for user {profile.user.email}")
         # ───────────────────────────────────────────────────────────────────────
 
         create_audit_log(
@@ -1498,7 +1498,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             from django.core.cache import cache
             cache.delete(f'user_modules_{profile.id}')
             cache.delete(f'user_permissions_{profile.id}')
-            print(f"[RBAC] ✅ Cleared module/permission cache for user {profile.user.email}")
+            logger.debug(f"[RBAC] ✅ Cleared module/permission cache for user {profile.user.email}")
             # ───────────────────────────────────────────────────────────────────────
             
             create_audit_log(
@@ -2288,9 +2288,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             
             # GET - Retrieve profile
             # Log the request for debugging
-            print(f"\n[DEBUG /rbac/users/me/] User: {request.user}")
-            print(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
-            print(f"[DEBUG /rbac/users/me/] User email: {getattr(request.user, 'email', 'N/A')}")
+            logger.debug(f"\n[DEBUG /rbac/users/me/] User: {request.user}")
+            logger.debug(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
+            logger.debug(f"[DEBUG /rbac/users/me/] User email: {getattr(request.user, 'email', 'N/A')}")
             
             profile_view = request.query_params.get('view') == 'profile'
             profile_queryset = UserProfile.objects.select_related(
@@ -2310,11 +2310,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 is_deleted=False
             ).first()
             
-            print(f"[DEBUG /rbac/users/me/] Profile found: {profile is not None}")
+            logger.debug(f"[DEBUG /rbac/users/me/] Profile found: {profile is not None}")
             
             # If no profile exists, return user info without RBAC data
             if not profile:
-                print(f"[DEBUG /rbac/users/me/] No RBAC profile for {request.user.email}")
+                logger.debug(f"[DEBUG /rbac/users/me/] No RBAC profile for {request.user.email}")
                 return Response({
                     'id': str(request.user.id),
                     'email': request.user.email,
@@ -2331,7 +2331,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 })
             
             # Try to serialize the profile
-            print(f"[DEBUG /rbac/users/me/] Serializing profile...")
+            logger.debug(f"[DEBUG /rbac/users/me/] Serializing profile...")
             serializer = (
                 UserProfileSelfSerializer(profile, context={'request': request})
                 if profile_view
@@ -2343,17 +2343,17 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 from .approval_eligibility import can_review_profile_document
                 data['module_actions'] = effective_action_map(profile)
                 data['can_review_profile_documents'] = can_review_profile_document(request.user)
-            print(f"[DEBUG /rbac/users/me/] Serialization successful")
-            print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
-            print(f"[DEBUG /rbac/users/me/] Phone: {data.get('phone')}, Profile Photo: {data.get('profile_photo')}")
+            logger.debug(f"[DEBUG /rbac/users/me/] Serialization successful")
+            logger.debug(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
+            logger.debug(f"[DEBUG /rbac/users/me/] Phone: {data.get('phone')}, Profile Photo: {data.get('profile_photo')}")
             
             return Response(data)
             
         except Exception as e:
             # Log the full error for debugging
-            print(f"\n[ERROR /rbac/users/me/] Exception occurred: {str(e)}")
-            print(f"[ERROR /rbac/users/me/] Exception type: {type(e).__name__}")
-            print(f"[ERROR /rbac/users/me/] Traceback:")
+            logger.debug(f"\n[ERROR /rbac/users/me/] Exception occurred: {str(e)}")
+            logger.debug(f"[ERROR /rbac/users/me/] Exception type: {type(e).__name__}")
+            logger.debug(f"[ERROR /rbac/users/me/] Traceback:")
             traceback.print_exc()
             
             # Return safe fallback data to avoid breaking the UI
@@ -2674,13 +2674,13 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 else self.get_serializer(profile)
             )
             response_data = serializer.data
-            print(f"[DEBUG] Profile response - phone: {response_data.get('phone')}, profile_photo: {response_data.get('profile_photo')}")
+            logger.debug(f"[DEBUG] Profile response - phone: {response_data.get('phone')}, profile_photo: {response_data.get('profile_photo')}")
             return Response(response_data)
             
         except Exception as e:
             import traceback
-            print(f"[ERROR] Failed to update profile: {str(e)}")
-            print(traceback.format_exc())
+            logger.debug(f"[ERROR] Failed to update profile: {str(e)}")
+            logger.debug(traceback.format_exc())
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

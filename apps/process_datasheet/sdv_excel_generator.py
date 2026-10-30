@@ -10,8 +10,8 @@ import openpyxl
 from io import BytesIO
 from django.core.files.base import ContentFile
 from apps.process_datasheet.template_manager import SDVTemplateManager
-
 logger = logging.getLogger(__name__)
+
 
 
 class SDVExcelGenerator:
@@ -266,8 +266,8 @@ def test_excel_generator():
     with open(output_path, 'wb') as f:
         f.write(excel_file.getvalue())
     
-    print(f"✅ Test file generated: {output_path}")
-    print(f"   Size: {output_path.stat().st_size / 1024:.2f} KB")
+    logger.debug(f"✅ Test file generated: {output_path}")
+    logger.debug(f"   Size: {output_path.stat().st_size / 1024:.2f} KB")
 
 
 if __name__ == "__main__":

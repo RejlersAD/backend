@@ -9,9 +9,9 @@ import base64
 import logging
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from django.conf import settings
-import fitz  # PyMuPDF
-
+import pymupdf  # PyMuPDF
 logger = logging.getLogger(__name__)
+
 
 # ============================================================================
 # PATTERN LEARNING CONFIGURATION
@@ -149,12 +149,12 @@ class PFDtoPIDPatternLearner:
     def convert_pdf_to_base64(self, pdf_path, page_num=0, dpi=200):
         """Convert PDF page to base64 image"""
         try:
-            pdf_document = fitz.open(pdf_path)
+            pdf_document = pymupdf.open(pdf_path)
             page = pdf_document[page_num]
             
             # Convert to high-quality image
             zoom = dpi / 72
-            mat = fitz.Matrix(zoom, zoom)
+            mat = pymupdf.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             
             # Convert to PNG bytes and encode

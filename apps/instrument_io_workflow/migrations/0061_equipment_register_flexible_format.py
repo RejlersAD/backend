@@ -37,7 +37,10 @@ default row is touched (matched by name). I/O List only —
 apps.pid_checker_v2 / apps.pid_verification are not touched by, and do
 not read, this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'equipment_register'
 OLD_NAME = 'Equipment Numbering — XX-XX-AAAA-XX-XX-XX (default)'
@@ -69,7 +72,7 @@ def _apply(apps, name, fields):
     row.definition = definition
     row.name = NEW_NAME if fields is NEW_FIELDS else OLD_NAME
     row.save(update_fields=['definition', 'name'])
-    print(f'[instrument_io_workflow] {SECTION!r} field structure replaced '
+    logger.debug(f'[instrument_io_workflow] {SECTION!r} field structure replaced '
           f'({len(fields)} fields).')
 
 

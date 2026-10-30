@@ -18,12 +18,12 @@ import re
 import logging
 from typing import Optional
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
+logger = logging.getLogger(__name__)
 
 Image.MAX_IMAGE_PIXELS = None
 
-logger = logging.getLogger(__name__)
 
 
 # ─── Soft-coded config ────────────────────────────────────────────────
@@ -605,8 +605,8 @@ def _serial_int(s: str) -> int:
 def _render_pages(pdf_bytes: bytes) -> list[Image.Image]:
     """Render each PDF page to a high-res PIL image at VISION_RENDER_DPI."""
     pages: list[Image.Image] = []
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-    mat = fitz.Matrix(VISION_RENDER_DPI / 72, VISION_RENDER_DPI / 72)
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+    mat = pymupdf.Matrix(VISION_RENDER_DPI / 72, VISION_RENDER_DPI / 72)
     for page in doc:
         pix = page.get_pixmap(matrix=mat, alpha=False)
         pages.append(Image.open(io.BytesIO(pix.tobytes('png'))))
@@ -617,15 +617,15 @@ def _render_single_page(pdf_bytes: bytes, page_index: int) -> Image.Image:
     """Render exactly ONE page to a high-res PIL image at VISION_RENDER_DPI.
 
     Unlike _render_pages(), this does NOT rasterize every other page —
-    fitz.open() only parses the document's xref table; get_pixmap() is what
+    pymupdf.open() only parses the document's xref table; get_pixmap() is what
     actually does the (expensive) rendering work, and it's called here for
     a single page only. Used by callers that process pages independently
     (e.g. one Celery task per page for a 35-50 page document) so N page-
     tasks cost O(N) total renders instead of O(N^2) (each task re-rendering
     every page just to discard all but one).
     """
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-    mat = fitz.Matrix(VISION_RENDER_DPI / 72, VISION_RENDER_DPI / 72)
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+    mat = pymupdf.Matrix(VISION_RENDER_DPI / 72, VISION_RENDER_DPI / 72)
     pix = doc[page_index].get_pixmap(matrix=mat, alpha=False)
     return Image.open(io.BytesIO(pix.tobytes('png')))
 

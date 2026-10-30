@@ -4,6 +4,8 @@ Provides REST API endpoints for managing employee lifecycle
 
 ✅ MIGRATED: Now uses EmployeeMaster instead of UserProfile
 """
+
+import logging
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -54,6 +56,7 @@ from .rbac import (
 )
 from .project_assignments import get_active_project_assignments, get_profile_project_manager
 from .performance_insights import build_probation_report_insights
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -858,10 +861,12 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                 # This will trigger the signal that auto-assigns the Default role
                 default_org = Organization.objects.filter(is_active=True).first()
                 if not default_org:
-                    default_org = Organization.objects.create(
-                        name='Default Organization',
+                    default_org, _ = Organization.objects.get_or_create(
                         code='DEFAULT',
-                        is_active=True
+                        defaults={
+                            'name': 'Default Organization',
+                            'is_active': True,
+                        },
                     )
                 
                 rbac_profile = RBACUserProfile.objects.create(
@@ -872,7 +877,7 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                     job_title=data.get('job_title_uae') or data.get('job_title_finland', ''),
                     phone=mobile_phone
                 )
-                print(f"[Onboarding] ✅ Created RBAC UserProfile for {email} — Default role will be auto-assigned")
+                logger.debug(f"[Onboarding] ✅ Created RBAC UserProfile for {email} — Default role will be auto-assigned")
                 
                 # Create EmployeeMaster record with the validated manager.
                 generated_employee_id = _next_onboarding_employee_identifier()
@@ -977,7 +982,7 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                         
                     except Exception as e:
                         # Log error but don't fail the whole request
-                        print(f"Error uploading photo: {str(e)}")
+                        logger.debug(f"Error uploading photo: {str(e)}")
                         photo_warning = 'Employee created, but the photo could not be uploaded. Upload the photo from the employee profile.'
                 
                 return Response({
@@ -1084,10 +1089,10 @@ class OnboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet)
                         for field, value in sync_fields.items():
                             setattr(employee, field, value)
                         employee.save(update_fields=list(sync_fields.keys()))
-                        print(f"[SYNC] Updated EmployeeMaster fields: {list(sync_fields.keys())}")
+                        logger.debug(f"[SYNC] Updated EmployeeMaster fields: {list(sync_fields.keys())}")
         except Exception as sync_error:
             # Log but don't fail the update
-            print(f"[WARNING] Failed to sync to EmployeeMaster: {str(sync_error)}")
+            logger.debug(f"[WARNING] Failed to sync to EmployeeMaster: {str(sync_error)}")
         
         return Response(serializer.data)
     
@@ -1279,7 +1284,7 @@ class OffboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet
         record = OffboardingRecord.objects.select_for_update().get(pk=self.get_object().pk)
         require_approval(request.user, 'hr_onboarding', assigned=True,
                          current=record.status in OFFBOARDING_ACTIVE_STATUSES and record.project_manager_approval_status in {'approved', 'not_required'},
-                         positions={'hr_manager', 'hr_admin', 'human_resource'})
+                         positions={'hr_manager', 'hr_admin'})
         if record.status not in OFFBOARDING_ACTIVE_STATUSES:
             raise ValidationError({'detail': 'Only an active offboarding process can be rejected.'})
 
@@ -1681,7 +1686,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     )
                 except Exception as e:
                     # Log but don't fail if old file deletion fails
-                    print(f"Warning: Could not delete old file {document.file_path}: {e}")
+                    logger.debug(f"Warning: Could not delete old file {document.file_path}: {e}")
             
             # Upload new file to S3
             s3_service.s3_client.upload_fileobj(
