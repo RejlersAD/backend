@@ -166,6 +166,8 @@ test-results/
 # Test files and utility scripts folder
 test/
 test_*.py
+# Django's configured runtime test runner is production code, despite its filename.
+!config/test_runner.py
 # Application regression suites and their isolated test app configuration.
 !apps/sales/tests/test_mailbox_search.py
 !apps/core/tests/test_shared_records.py
