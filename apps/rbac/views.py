@@ -64,7 +64,7 @@ class OrganizationViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated, IsSuperAdmin]
         return [permission() for permission in permission_classes]
-    
+
     def perform_create(self, serializer):
         org = serializer.save()
         create_audit_log(
@@ -916,7 +916,20 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def perform_update(self, serializer):
         from .approval_eligibility import self_organization_changes
-        if serializer.instance.user_id == self.request.user.pk:
+        organization_id = self.request.data.get('organization_id', self.request.data.get('organization'))
+        if organization_id is not None:
+            profile = serializer.instance
+            try:
+                is_super_admin = self.request.user.rbac_profile.is_super_admin()
+            except Exception:
+                is_super_admin = False
+            actor_is_superuser = self.request.user.is_superuser
+            if str(organization_id or '') != str(profile.organization_id or '') and not (is_super_admin or actor_is_superuser):
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('Only a Super Administrator can change an employee organisation.')
+        if serializer.instance.user_id == self.request.user.pk and not (
+            actor_is_superuser or is_super_admin
+        ):
             forbidden = self_organization_changes(serializer.instance, self.request.data)
             if forbidden:
                 from rest_framework.exceptions import PermissionDenied
@@ -2435,7 +2448,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 )
 
             from .approval_eligibility import self_organization_changes
-            forbidden = self_organization_changes(profile, request.data)
+            try:
+                actor_is_super_admin = request.user.is_superuser or request.user.rbac_profile.is_super_admin()
+            except Exception:
+                actor_is_super_admin = False
+            forbidden = [] if actor_is_super_admin else self_organization_changes(profile, request.data)
             if forbidden:
                 return Response({key: 'This organizational assignment must be maintained by HR or an authorized administrator.'
                                  for key in forbidden}, status=status.HTTP_403_FORBIDDEN)

@@ -186,8 +186,18 @@ def self_organization_changes(profile, data):
     """Self-service cannot alter facts used to decide business authority."""
     current = {'department': profile.department, 'job_title': profile.job_title,
                'manager_id': profile.manager_id, 'manager': profile.manager_id}
-    return [key for key, value in current.items() if key in data
-            and str(data[key] or '') != str(value or '')]
+    changed = []
+    for key, value in current.items():
+        if key not in data:
+            continue
+        submitted = data[key]
+        if key in ('manager_id', 'manager') and hasattr(submitted, 'pk'):
+            submitted = submitted.pk
+        submitted_value = str(submitted or '').strip()
+        current_value = str(value or '').strip()
+        if submitted_value != current_value:
+            changed.append(key)
+    return changed
 
 
 def configured_approval_routes():
