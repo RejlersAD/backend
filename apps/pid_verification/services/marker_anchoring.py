@@ -37,8 +37,8 @@ import logging
 import re
 
 from django.conf import settings
-
 logger = logging.getLogger(__name__)
+
 
 # ── Soft-coded defaults (override any key via settings.PIDV_MARKER_ANCHORING) ──
 _DEFAULTS = {
@@ -128,8 +128,8 @@ def rotate_box(page, x0, y0, x1, y1):
     """Map a text-layer box from unrotated page space to rotated page space."""
     if not page.rotation:
         return x0, y0, x1, y1
-    import fitz
-    r = fitz.Rect(x0, y0, x1, y1) * page.rotation_matrix
+    import pymupdf
+    r = pymupdf.Rect(x0, y0, x1, y1) * page.rotation_matrix
     r.normalize()
     return r.x0, r.y0, r.x1, r.y1
 
@@ -154,14 +154,14 @@ def ocr_anchor_needed(raw_words):
 
 def render_page_gray(page):
     """Render the page (rotation applied) for OCR. Returns (PIL image, dpi)."""
-    import fitz
+    import pymupdf
     from PIL import Image
 
     max_px = float(_cfg('max_pixels'))
     area_pt = float(page.rect.width * page.rect.height) or 1.0
     dpi = min(float(_cfg('dpi')), 72.0 * (max_px / area_pt) ** 0.5)
     Image.MAX_IMAGE_PIXELS = max(Image.MAX_IMAGE_PIXELS or 0, int(max_px * 1.2))
-    pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0), colorspace=fitz.csGRAY, alpha=False)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(dpi / 72.0, dpi / 72.0), colorspace=pymupdf.csGRAY, alpha=False)
     return Image.open(io.BytesIO(pix.tobytes('png'))), dpi
 
 

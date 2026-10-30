@@ -23,8 +23,8 @@ from reportlab.lib import colors
 from reportlab.platypus import Table, TableStyle
 import os
 from django.conf import settings
-
 logger = logging.getLogger(__name__)
+
 
 # Initialize OpenAI client with API key
 
@@ -862,7 +862,7 @@ Return JSON with:
             
             if is_pdf:
                 # Handle PDF file - convert first page to image
-                import fitz  # PyMuPDF
+                import pymupdf  # PyMuPDF
                 
                 logger.info(f"Detected PDF file ({len(file_content)} bytes), converting to image...")
                 
@@ -871,14 +871,14 @@ Return JSON with:
                     raise ValueError(f"PDF file is too small ({len(file_content)} bytes). File may be corrupted.")
                 
                 # Open PDF from bytes
-                pdf_document = fitz.open(stream=file_content, filetype="pdf")
+                pdf_document = pymupdf.open(stream=file_content, filetype="pdf")
                 
                 # Get first page
                 first_page = pdf_document[0]
                 
                 # Render page to image (high resolution)
                 zoom = 2.0  # Higher zoom for better quality
-                mat = fitz.Matrix(zoom, zoom)
+                mat = pymupdf.Matrix(zoom, zoom)
                 pix = first_page.get_pixmap(matrix=mat)
                 
                 # Convert to PIL Image

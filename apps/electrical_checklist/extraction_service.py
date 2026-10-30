@@ -13,8 +13,8 @@ from typing import Dict, List, Optional, Any
 from PIL import Image
 
 from .config import CHECKLIST_TEMPLATE, OCR_CONFIG
-
 logger = logging.getLogger(__name__)
+
 
 
 class ChecklistExtractionService:
@@ -85,7 +85,7 @@ class ChecklistExtractionService:
     def _pdf_to_images(self, pdf_file) -> List[Image.Image]:
         """Convert PDF pages to PIL Images"""
         try:
-            import fitz  # PyMuPDF
+            import pymupdf  # PyMuPDF
             
             # Read PDF bytes
             if hasattr(pdf_file, 'read'):
@@ -96,13 +96,13 @@ class ChecklistExtractionService:
                     pdf_bytes = f.read()
             
             # Open PDF with PyMuPDF
-            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            pdf_document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             images = []
             
             for page_num in range(len(pdf_document)):
                 page = pdf_document[page_num]
                 # Render page at 300 DPI for good OCR quality
-                pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(300/72, 300/72))
                 img_bytes = pix.tobytes("png")
                 img = Image.open(io.BytesIO(img_bytes))
                 images.append(img)

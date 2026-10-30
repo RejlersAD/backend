@@ -28,7 +28,10 @@ pattern as migrations 0054/0056/0057. I/O List only —
 apps.pid_checker_v2 / apps.pid_verification are not touched by, and do
 not read, this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'signal_types'
 NAME = 'Signal Types — Signal Type (default)'
@@ -56,7 +59,7 @@ def apply_forward(apps, schema_editor):
             field['lookup'] = {**field.get('lookup', {}), **NEW_CODES}
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[instrument_io_workflow] Added/confirmed {len(NEW_CODES)} signal_type codes '
+    logger.debug(f'[instrument_io_workflow] Added/confirmed {len(NEW_CODES)} signal_type codes '
           f'in {SECTION!r}: {sorted(NEW_CODES)}')
 
 

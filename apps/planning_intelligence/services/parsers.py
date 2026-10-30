@@ -15,8 +15,8 @@ import logging
 import os
 
 from .extraction_coverage import finish_coverage, new_coverage, record_issue, record_unit
-
 logger = logging.getLogger(__name__)
+
 
 def _positive_setting(name, default):
     try:
@@ -157,12 +157,12 @@ def _remove_ocr_table_rules(image):
 
 def _ocr_pdf_page(file_obj, index):
     try:
-        import fitz
+        import pymupdf
         import pytesseract
         from PIL import Image
         file_obj.seek(0)
-        with fitz.open(stream=file_obj.read(), filetype='pdf') as document:
-            pixmap = document[index].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), alpha=False)
+        with pymupdf.open(stream=file_obj.read(), filetype='pdf') as document:
+            pixmap = document[index].get_pixmap(matrix=pymupdf.Matrix(300 / 72, 300 / 72), alpha=False)
             with Image.open(io.BytesIO(pixmap.tobytes('png'))) as image:
                 prepared = _remove_ocr_table_rules(image)
                 try:
@@ -178,10 +178,10 @@ def _ocr_pdf_page(file_obj, index):
 def _extract_pdf_ocr(file_obj, coverage=None) -> str:
     """Bounded optional OCR fallback for image-only/scanned PDF references."""
     try:
-        import fitz
+        import pymupdf
         file_obj.seek(0)
         pages = []
-        with fitz.open(stream=file_obj.read(), filetype='pdf') as document:
+        with pymupdf.open(stream=file_obj.read(), filetype='pdf') as document:
             count = len(document)
         for index in range(count):
             if index >= MAX_OCR_PAGES:

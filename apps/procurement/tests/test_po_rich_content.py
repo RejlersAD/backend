@@ -4,7 +4,7 @@ from io import BytesIO
 from unittest import TestCase
 from unittest.mock import patch
 
-import fitz
+import pymupdf
 from docx import Document
 from docx.oxml.ns import qn
 from PIL import Image
@@ -40,7 +40,7 @@ class PurchaseOrderRichContentTests(TestCase):
         order = self.order(narrative)
         content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        return fitz.open(stream=content, filetype='pdf'), Document(BytesIO(build_purchase_order_docx(order)))
+        return pymupdf.open(stream=content, filetype='pdf'), Document(BytesIO(build_purchase_order_docx(order)))
 
     def test_scope_defaults_to_twelve_points_and_preserves_authored_sizes(self):
         pdf, word = self.render(
@@ -76,7 +76,7 @@ class PurchaseOrderRichContentTests(TestCase):
         order = self.order(narrative)
         content, warnings = build_purchase_order_pdf(order)
         self.assertFalse(warnings)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             spans = [span for page in pdf for block in page.get_text('dict')['blocks'] if 'lines' in block
                      for line in block['lines'] for span in line['spans']]
             for text in narrative.splitlines():
@@ -169,7 +169,7 @@ class PurchaseOrderRichContentTests(TestCase):
         narrative = '<table>' + ''.join(f'<tr><th>Header-cell deliverable {index}</th><th>{index}</th></tr>' for index in range(75)) + '</table>'
         order = self.order(narrative)
         content, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as document:
+        with pymupdf.open(stream=content, filetype='pdf') as document:
             text = '\n'.join(page.get_text() for page in document)
             self.assertIn('Header-cell deliverable 74', text)
             self.assertGreater(len(document), 3)
@@ -209,7 +209,7 @@ class PurchaseOrderRichContentTests(TestCase):
         order.items[0].update(specification='SPEC-AX7', custom_measure='Measured value')
         order.items_table_headers = {'__column_order': ['specification', 'custom_measure', 'description'], 'description': 'Scope Item', 'specification': 'Agreed Specification', 'custom_measure': 'Measure'}
         pdf, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=pdf, filetype='pdf') as document:
+        with pymupdf.open(stream=pdf, filetype='pdf') as document:
             text = document[-1].get_text()
             self.assertLess(text.index('Agreed'), text.index('Measure'))
             self.assertIn('SPEC-AX7', text)
@@ -225,14 +225,14 @@ class PurchaseOrderRichContentTests(TestCase):
         order.summary = 'Legacy transient summary'
         order.contact_persons = {'purchase_summary': 'Saved engineering summary'}
         pdf, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=pdf, filetype='pdf') as document:
+        with pymupdf.open(stream=pdf, filetype='pdf') as document:
             self.assertIn('Saved engineering summary', document[0].get_text())
             self.assertNotIn('Legacy transient summary', document[0].get_text())
         word = Document(BytesIO(build_purchase_order_docx(order)))
         self.assertTrue(any('Saved engineering summary' in cell.text for table in word.tables for row in table.rows for cell in row.cells))
         order.contact_persons['purchase_summary'] = ''
         pdf, _ = build_purchase_order_pdf(order)
-        with fitz.open(stream=pdf, filetype='pdf') as document:
+        with pymupdf.open(stream=pdf, filetype='pdf') as document:
             self.assertIn(order.title, document[0].get_text())
             self.assertNotIn('Legacy transient summary', document[0].get_text())
 
@@ -242,7 +242,7 @@ class PurchaseOrderRichContentTests(TestCase):
         with patch('django.core.files.storage.default_storage.open', side_effect=AssertionError('No storage read for uploaded bytes')):
             content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as document:
+        with pymupdf.open(stream=content, filetype='pdf') as document:
             self.assertIn('Supporting document', document[-1].get_text())
             self.assertIn('Reviewed appendix title', document[-2].get_text())
             self.assertIn('Supporting scope', document[-2].get_text())
@@ -264,7 +264,7 @@ class PurchaseOrderRichContentTests(TestCase):
         with patch('apps.procurement.services.purchase_order_exports.PdfReader', side_effect=read_source):
             content, warnings = build_purchase_order_pdf(order)
         self.assertEqual(warnings, [])
-        with fitz.open(stream=content, filetype='pdf') as document:
+        with pymupdf.open(stream=content, filetype='pdf') as document:
             self.assertEqual(len(document), 3 + 2 * len(order.attachments))
             for index in range(8):
                 self.assertIn(f'UNIQUE APPENDIX CONTENT {index}', document[4 + 2 * index].get_text())

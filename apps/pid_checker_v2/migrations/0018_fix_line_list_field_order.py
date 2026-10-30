@@ -17,7 +17,10 @@ legend a user has since customized/renamed themselves.
 The service-code lookup table (37 entries) is carried over unchanged from
 the previous definition, just under the renamed field key 'service_code'.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'line_list'
 
@@ -174,7 +177,7 @@ def fix_forward(apps, schema_editor):
         description=NEW_DESCRIPTION,
         definition=NEW_DEFINITION,
     )
-    print(f'[pid_checker_v2] Fixed field order on {updated} {SECTION!r} legend row(s).')
+    logger.debug(f'[pid_checker_v2] Fixed field order on {updated} {SECTION!r} legend row(s).')
 
 
 def fix_backward(apps, schema_editor):

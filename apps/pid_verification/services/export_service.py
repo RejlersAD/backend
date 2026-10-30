@@ -10,8 +10,8 @@ import os
 import re as _re
 import tempfile
 from typing import Optional
-
 logger = logging.getLogger(__name__)
+
 
 # Soft-coded: categories excluded from all exports (Excel + PDF).
 # Connectivity findings are omitted — orphan-node graph checks produce too many
@@ -276,7 +276,7 @@ def generate_pdf(document) -> Optional[bytes]:
         try:
             from ..tasks import _resolve_file_path
             file_path = _resolve_file_path(document)
-            import fitz as _fitz                                              # noqa
+            import pymupdf as _pymupdf                                              # noqa
             from PIL import Image as _PILImg, ImageDraw as _IDraw            # noqa
             from PIL import ImageFont as _IFont                              # noqa
             HAS_OVERLAY = True
@@ -312,18 +312,18 @@ def generate_pdf(document) -> Optional[bytes]:
         if not HAS_OVERLAY or file_path is None:
             return None, {}
         try:
-            import fitz as _fitz
+            import pymupdf as _pymupdf
             from PIL import Image as _PILImg, ImageDraw as _IDraw, ImageFont as _IFont
 
             dpi      = RC['drawing_overlay']['dpi']
             sev_rgba = RC['drawing_overlay']['severity_rgba']
 
-            pdf = _fitz.open(file_path)
+            pdf = _pymupdf.open(file_path)
             if page_index >= len(pdf):
                 pdf.close()
                 return None, {}
             pix = pdf[page_index].get_pixmap(
-                matrix=_fitz.Matrix(dpi / 72.0, dpi / 72.0), alpha=False)
+                matrix=_pymupdf.Matrix(dpi / 72.0, dpi / 72.0), alpha=False)
             img = _PILImg.frombytes('RGB', [pix.width, pix.height], pix.samples)
             pdf.close()
 

@@ -1,5 +1,8 @@
+import logging
+
 from rest_framework import serializers
 from .models import PIDProject, PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
+logger = logging.getLogger(__name__)
 
 
 def _load_suppressed_categories():
@@ -634,7 +637,7 @@ class PIDDrawingUploadSerializer(serializers.Serializer):
                 data['rev'] = match.group(5) or ''
                 data['sheet_number'] = match.group(6) or '1'
                 data['total_sheets'] = match.group(7) or '1'
-                print(f"[SMART_PARSE] Auto-parsed drawing number: {drawing_num}")
+                logger.debug(f"[SMART_PARSE] Auto-parsed drawing number: {drawing_num}")
         
         # If structured fields provided, rebuild drawing_number
         elif all([data.get('area'), data.get('p_area'), data.get('doc_code'), data.get('serial_number')]):
@@ -644,7 +647,7 @@ class PIDDrawingUploadSerializer(serializers.Serializer):
             if data.get('sheet_number') and data.get('total_sheets'):
                 parts.append(f"{data['sheet_number']}/{data['total_sheets']}")
             data['drawing_number'] = '-'.join(parts)
-            print(f"[SMART_BUILD] Built drawing number: {data['drawing_number']}")
+            logger.debug(f"[SMART_BUILD] Built drawing number: {data['drawing_number']}")
         
         return data
     
@@ -661,30 +664,30 @@ class PIDDrawingUploadSerializer(serializers.Serializer):
     
     def validate_file(self, value):
         """Validate PDF file with enhanced debugging"""
-        print(f"[SERIALIZER] File validation - received value: {value}")
-        print(f"[SERIALIZER] Value type: {type(value)}")
+        logger.debug(f"[SERIALIZER] File validation - received value: {value}")
+        logger.debug(f"[SERIALIZER] Value type: {type(value)}")
         
         if not value:
-            print(f"[SERIALIZER] File validation failed: No file provided")
+            logger.debug(f"[SERIALIZER] File validation failed: No file provided")
             raise serializers.ValidationError("File is required")
         
         # Check if it's a proper file object
         if not hasattr(value, 'name') or not hasattr(value, 'read'):
-            print(f"[SERIALIZER] File validation failed: Not a proper file object")
+            logger.debug(f"[SERIALIZER] File validation failed: Not a proper file object")
             raise serializers.ValidationError("The submitted data was not a file. Check the encoding type on the form.")
         
         # Get filename
         filename = getattr(value, 'name', '')
-        print(f"[SERIALIZER] File name: {filename}")
+        logger.debug(f"[SERIALIZER] File name: {filename}")
         
         if not filename:
-            print(f"[SERIALIZER] File validation failed: No filename")
+            logger.debug(f"[SERIALIZER] File validation failed: No filename")
             raise serializers.ValidationError("File must have a name")
         
         # Check file extension (allow PDF, PNG, JPG for broader compatibility)
         allowed_extensions = ['.pdf', '.png', '.jpg', '.jpeg']
         if not any(filename.lower().endswith(ext) for ext in allowed_extensions):
-            print(f"[SERIALIZER] File validation failed: Invalid extension for {filename}")
+            logger.debug(f"[SERIALIZER] File validation failed: Invalid extension for {filename}")
             raise serializers.ValidationError(
                 f"Only PDF, PNG, JPG files are allowed. Received: {filename}"
             )
@@ -692,19 +695,19 @@ class PIDDrawingUploadSerializer(serializers.Serializer):
         # Check file size (max 50MB)
         max_size = 50 * 1024 * 1024  # 50MB
         file_size = getattr(value, 'size', 0)
-        print(f"[SERIALIZER] File size: {file_size} bytes")
+        logger.debug(f"[SERIALIZER] File size: {file_size} bytes")
         
         if file_size > max_size:
-            print(f"[SERIALIZER] File validation failed: File too large")
+            logger.debug(f"[SERIALIZER] File validation failed: File too large")
             raise serializers.ValidationError(
                 f"File size cannot exceed 50MB. Current size: {file_size / (1024*1024):.2f}MB"
             )
         
         if file_size == 0:
-            print(f"[SERIALIZER] File validation failed: Empty file")
+            logger.debug(f"[SERIALIZER] File validation failed: Empty file")
             raise serializers.ValidationError("File cannot be empty")
         
-        print(f"[SERIALIZER] File validation successful: {filename} ({file_size} bytes)")
+        logger.debug(f"[SERIALIZER] File validation successful: {filename} ({file_size} bytes)")
         return value
 
 

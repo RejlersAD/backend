@@ -2,6 +2,8 @@
 AI-Powered P&ID Extraction Engine
 Handles vision API calls to OpenAI GPT-4o and Claude 3.5 Sonnet for P&ID element extraction.
 """
+
+import logging
 from apps.core.ai_consumer_clients import provider_api_key
 import json
 import base64
@@ -18,6 +20,7 @@ from .ai_config import (
     EXTRACTION_PATTERNS,
     API_LIMITS,
 )
+logger = logging.getLogger(__name__)
 
 
 class PIDExtractionEngine:
@@ -233,7 +236,7 @@ class PIDExtractionEngine:
                 return equipment_list
             
         except Exception as e:
-            print(f"Equipment extraction error: {e}")
+            logger.debug(f"Equipment extraction error: {e}")
         
         return []
     
@@ -276,7 +279,7 @@ class PIDExtractionEngine:
                 return line_list
             
         except Exception as e:
-            print(f"Line extraction error: {e}")
+            logger.debug(f"Line extraction error: {e}")
         
         return []
     
@@ -319,7 +322,7 @@ class PIDExtractionEngine:
                 return instrument_list
             
         except Exception as e:
-            print(f"Instrument extraction error: {e}")
+            logger.debug(f"Instrument extraction error: {e}")
         
         return []
     
@@ -355,7 +358,7 @@ class PIDExtractionEngine:
                 return overview
             
         except Exception as e:
-            print(f"Quick overview error: {e}")
+            logger.debug(f"Quick overview error: {e}")
         
         return {}
     

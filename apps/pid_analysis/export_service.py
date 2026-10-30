@@ -2,11 +2,14 @@
 P&ID Report Export Service
 Generate professional reports in PDF, Excel, and CSV formats with customizable branding
 """
+
+import logging
 from django.http import HttpResponse
 from django.conf import settings
 from datetime import datetime
 import csv
 import io
+logger = logging.getLogger(__name__)
 
 
 class PIDReportExportService:
@@ -39,8 +42,8 @@ class PIDReportExportService:
     
     def export_pdf(self, drawing):
         """Export report as PDF with customizable branding"""
-        print(f"[PDF_EXPORT] Starting PDF export for drawing: {drawing.drawing_number}")
-        print(f"[PDF_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
+        logger.debug(f"[PDF_EXPORT] Starting PDF export for drawing: {drawing.drawing_number}")
+        logger.debug(f"[PDF_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
         
         try:
             from reportlab.lib import colors
@@ -49,9 +52,9 @@ class PIDReportExportService:
             from reportlab.lib.units import cm
             from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
             from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-            print(f"[PDF_EXPORT] Reportlab imported successfully")
+            logger.debug(f"[PDF_EXPORT] Reportlab imported successfully")
         except ImportError as e:
-            print(f"[ERROR] Failed to import reportlab: {str(e)}")
+            logger.debug(f"[ERROR] Failed to import reportlab: {str(e)}")
             return HttpResponse(
                 f"PDF export library not available: {str(e)}",
                 content_type='text/plain',
@@ -60,7 +63,7 @@ class PIDReportExportService:
         
         # Verify report exists
         if not hasattr(drawing, 'analysis_report'):
-            print(f"[PDF_EXPORT ERROR] Drawing has no analysis_report")
+            logger.debug(f"[PDF_EXPORT ERROR] Drawing has no analysis_report")
             return HttpResponse(
                 "No analysis report available for this drawing",
                 content_type='text/plain',
@@ -68,7 +71,7 @@ class PIDReportExportService:
             )
         
         report = drawing.analysis_report
-        print(f"[PDF_EXPORT] Report total_issues: {report.total_issues}")
+        logger.debug(f"[PDF_EXPORT] Report total_issues: {report.total_issues}")
         
         buffer = io.BytesIO()
         
@@ -361,7 +364,7 @@ class PIDReportExportService:
         try:
             doc.build(elements)
         except Exception as e:
-            print(f"[ERROR] Failed to build PDF document: {str(e)}")
+            logger.debug(f"[ERROR] Failed to build PDF document: {str(e)}")
             import traceback
             traceback.print_exc()
             return HttpResponse(
@@ -379,16 +382,16 @@ class PIDReportExportService:
     
     def export_excel(self, drawing):
         """Export report as Excel with customizable branding"""
-        print(f"[EXCEL_EXPORT] Starting Excel export for drawing: {drawing.drawing_number}")
-        print(f"[EXCEL_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
+        logger.debug(f"[EXCEL_EXPORT] Starting Excel export for drawing: {drawing.drawing_number}")
+        logger.debug(f"[EXCEL_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
         
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
             from openpyxl.utils import get_column_letter
-            print(f"[EXCEL_EXPORT] openpyxl imported successfully")
+            logger.debug(f"[EXCEL_EXPORT] openpyxl imported successfully")
         except ImportError as e:
-            print(f"[ERROR] Failed to import openpyxl: {str(e)}")
+            logger.debug(f"[ERROR] Failed to import openpyxl: {str(e)}")
             return HttpResponse(
                 f"Excel export library not available: {str(e)}",
                 content_type='text/plain',
@@ -397,7 +400,7 @@ class PIDReportExportService:
         
         # Verify report exists
         if not hasattr(drawing, 'analysis_report'):
-            print(f"[EXCEL_EXPORT ERROR] Drawing has no analysis_report")
+            logger.debug(f"[EXCEL_EXPORT ERROR] Drawing has no analysis_report")
             return HttpResponse(
                 "No analysis report available for this drawing",
                 content_type='text/plain',
@@ -405,7 +408,7 @@ class PIDReportExportService:
             )
         
         report = drawing.analysis_report
-        print(f"[EXCEL_EXPORT] Report total_issues: {report.total_issues}")
+        logger.debug(f"[EXCEL_EXPORT] Report total_issues: {report.total_issues}")
         
         # Create workbook
         wb = openpyxl.Workbook()
@@ -673,7 +676,7 @@ class PIDReportExportService:
             wb.save(buffer)
             buffer.seek(0)
         except Exception as e:
-            print(f"[ERROR] Failed to save Excel workbook: {str(e)}")
+            logger.debug(f"[ERROR] Failed to save Excel workbook: {str(e)}")
             import traceback
             traceback.print_exc()
             return HttpResponse(
@@ -692,12 +695,12 @@ class PIDReportExportService:
     
     def export_csv(self, drawing):
         """Export report as CSV"""
-        print(f"[CSV_EXPORT] Starting CSV export for drawing: {drawing.drawing_number}")
-        print(f"[CSV_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
+        logger.debug(f"[CSV_EXPORT] Starting CSV export for drawing: {drawing.drawing_number}")
+        logger.debug(f"[CSV_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
         
         # Verify report exists
         if not hasattr(drawing, 'analysis_report'):
-            print(f"[CSV_EXPORT ERROR] Drawing has no analysis_report")
+            logger.debug(f"[CSV_EXPORT ERROR] Drawing has no analysis_report")
             return HttpResponse(
                 "No analysis report available for this drawing",
                 content_type='text/plain',
@@ -705,7 +708,7 @@ class PIDReportExportService:
             )
         
         report = drawing.analysis_report
-        print(f"[CSV_EXPORT] Report total_issues: {report.total_issues}")
+        logger.debug(f"[CSV_EXPORT] Report total_issues: {report.total_issues}")
         
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = f'attachment; filename="PID_Analysis_{drawing.drawing_number or "Report"}_{datetime.now().strftime("%Y%m%d")}.csv"'

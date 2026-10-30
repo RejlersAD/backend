@@ -3,8 +3,11 @@
 Data migration to set up approval routes for all invoice categories.
 Reads email addresses from environment variables for flexibility across environments.
 """
+
+import logging
 import os
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 def create_approval_routes(apps, schema_editor):
@@ -163,7 +166,7 @@ def create_approval_routes(apps, schema_editor):
             }
         )
     
-    print(f"✅ Successfully created/updated approval route: {route_config['name']}")
+    logger.debug(f"✅ Successfully created/updated approval route: {route_config['name']}")
 
 
 def remove_approval_routes(apps, schema_editor):
@@ -174,7 +177,7 @@ def remove_approval_routes(apps, schema_editor):
     ApprovalRoute.objects.filter(
         invoice_type__in=['project', 'admin', 'finance', 'it']
     ).delete()
-    print("✅ Removed approval routes")
+    logger.debug("✅ Removed approval routes")
 
 
 class Migration(migrations.Migration):

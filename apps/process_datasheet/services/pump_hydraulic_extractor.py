@@ -41,8 +41,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Soft-coded constants
@@ -85,8 +85,8 @@ def _extract_text(pdf_path: str) -> str:
 
     # Always also run PyMuPDF — sometimes pdfplumber misses rotated text
     try:
-        import fitz
-        doc = fitz.open(pdf_path)
+        import pymupdf
+        doc = pymupdf.open(pdf_path)
         for page in doc:
             t = page.get_text() or ''
             if t.strip():
@@ -100,8 +100,8 @@ def _extract_text(pdf_path: str) -> str:
 
 def _page_count(pdf_path: str) -> int:
     try:
-        import fitz
-        doc = fitz.open(pdf_path)
+        import pymupdf
+        doc = pymupdf.open(pdf_path)
         n = doc.page_count
         doc.close()
         return n
@@ -165,11 +165,11 @@ def _render_pages_to_b64_jpegs(pdf_path: str, max_pages: int, dpi: int) -> List[
     """Render the first N pages to base-64-encoded JPEGs for the vision API."""
     images: List[str] = []
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         for i, page in enumerate(doc):
             if i >= max_pages:
                 break

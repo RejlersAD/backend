@@ -3,8 +3,11 @@ Verifier Agent - Controlled LLM for missed issues
 Uses ONLY extracted data - NO hallucination
 Uses MultiModelAIService for OpenAI + Gemini fallback
 """
+
+import logging
 import os
 from typing import Dict, List, Any
+logger = logging.getLogger(__name__)
 
 
 class VerifierAgent:
@@ -22,7 +25,7 @@ class VerifierAgent:
         # Import here to avoid circular imports
         from apps.pid_analysis.multi_model_service import MultiModelAIService
         self.ai_service = MultiModelAIService()
-        print("[VERIFIER AGENT] Initialized with MultiModelAIService")
+        logger.debug("[VERIFIER AGENT] Initialized with MultiModelAIService")
     
     def verify(
         self, 
@@ -41,7 +44,7 @@ class VerifierAgent:
         Returns:
             Additional issues found (NOT in rule_issues)
         """
-        print(f"[VERIFIER AGENT] Starting verification with ground truth data")
+        logger.debug(f"[VERIFIER AGENT] Starting verification with ground truth data")
         
         # Build grounding context
         grounding = self._build_grounding_context(extracted_data)
@@ -82,16 +85,16 @@ class VerifierAgent:
                 use_vision=True
             )
             
-            print(f"[VERIFIER AGENT] LLM response length: {len(result_text)}")
+            logger.debug(f"[VERIFIER AGENT] LLM response length: {len(result_text)}")
             
             # Parse issues from response
             additional_issues = self._parse_issues(result_text, extracted_data)
-            print(f"[VERIFIER AGENT] Found {len(additional_issues)} additional issue(s)")
+            logger.debug(f"[VERIFIER AGENT] Found {len(additional_issues)} additional issue(s)")
             
             return additional_issues
             
         except Exception as e:
-            print(f"[VERIFIER AGENT ERROR] {e}")
+            logger.debug(f"[VERIFIER AGENT ERROR] {e}")
             return []
     
     def _get_system_prompt(self) -> str:

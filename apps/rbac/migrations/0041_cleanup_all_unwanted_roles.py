@@ -1,7 +1,10 @@
+import logging
+
 # Migration to clean up ALL unwanted roles regardless of is_system_role flag
 # Targets BOTH system and non-system variants of the unwanted roles
 
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 def cleanup_all_unwanted_roles(apps, schema_editor):
@@ -38,21 +41,21 @@ def cleanup_all_unwanted_roles(apps, schema_editor):
                     pass
 
             if has_users:
-                print(f"  ⚠ Skipping {role.name} ({code}) — has assigned users")
+                logger.debug(f"  ⚠ Skipping {role.name} ({code}) — has assigned users")
                 continue
 
             RoleModule.objects.filter(role=role).delete()
             role.delete()
             deleted += 1
-            print(f"  ✓ Deleted: {role.name} ({code})")
+            logger.debug(f"  ✓ Deleted: {role.name} ({code})")
 
-    print(f"\n  Cleanup complete: {deleted} roles deleted")
+    logger.debug(f"\n  Cleanup complete: {deleted} roles deleted")
 
     # Print final state
     remaining = Role.objects.filter(is_active=True).exclude(code__startswith='custom_').order_by('name')
-    print(f"  Remaining active roles ({remaining.count()}):")
+    logger.debug(f"  Remaining active roles ({remaining.count()}):")
     for r in remaining:
-        print(f"    - {r.name} ({r.code})")
+        logger.debug(f"    - {r.name} ({r.code})")
 
 
 def noop_reverse(apps, schema_editor):

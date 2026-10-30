@@ -1,12 +1,15 @@
 """
 RBAC Signals
 """
+
+import logging
 from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from .models import UserProfile, Organization, UserRole, RoleModule, RolePermission, Delegation, Role, Module, Permission
 from .utils import create_audit_log
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -45,9 +48,9 @@ def clear_user_permissions_cache(sender, instance, **kwargs):
     try:
         cache.delete(f'user_permissions_{profile_id}')
         cache.delete(f'user_modules_{profile_id}')
-        print(f"[Cache] Cleared permissions and modules cache for user {profile_id}")
+        logger.debug(f"[Cache] Cleared permissions and modules cache for user {profile_id}")
     except Exception as exc:
-        print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+        logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
 
 
 @receiver(post_save, sender=RoleModule)
@@ -73,10 +76,10 @@ def clear_role_users_cache(sender, instance, **kwargs):
             cache.delete(f'user_modules_{profile_id}')
             cleared_count += 1
         except Exception as exc:
-            print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+            logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
     
     if cleared_count > 0:
-        print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} module change")
+        logger.debug(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} module change")
 
 
 @receiver(post_save, sender=RolePermission)
@@ -99,10 +102,10 @@ def clear_role_permission_users_cache(sender, instance, **kwargs):
             cache.delete(f'user_permissions_{profile_id}')
             cleared_count += 1
         except Exception as exc:
-            print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+            logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
 
     if cleared_count > 0:
-        print(f"[Cache] Cleared permissions cache for {cleared_count} user(s) affected by role {role_id} permission change")
+        logger.debug(f"[Cache] Cleared permissions cache for {cleared_count} user(s) affected by role {role_id} permission change")
 
 
 # Soft-coded: read the default role code from rbac_config so a single config
@@ -147,7 +150,7 @@ def assign_default_role_on_profile_creation(sender, instance, created, **kwargs)
     except Exception as exc:
         # Never let default-role assignment block profile creation itself —
         # the profile has already been saved by this point.
-        print(f"[RBAC] WARNING Failed to assign default role to profile {instance.id}: {exc}")
+        logger.debug(f"[RBAC] WARNING Failed to assign default role to profile {instance.id}: {exc}")
 
 
 @receiver(post_save, sender='rbac.Module')
@@ -185,9 +188,9 @@ def clear_profile_status_cache(sender, instance, created, **kwargs):
         try:
             cache.delete(f'user_permissions_{instance.id}')
             cache.delete(f'user_modules_{instance.id}')
-            print(f"[Cache] Cleared cache for user {instance.id} (status={instance.status}, deleted={instance.is_deleted})")
+            logger.debug(f"[Cache] Cleared cache for user {instance.id} (status={instance.status}, deleted={instance.is_deleted})")
         except Exception as exc:
-            print(f"[Cache] WARNING Failed to clear cache for user {instance.id}: {exc}")
+            logger.debug(f"[Cache] WARNING Failed to clear cache for user {instance.id}: {exc}")
 
 
 @receiver(post_save, sender=Role)
@@ -208,11 +211,11 @@ def clear_role_status_cache(sender, instance, **kwargs):
                 cache.delete(f'user_modules_{profile_id}')
                 cleared_count += 1
             except Exception as exc:
-                print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+                logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
         if cleared_count > 0:
-            print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} status change")
+            logger.debug(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} status change")
     except Exception as exc:
-        print(f"[Cache] WARNING Failed to clear role cache for role {role_id}: {exc}")
+        logger.debug(f"[Cache] WARNING Failed to clear role cache for role {role_id}: {exc}")
 
 
 @receiver(post_save, sender=Module)
@@ -235,11 +238,11 @@ def clear_module_status_cache(sender, instance, **kwargs):
                 cache.delete(f'user_modules_{profile_id}')
                 cleared_count += 1
             except Exception as exc:
-                print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+                logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
         if cleared_count > 0:
-            print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by module {module_id} status change")
+            logger.debug(f"[Cache] Cleared cache for {cleared_count} user(s) affected by module {module_id} status change")
     except Exception as exc:
-        print(f"[Cache] WARNING Failed to clear module cache for module {module_id}: {exc}")
+        logger.debug(f"[Cache] WARNING Failed to clear module cache for module {module_id}: {exc}")
 
 
 @receiver(post_save, sender=Permission)
@@ -267,11 +270,11 @@ def clear_permission_status_cache(sender, instance, **kwargs):
                 cache.delete(f'user_modules_{profile_id}')
                 cleared_count += 1
             except Exception as exc:
-                print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+                logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
         if cleared_count > 0:
-            print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by permission {permission_id} status change")
+            logger.debug(f"[Cache] Cleared cache for {cleared_count} user(s) affected by permission {permission_id} status change")
     except Exception as exc:
-        print(f"[Cache] WARNING Failed to clear permission cache for permission {permission_id}: {exc}")
+        logger.debug(f"[Cache] WARNING Failed to clear permission cache for permission {permission_id}: {exc}")
 
 
 @receiver(post_save, sender=Delegation)
@@ -285,4 +288,4 @@ def clear_delegation_cache(sender, instance, **kwargs):
             cache.delete(f'user_permissions_{profile_id}')
             cache.delete(f'user_modules_{profile_id}')
         except Exception as exc:
-            print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
+            logger.debug(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")

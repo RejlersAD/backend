@@ -29,8 +29,8 @@ from .serializers import (
     DesignAnalysisCreateSerializer, EngineeringListItemSerializer,
     EngineeringListItemListSerializer, ListTypeConfigSerializer
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 # ---------------------------------------------------------------------------
@@ -52,11 +52,11 @@ def _extract_pid_no_per_page(file_path: str) -> dict:
     """
     page_map: dict = {}
     try:
-        import fitz as _fitz  # PyMuPDF — already a project dependency
+        import pymupdf as _pymupdf  # PyMuPDF — already a project dependency
         from apps.pid_analysis.equipment_analysis_views import (
             _extract_titleblock_dwg_no,
         )
-        doc = _fitz.open(file_path)
+        doc = _pymupdf.open(file_path)
         try:
             for _pg_idx in range(len(doc)):
                 try:
@@ -2416,13 +2416,13 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Only PDF drawings are supported'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            import fitz
+            import pymupdf
             from django.core.files.base import ContentFile
             from django.db.models import Max
 
             drawing_bytes = drawing_file.read()
             try:
-                pdf_doc = fitz.open(stream=drawing_bytes, filetype='pdf')
+                pdf_doc = pymupdf.open(stream=drawing_bytes, filetype='pdf')
                 page_count = len(pdf_doc)
                 pdf_doc.close()
             except Exception as page_count_err:
@@ -2540,18 +2540,18 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            import fitz
+            import pymupdf
 
             with drawing.original_file.open('rb') as fh:
                 raw = fh.read()
 
-            pdf_doc = fitz.open(stream=raw, filetype='pdf')
+            pdf_doc = pymupdf.open(stream=raw, filetype='pdf')
             try:
                 if page_idx < 0 or page_idx >= len(pdf_doc):
                     return Response({'error': f'page_index out of range (0-{len(pdf_doc) - 1})'},
                                      status=status.HTTP_400_BAD_REQUEST)
                 page = pdf_doc[page_idx]
-                mat = fitz.Matrix(self.DRAWING_RENDER_ZOOM, self.DRAWING_RENDER_ZOOM)
+                mat = pymupdf.Matrix(self.DRAWING_RENDER_ZOOM, self.DRAWING_RENDER_ZOOM)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 png_bytes = pix.tobytes('png')
             finally:
@@ -2790,8 +2790,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             # burning OCR time.  Matches the frontend LL_UPLOAD_RULES card.
             # ------------------------------------------------------------------
             try:
-                import fitz as _fitz
-                with _fitz.open(tmp_path) as _limit_doc:
+                import pymupdf as _pymupdf
+                with _pymupdf.open(tmp_path) as _limit_doc:
                     _page_count = len(_limit_doc)
                 if _page_count > BASE_EXTRACTION_MAX_PAGES:
                     logger.warning(f"📄 Rejected {pid_file.name}: {_page_count} pages > {BASE_EXTRACTION_MAX_PAGES}")

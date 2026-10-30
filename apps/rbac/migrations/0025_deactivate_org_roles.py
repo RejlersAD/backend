@@ -24,7 +24,10 @@ Safety rules applied before deactivation:
 To RE-ACTIVATE any of these roles manually (Django shell or admin):
     Role.objects.filter(name='Finance Invoice Management').update(is_active=True)
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded target list ────────────────────────────────────────────────────
 # Change this list if role names ever differ in production.
@@ -54,7 +57,7 @@ def deactivate_org_roles(apps, schema_editor):
         )
     except Role.DoesNotExist:
         fallback_role = None
-        print(f'  [0025]   ⚠ Fallback role "{FALLBACK_ROLE_CODE}" not found — orphaned users will NOT be auto-assigned')
+        logger.debug(f'  [0025]   ⚠ Fallback role "{FALLBACK_ROLE_CODE}" not found — orphaned users will NOT be auto-assigned')
 
     for target_name in TARGET_ROLE_NAMES:
         candidates = Role.objects.using(db_alias).filter(
@@ -62,17 +65,17 @@ def deactivate_org_roles(apps, schema_editor):
         )
 
         if not candidates.exists():
-            print(f'  [0025] ℹ Role not found (already absent or renamed): "{target_name}"')
+            logger.debug(f'  [0025] ℹ Role not found (already absent or renamed): "{target_name}"')
             continue
 
         for role in candidates:
             # ── Safety guard: never touch protected system roles ──────────
             if role.code in PROTECTED_CODES or role.is_system_role:
-                print(f'  [0025]   ⚠ Skipping protected/system role: "{role.name}" (code={role.code})')
+                logger.debug(f'  [0025]   ⚠ Skipping protected/system role: "{role.name}" (code={role.code})')
                 continue
 
             if not role.is_active:
-                print(f'  [0025] ℹ Already inactive: "{role.name}" (code={role.code})')
+                logger.debug(f'  [0025] ℹ Already inactive: "{role.name}" (code={role.code})')
                 continue
 
             # ── Migrate user assignments ──────────────────────────────────
@@ -94,12 +97,12 @@ def deactivate_org_roles(apps, schema_editor):
                     orphan_count += 1
 
             if orphan_count:
-                print(f'  [0025]   ✓ {orphan_count} user(s) assigned fallback role "{FALLBACK_ROLE_CODE}"')
+                logger.debug(f'  [0025]   ✓ {orphan_count} user(s) assigned fallback role "{FALLBACK_ROLE_CODE}"')
 
             # ── Deactivate the role ───────────────────────────────────────
             role.is_active = False
             role.save(using=db_alias, update_fields=['is_active'])
-            print(f'  [0025] ✓ Deactivated role: "{role.name}" (code={role.code})')
+            logger.debug(f'  [0025] ✓ Deactivated role: "{role.name}" (code={role.code})')
 
 
 def noop(apps, schema_editor):

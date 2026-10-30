@@ -36,8 +36,8 @@ import os
 import re
 from pathlib import Path
 from typing import Optional
-
 logger = logging.getLogger(__name__)
+
 
 # ── Soft-coded: model names (override via env vars) ───────────────────────────
 GEMINI_MODEL        = os.getenv('GEMINI_VISION_MODEL',  'gemini-3.8-flash')
@@ -228,7 +228,7 @@ def _drawing_to_images(drawing_obj) -> list[str]:
     """
     images = []
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
 
         # Resolve the django file field path
@@ -242,13 +242,13 @@ def _drawing_to_images(drawing_obj) -> list[str]:
             logger.warning('[DCSAnalyzer] File not found: %s', file_path)
             return images
 
-        pdf = fitz.open(file_path)
+        pdf = pymupdf.open(file_path)
         page_idx = drawing_obj.page_index or 0
         if page_idx >= len(pdf):
             page_idx = 0
 
         page = pdf[page_idx]
-        mat  = fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE)
+        mat  = pymupdf.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE)
         pix  = page.get_pixmap(matrix=mat, alpha=False)
         img  = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
 
@@ -273,12 +273,12 @@ def _legend_pdf_to_images(legend_file_path: str) -> list[str]:
     """Render all pages of the legend PDF to base64-JPEG."""
     images = []
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
 
-        pdf = fitz.open(legend_file_path)
+        pdf = pymupdf.open(legend_file_path)
         for page in pdf:
-            mat = fitz.Matrix(2.0, 2.0)
+            mat = pymupdf.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             img = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
             w, h = img.size

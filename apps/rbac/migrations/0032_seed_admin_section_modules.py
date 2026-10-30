@@ -23,7 +23,10 @@ All new modules are created idempotently (get_or_create) and assigned
 to the super_admin and admin roles.  This ensures the Role & Access Management
 panel correctly displays all admin features under the Administration group.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded catalogue for this migration ───────────────────────────────────
 NEW_ADMIN_MODULES = [
@@ -96,14 +99,14 @@ def seed_admin_section_modules(apps, schema_editor):
             obj.save(using=db_alias)
         module_objs[m['code']] = obj
         action = 'created' if created else 'updated'
-        print(f'  [0032] ✓ Module {action}: {m["code"]}')
+        logger.debug(f'  [0032] ✓ Module {action}: {m["code"]}')
 
     # 2. Assign to target roles
     for role_code in GRANT_TO_ROLES:
         try:
             role = Role.objects.using(db_alias).get(code=role_code)
         except Role.DoesNotExist:
-            print(f'  [0032] ⚠ Role not found: {role_code} — skipping')
+            logger.debug(f'  [0032] ⚠ Role not found: {role_code} — skipping')
             continue
         for mod in module_objs.values():
             _, created = RoleModule.objects.using(db_alias).get_or_create(
@@ -111,7 +114,7 @@ def seed_admin_section_modules(apps, schema_editor):
                 module=mod,
             )
             if created:
-                print(f'  [0032] ✓ Granted {mod.code} → {role_code}')
+                logger.debug(f'  [0032] ✓ Granted {mod.code} → {role_code}')
 
 
 def noop(apps, schema_editor):

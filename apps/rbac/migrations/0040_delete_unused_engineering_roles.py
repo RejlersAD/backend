@@ -1,6 +1,9 @@
+import logging
+
 # Generated migration to delete unused engineering and HR roles
 
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 def delete_unused_roles(apps, schema_editor):
@@ -40,7 +43,7 @@ def delete_unused_roles(apps, schema_editor):
             # Check if any users are assigned this role
             user_count = UserRole.objects.filter(role=role).count()
             if user_count > 0:
-                print(f"  ⚠️ Skipping {role.name} ({role_code}) - {user_count} users assigned")
+                logger.debug(f"  ⚠️ Skipping {role.name} ({role_code}) - {user_count} users assigned")
                 continue
             
             # Delete role-module assignments
@@ -50,19 +53,19 @@ def delete_unused_roles(apps, schema_editor):
             # Delete the role
             role.delete()
             deleted_count += 1
-            print(f"  ✓ Deleted role: {role.name} ({role_code}) - {module_count} modules removed")
+            logger.debug(f"  ✓ Deleted role: {role.name} ({role_code}) - {module_count} modules removed")
             
         except Role.DoesNotExist:
-            print(f"  • Role not found: {role_code} (skipping)")
+            logger.debug(f"  • Role not found: {role_code} (skipping)")
     
-    print(f"\n  ✓ Cleanup complete: {deleted_count} roles deleted")
+    logger.debug(f"\n  ✓ Cleanup complete: {deleted_count} roles deleted")
 
 
 def reverse_delete(apps, schema_editor):
     """
     Reverse migration - cannot restore deleted roles.
     """
-    print("  ⚠️ Reverse migration not supported - roles cannot be automatically restored")
+    logger.debug("  ⚠️ Reverse migration not supported - roles cannot be automatically restored")
 
 
 class Migration(migrations.Migration):

@@ -21,8 +21,8 @@ import re
 import pandas as pd
 
 from apps.pid_checker_v2.legend_defaults import DEFAULT_TEMPLATES, SECTION_ELECTRICAL
-
 logger = logging.getLogger(__name__)
+
 
 # Get electrical legend fields — the ONE source of truth for this
 # section's shape. Same pattern as services/tag_extractor.py's own
@@ -161,9 +161,9 @@ def _rows_from_table(table_rows, file_type):
 
 
 def _parse_pdf_tier1_pymupdf(pdf_bytes, file_type):
-    import fitz  # PyMuPDF
+    import pymupdf  # PyMuPDF
     results = []
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         for page_num, page in enumerate(doc):
             try:
@@ -355,11 +355,11 @@ def extract_panel_tag_from_load_list(pdf_bytes):
     doesn't actually parse as a real electrical tag is treated as not
     found, same "never fabricate a match" rule used throughout this app.
     """
-    import fitz  # PyMuPDF
+    import pymupdf  # PyMuPDF
 
     page_texts = []  # [(page_num, source, text)]
 
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         for page_num, page in enumerate(doc):
             text = page.get_text() or ''

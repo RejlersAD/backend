@@ -1,3 +1,5 @@
+import logging
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
@@ -52,6 +54,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions
 from rest_framework.response import Response
 from django.http import HttpResponse
+logger = logging.getLogger(__name__)
 
 # Export endpoint - using test-export pattern because drawings/pk/export doesn't work
 @api_view(['GET'])
@@ -61,11 +64,11 @@ def test_export(request, pk):
     from .models import PIDDrawing
     from .export_service import PIDReportExportService
     
-    print(f"[EXPORT via TEST] Reached export endpoint! PK={pk}")
+    logger.debug(f"[EXPORT via TEST] Reached export endpoint! PK={pk}")
     
     try:
         drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
-        print(f"[EXPORT via TEST] Drawing found: {drawing.drawing_number}")
+        logger.debug(f"[EXPORT via TEST] Drawing found: {drawing.drawing_number}")
     except PIDDrawing.DoesNotExist:
         return Response({'error': 'Drawing not found'}, status=404)
     
@@ -73,7 +76,7 @@ def test_export(request, pk):
         return Response({'error': 'No analysis report available'}, status=404)
     
     export_format = request.query_params.get('format', 'pdf')
-    print(f"[EXPORT via TEST] Format: {export_format}")
+    logger.debug(f"[EXPORT via TEST] Format: {export_format}")
     
     export_service = PIDReportExportService()
     
@@ -87,7 +90,7 @@ def test_export(request, pk):
         else:
             return Response({'error': 'Invalid format'}, status=400)
     except Exception as e:
-        print(f"[EXPORT via TEST ERROR] {str(e)}")
+        logger.debug(f"[EXPORT via TEST ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         return Response({'error': str(e)}, status=500)
@@ -100,11 +103,11 @@ def export_drawing(request, pk):
     from .models import PIDDrawing
     from .export_service import PIDReportExportService
     
-    print(f"[EXPORT DRAWING] Reached export endpoint! PK={pk}")
+    logger.debug(f"[EXPORT DRAWING] Reached export endpoint! PK={pk}")
     
     try:
         drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
-        print(f"[EXPORT DRAWING] Drawing found: {drawing.drawing_number}")
+        logger.debug(f"[EXPORT DRAWING] Drawing found: {drawing.drawing_number}")
     except PIDDrawing.DoesNotExist:
         return Response({'error': 'Drawing not found'}, status=404)
     
@@ -112,7 +115,7 @@ def export_drawing(request, pk):
         return Response({'error': 'No analysis report available'}, status=404)
     
     export_format = request.query_params.get('format', 'pdf')
-    print(f"[EXPORT DRAWING] Format: {export_format}")
+    logger.debug(f"[EXPORT DRAWING] Format: {export_format}")
     
     export_service = PIDReportExportService()
     
@@ -126,7 +129,7 @@ def export_drawing(request, pk):
         else:
             return Response({'error': 'Invalid format'}, status=400)
     except Exception as e:
-        print(f"[EXPORT DRAWING ERROR] {str(e)}")
+        logger.debug(f"[EXPORT DRAWING ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         return Response({'error': str(e)}, status=500)
@@ -139,8 +142,8 @@ def direct_export(request, pk):
     from .models import PIDDrawing
     from .export_service import PIDReportExportService
     
-    print(f"\n[DIRECT EXPORT] ===== DIRECT EXPORT CALLED =====")
-    print(f"[DIRECT EXPORT] PK: {pk}, Format: {request.query_params.get('format', 'pdf')}")
+    logger.debug(f"\n[DIRECT EXPORT] ===== DIRECT EXPORT CALLED =====")
+    logger.debug(f"[DIRECT EXPORT] PK: {pk}, Format: {request.query_params.get('format', 'pdf')}")
     
     try:
         drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
@@ -163,7 +166,7 @@ def direct_export(request, pk):
         else:
             return Response({'error': 'Invalid format'}, status=400)
     except Exception as e:
-        print(f"[DIRECT EXPORT ERROR] {str(e)}")
+        logger.debug(f"[DIRECT EXPORT ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         return Response({'error': str(e)}, status=500)

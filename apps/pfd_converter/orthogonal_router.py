@@ -4,8 +4,11 @@ ORTHOGONAL LINE ROUTER
 Professional P&ID line routing with 90° angles only, no diagonals
 """
 
+import logging
+
 from typing import List, Tuple, Set
 from reportlab.lib.units import mm
+logger = logging.getLogger(__name__)
 
 
 class OrthogonalRouter:
@@ -138,23 +141,23 @@ def test_orthogonal_router():
     start = (100*mm, 300*mm)
     end = (400*mm, 200*mm)
     route = router.route(start, end, "line-1")
-    print(f"Route 1: {len(route)} waypoints")
+    logger.debug(f"Route 1: {len(route)} waypoints")
     for i, point in enumerate(route):
-        print(f"  {i}: ({point[0]/mm:.1f}mm, {point[1]/mm:.1f}mm)")
+        logger.debug(f"  {i}: ({point[0]/mm:.1f}mm, {point[1]/mm:.1f}mm)")
     
     # Test 2: Parallel line
     start2 = (100*mm, 310*mm)  # 10mm above first line
     end2 = (400*mm, 210*mm)
     route2 = router.route(start2, end2, "line-2")
-    print(f"\nRoute 2: {len(route2)} waypoints")
+    logger.debug(f"\nRoute 2: {len(route2)} waypoints")
     for i, point in enumerate(route2):
-        print(f"  {i}: ({point[0]/mm:.1f}mm, {point[1]/mm:.1f}mm)")
+        logger.debug(f"  {i}: ({point[0]/mm:.1f}mm, {point[1]/mm:.1f}mm)")
     
     # Test 3: Elbows
     elbows = router.get_elbow_positions(route)
-    print(f"\nElbows for route 1: {len(elbows)}")
+    logger.debug(f"\nElbows for route 1: {len(elbows)}")
     for elbow in elbows:
-        print(f"  Elbow at ({elbow[0]/mm:.1f}mm, {elbow[1]/mm:.1f}mm)")
+        logger.debug(f"  Elbow at ({elbow[0]/mm:.1f}mm, {elbow[1]/mm:.1f}mm)")
 
 
 if __name__ == "__main__":

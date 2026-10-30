@@ -13,11 +13,11 @@ import math
 import re
 from dataclasses import dataclass
 
-import fitz
+import pymupdf
 import numpy as np
 from PIL import Image
-
 logger = logging.getLogger(__name__)
+
 
 SYMBOL_DPI = 150
 OCR_DPI = 300
@@ -157,7 +157,7 @@ def _load_references(user_id):
 
 
 def embedded_text_boxes(page):
-    return [TextBox(word[4], tuple(fitz.Rect(word[:4]) * page.rotation_matrix))
+    return [TextBox(word[4], tuple(pymupdf.Rect(word[:4]) * page.rotation_matrix))
             for word in page.get_text('words')]
 
 def drawing_title_from_boxes(boxes, width, height):
@@ -210,9 +210,9 @@ def drawing_title(page, boxes=None):
     pytesseract = extractor.pytesseract
     titles = set()
     for left, right in ((0, page.rect.width / 2), (page.rect.width / 2, page.rect.width)):
-        clip = fitz.Rect(left, page.rect.height * 0.7, right, page.rect.height)
+        clip = pymupdf.Rect(left, page.rect.height * 0.7, right, page.rect.height)
         zoom = 240 / 72
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, alpha=False)
         image = extractor._enhance_native_drawing(Image.frombytes('RGB', (pix.width, pix.height), pix.samples))
         for angle in (0, 90, 180, 270):
             try:
@@ -435,7 +435,7 @@ def detect_symbols(rgb, references, cv, on_progress=None):
 
 
 def _ocr_page(page, pytesseract, cv, scan_mode, on_progress=None):
-    pixmap = page.get_pixmap(matrix=fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72), alpha=False)
+    pixmap = page.get_pixmap(matrix=pymupdf.Matrix(OCR_DPI / 72, OCR_DPI / 72), alpha=False)
     rgb = np.frombuffer(pixmap.samples, dtype='uint8').reshape(pixmap.height, pixmap.width, 3)
     binary = 255 - _ink(rgb, cv)
     step = OCR_TILE - OCR_OVERLAP
@@ -616,7 +616,7 @@ def extract_local_valve_mto(pdf_path, *, user_id=None, scan_mode='thorough',
         from apps.valve_mto.specification_lookup import load_specification_lookups, enrich_specifications
         specifications = load_specification_lookups(user_id)
         class_codes = specifications['pms_class']
-        with fitz.open(pdf_path) as document:
+        with pymupdf.open(pdf_path) as document:
             page_count = len(document)
             for page_index, page in enumerate(document):
                 progress = (lambda current, total: on_progress(
@@ -639,7 +639,7 @@ def extract_local_valve_mto(pdf_path, *, user_id=None, scan_mode='thorough',
                 pid_number = drawing_numbers[0] if len(set(drawing_numbers)) == 1 else ''
                 if page_index == 0 and pid_number:
                     meta['doc_no'] = pid_number
-                pix = page.get_pixmap(matrix=fitz.Matrix(SYMBOL_DPI / 72, SYMBOL_DPI / 72), alpha=False)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(SYMBOL_DPI / 72, SYMBOL_DPI / 72), alpha=False)
                 rgb = np.frombuffer(pix.samples, dtype='uint8').reshape(pix.height, pix.width, 3)
                 matches = detect_symbols(rgb, references, cv2,
                                          on_progress=(lambda c, t: progress(c, t * 5)) if progress else None)

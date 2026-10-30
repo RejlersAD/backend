@@ -213,7 +213,7 @@ HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager']
 # Sensitive roles — only Super Admin may grant these
 SENSITIVE_ROLE_CODES = ['hr_admin']
 
-# Sensitive module codes — restricted to hr_admin, human_resource and super_admin
+# Sensitive module codes — restricted to hr_admin and super_admin
 SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet', 'hr_onboarding']
 
 # ─────────────────────────────────────────────────────────────────────────────

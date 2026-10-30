@@ -1,6 +1,8 @@
 """
 Rule Engine - Orchestrates all deterministic validation rules
 """
+
+import logging
 from typing import Dict, List, Any
 from .validation_rules import (
     LineClassificationRule,
@@ -11,6 +13,7 @@ from .validation_rules import (
     DuplicateLineRule,
     MissingDataRule
 )
+logger = logging.getLogger(__name__)
 
 
 class RuleEngine:
@@ -31,7 +34,7 @@ class RuleEngine:
             MissingDataRule()
         ]
         
-        print(f"[RULE ENGINE] Initialized with {len(self.rules)} deterministic rules")
+        logger.debug(f"[RULE ENGINE] Initialized with {len(self.rules)} deterministic rules")
     
     def validate(self, extracted_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -43,7 +46,7 @@ class RuleEngine:
         Returns:
             List of issues found by deterministic rules
         """
-        print(f"[RULE ENGINE] Running {len(self.rules)} validation rules...")
+        logger.debug(f"[RULE ENGINE] Running {len(self.rules)} validation rules...")
         
         all_issues = []
         
@@ -51,14 +54,14 @@ class RuleEngine:
             try:
                 issues = rule.validate(extracted_data)
                 if issues:
-                    print(f"[RULE ENGINE] {rule.rule_name}: Found {len(issues)} issue(s)")
+                    logger.debug(f"[RULE ENGINE] {rule.rule_name}: Found {len(issues)} issue(s)")
                     all_issues.extend(issues)
                 else:
-                    print(f"[RULE ENGINE] {rule.rule_name}: No issues")
+                    logger.debug(f"[RULE ENGINE] {rule.rule_name}: No issues")
             except Exception as e:
-                print(f"[RULE ENGINE ERROR] {rule.rule_name} failed: {e}")
+                logger.debug(f"[RULE ENGINE ERROR] {rule.rule_name} failed: {e}")
         
-        print(f"[RULE ENGINE] Total issues from deterministic rules: {len(all_issues)}")
+        logger.debug(f"[RULE ENGINE] Total issues from deterministic rules: {len(all_issues)}")
         return all_issues
     
     def get_grounding_data(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:

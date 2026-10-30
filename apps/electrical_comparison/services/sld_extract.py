@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-import fitz
+import pymupdf
 import numpy as np
 import pytesseract
 from PIL import Image
@@ -144,7 +144,7 @@ class TagRules:
 
 def _render(page, rot=0):
     zoom = DPI / 72.0
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3]
     if rot == 90:
         img = np.ascontiguousarray(np.rot90(img, k=-1))
@@ -198,7 +198,7 @@ def _rot90_back(x, y, img_shape):
 def extract_tags(pdf_bytes, analysis=None, area='285'):
     """-> [SldTag] per the §7 data contract (cropUrl filled when storage
     is available; evidence rendering is best-effort)."""
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     rules = TagRules(area)
     found = {}
 
@@ -309,8 +309,8 @@ def _render_crops(doc, tags, analysis):
     for idx, t in enumerate(tags):
         try:
             page = doc.load_page(t['sheet'] - 1)
-            r = fitz.Rect(t['x'] - 60, t['y'] - 40, t['x'] + 200, t['y'] + 60) & page.rect
-            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=r)
+            r = pymupdf.Rect(t['x'] - 60, t['y'] - 40, t['x'] + 200, t['y'] + 60) & page.rect
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(3, 3), clip=r)
             path = f'electrical_comparison/evidence/{analysis.id}_{idx}.png'
             saved = default_storage.save(path, ContentFile(pix.tobytes('png')))
             t['cropUrl'] = default_storage.url(saved)

@@ -19,8 +19,8 @@ Extracted fields:
 import logging
 import re
 from typing import Any, Dict
-
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Compiled patterns
@@ -80,8 +80,8 @@ def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
 
 def _get_page_text(file_path: str, page_index: int) -> str:
     try:
-        import fitz
-        pdf  = fitz.open(file_path)
+        import pymupdf
+        pdf  = pymupdf.open(file_path)
         page = pdf[page_index] if page_index < len(pdf) else pdf[0]
         text = page.get_text('text')
         pdf.close()
@@ -191,12 +191,12 @@ def _apply_ocr_to_positions(page, pw: float, ph: float, positions: dict) -> None
     via pytesseract.  Used when the PDF has no embedded text layer (vector/scanned).
     """
     try:
-        import fitz
+        import pymupdf
         import io
         import pytesseract
         from PIL import Image
 
-        mat = fitz.Matrix(_OCR_DPI / 72, _OCR_DPI / 72)
+        mat = pymupdf.Matrix(_OCR_DPI / 72, _OCR_DPI / 72)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.open(io.BytesIO(pix.tobytes('png')))
         img_w, img_h = img.width, img.height
@@ -243,8 +243,8 @@ def _extract_tag_positions(file_path: str, page_index: int) -> dict:
     """
     positions: Dict[str, Any] = {}
     try:
-        import fitz
-        pdf  = fitz.open(file_path)
+        import pymupdf
+        pdf  = pymupdf.open(file_path)
         page = pdf[page_index] if page_index < len(pdf) else pdf[0]
         pw   = page.rect.width
         ph   = page.rect.height

@@ -7,8 +7,8 @@ import io
 from typing import List, Dict, Any
 from django.conf import settings
 import logging
-
 logger = logging.getLogger(__name__)
+
 
 
 class DocumentProcessor:
@@ -30,15 +30,15 @@ class DocumentProcessor:
             Extracted text
         """
         try:
-            import fitz  # PyMuPDF
+            import pymupdf  # PyMuPDF
             
             # Handle file object or path
             if isinstance(pdf_file, str):
-                pdf_document = fitz.open(pdf_file)
+                pdf_document = pymupdf.open(pdf_file)
             else:
                 pdf_file.seek(0)
                 pdf_bytes = pdf_file.read()
-                pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+                pdf_document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             text = ""
             for page_num in range(len(pdf_document)):

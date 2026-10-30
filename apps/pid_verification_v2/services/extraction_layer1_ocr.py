@@ -3,7 +3,7 @@ PID Verification V2 - Layer 1: Free Open-Source OCR Extraction
 ==============================================================
 Implements multi-engine OCR extraction using free/open-source tools:
   - Tesseract OCR (pytesseract with PSM modes 11, 6, 3)
-  - PyMuPDF (fitz) - word/block-level text extraction
+  - PyMuPDF (pymupdf) - word/block-level text extraction
   - pdfplumber - table extraction
   - Yellow-region OCR - highlighted area extraction
 
@@ -19,8 +19,9 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 from decimal import Decimal
 from PIL import Image, ImageOps, ImageEnhance
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 import pdfplumber
+logger = logging.getLogger(__name__)
 
 # OCR Engines
 try:
@@ -37,7 +38,6 @@ from ..extraction_config import (
     EXTRACTION_PROFILES,
 )
 
-logger = logging.getLogger(__name__)
 
 
 class Layer1OCRExtractor:
@@ -92,7 +92,7 @@ class Layer1OCRExtractor:
         logger.info(f"[Layer1] Starting extraction for {pdf_path} (type: {file_type})")
         
         # Open PDF with PyMuPDF for page count
-        pdf_doc = fitz.open(pdf_path)
+        pdf_doc = pymupdf.open(pdf_path)
         total_pages = len(pdf_doc)
         pdf_doc.close()
         
@@ -191,13 +191,13 @@ class Layer1OCRExtractor:
     
     def _pdf_page_to_image(self, pdf_path: str, page_num: int) -> Image.Image:
         """Convert PDF page to PIL Image for OCR."""
-        pdf_doc = fitz.open(pdf_path)
+        pdf_doc = pymupdf.open(pdf_path)
         page = pdf_doc.load_page(page_num - 1)  # 0-indexed
         
         # Get DPI from config
         dpi = self.profile.get('ocr_settings', {}).get('dpi', 150)
         zoom = dpi / 72  # 72 is default PDF DPI
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         
         pix = page.get_pixmap(matrix=mat)
         img_data = pix.tobytes("png")
@@ -298,7 +298,7 @@ class Layer1OCRExtractor:
             }
         """
         try:
-            pdf_doc = fitz.open(pdf_path)
+            pdf_doc = pymupdf.open(pdf_path)
             page = pdf_doc.load_page(page_num - 1)
             
             # Extract text

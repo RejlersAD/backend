@@ -3,7 +3,7 @@
 from copy import deepcopy
 from io import BytesIO
 
-import fitz
+import pymupdf
 from docx import Document
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -89,7 +89,7 @@ class PurchaseOrderIntroductionTests(TestCase):
         before = PurchaseOrder.objects.values().get(pk=self.order.pk)
         pdf, warnings = build_purchase_order_pdf(self.order)
         self.assertFalse(warnings)
-        with fitz.open(stream=pdf, filetype='pdf') as document:
+        with pymupdf.open(stream=pdf, filetype='pdf') as document:
             pdf_text = '\n'.join(page.get_text() for page in document)
         word = Document(BytesIO(build_purchase_order_docx(self.order)))
         word_text = '\n'.join(paragraph.text for paragraph in word.paragraphs)
@@ -124,7 +124,7 @@ class PurchaseOrderIntroductionTests(TestCase):
                 snapshot = document_preview_order({'contact_persons': contacts}, base=self.order)
                 pdf, warnings = build_purchase_order_pdf(snapshot)
                 self.assertFalse(warnings)
-                with fitz.open(stream=pdf, filetype='pdf') as document:
+                with pymupdf.open(stream=pdf, filetype='pdf') as document:
                     pdf_text = '\n'.join(page.get_text() for page in document)
                 self.assertEqual(text in pdf_text, visible)
                 self.assertIn('Preserved scope narrative.', pdf_text)
@@ -149,7 +149,7 @@ class PurchaseOrderIntroductionTests(TestCase):
                     self.assertEqual(bool(purchase_order_introduction(snapshot)), visible)
                     pdf, warnings = build_purchase_order_pdf(snapshot)
                     self.assertFalse(warnings)
-                    with fitz.open(stream=pdf, filetype='pdf') as document:
+                    with pymupdf.open(stream=pdf, filetype='pdf') as document:
                         self.assertEqual(len(document), 3 if visible else 2)
                         pdf_text = '\n'.join(page.get_text() for page in document)
                     word = Document(BytesIO(build_purchase_order_docx(snapshot)))
@@ -188,7 +188,7 @@ class PurchaseOrderIntroductionTests(TestCase):
                 before = PurchaseOrder.objects.values().get(pk=self.order.pk)
                 pdf, warnings = build_purchase_order_pdf(self.order)
                 self.assertFalse(warnings)
-                with fitz.open(stream=pdf, filetype='pdf') as document:
+                with pymupdf.open(stream=pdf, filetype='pdf') as document:
                     text = '\n'.join(page.get_text() for page in document)
                     self.assertIn('PO DESCRIPTION & SCOPE', text)
                     self.assertIn('Scope retained after clearing the introduction.', text)
@@ -208,7 +208,7 @@ class PurchaseOrderIntroductionTests(TestCase):
         snapshot = document_preview_order({'contact_persons': {'order_introduction': ''}}, base=self.order)
         self.assertEqual(purchase_order_introduction(snapshot), '')
         pdf, _ = build_purchase_order_pdf(snapshot)
-        with fitz.open(stream=pdf, filetype='pdf') as document:
+        with pymupdf.open(stream=pdf, filetype='pdf') as document:
             self.assertNotIn('issue this purchase order to', '\n'.join(page.get_text() for page in document))
         self.assertEqual(PurchaseOrder.objects.values().get(pk=self.order.pk), before)
 
@@ -226,7 +226,7 @@ class PurchaseOrderIntroductionTests(TestCase):
                 snapshot = document_preview_order({'contact_persons': contacts}, base=self.order)
                 pdf, warnings = build_purchase_order_pdf(snapshot)
                 self.assertFalse(warnings)
-                with fitz.open(stream=pdf, filetype='pdf') as document:
+                with pymupdf.open(stream=pdf, filetype='pdf') as document:
                     text = '\n'.join(page.get_text() for page in document)
                 self.assertEqual('PO DESCRIPTION & SCOPE' in text, visible is not False)
                 self.assertIn('Retained engineering scope narrative.', text)
@@ -272,7 +272,7 @@ class PurchaseOrderIntroductionTests(TestCase):
         self.assertFalse(snapshot.approval_log)
         content, warnings = build_purchase_order_pdf(snapshot)
         self.assertFalse(warnings)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertEqual(len(pdf), 2)
             self.assertIn('SUMMARY OF PRICES', pdf[1].get_text())
             self.assertNotIn('PURCHASE ORDER:', '\n'.join(page.get_text() for page in pdf))

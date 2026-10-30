@@ -19,7 +19,10 @@ pattern), so nothing is guessed here. These 3 example codes will produce a
 soft "not a recognised code" finding (not a format-match failure) until
 their meanings are confirmed and added.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'instrument_index'
 
@@ -103,7 +106,7 @@ def fix_forward(apps, schema_editor):
         description=NEW_DESCRIPTION,
         definition=NEW_DEFINITION,
     )
-    print(f'[instrument_io_workflow] Switched to 3-field format on {updated} '
+    logger.debug(f'[instrument_io_workflow] Switched to 3-field format on {updated} '
           f'{SECTION!r} legend row(s).')
 
 

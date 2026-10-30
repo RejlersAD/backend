@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
@@ -16,6 +18,7 @@ from apps.pid_analysis.export_service import PIDReportExportService
 
 # Import feature registry views
 from apps.api.feature_views import list_features, get_feature, get_categories, get_navigation
+logger = logging.getLogger(__name__)
 
 
 def is_app_installed(app_label):
@@ -77,16 +80,16 @@ def railway_diagnostic_health_check(request):
 def pid_export_view(request, pk):
     """Plain Django view for export - no DRF decorators"""
     
-    print(f"\n{'='*60}")
-    print(f"[PID EXPORT] Request received!")
-    print(f"[PID EXPORT] PK: {pk}")
-    print(f"[PID EXPORT] Method: {request.method}")
-    print(f"[PID EXPORT] Path: {request.path}")
-    print(f"{'='*60}\n")
+    logger.debug(f"\n{'='*60}")
+    logger.debug(f"[PID EXPORT] Request received!")
+    logger.debug(f"[PID EXPORT] PK: {pk}")
+    logger.debug(f"[PID EXPORT] Method: {request.method}")
+    logger.debug(f"[PID EXPORT] Path: {request.path}")
+    logger.debug(f"{'='*60}\n")
     
     try:
         drawing = PIDDrawing.objects.get(id=pk)
-        print(f"[PID EXPORT] Drawing found: {drawing.drawing_number}")
+        logger.debug(f"[PID EXPORT] Drawing found: {drawing.drawing_number}")
     except PIDDrawing.DoesNotExist:
         return HttpResponse('{"error": "Drawing not found"}', status=404, content_type='application/json')
     
@@ -94,7 +97,7 @@ def pid_export_view(request, pk):
         return HttpResponse('{"error": "No analysis report"}', status=404, content_type='application/json')
     
     export_format = request.GET.get('format', 'pdf')
-    print(f"[PID EXPORT] Format: {export_format}")
+    logger.debug(f"[PID EXPORT] Format: {export_format}")
     
     export_service = PIDReportExportService()
     
@@ -108,7 +111,7 @@ def pid_export_view(request, pk):
         else:
             return HttpResponse('{"error": "Invalid format"}', status=400, content_type='application/json')
     except Exception as e:
-        print(f"[PID EXPORT ERROR] {str(e)}")
+        logger.debug(f"[PID EXPORT ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         return HttpResponse(f'{{"error": "{str(e)}"}}', status=500, content_type='application/json')
@@ -178,57 +181,57 @@ if is_app_installed('apps.qhse'):
     for area in ('detailed', 'quality', 'health-safety', 'environmental', 'energy'):
         urlpatterns.append(path(f'api/v1/qhse/areas/{area}/', include(('apps.qhse.urls', 'qhse'), namespace=f'qhse-{area}')))
     urlpatterns.append(path('api/v1/qhse/', include('apps.qhse.urls')))
-    print("[URL] ✅ QHSE URLs registered")
+    logger.debug("[URL] ✅ QHSE URLs registered")
 
 if is_app_installed('apps.procurement'):
     urlpatterns.append(path('api/v1/procurement/', include('apps.procurement.urls')))
-    print("[URL] ✅ Procurement URLs registered")
+    logger.debug("[URL] ✅ Procurement URLs registered")
 
 if is_app_installed('apps.notifications'):
     urlpatterns.append(path('api/v1/notifications/', include('apps.notifications.urls')))
-    print("[URL] ✅ Notifications URLs registered")
+    logger.debug("[URL] ✅ Notifications URLs registered")
 
 if is_app_installed('apps.activity'):
     urlpatterns.append(path('api/v1/activity/', include('apps.activity.urls')))
-    print("[URL] ✅ Activity URLs registered")
+    logger.debug("[URL] ✅ Activity URLs registered")
 
 if is_app_installed('apps.sales'):
     urlpatterns.append(path('api/v1/sales/', include('apps.sales.urls')))
-    print("[URL] ✅ Sales URLs registered")
+    logger.debug("[URL] ✅ Sales URLs registered")
 
 if is_app_installed('apps.wrench_integration'):
     urlpatterns.append(path('api/v1/wrench/', include('apps.wrench_integration.urls')))
-    print("[URL] ✅ Wrench Integration URLs registered")
+    logger.debug("[URL] ✅ Wrench Integration URLs registered")
 
 # Data Mining Platform — AI-powered data integration with Wrench
 if is_app_installed('apps.data_mining'):
     urlpatterns.append(path('api/v1/data-mining/', include('apps.data_mining.urls')))
-    print("[URL] ✅ Data Mining Platform URLs registered")
+    logger.debug("[URL] ✅ Data Mining Platform URLs registered")
 
 # P&ID Verification — deterministic quality checker (V1)
 if is_app_installed('apps.pid_verification'):
     urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
-    print("[URL] ✅ P&ID Verification V1 URLs registered")
+    logger.debug("[URL] ✅ P&ID Verification V1 URLs registered")
 
 # P&ID Verification V2 — Re-enabled with isolated database and V2 endpoints
 if is_app_installed('apps.pid_verification_v2'):
     urlpatterns.append(path('api/v2/pid-verification/', include('apps.pid_verification_v2.urls')))
-    print("[URL] ✅ P&ID Verification V2 URLs registered")
+    logger.debug("[URL] ✅ P&ID Verification V2 URLs registered")
 
 # P&ID Checker V2 — new minimal scaffold (isolated DB, empty starting point)
 if is_app_installed('apps.pid_checker_v2'):
     urlpatterns.append(path('api/v1/pid-checker-v2/', include('apps.pid_checker_v2.urls')))
-    print("[URL] ✅ P&ID Checker V2 URLs registered")
+    logger.debug("[URL] ✅ P&ID Checker V2 URLs registered")
 
 # SLD Verification — electrical single line diagram quality checker
 if is_app_installed('apps.sld_verification'):
     urlpatterns.append(path('api/v1/sld-verification/', include('apps.sld_verification.urls')))
-    print("[URL] ✅ SLD Verification URLs registered")
+    logger.debug("[URL] ✅ SLD Verification URLs registered")
 
 # PFD Quality Checker — deterministic rule engine
 if is_app_installed('apps.pfd_quality'):
     urlpatterns.append(path('api/v1/pfd-quality/', include('apps.pfd_quality.urls')))
-    print("[URL] ✅ PFD Quality URLs registered")
+    logger.debug("[URL] ✅ PFD Quality URLs registered")
 
 # Cross Recommendation Bridge — PID ↔ PFD smart suggestions
 if is_app_installed('apps.cross_recommendation'):
@@ -237,22 +240,22 @@ if is_app_installed('apps.cross_recommendation'):
 # Non-TEFF Metadata Extractor — multi-format document metadata extraction
 if is_app_installed('apps.non_teff_metadata'):
     urlpatterns.append(path('api/v1/non-teff/', include('apps.non_teff_metadata.urls')))
-    print("[URL] ✅ Cross Recommendation URLs registered")
+    logger.debug("[URL] ✅ Cross Recommendation URLs registered")
 
 # Spec Customization — Paper Spec PDF extraction (Piping Classes)
 if is_app_installed('apps.spec_customization'):
     urlpatterns.append(path('api/v1/spec-customization/', include('apps.spec_customization.urls')))
-    print("[URL] ✅ Spec Customization URLs registered")
+    logger.debug("[URL] ✅ Spec Customization URLs registered")
 
 # Project Organizer — shared, cross-tool project registry (additive)
 if is_app_installed('apps.project_organizer'):
     urlpatterns.append(path('api/v1/project-organizer/', include('apps.project_organizer.urls')))
-    print("[URL] ✅ Project Organizer URLs registered")
+    logger.debug("[URL] ✅ Project Organizer URLs registered")
 
 # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
 if is_app_installed('apps.valve_standards'):
     urlpatterns.append(path('api/v1/valve-standards/', include('apps.valve_standards.urls')))
-    print("[URL] ✅ Valve Standards Reference URLs registered")
+    logger.debug("[URL] ✅ Valve Standards Reference URLs registered")
 
 # MLflow Model Orchestration API (DISABLED - not in use)
 # urlpatterns.extend([

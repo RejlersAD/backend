@@ -5,8 +5,8 @@ Returns a list of SegmentedDrawing dataclasses.
 import logging
 from dataclasses import dataclass, field
 from typing import List
-
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -20,11 +20,11 @@ class SegmentedDrawing:
 def segment_document(document_id: str, file_path: str) -> List[SegmentedDrawing]:
     """
     Open the PDF at file_path and return one SegmentedDrawing per page.
-    Uses PyMuPDF (fitz) when available, falls back to a single-segment stub.
+    Uses PyMuPDF (pymupdf) when available, falls back to a single-segment stub.
     """
     try:
-        import fitz  # PyMuPDF
-        return _segment_with_fitz(document_id, file_path)
+        import pymupdf  # PyMuPDF
+        return _segment_with_pymupdf(document_id, file_path)
     except ImportError:
         logger.warning('[PFDQ Segmentation] PyMuPDF not available — treating file as single drawing')
         return [SegmentedDrawing(
@@ -35,10 +35,10 @@ def segment_document(document_id: str, file_path: str) -> List[SegmentedDrawing]
         )]
 
 
-def _segment_with_fitz(document_id: str, file_path: str) -> List[SegmentedDrawing]:
-    import fitz
+def _segment_with_pymupdf(document_id: str, file_path: str) -> List[SegmentedDrawing]:
+    import pymupdf
 
-    pdf = fitz.open(file_path)
+    pdf = pymupdf.open(file_path)
     segments: List[SegmentedDrawing] = []
 
     for i, page in enumerate(pdf):

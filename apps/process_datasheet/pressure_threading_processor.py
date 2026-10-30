@@ -1,4 +1,4 @@
-﻿"""
+"""
 Threading-based async processor for Pressure Instrument datasheet generation
 Fallback when Celery is in EAGER mode or not available
 """
@@ -10,13 +10,13 @@ from django.core.cache import cache
 from apps.process_datasheet.real_pid_extractor import RealPIDExtractor
 from apps.process_datasheet.mock_extractors import MockPIDExtractor
 from apps.process_datasheet.excel_generators.pressure_excel_generator import PressureExcelGeneratorDynamic
-
 logger = logging.getLogger(__name__)
+
 
 def log_and_print(message):
     """Helper to both log and print for visibility"""
     logger.info(message)
-    print(message)
+    logger.debug(message)
 
 def generate_pressure_html_preview(instruments):
     """Generate HTML preview table for pressure instruments"""

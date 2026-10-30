@@ -84,7 +84,7 @@ from .governance import audit, employee_for_user, is_manager
 from .microsoft_graph import GraphConfigurationError, MicrosoftGraphService
 
 
-HR_ROLE_CODES = {'hr_manager', 'hr_admin', 'human_resource', 'admin', 'super_admin', 'superadmin'}
+HR_ROLE_CODES = {'hr_manager', 'hr_admin', 'admin', 'super_admin', 'superadmin'}
 
 
 def _role_codes(user):

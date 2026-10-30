@@ -32,8 +32,8 @@ from functools import lru_cache
 from typing import Any, Dict
 
 from .legend_knowledge import load_legend_knowledge
-
 logger = logging.getLogger(__name__)
+
 
 # Soft-coded standard NPS inch sizes accepted by deterministic parser.
 _STANDARD_NPS_INCH = {
@@ -220,19 +220,19 @@ def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
     try:
         import pytesseract
         from PIL import Image, ImageOps, ImageFilter
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
         ext = file_path.rsplit('.', 1)[-1].lower()
 
         images = []
         if ext == 'pdf':
-            doc = fitz.open(file_path)
+            doc = pymupdf.open(file_path)
             page = doc[page_index]
             import io
             # Multi-DPI pass improves recovery of small text like 6"/4" labels.
             for dpi in (150, 300, 450):
-                mat = fitz.Matrix(dpi / 72, dpi / 72)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+                mat = pymupdf.Matrix(dpi / 72, dpi / 72)
+                pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY)
                 images.append(Image.open(io.BytesIO(pix.tobytes('png'))))
             doc.close()
         else:
@@ -268,7 +268,7 @@ def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
 
         return '\n'.join(all_text_parts)
     except ImportError:
-        logger.warning('[PIDExtraction] pytesseract/fitz not available – using empty extraction')
+        logger.warning('[PIDExtraction] pytesseract/pymupdf not available – using empty extraction')
         return ''
     except Exception as exc:
         logger.error('[PIDExtraction] Tesseract OCR error: %s', exc)
@@ -574,12 +574,12 @@ def _extract_tag_positions(file_path, page_index, known_tags=None):
                     _scan_text(combined, pair_xp, pair_yp)
 
     try:
-        import fitz
+        import pymupdf
         ext = file_path.rsplit('.', 1)[-1].lower()
         if ext != 'pdf':
             return positions
 
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         if page_index >= len(doc):
             doc.close()
             return positions
@@ -788,11 +788,11 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
             )
 
     try:
-        import fitz
+        import pymupdf
         if file_path.rsplit('.', 1)[-1].lower() != 'pdf':
             return []
 
-        doc    = fitz.open(file_path)
+        doc    = pymupdf.open(file_path)
         if page_index >= len(doc):
             doc.close()
             return []
@@ -907,8 +907,8 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                     import io
 
                     dpi = 200   # reduced for rotated passes: speed vs quality trade-off
-                    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-                    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
+                    mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
+                    pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY, alpha=False)
                     orig_img      = Image.open(io.BytesIO(pix.tobytes('png')))
                     orig_w, orig_h = orig_img.size
                     cfg = '--oem 1 --psm 11'
@@ -1088,11 +1088,11 @@ def _extract_red_annotations(file_path: str, page_index: int) -> list:
     """
     items: list = []
     try:
-        import fitz
+        import pymupdf
         if file_path.rsplit('.', 1)[-1].lower() != 'pdf':
             return items
 
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         if page_index >= len(doc):
             doc.close()
             return items

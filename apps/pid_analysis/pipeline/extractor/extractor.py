@@ -2,11 +2,14 @@
 PID Extractor - Main extraction orchestrator
 Coordinates OCR, classification, and symbol detection
 """
+
+import logging
 from typing import Dict, Any, Set, List
 from .ocr_parser import OCRParser
 from .regex_classifier import RegexClassifier
 from .symbol_detector import SymbolDetector
 import uuid
+logger = logging.getLogger(__name__)
 
 
 class PIDExtractor:
@@ -47,32 +50,32 @@ class PIDExtractor:
                 'extraction_metadata': Dict
             }
         """
-        print(f"[EXTRACTOR] Starting extraction - Document ID: {self.document_id}")
+        logger.debug(f"[EXTRACTOR] Starting extraction - Document ID: {self.document_id}")
         
         # Step 1: OCR text extraction
         ocr_result = self.ocr_parser.extract_text_from_pdf(pdf_file)
-        print(f"[EXTRACTOR] OCR extracted {len(ocr_result['text_blocks'])} text blocks")
+        logger.debug(f"[EXTRACTOR] OCR extracted {len(ocr_result['text_blocks'])} text blocks")
         
         # Step 2: Tokenize text
         tokens = self.ocr_parser.get_text_tokens()
-        print(f"[EXTRACTOR] Tokenized {len(tokens)} tokens")
+        logger.debug(f"[EXTRACTOR] Tokenized {len(tokens)} tokens")
         
         # Step 3: Classify tokens deterministically
         classified = self.regex_classifier.classify_tokens(tokens)
-        print(f"[EXTRACTOR] Classified elements:")
-        print(f"  - Line numbers: {len(classified['line_numbers'])}")
-        print(f"  - Equipment tags: {len(classified['equipment_tags'])}")
-        print(f"  - Instrument tags: {len(classified['instrument_tags'])}")
-        print(f"  - Active notes: {len(classified['notes'])}")
-        print(f"  - Deleted notes: {len(classified['deleted_notes'])}")
-        print(f"  - Spec breaks: {len(classified['spec_breaks'])}")
+        logger.debug(f"[EXTRACTOR] Classified elements:")
+        logger.debug(f"  - Line numbers: {len(classified['line_numbers'])}")
+        logger.debug(f"  - Equipment tags: {len(classified['equipment_tags'])}")
+        logger.debug(f"  - Instrument tags: {len(classified['instrument_tags'])}")
+        logger.debug(f"  - Active notes: {len(classified['notes'])}")
+        logger.debug(f"  - Deleted notes: {len(classified['deleted_notes'])}")
+        logger.debug(f"  - Spec breaks: {len(classified['spec_breaks'])}")
         
         # Step 4: Detect symbols (CV/heuristic)
         symbols = self.symbol_detector.detect_symbols(pdf_file)
-        print(f"[EXTRACTOR] Detected symbols:")
-        print(f"  - Reducers: {len(symbols['reducers'])}")
-        print(f"  - Valves: {len(symbols['valves'])}")
-        print(f"  - Arrows: {len(symbols['arrows'])}")
+        logger.debug(f"[EXTRACTOR] Detected symbols:")
+        logger.debug(f"  - Reducers: {len(symbols['reducers'])}")
+        logger.debug(f"  - Valves: {len(symbols['valves'])}")
+        logger.debug(f"  - Arrows: {len(symbols['arrows'])}")
         
         # Compile final structured data
         extracted_data = {
@@ -96,5 +99,5 @@ class PIDExtractor:
             }
         }
         
-        print(f"[EXTRACTOR] Extraction complete - Document ID: {self.document_id}")
+        logger.debug(f"[EXTRACTOR] Extraction complete - Document ID: {self.document_id}")
         return extracted_data

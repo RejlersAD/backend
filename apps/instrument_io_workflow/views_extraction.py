@@ -30,8 +30,8 @@ from rest_framework.response import Response
 from .models import IOListDocument, IOListProject
 from .models_extraction import (IOListAISuggestion, IOListExtraction,
                                 IOListServiceDecision)
-
 logger = logging.getLogger(__name__)
+
 
 
 def _project_or_404(request, project_id):
@@ -43,8 +43,8 @@ def _detect_kind(filename, file_bytes):
     by sheet names."""
     name = filename.lower()
     if name.endswith('.pdf'):
-        import fitz
-        doc = fitz.open(stream=file_bytes, filetype='pdf')
+        import pymupdf
+        doc = pymupdf.open(stream=file_bytes, filetype='pdf')
         try:
             text = '\n'.join(doc.load_page(i).get_text('text') or ''
                              for i in range(min(doc.page_count, 2)))
@@ -108,7 +108,7 @@ def upload_extraction_file(request, project_id):
     summary = {'id': str(doc.id), 'kind': kind, 'name': upload.name}
     if kind == 'pid':
         from .services.pid_io import spans
-        import fitz
+        import pymupdf
         import tempfile, os
         tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
         try:

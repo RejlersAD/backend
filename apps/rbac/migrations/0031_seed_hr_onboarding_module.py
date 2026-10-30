@@ -1,3 +1,5 @@
+import logging
+
 # Migration 0031 — Seed HR Onboarding | Offboarding Module
 # =============================================================
 # Adds the `hr_onboarding` module code so it appears as a
@@ -14,6 +16,7 @@
 # Uses soft-coded configuration and is idempotent.
 
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 # ── Soft-coded module configuration ──────────────────────────────────────
@@ -55,7 +58,7 @@ def seed_hr_onboarding_module(apps, schema_editor):
         },
     )
     action = "Created" if created else "Updated"
-    print(f"✅ {action} module: {module.name} (code={module.code})")
+    logger.debug(f"✅ {action} module: {module.name} (code={module.code})")
 
     # 2. Assign module to configured roles (idempotent)
     assigned = 0
@@ -63,19 +66,19 @@ def seed_hr_onboarding_module(apps, schema_editor):
         try:
             role = Role.objects.get(code=role_code)
         except Role.DoesNotExist:
-            print(f"  ⚠️  Role not found (skipping): {role_code}")
+            logger.debug(f"  ⚠️  Role not found (skipping): {role_code}")
             continue
 
         if role.modules.filter(code=HR_ONBOARDING_MODULE['code']).exists():
-            print(f"  ✓ Already assigned to: {role.name} ({role.code})")
+            logger.debug(f"  ✓ Already assigned to: {role.name} ({role.code})")
         else:
             role.modules.add(module)
             assigned += 1
-            print(f"  → Assigned hr_onboarding to: {role.name} ({role.code})")
+            logger.debug(f"  → Assigned hr_onboarding to: {role.name} ({role.code})")
 
-    print("=" * 60)
-    print(f"HR Onboarding Module Migration Complete — assigned to {assigned} new role(s)")
-    print("=" * 60)
+    logger.debug("=" * 60)
+    logger.debug(f"HR Onboarding Module Migration Complete — assigned to {assigned} new role(s)")
+    logger.debug("=" * 60)
 
 
 def reverse_noop(apps, schema_editor):

@@ -23,8 +23,8 @@ def extract_analysis_chunks(stream, name, size):
     suffix = PurePosixPath(name.lower()).suffix
     pieces, diagnostic = [], ''
     if suffix == '.pdf':
-        import fitz
-        doc = fitz.open(stream=stream.read(SOURCE_BYTES + 1), filetype='pdf')
+        import pymupdf
+        doc = pymupdf.open(stream=stream.read(SOURCE_BYTES + 1), filetype='pdf')
         try:
             total = 0
             for index, page in enumerate(doc):

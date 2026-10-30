@@ -2,6 +2,8 @@
 Serializers for user models.
 Smart data validation and transformation.
 """
+
+import logging
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -9,6 +11,7 @@ from django.utils import timezone
 # New employee management
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.services import EmployeeService
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -60,8 +63,8 @@ class UserSerializer(serializers.ModelSerializer):
         except Exception as e:
             # Log error for debugging
             import traceback
-            print(f"[ERROR] UserSerializer.get_roles failed: {str(e)}")
-            print(traceback.format_exc())
+            logger.debug(f"[ERROR] UserSerializer.get_roles failed: {str(e)}")
+            logger.debug(traceback.format_exc())
         return []
 
     def get_profile(self, obj):
@@ -109,8 +112,8 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         except Exception as e:
             # Log error but don't fail registration if employee creation fails
             import traceback
-            print(f"[WARNING] Failed to create EmployeeMaster record during registration: {str(e)}")
-            print(traceback.format_exc())
+            logger.debug(f"[WARNING] Failed to create EmployeeMaster record during registration: {str(e)}")
+            logger.debug(traceback.format_exc())
             # Do not create a second employee profile. HR can resolve a failed
             # canonical employee creation from the migration audit.
         

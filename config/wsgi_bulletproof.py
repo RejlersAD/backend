@@ -9,11 +9,14 @@ It provides:
 
 This prevents 502 Bad Gateway errors on Railway.
 """
+
+import logging
 import os
 import sys
 import json
 import traceback
 from datetime import datetime
+logger = logging.getLogger(__name__)
 
 # Try to load Django WSGI application
 DJANGO_APP = None
@@ -23,12 +26,12 @@ try:
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
     from django.core.wsgi import get_wsgi_application
     DJANGO_APP = get_wsgi_application()
-    print("✅ Django WSGI application loaded successfully")
+    logger.debug("✅ Django WSGI application loaded successfully")
 except Exception as e:
     DJANGO_ERROR = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-    print(f"⚠️  Django failed to load: {type(e).__name__}: {str(e)}")
-    print("   Fallback WSGI app will handle requests")
-    print(traceback.format_exc())
+    logger.debug(f"⚠️  Django failed to load: {type(e).__name__}: {str(e)}")
+    logger.debug("   Fallback WSGI app will handle requests")
+    logger.debug(traceback.format_exc())
 
 
 # SOFT-CODED CORS Configuration for fallback mode
@@ -132,8 +135,8 @@ def application(environ, start_response):
             return DJANGO_APP(environ, start_response)
         except Exception as e:
             # Log the error but don't crash - use fallback
-            print(f"⚠️  Django request failed: {type(e).__name__}: {str(e)}")
-            print(traceback.format_exc())
+            logger.debug(f"⚠️  Django request failed: {type(e).__name__}: {str(e)}")
+            logger.debug(traceback.format_exc())
             return fallback_app(environ, start_response)
     else:
         return fallback_app(environ, start_response)

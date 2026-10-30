@@ -7,8 +7,8 @@ Each page is treated as one drawing (deterministic, no AI).
 import logging
 from dataclasses import dataclass, field
 from typing import List
-
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -67,10 +67,10 @@ def segment_document(document_id: str, file_path: str) -> List[SegmentedDrawing]
 
 
 def _segment_pdf(document_id: str, file_path: str) -> List[SegmentedDrawing]:
-    """One SegmentedDrawing per PDF page using PyMuPDF (fitz) or fallback."""
+    """One SegmentedDrawing per PDF page using PyMuPDF (pymupdf) or fallback."""
     try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(file_path)
+        import pymupdf  # PyMuPDF
+        doc = pymupdf.open(file_path)
         results = []
         for i, page in enumerate(doc):
             text_preview = page.get_text('text')[:200].strip()

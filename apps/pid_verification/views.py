@@ -2011,14 +2011,14 @@ def drawing_image(request, document_id, page_index):
     try:
         if ext == "pdf":
             try:
-                import fitz  # PyMuPDF
-                pdf_doc = fitz.open(file_path)
+                import pymupdf  # PyMuPDF
+                pdf_doc = pymupdf.open(file_path)
                 if page_index >= len(pdf_doc):
                     pdf_doc.close()
                     return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
                 page = pdf_doc[page_index]
                 # 2× zoom → ~150 dpi for typical A1 drawings
-                mat = fitz.Matrix(2.0, 2.0)
+                mat = pymupdf.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 png_data = pix.tobytes("png")
                 pdf_doc.close()

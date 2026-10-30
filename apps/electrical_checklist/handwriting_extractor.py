@@ -38,8 +38,8 @@ from .template_v2_config import (
     get_config_for_mode,
     get_vision_pricing,
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -346,7 +346,7 @@ class HandwritingExtractor:
 
     def _pdf_to_images(self, pdf_file) -> List[Image.Image]:
         """Convert PDF pages to PIL Images at configured DPI."""
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
         if hasattr(pdf_file, "read"):
             pdf_bytes = pdf_file.read()
@@ -362,9 +362,9 @@ class HandwritingExtractor:
         zoom = dpi / 72.0
         images: List[Image.Image] = []
 
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
             for page in doc:
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 if img.mode != "RGB":
                     img = img.convert("RGB")

@@ -5,12 +5,15 @@ CRITICAL: Preserves original template format exactly
 Does NOT modify existing code or APIs
 """
 
+import logging
+
 import openpyxl
 from openpyxl.styles import Alignment, Font, Border, Side
 from typing import List, BinaryIO
 from io import BytesIO
 from datetime import datetime
 from .comment_extractor import ReviewerComment
+logger = logging.getLogger(__name__)
 
 
 def populate_crs_template(
@@ -73,7 +76,7 @@ def populate_crs_template(
         return output_buffer
     
     except Exception as e:
-        print(f"Error populating CRS template: {str(e)}")
+        logger.debug(f"Error populating CRS template: {str(e)}")
         import traceback
         traceback.print_exc()
         # Return original template on error - SAFE FALLBACK
@@ -199,7 +202,7 @@ def _populate_comment_row(sheet, row_num: int, comment: ReviewerComment, index: 
         _copy_row_formatting(sheet, row_num - 1, row_num)
     
     except Exception as e:
-        print(f"Error populating row {row_num}: {str(e)}")
+        logger.debug(f"Error populating row {row_num}: {str(e)}")
 
 
 def _detect_column_mapping(sheet) -> dict:

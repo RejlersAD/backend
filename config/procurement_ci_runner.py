@@ -1,11 +1,14 @@
 """Strict, opt-in runner for the two purchase-recommendation CI modules."""
 
+import logging
+
 import sys
 import unittest
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
-from django.test.runner import DiscoverRunner
+from config.test_runner import NonInteractiveKeepDbRunner
+logger = logging.getLogger(__name__)
 
 
 REQUIRED_TEST_MODULES = (
@@ -22,7 +25,7 @@ def _test_ids(suite):
             yield test.id()
 
 
-class PurchaseRecommendationCIRunner(DiscoverRunner):
+class PurchaseRecommendationCIRunner(NonInteractiveKeepDbRunner):
     """Do not accept SQLite, absent suites, skipped tests or an empty run as green.
 
     Selected only through --testrunner in the focused CI workflow. The normal
@@ -51,19 +54,16 @@ class PurchaseRecommendationCIRunner(DiscoverRunner):
         connection.ensure_connection()
         with connection.cursor() as cursor:
             cursor.execute('SELECT version()')
-            print('CI PostgreSQL service:', cursor.fetchone()[0], flush=True)
+            logger.debug('CI PostgreSQL service:', cursor.fetchone()[0])
         return super().setup_databases(**kwargs)
 
     def suite_result(self, suite, result, **kwargs):
         failures = super().suite_result(suite, result, **kwargs)
         if result.skipped:
-            print(
-                f'CI failure: {len(result.skipped)} test(s) unexpectedly skipped; '
-                'all focused PostgreSQL tests must execute.',
-                file=sys.stderr,
-            )
+            logger.debug(f'CI failure: {len(result.skipped)} test(s) unexpectedly skipped; '
+                'all focused PostgreSQL tests must execute.')
             failures += len(result.skipped)
         if result.testsRun == 0:
-            print('CI failure: no purchase-recommendation tests executed.', file=sys.stderr)
+            logger.debug('CI failure: no purchase-recommendation tests executed.')
             failures += 1
         return failures

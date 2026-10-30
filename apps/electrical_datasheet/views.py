@@ -12,7 +12,6 @@ import openai
 from django.conf import settings
 import logging
 
-logger = logging.getLogger(__name__)
 
 from .models import (
     ElectricalEquipmentType,
@@ -31,6 +30,7 @@ from .serializers import (
 from .quality_checker import QualityCheckerMixin
 from .s3_service import ElectricalDatasheetS3Service
 from .adnoc_standards import ADNOCStandardsManager
+logger = logging.getLogger(__name__)
 
 
 def load_electrical_config():

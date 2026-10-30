@@ -4,36 +4,14 @@ Smart configuration using environment variables for security and flexibility.
 Aligned with centralized environment configuration (9-3-26 commit).
 """
 
+import logging
+
 import os
-import sys
 from pathlib import Path
 from urllib.parse import quote
 from decouple import config
 import dj_database_url
-
-# BUG FIX: real, confirmed server-startup crash on Windows — several
-# modules loaded during Django startup (this file included, further
-# below, plus various apps' own startup-time print()/logger.info() calls
-# used as visible "[X] [OK] registered" banners) contain emoji/unicode
-# characters. Windows' default console codepage (cp1252, sometimes
-# cp437) can't encode most of those, and a plain `print()` to a cp1252
-# console raises UnicodeEncodeError, which crashes the ENTIRE process —
-# not just skips that one line. This is Django's first-loaded module
-# (every entry point — manage.py, wsgi.py, asgi.py, celery.py — imports
-# it before anything else), so reconfiguring stdout/stderr to UTF-8 HERE,
-# before any of this file's own prints run, protects every one of those
-# entry points and every app's startup banner at once, instead of
-# hand-fixing each emoji individually across the codebase (a real scan
-# found 378 such print() calls — not something to chase one at a time).
-# reconfigure() is Python 3.7+; errors='replace' means even a genuinely
-# unencodable character degrades to a visible '?' instead of crashing.
-# A misconfigured/redirected stream without reconfigure() (rare, e.g.
-# some CI log capture) is not fatal to fix — never let this block startup.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding='utf-8', errors='replace')
-    except (AttributeError, ValueError):
-        pass
+logger = logging.getLogger(__name__)
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -57,9 +35,9 @@ try:
         get_database_url as get_centralized_db_url,
     )
     CENTRALIZED_CONFIG_AVAILABLE = True
-    print(f"[CONFIG] [OK] Centralized configuration loaded")
+    logger.debug(f"[CONFIG] [OK] Centralized configuration loaded")
 except ImportError as e:
-    print(f"[CONFIG] [WARNING] Centralized configuration not available: {e}")
+    logger.debug(f"[CONFIG] [WARNING] Centralized configuration not available: {e}")
     CENTRALIZED_CONFIG_AVAILABLE = False
     env_config = None
     get_environment = lambda: 'local'
@@ -106,7 +84,7 @@ def app_exists(app_path):
         # Check if directory exists and has __init__.py
         return app_dir.is_dir() and app_dir.joinpath('__init__.py').exists()
     except Exception as e:
-        print(f"[WARNING] Could not check app existence for '{app_path}': {e}")
+        logger.debug(f"[WARNING] Could not check app existence for '{app_path}': {e}")
         return False
 
 # SECURITY WARNING: keep the secret key used in production secret!
@@ -117,16 +95,16 @@ DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 
 # Validate SECRET_KEY in production (after DEBUG is defined)
 if not DEBUG and SECRET_KEY == 'django-insecure-change-this-in-production':
-    print("\n" + "="*70)
-    print("🚨 SECURITY WARNING: Using default SECRET_KEY in production!")
-    print("="*70)
-    print("Set SECRET_KEY environment variable in Railway:")
-    print("  1. Go to Railway → aiflowbackend-production → Variables")
-    print("  2. Add: SECRET_KEY = <random-50-character-string>")
-    print("")
-    print("Generate a secure key with:")
-    print("  python -c \"from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())\"")
-    print("="*70 + "\n")
+    logger.debug("\n" + "="*70)
+    logger.debug("🚨 SECURITY WARNING: Using default SECRET_KEY in production!")
+    logger.debug("="*70)
+    logger.debug("Set SECRET_KEY environment variable in Railway:")
+    logger.debug("  1. Go to Railway → aiflowbackend-production → Variables")
+    logger.debug("  2. Add: SECRET_KEY = <random-50-character-string>")
+    logger.debug("")
+    logger.debug("Generate a secure key with:")
+    logger.debug("  python -c \"from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())\"")
+    logger.debug("="*70 + "\n")
 
 # ================================================================
 # BYOK (Bring Your Own Key) ENCRYPTION KEY
@@ -139,7 +117,7 @@ BYOK_ENCRYPTION_KEY = config('BYOK_ENCRYPTION_KEY', default=None)
 if BYOK_ENCRYPTION_KEY:
     BYOK_ENCRYPTION_KEY = BYOK_ENCRYPTION_KEY.encode() if isinstance(BYOK_ENCRYPTION_KEY, str) else BYOK_ENCRYPTION_KEY
 else:
-    print("[WARNING] BYOK_ENCRYPTION_KEY not set — planning BYOK uses legacy SECRET_KEY compatibility mode.")
+    logger.debug("[WARNING] BYOK_ENCRYPTION_KEY not set — planning BYOK uses legacy SECRET_KEY compatibility mode.")
 
 PLANNING_INTEGRATION_ENCRYPTION_KEY = config('PLANNING_INTEGRATION_ENCRYPTION_KEY', default=None)
 # Central AI credentials use dedicated encryption material. An explicitly
@@ -159,7 +137,7 @@ try:
     if CENTRALIZED_CONFIG_AVAILABLE:
         backend_config = env_config.get_backend_config()
         ALLOWED_HOSTS = backend_config.get('allowed_hosts', ['*'])
-        print(f"[DJANGO] ✅ Using ALLOWED_HOSTS from centralized config: {ALLOWED_HOSTS}")
+        logger.debug(f"[DJANGO] ✅ Using ALLOWED_HOSTS from centralized config: {ALLOWED_HOSTS}")
     else:
         # Fallback to environment variable
         ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
@@ -179,9 +157,9 @@ try:
         if '*' not in ALLOWED_HOSTS and not any(host.endswith('.railway.app') for host in ALLOWED_HOSTS):
             ALLOWED_HOSTS.append('.railway.app')
         
-        print(f"[DJANGO] ALLOWED_HOSTS: {ALLOWED_HOSTS}")
+        logger.debug(f"[DJANGO] ALLOWED_HOSTS: {ALLOWED_HOSTS}")
 except Exception as e:
-    print(f"[ERROR] ALLOWED_HOSTS configuration failed: {e}")
+    logger.debug(f"[ERROR] ALLOWED_HOSTS configuration failed: {e}")
     # Fallback to allow all hosts to prevent 500 error
     ALLOWED_HOSTS = ['*']
 
@@ -262,9 +240,9 @@ OPTIONAL_APPS = [
 for app in OPTIONAL_APPS:
     if app_exists(app):
         INSTALLED_APPS.append(app)
-        print(f"[OK] Loaded optional app: {app}")
+        logger.debug(f"[OK] Loaded optional app: {app}")
     else:
-        print(f"[WARNING] Skipped missing app: {app}")
+        logger.debug(f"[WARNING] Skipped missing app: {app}")
 
 # Add remaining apps
 INSTALLED_APPS.extend([
@@ -360,16 +338,16 @@ if REDIS_URL_FOR_CHANNELS:
                 },
             },
         }
-        print(f"[CHANNELS] OK Channel layer configured (URL-based): {redis_host}:{redis_port}")
+        logger.debug(f"[CHANNELS] OK Channel layer configured (URL-based): {redis_host}:{redis_port}")
     else:
         # Could not parse URL - use in-memory fallback
-        print(f"[CHANNELS] WARNING  Could not parse REDIS_URL")
+        logger.debug(f"[CHANNELS] WARNING  Could not parse REDIS_URL")
         CHANNEL_LAYERS = {
             'default': {
                 'BACKEND': 'channels.layers.InMemoryChannelLayer',
             },
         }
-        print(f"[CHANNELS] WARNING Using in-memory channels (single-server only)")
+        logger.debug(f"[CHANNELS] WARNING Using in-memory channels (single-server only)")
 else:
     # Check if REDIS_HOST is configured
     REDIS_HOST_FOR_CHANNELS = config('REDIS_HOST', default=None)
@@ -385,7 +363,7 @@ else:
                 },
             },
         }
-        print(f"[CHANNELS] OK Channel layer configured (host-based): {REDIS_HOST_FOR_CHANNELS}:{config('REDIS_PORT', default=6379)}")
+        logger.debug(f"[CHANNELS] OK Channel layer configured (host-based): {REDIS_HOST_FOR_CHANNELS}:{config('REDIS_PORT', default=6379)}")
     else:
         # No Redis available - use in-memory channel layer
         CHANNEL_LAYERS = {
@@ -393,8 +371,8 @@ else:
                 'BACKEND': 'channels.layers.InMemoryChannelLayer',
             },
         }
-        print(f"[CHANNELS] WARNING Using in-memory channels (Redis not configured)")
-        print(f"[CHANNELS] Note: WebSockets limited to single server. Set REDIS_URL for multi-server support.")
+        logger.debug(f"[CHANNELS] WARNING Using in-memory channels (Redis not configured)")
+        logger.debug(f"[CHANNELS] Note: WebSockets limited to single server. Set REDIS_URL for multi-server support.")
 
 # ==============================================================================
 # End of Channel Layers Configuration
@@ -483,7 +461,7 @@ if not DATABASE_URL:
         # Stub DB — never used for queries, just keeps Django settings importable
         # so build-time tasks (e.g. collectstatic) don't fail.
         DATABASE_URL = 'sqlite:///:memory:'
-        print(f"[DJANGO] ⚠️  No DATABASE_URL configured — using in-memory sqlite stub "
+        logger.debug(f"[DJANGO] ⚠️  No DATABASE_URL configured — using in-memory sqlite stub "
               f"(safe for build-time '{' '.join(_sys.argv[1:2]) or 'startup'}' only)")
     else:
         raise RuntimeError(
@@ -503,8 +481,8 @@ _env_labels = {
     'testing':    '[TESTING]',
     'test':       '[TESTING]',
 }
-print(f"[DJANGO] {_env_labels.get(ENVIRONMENT.lower(), f'[{ENVIRONMENT.upper()}]')} Environment")
-print(f"[DJANGO] DB host: {DATABASE_URL.split('@')[-1]}")
+logger.debug(f"[DJANGO] {_env_labels.get(ENVIRONMENT.lower(), f'[{ENVIRONMENT.upper()}]')} Environment")
+logger.debug(f"[DJANGO] DB host: {DATABASE_URL.split('@')[-1]}")
 
 # Parse database configuration
 db_config = dj_database_url.parse(DATABASE_URL)
@@ -528,9 +506,10 @@ if ENVIRONMENT.lower() not in ('production', 'prod'):
     db_config['TEST'] = {'NAME': 'test_aiflow'}
 
 DATABASES = {'default': db_config}
+TEST_RUNNER = 'config.test_runner.NonInteractiveKeepDbRunner'
 
-print(f"[DJANGO] DB: {db_config.get('HOST')}:{db_config.get('PORT')}")
-print(f"[DJANGO] Timeouts: connect=60s, query=120s, keepalive=60s")
+logger.debug(f"[DJANGO] DB: {db_config.get('HOST')}:{db_config.get('PORT')}")
+logger.debug(f"[DJANGO] Timeouts: connect=60s, query=120s, keepalive=60s")
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -766,22 +745,22 @@ IS_RAILWAY = config('RAILWAY_ENVIRONMENT', default='') != ''
 RAILWAY_ENV_NAME = config('RAILWAY_ENVIRONMENT', default='local')
 
 if IS_RAILWAY:
-    print(f"\n[RAILWAY] 🚂 Detected Railway environment: {RAILWAY_ENV_NAME}")
-    print(f"[RAILWAY] Frontend URL: {PRODUCTION_FRONTEND}")
-    print(f"[RAILWAY] Backend URL: {PRODUCTION_BACKEND}")
+    logger.debug(f"\n[RAILWAY] 🚂 Detected Railway environment: {RAILWAY_ENV_NAME}")
+    logger.debug(f"[RAILWAY] Frontend URL: {PRODUCTION_FRONTEND}")
+    logger.debug(f"[RAILWAY] Backend URL: {PRODUCTION_BACKEND}")
     
     # Ensure production URLs are set correctly for Railway
     if 'radai.ae' not in PRODUCTION_FRONTEND:
-        print("[RAILWAY] ⚠️  WARNING: FRONTEND_URL does not contain radai.ae")
-        print("[RAILWAY] ⚠️  Using fallback: https://www.radai.ae")
+        logger.debug("[RAILWAY] ⚠️  WARNING: FRONTEND_URL does not contain radai.ae")
+        logger.debug("[RAILWAY] ⚠️  Using fallback: https://www.radai.ae")
         PRODUCTION_FRONTEND = 'https://www.radai.ae'
     
     if 'railway.app' not in PRODUCTION_BACKEND:
-        print("[RAILWAY] ⚠️  WARNING: BACKEND_URL does not contain railway.app")
-        print("[RAILWAY] ⚠️  Using fallback: https://aiflowbackend-production.up.railway.app")
+        logger.debug("[RAILWAY] ⚠️  WARNING: BACKEND_URL does not contain railway.app")
+        logger.debug("[RAILWAY] ⚠️  Using fallback: https://aiflowbackend-production.up.railway.app")
         PRODUCTION_BACKEND = 'https://aiflowbackend-production.up.railway.app'
     
-    print(f"[RAILWAY] ✅ Production URLs validated\n")
+    logger.debug(f"[RAILWAY] ✅ Production URLs validated\n")
 
 # ==============================================================================
 # CORS CONFIGURATION (SOFT-CODED with Railway Safety)
@@ -793,13 +772,13 @@ if CORS_ALLOW_ALL_ORIGINS:
     # If allowing all origins, disable credentials for security
     CORS_ALLOW_CREDENTIALS = False
     CORS_ALLOWED_ORIGINS = []  # Not used when allow all is True
-    print("[CORS] WARNING  WARNING: CORS_ALLOW_ALL_ORIGINS is True - ALL origins allowed!")
+    logger.debug("[CORS] WARNING  WARNING: CORS_ALLOW_ALL_ORIGINS is True - ALL origins allowed!")
 else:
     # SOFT-CODED: Use centralized configuration if available
     if CENTRALIZED_CONFIG_AVAILABLE:
-        print("[CORS] ✅ Using centralized environment configuration")
+        logger.debug("[CORS] ✅ Using centralized environment configuration")
         CORS_ALLOWED_ORIGINS = get_cors_origins()
-        print(f"[CORS] Current environment: {get_environment()}")
+        logger.debug(f"[CORS] Current environment: {get_environment()}")
     else:
         # Fallback to environment variable or defaults
         CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
@@ -895,28 +874,28 @@ else:
 # Additional CORS settings for preflight
 CORS_ALLOW_PRIVATE_NETWORK = True
 
-print("\n" + "="*70)
-print("[CORS] ====== CORS CONFIGURATION ======")
+logger.debug("\n" + "="*70)
+logger.debug("[CORS] ====== CORS CONFIGURATION ======")
 if IS_RAILWAY:
-    print(f"[CORS] 🚂 Railway Environment: {RAILWAY_ENV_NAME}")
-print("="*70)
-print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
+    logger.debug(f"[CORS] 🚂 Railway Environment: {RAILWAY_ENV_NAME}")
+logger.debug("="*70)
+logger.debug(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
 if not CORS_ALLOW_ALL_ORIGINS:
-    print(f"[CORS] Allowed Origins Count: {len(CORS_ALLOWED_ORIGINS)}")
-    print(f"[CORS] Allowed Origins:")
+    logger.debug(f"[CORS] Allowed Origins Count: {len(CORS_ALLOWED_ORIGINS)}")
+    logger.debug(f"[CORS] Allowed Origins:")
     for origin in CORS_ALLOWED_ORIGINS:
         # Highlight production domains
         if 'radai.ae' in origin or 'railway.app' in origin:
-            print(f"  ✅ {origin}  <-- PRODUCTION")
+            logger.debug(f"  ✅ {origin}  <-- PRODUCTION")
         else:
-            print(f"  - {origin}")
-print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
-print(f"[CORS] Preflight Max Age: {CORS_PREFLIGHT_MAX_AGE}s")
-print(f"[CORS] Frontend URL: {PRODUCTION_FRONTEND}")
-print(f"[CORS] Backend URL: {PRODUCTION_BACKEND}")
+            logger.debug(f"  - {origin}")
+logger.debug(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
+logger.debug(f"[CORS] Preflight Max Age: {CORS_PREFLIGHT_MAX_AGE}s")
+logger.debug(f"[CORS] Frontend URL: {PRODUCTION_FRONTEND}")
+logger.debug(f"[CORS] Backend URL: {PRODUCTION_BACKEND}")
 if IS_RAILWAY:
-    print(f"[CORS] Railway Health Check: {PRODUCTION_BACKEND}/api/v1/health/")
-print("="*70 + "\n")
+    logger.debug(f"[CORS] Railway Health Check: {PRODUCTION_BACKEND}/api/v1/health/")
+logger.debug("="*70 + "\n")
 
 # ==============================================================================
 # CSRF CONFIGURATION (SOFT-CODED)
@@ -924,7 +903,7 @@ print("="*70 + "\n")
 
 # SOFT-CODED: Use centralized configuration if available
 if CENTRALIZED_CONFIG_AVAILABLE:
-    print("[CSRF] ✅ Using centralized environment configuration")
+    logger.debug("[CSRF] ✅ Using centralized environment configuration")
     CSRF_TRUSTED_ORIGINS = get_csrf_origins()
 else:
     # Fallback: Build CSRF trusted origins from CORS origins
@@ -959,9 +938,9 @@ CSRF_COOKIE_SAMESITE = 'None' if not DEBUG else 'Lax'
 CSRF_USE_SESSIONS = False
 CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read for API calls
 
-print(f"[CSRF] Trusted Origins: {len(CSRF_TRUSTED_ORIGINS)} domains")
+logger.debug(f"[CSRF] Trusted Origins: {len(CSRF_TRUSTED_ORIGINS)} domains")
 for origin in CSRF_TRUSTED_ORIGINS:
-    print(f"  - {origin}")
+    logger.debug(f"  - {origin}")
 
 # ==============================================================================
 # End of CORS/CSRF Configuration
@@ -1002,8 +981,8 @@ if REDIS_URL:
             'TIMEOUT': 300,  # 5 minutes default
         }
     }
-    print(f"[CACHE] OK Redis cache configured (URL-based)")
-    print(f"[CACHE] URL: {REDIS_URL.split('@')[0]}@***")  # Hide credentials
+    logger.debug(f"[CACHE] OK Redis cache configured (URL-based)")
+    logger.debug(f"[CACHE] URL: {REDIS_URL.split('@')[0]}@***")  # Hide credentials
 elif REDIS_HOST and REDIS_HOST != 'None':
     # Docker Compose: host/port configuration
     REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
@@ -1027,8 +1006,8 @@ elif REDIS_HOST and REDIS_HOST != 'None':
             'TIMEOUT': 300,
         }
     }
-    print(f"[CACHE] OK Redis cache configured (host-based)")
-    print(f"[CACHE] Host: {REDIS_HOST}:{REDIS_PORT}")
+    logger.debug(f"[CACHE] OK Redis cache configured (host-based)")
+    logger.debug(f"[CACHE] Host: {REDIS_HOST}:{REDIS_PORT}")
 else:
     # Fallback: In-memory cache (Railway without Redis plugin)
     CACHES = {
@@ -1041,8 +1020,8 @@ else:
             }
         }
     }
-    print(f"[CACHE] WARNING Using in-memory cache (Redis not configured)")
-    print(f"[CACHE] Note: Cache will be lost on restart. Set REDIS_URL for persistent cache.")
+    logger.debug(f"[CACHE] WARNING Using in-memory cache (Redis not configured)")
+    logger.debug(f"[CACHE] Note: Cache will be lost on restart. Set REDIS_URL for persistent cache.")
 
 # ==============================================================================
 # End of Cache Configuration
@@ -1060,21 +1039,21 @@ if REDIS_URL:
     # Use the same Redis URL for Celery (different database number for separation)
     CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=REDIS_URL.replace('/1', '/0'))
     CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=REDIS_URL.replace('/1', '/0'))
-    print(f"[CELERY] OK Broker configured (URL-based)")
+    logger.debug(f"[CELERY] OK Broker configured (URL-based)")
 elif REDIS_HOST and REDIS_HOST != 'None':
     # Fallback to host/port configuration
     REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
     CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
     CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
-    print(f"[CELERY] OK Broker configured (host-based): {REDIS_HOST}:{REDIS_PORT}")
+    logger.debug(f"[CELERY] OK Broker configured (host-based): {REDIS_HOST}:{REDIS_PORT}")
 else:
     # No Redis available - disable Celery (tasks will run synchronously)
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = True
     CELERY_BROKER_URL = None
     CELERY_RESULT_BACKEND = None  # No backend needed for EAGER mode
-    print(f"[CELERY] WARNING Running in EAGER mode (Redis not configured)")
-    print(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
+    logger.debug(f"[CELERY] WARNING Running in EAGER mode (Redis not configured)")
+    logger.debug(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
 
 # Check if EAGER mode is explicitly requested via environment variable.
 # IMPORTANT: preserve True set by the no-Redis branch above; only override if explicitly
@@ -1092,8 +1071,8 @@ CELERY_TASK_EAGER_PROPAGATES = config(
 )
 
 if CELERY_TASK_ALWAYS_EAGER:
-    print(f"[CELERY] ⚡ EAGER mode enabled via environment variable")
-    print(f"[CELERY] ⚡ Tasks will execute synchronously (immediate results)")
+    logger.debug(f"[CELERY] ⚡ EAGER mode enabled via environment variable")
+    logger.debug(f"[CELERY] ⚡ Tasks will execute synchronously (immediate results)")
 
 # SOFT-CODED: opt-in flag for the base_extraction endpoint to prefer Celery
 # over thread-based extraction.  False by default (safe for all environments).
@@ -1102,7 +1081,7 @@ if CELERY_TASK_ALWAYS_EAGER:
 CELERY_BASE_EXTRACTION_PREFER_CELERY = config(
     'CELERY_BASE_EXTRACTION_PREFER_CELERY', default=False, cast=bool
 )
-print(f"[CELERY] base_extraction prefer_celery: {CELERY_BASE_EXTRACTION_PREFER_CELERY}")
+logger.debug(f"[CELERY] base_extraction prefer_celery: {CELERY_BASE_EXTRACTION_PREFER_CELERY}")
 
 # Planning jobs normally run through Celery. If the broker cannot accept a task,
 # keep the user request non-blocking by handing the durable job to one bounded
@@ -1111,7 +1090,7 @@ print(f"[CELERY] base_extraction prefer_celery: {CELERY_BASE_EXTRACTION_PREFER_C
 PLANNING_JOB_LOCAL_FALLBACK = config(
     'PLANNING_JOB_LOCAL_FALLBACK', default=True, cast=bool,
 )
-print(f"[CELERY] planning local fallback: {PLANNING_JOB_LOCAL_FALLBACK}")
+logger.debug(f"[CELERY] planning local fallback: {PLANNING_JOB_LOCAL_FALLBACK}")
 
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
@@ -1128,7 +1107,7 @@ CELERY_TIMEZONE = TIME_ZONE
 #                                       (default: True)
 CELERY_TASK_ACKS_LATE = config('CELERY_TASK_ACKS_LATE', default=True, cast=bool)
 CELERY_TASK_REJECT_ON_WORKER_LOST = config('CELERY_TASK_REJECT_ON_WORKER_LOST', default=True, cast=bool)
-print(f"[CELERY] acks_late={CELERY_TASK_ACKS_LATE} reject_on_worker_lost={CELERY_TASK_REJECT_ON_WORKER_LOST}")
+logger.debug(f"[CELERY] acks_late={CELERY_TASK_ACKS_LATE} reject_on_worker_lost={CELERY_TASK_REJECT_ON_WORKER_LOST}")
 
 # SOFT-CODED: Broker transport options — ensures .delay() fails fast when
 # the Redis broker is unreachable (slow timeout vs immediate ERRNO 111).
@@ -1147,17 +1126,17 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     # Long visibility timeout so heavy OCR tasks are not re-queued mid-flight
     'visibility_timeout': 43200,  # 12 hours
 }
-print(f"[CELERY] Broker connect timeout: {CELERY_BROKER_CONNECTION_TIMEOUT}s")
+logger.debug(f"[CELERY] Broker connect timeout: {CELERY_BROKER_CONNECTION_TIMEOUT}s")
 
 # Never print broker URLs: Railway Redis URLs contain credentials.
 if CELERY_BROKER_URL:
-    print("[CELERY] Broker: configured")
+    logger.debug("[CELERY] Broker: configured")
 else:
-    print("[CELERY] Broker: None (EAGER mode)")
+    logger.debug("[CELERY] Broker: None (EAGER mode)")
 if CELERY_RESULT_BACKEND:
-    print("[CELERY] Result Backend: configured")
+    logger.debug("[CELERY] Result Backend: configured")
 else:
-    print("[CELERY] Result Backend: None")
+    logger.debug("[CELERY] Result Backend: None")
 
 # Celery Beat — scheduled tasks
 # Run daily at 02:00 server time; the task self-skips unless PayrollSchedule.enabled
@@ -1233,7 +1212,7 @@ for _app_config_module in (
         _mod = _importlib.import_module(_app_config_module)
         CELERY_BEAT_SCHEDULE.update(getattr(_mod, 'BEAT_SCHEDULE', {}))
     except Exception as _e:
-        print(f'[CELERY BEAT] WARNING: failed to load schedule from {_app_config_module}: {_e}')
+        logger.debug(f'[CELERY BEAT] WARNING: failed to load schedule from {_app_config_module}: {_e}')
 
 from apps.portfolio.schedule import portfolio_beat_schedule
 CELERY_BEAT_SCHEDULE.update(portfolio_beat_schedule(
@@ -1299,8 +1278,8 @@ S3_READY = safe_cast_bool(config('S3_READY', default='False'), False)
 
 # Smart S3 validation: Require explicit S3_READY flag to prevent credential errors
 if USE_S3_CONFIG and not S3_READY:
-    print("WARNING  [S3] USE_S3=True but S3_READY=False. Using local storage for safety.")
-    print("    Set S3_READY=True on Railway after updating AWS credentials.")
+    logger.debug("WARNING  [S3] USE_S3=True but S3_READY=False. Using local storage for safety.")
+    logger.debug("    Set S3_READY=True on Railway after updating AWS credentials.")
     USE_S3 = False
 elif USE_S3_CONFIG and S3_READY:
     # Double-check credentials are present
@@ -1310,13 +1289,13 @@ elif USE_S3_CONFIG and S3_READY:
     
     # Validate that all required S3 configuration is present
     if not aws_access_key or not aws_secret_key or not aws_bucket_name:
-        print("WARNING  [S3] Credentials incomplete despite S3_READY=True. Falling back to local storage.")
-        print(f"    - AWS_ACCESS_KEY_ID: {'OK Set' if aws_access_key else '✗ Missing'}")
-        print(f"    - AWS_SECRET_ACCESS_KEY: {'OK Set' if aws_secret_key else '✗ Missing'}")
-        print(f"    - AWS_STORAGE_BUCKET_NAME: {'OK Set' if aws_bucket_name else '✗ Missing'}")
+        logger.debug("WARNING  [S3] Credentials incomplete despite S3_READY=True. Falling back to local storage.")
+        logger.debug(f"    - AWS_ACCESS_KEY_ID: {'OK Set' if aws_access_key else '✗ Missing'}")
+        logger.debug(f"    - AWS_SECRET_ACCESS_KEY: {'OK Set' if aws_secret_key else '✗ Missing'}")
+        logger.debug(f"    - AWS_STORAGE_BUCKET_NAME: {'OK Set' if aws_bucket_name else '✗ Missing'}")
         USE_S3 = False  # Disable S3 if credentials are incomplete
     else:
-        print(f"OK [S3] Enabled with bucket: {aws_bucket_name}")
+        logger.debug(f"OK [S3] Enabled with bucket: {aws_bucket_name}")
         USE_S3 = True
 else:
     USE_S3 = False
@@ -1383,7 +1362,7 @@ if USE_S3:
         STATIC_URL = '/static/'
     else:
         # S3 enabled but bucket not configured - use local storage
-        print("WARNING  USE_S3=True but AWS_STORAGE_BUCKET_NAME not set. Using local storage.")
+        logger.debug("WARNING  USE_S3=True but AWS_STORAGE_BUCKET_NAME not set. Using local storage.")
         MEDIA_ROOT = BASE_DIR / 'media'
         MEDIA_URL = '/media/'
         STATIC_ROOT = BASE_DIR / 'staticfiles'
@@ -1579,16 +1558,16 @@ EMAIL_SUBJECT_PREFIX = config('EMAIL_SUBJECT_PREFIX', default='[RADAI] ')
 EMAIL_VERIFICATION_REQUIRED = safe_cast_bool(config('EMAIL_VERIFICATION_REQUIRED', default='True'), True)
 EMAIL_VERIFICATION_TOKEN_EXPIRY = safe_cast_int(config('EMAIL_VERIFICATION_TOKEN_EXPIRY', default='86400'), 86400)  # 24 hours
 
-print("\n" + "=" * 60)
+logger.debug("\n" + "=" * 60)
 # print("EMAIL CONFIGURATION")
-print("=" * 60)
-print(f"Email Backend: {EMAIL_BACKEND}")
-print(f"Email Host: {EMAIL_HOST}")
-print(f"Email Port: {EMAIL_PORT}")
-print(f"Use TLS: {EMAIL_USE_TLS}")
-print(f"SMTP User Configured: {'Yes' if EMAIL_HOST_USER else 'No'}")
-print(f"Default From Email: {DEFAULT_FROM_EMAIL}")
-print("=" * 60 + "\n")
+logger.debug("=" * 60)
+logger.debug(f"Email Backend: {EMAIL_BACKEND}")
+logger.debug(f"Email Host: {EMAIL_HOST}")
+logger.debug(f"Email Port: {EMAIL_PORT}")
+logger.debug(f"Use TLS: {EMAIL_USE_TLS}")
+logger.debug(f"SMTP User Configured: {'Yes' if EMAIL_HOST_USER else 'No'}")
+logger.debug(f"Default From Email: {DEFAULT_FROM_EMAIL}")
+logger.debug("=" * 60 + "\n")
 
 # ========================================================================
 # Finance Module - Approval Team Email Addresses
@@ -1618,13 +1597,13 @@ USAGE_LOG_RETENTION_DAYS = safe_cast_int(config('USAGE_LOG_RETENTION_DAYS', defa
 # Cache TTL for summary data (seconds)
 USAGE_CACHE_TTL = safe_cast_int(config('USAGE_CACHE_TTL', default='300'), 300)
 
-print("\n" + "=" * 60)
-print("USAGE TRACKING CONFIGURATION")
-print("=" * 60)
-print(f"Enabled: {ENABLE_USAGE_TRACKING}")
-print(f"Log Retention: {USAGE_LOG_RETENTION_DAYS} days")
-print(f"Cache TTL: {USAGE_CACHE_TTL} seconds")
-print("=" * 60 + "\n")
+logger.debug("\n" + "=" * 60)
+logger.debug("USAGE TRACKING CONFIGURATION")
+logger.debug("=" * 60)
+logger.debug(f"Enabled: {ENABLE_USAGE_TRACKING}")
+logger.debug(f"Log Retention: {USAGE_LOG_RETENTION_DAYS} days")
+logger.debug(f"Cache TTL: {USAGE_CACHE_TTL} seconds")
+logger.debug("=" * 60 + "\n")
 
 # ========================================================================
 # DISCIPLINE-BASED MODULE ACCESS CONFIGURATION (Soft-Coded RBAC)
@@ -1638,13 +1617,13 @@ from apps.rbac.discipline_config import DisciplineAccessConfig
 # Default soft-coded configuration (can be overridden via environment)
 DISCIPLINE_MODULE_ACCESS = DisciplineAccessConfig.DEFAULT_DISCIPLINE_MODULES
 
-print("\n" + "=" * 60)
-print("DISCIPLINE-BASED ACCESS CONTROL (SOFT-CODED RBAC)")
-print("=" * 60)
+logger.debug("\n" + "=" * 60)
+logger.debug("DISCIPLINE-BASED ACCESS CONTROL (SOFT-CODED RBAC)")
+logger.debug("=" * 60)
 for module_code, config_dict in DISCIPLINE_MODULE_ACCESS.items():
     accessible_depts = config_dict.get('accessible_by_disciplines', [])
-    print(f"  {module_code:25} → {len(accessible_depts)} department(s)")
-print("=" * 60 + "\n")
+    logger.debug(f"  {module_code:25} → {len(accessible_depts)} department(s)")
+logger.debug("=" * 60 + "\n")
 
 # ========================================================================
 # ROBUST QUEUE SERVICE CONFIGURATION
@@ -1662,12 +1641,12 @@ QUEUE_MAX_RETRIES = safe_cast_int(
     config('QUEUE_MAX_RETRIES', default='3'), 3
 )
 
-print("\n" + "=" * 60)
-print("ROBUST QUEUE SERVICE (FALLBACK)")
-print("=" * 60)
-print(f"Circuit Breaker Max Failures: {QUEUE_CIRCUIT_BREAKER_MAX_FAILURES}")
-print(f"Circuit Breaker Timeout: {QUEUE_CIRCUIT_BREAKER_TIMEOUT}s")
-print(f"Max Retries: {QUEUE_MAX_RETRIES}")
+logger.debug("\n" + "=" * 60)
+logger.debug("ROBUST QUEUE SERVICE (FALLBACK)")
+logger.debug("=" * 60)
+logger.debug(f"Circuit Breaker Max Failures: {QUEUE_CIRCUIT_BREAKER_MAX_FAILURES}")
+logger.debug(f"Circuit Breaker Timeout: {QUEUE_CIRCUIT_BREAKER_TIMEOUT}s")
+logger.debug(f"Max Retries: {QUEUE_MAX_RETRIES}")
 
 # ========================================================================
 # LOGGING
@@ -1781,7 +1760,7 @@ LOGGING = {
         },
     },
 }
-print("=" * 60 + "\n")
+logger.debug("=" * 60 + "\n")
 
 
 # S3D controlled release: explicit local/operator configuration, no inferred grants.

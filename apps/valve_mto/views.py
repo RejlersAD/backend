@@ -413,8 +413,8 @@ class ValveMTOProjectViewSet(viewsets.ModelViewSet):
         groups = []
         try:
             drawing.file.open('rb')
-            import fitz
-            doc = fitz.open(stream=drawing.file.read(), filetype='pdf')
+            import pymupdf
+            doc = pymupdf.open(stream=drawing.file.read(), filetype='pdf')
             drawing.file.close()
             candidates = detect_symbols(doc)
             doc.close()

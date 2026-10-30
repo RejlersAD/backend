@@ -47,8 +47,8 @@ from apps.process_datasheet.tag_validator import (
     is_demo_tag,
     get_tag,
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 # =============================================================================
@@ -201,7 +201,7 @@ def _strategy_native_text(pid_file_path: str, pid_filename: Optional[str], valve
     Works on vector PDFs even when all upstream Vision providers are down.
     """
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
     except Exception as e:
         logger.warning(f'[MOV-Chain:native_text] PyMuPDF unavailable: {e}')
         return None
@@ -210,7 +210,7 @@ def _strategy_native_text(pid_file_path: str, pid_filename: Optional[str], valve
     drawing_no: Optional[str] = None
 
     try:
-        doc = fitz.open(pid_file_path)
+        doc = pymupdf.open(pid_file_path)
         try:
             for page_idx in range(len(doc)):
                 page = doc[page_idx]
@@ -238,7 +238,7 @@ def _strategy_native_text(pid_file_path: str, pid_filename: Optional[str], valve
                         import io
                         from PIL import Image
                         import pytesseract
-                        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+                        pix = page.get_pixmap(matrix=pymupdf.Matrix(3, 3))
                         img = Image.open(io.BytesIO(pix.tobytes('png')))
                         ocr_text = pytesseract.image_to_string(img, config='--oem 3 --psm 11') or ''
                         text = (text + '\n' + ocr_text).strip()

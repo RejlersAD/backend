@@ -10,7 +10,7 @@ import json
 import re
 from typing import Dict, List
 import os
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 import io
 
 from apps.process_datasheet.ai_provider import (
@@ -20,8 +20,8 @@ from apps.process_datasheet.ai_provider import (
     GEMINI_VISION_MODEL,
     OPENAI_VISION_MODEL,
 )
-
 logger = logging.getLogger(__name__)
+
 
 # â”€â”€â”€ Shared HMB extraction prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _HMB_SYSTEM = """You are an expert engineering data extraction assistant for Heat and Material Balance (HMB) documents.
@@ -119,11 +119,11 @@ class HMBVisionExtractor:
 
     def _pdf_to_images(self, pdf_path: str, max_pages: int = 15) -> List[bytes]:
         """Return raw PNG bytes for each page (capped at max_pages)."""
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         pages_to_process = min(len(doc), max_pages)
         images = []
         for i in range(pages_to_process):
-            pix = doc[i].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
+            pix = doc[i].get_pixmap(matrix=pymupdf.Matrix(300 / 72, 300 / 72))
             images.append(pix.tobytes("png"))
         doc.close()
         return images

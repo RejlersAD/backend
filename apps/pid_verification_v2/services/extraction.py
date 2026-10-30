@@ -26,8 +26,8 @@ from typing import Any, Dict
 from celery.exceptions import SoftTimeLimitExceeded
 
 from .legend_knowledge import load_legend_knowledge
-
 logger = logging.getLogger(__name__)
+
 
 # Soft-coded standard NPS inch sizes accepted by deterministic parser.
 _STANDARD_NPS_INCH = {
@@ -240,7 +240,7 @@ def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
     try:
         import pytesseract
         from PIL import Image, ImageOps, ImageFilter
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
         Image.MAX_IMAGE_PIXELS = _PIL_MAX_IMAGE_PIXELS
 
@@ -253,12 +253,12 @@ def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
         dpi_levels = (150, 300, 450)
         page_by_dpi = {}
         if ext == 'pdf':
-            doc = fitz.open(file_path)
+            doc = pymupdf.open(file_path)
             page = doc[page_index]
 
             def _render(dpi):
-                mat = fitz.Matrix(dpi / 72, dpi / 72)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+                mat = pymupdf.Matrix(dpi / 72, dpi / 72)
+                pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY)
                 import io
                 return Image.open(io.BytesIO(pix.tobytes('png')))
 
@@ -322,7 +322,7 @@ def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
             if _doc_ref is not None:
                 _doc_ref.close()
     except ImportError:
-        logger.warning('[PIDExtraction] pytesseract/fitz not available – using empty extraction')
+        logger.warning('[PIDExtraction] pytesseract/pymupdf not available – using empty extraction')
     except SoftTimeLimitExceeded:
         # Never swallow the Celery soft time-limit signal here — let it
         # propagate so the task can fail cleanly instead of silently
@@ -617,12 +617,12 @@ def _extract_tag_positions(file_path, page_index):
                     _scan_text(combined, pair_xp, pair_yp)
 
     try:
-        import fitz
+        import pymupdf
         ext = file_path.rsplit('.', 1)[-1].lower()
         if ext != 'pdf':
             return positions
 
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         if page_index >= len(doc):
             doc.close()
             return positions
@@ -662,8 +662,8 @@ def _extract_tag_positions(file_path, page_index):
                 import io
 
                 dpi = 300
-                mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
+                mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
+                pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY, alpha=False)
                 img = Image.open(io.BytesIO(pix.tobytes('png')))
                 img_w, img_h = img.size
 
@@ -841,11 +841,11 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
             )
 
     try:
-        import fitz
+        import pymupdf
         if file_path.rsplit('.', 1)[-1].lower() != 'pdf':
             return []
 
-        doc    = fitz.open(file_path)
+        doc    = pymupdf.open(file_path)
         if page_index >= len(doc):
             doc.close()
             return []
@@ -947,8 +947,8 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text
                 import io
 
                 dpi = 200   # reduced for rotated passes: speed vs quality trade-off
-                mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
+                mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
+                pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY, alpha=False)
                 orig_img      = Image.open(io.BytesIO(pix.tobytes('png')))
                 orig_w, orig_h = orig_img.size
                 cfg = '--oem 1 --psm 11'
@@ -1127,11 +1127,11 @@ def _extract_red_annotations(file_path: str, page_index: int) -> list:
     """
     items: list = []
     try:
-        import fitz
+        import pymupdf
         if file_path.rsplit('.', 1)[-1].lower() != 'pdf':
             return items
 
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         if page_index >= len(doc):
             doc.close()
             return items

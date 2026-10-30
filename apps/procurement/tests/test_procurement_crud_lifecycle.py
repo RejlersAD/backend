@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
-import fitz
+import pymupdf
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.base import ContentFile
@@ -205,7 +205,7 @@ class ProcurementCRUDLifecycleTests(TestCase):
             self.assertEqual(self.pr.price_remarks_data, source)
 
     def test_native_pr_attachment_uses_active_storage(self):
-        pdf = fitz.open()
+        pdf = pymupdf.open()
         pdf.new_page().insert_text((72, 72), 'Test quotation')
         upload = SimpleUploadedFile('quotation.pdf', pdf.tobytes(), content_type='application/pdf')
         pdf.close()

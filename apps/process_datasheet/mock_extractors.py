@@ -5,8 +5,8 @@ Simulates P&ID and HMB extraction (replace with real extraction later)
 import logging
 from typing import Dict, List
 from datetime import datetime
-
 logger = logging.getLogger(__name__)
+
 
 
 class MockPIDExtractor:
@@ -332,20 +332,20 @@ def test_mock_extractors():
     pid_data = pid_extractor.extract_from_pdf(None)
     hmb_data = hmb_extractor.extract_from_pdf(None)
     
-    print("=== P&ID Data ===")
-    print(f"Valves: {len(pid_data['valves'])}")
+    logger.debug("=== P&ID Data ===")
+    logger.debug(f"Valves: {len(pid_data['valves'])}")
     for valve in pid_data['valves']:
-        print(f"  - {valve['tag']}: {valve['line_no']}")
+        logger.debug(f"  - {valve['tag']}: {valve['line_no']}")
     
-    print("\n=== HMB Data ===")
-    print(f"Streams: {len(hmb_data['streams'])}")
+    logger.debug("\n=== HMB Data ===")
+    logger.debug(f"Streams: {len(hmb_data['streams'])}")
     for stream in hmb_data['streams']:
-        print(f"  - {stream['stream_id']}: {stream['line_no']}")
+        logger.debug(f"  - {stream['stream_id']}: {stream['line_no']}")
     
-    print("\n=== Line-Stream Matching ===")
+    logger.debug("\n=== Line-Stream Matching ===")
     line_context = match_lines_to_streams(pid_data, hmb_data)
     for valve_tag, context in line_context.items():
-        print(f"  - {valve_tag} -> {context['stream_id']} (via {context['line_no']})")
+        logger.debug(f"  - {valve_tag} -> {context['stream_id']} (via {context['line_no']})")
 
 
 if __name__ == "__main__":

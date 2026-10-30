@@ -54,6 +54,8 @@ from .serializers import (
     PipingClassSerializer,
     PipingClassListSerializer,
 )
+logger = logging.getLogger(__name__)
+
 try:
     from apps.planning_intelligence.services import byok_crypto
 except Exception:
@@ -88,7 +90,6 @@ from .services.presigned_upload import (
 from .tasks import extract_paper_spec
 from .services.completeness import extraction_completeness
 
-logger = logging.getLogger(__name__)
 
 _CHATBOT_APPROVAL_CACHE_PREFIX = "spec_customization:chatbot_approval:"
 _CHATBOT_APPROVAL_TTL_SECONDS = 600
@@ -207,18 +208,18 @@ def _page_count(file_field) -> int:
         Number of pages, or 0 if unable to determine
     """
     try:
-        import fitz
+        import pymupdf
         # For S3 storage, we need to read the file into memory
         try:
             # Try local path first (faster if available)
             file_path = file_field.path
-            with fitz.open(file_path) as doc:
+            with pymupdf.open(file_path) as doc:
                 return doc.page_count
         except (NotImplementedError, AttributeError):
             # S3 storage doesn't support .path, read from file-like object
             with file_field.open('rb') as f:
                 pdf_bytes = f.read()
-                with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
                     return doc.page_count
     except Exception:
         try:

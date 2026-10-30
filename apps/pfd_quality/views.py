@@ -44,8 +44,8 @@ from .serializers import (
     UploadSerializer,
 )
 from .services.consistency import compute_file_hash, check_cache
-
 logger = logging.getLogger(__name__)
+
 
 
 # ===========================================================================
@@ -459,13 +459,13 @@ def drawing_image(request, document_id, page_index):
 
     if ext == "pdf":
         try:
-            import fitz
-            pdf_doc = fitz.open(file_path)
+            import pymupdf
+            pdf_doc = pymupdf.open(file_path)
             if page_index >= len(pdf_doc):
                 pdf_doc.close()
                 return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
             page = pdf_doc[page_index]
-            mat  = fitz.Matrix(2.0, 2.0)  # 2× zoom ≈ 150 dpi for A1 drawings
+            mat  = pymupdf.Matrix(2.0, 2.0)  # 2× zoom ≈ 150 dpi for A1 drawings
             pix  = page.get_pixmap(matrix=mat, alpha=False)
             png_data = pix.tobytes("png")
             pdf_doc.close()

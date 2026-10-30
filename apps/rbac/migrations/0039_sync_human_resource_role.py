@@ -1,6 +1,9 @@
+import logging
+
 # Generated migration to sync human_resource role modules
 
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 def sync_human_resource_role(apps, schema_editor):
@@ -17,7 +20,7 @@ def sync_human_resource_role(apps, schema_editor):
     try:
         role = Role.objects.get(code='human_resource')
     except Role.DoesNotExist:
-        print("  [SKIP] human_resource role not found")
+        logger.debug("  [SKIP] human_resource role not found")
         return
     
     # Expected HR modules according to ROLE_MODULE_POLICY
@@ -45,7 +48,7 @@ def sync_human_resource_role(apps, schema_editor):
             deleted = RoleModule.objects.filter(role=role, module=module).delete()
             if deleted[0] > 0:
                 removed_count += 1
-                print(f"  - Removed module: {module_code}")
+                logger.debug(f"  - Removed module: {module_code}")
         except Module.DoesNotExist:
             pass
     
@@ -57,14 +60,14 @@ def sync_human_resource_role(apps, schema_editor):
             rm, created = RoleModule.objects.get_or_create(role=role, module=module)
             if created:
                 missing_count += 1
-                print(f"  + Added module: {module_code}")
+                logger.debug(f"  + Added module: {module_code}")
         except Module.DoesNotExist:
-            print(f"  ! Module not found: {module_code}")
+            logger.debug(f"  ! Module not found: {module_code}")
     
     # Summary
     current_count = RoleModule.objects.filter(role=role).count()
-    print(f"  ✓ Sync complete: removed {removed_count}, added {missing_count}")
-    print(f"  ✓ Final module count: {current_count} (expected: {len(expected_modules)})")
+    logger.debug(f"  ✓ Sync complete: removed {removed_count}, added {missing_count}")
+    logger.debug(f"  ✓ Final module count: {current_count} (expected: {len(expected_modules)})")
 
 
 def reverse_sync(apps, schema_editor):

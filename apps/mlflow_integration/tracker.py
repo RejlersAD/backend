@@ -3,6 +3,8 @@ MLflow Tracker - Central model orchestration and experiment tracking
 Provides decorators and utilities to track AI operations across all features
 """
 
+import logging
+
 import mlflow
 import mlflow.openai
 from functools import wraps
@@ -11,6 +13,7 @@ import os
 from typing import Dict, Any, Optional, Callable
 from django.conf import settings
 import json
+logger = logging.getLogger(__name__)
 
 
 class MLflowTracker:
@@ -29,7 +32,7 @@ class MLflowTracker:
     def initialize(self):
         """Initialize MLflow tracking"""
         if not self.enabled:
-            print('[MLflow] ⏭️  Tracking disabled')
+            logger.debug('[MLflow] ⏭️  Tracking disabled')
             return
             
         try:
@@ -39,14 +42,14 @@ class MLflowTracker:
             for exp_key, exp_name in self.experiments.items():
                 try:
                     mlflow.create_experiment(exp_name)
-                    print(f'[MLflow] 📊 Created experiment: {exp_name}')
+                    logger.debug(f'[MLflow] 📊 Created experiment: {exp_name}')
                 except Exception:
                     # Experiment already exists
                     pass
                     
-            print(f'[MLflow] ✅ Initialized with URI: {self.tracking_uri}')
+            logger.debug(f'[MLflow] ✅ Initialized with URI: {self.tracking_uri}')
         except Exception as e:
-            print(f'[MLflow] ⚠️  Initialization failed: {e}')
+            logger.debug(f'[MLflow] ⚠️  Initialization failed: {e}')
             self.enabled = False
     
     def get_experiment_name(self, feature: str) -> str:
@@ -179,7 +182,7 @@ class MLflowTracker:
                             mlflow.log_artifact(path, artifact_path=name)
                             
         except Exception as e:
-            print(f'[MLflow] ⚠️  Failed to log experiment: {e}')
+            logger.debug(f'[MLflow] ⚠️  Failed to log experiment: {e}')
     
     def track_model_performance(
         self,
@@ -250,7 +253,7 @@ class MLflowTracker:
             return runs
             
         except Exception as e:
-            print(f'[MLflow] ⚠️  Failed to compare models: {e}')
+            logger.debug(f'[MLflow] ⚠️  Failed to compare models: {e}')
             return None
 
 

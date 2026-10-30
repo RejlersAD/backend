@@ -31,8 +31,8 @@ from apps.pid_analysis.equipment_metadata import (
     normalise_equipment_metadata,
 )
 from apps.pid_analysis.multi_model_service import MultiModelAIService
-
 logger = logging.getLogger(__name__)
+
 
 # Description-only groups carry no related tag to anchor in the page text.
 _TEXT_ANCHOR_EXEMPT_GROUPS = ('engineering_notes', 'internals', 'process_streams')
@@ -65,21 +65,21 @@ def render_page_images(file_bytes: bytes, config: dict) -> list:
     vision enrichment.
     """
     try:
-        import fitz
+        import pymupdf
         ext_cfg = (config or {}).get('extraction', {})
         max_pages = _int_setting(ext_cfg, 'equipment_vision_max_pages', 12)
         dpi = _int_setting(ext_cfg, 'equipment_vision_dpi', 150, minimum=36)
         zoom = dpi / 72.0
         images: list = []
-        with fitz.open(stream=file_bytes, filetype='pdf') as doc:
+        with pymupdf.open(stream=file_bytes, filetype='pdf') as doc:
             for page in doc:
                 if len(images) >= max_pages:
                     break
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
                 long_edge = max(pix.width, pix.height)
                 if long_edge > _MAX_IMAGE_EDGE_PX:
                     shrink = _MAX_IMAGE_EDGE_PX / long_edge
-                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom * shrink, zoom * shrink))
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom * shrink, zoom * shrink))
                 images.append(base64.b64encode(pix.tobytes('png')).decode('ascii'))
         return images
     except Exception as exc:  # noqa: BLE001 — vision rendering is best-effort

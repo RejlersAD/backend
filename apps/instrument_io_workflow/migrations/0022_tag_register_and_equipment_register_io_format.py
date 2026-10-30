@@ -20,7 +20,10 @@ isn't a safe carry-over either).
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # Same lookup as instrument_index (migration 0016) — kept in sync since
 # tag_register now uses the identical 3-field tag shape.
@@ -153,7 +156,7 @@ def update_forward(apps, schema_editor):
         updated = IOListLegendSheet.objects.filter(section=section, name=old_name).update(
             name=new_name, description=new_desc, definition=new_def,
         )
-        print(f'[instrument_io_workflow] Updated {section!r} to I/O List format on {updated} row(s).')
+        logger.debug(f'[instrument_io_workflow] Updated {section!r} to I/O List format on {updated} row(s).')
 
 
 def update_backward(apps, schema_editor):

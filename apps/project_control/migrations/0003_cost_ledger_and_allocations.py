@@ -1,8 +1,11 @@
-﻿import uuid
+import logging
+
+import uuid
 
 import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
+logger = logging.getLogger(__name__)
 
 
 LEGACY_PARENT_ID_INDEXES = (
@@ -119,10 +122,8 @@ def repair_legacy_parent_ids(apps, schema_editor):
                     f'type {udt_name!r}.'
                 )
             if repaired_rows:
-                print(
-                    f'[project_control.0003] Re-keyed {repaired_rows} '
-                    f'duplicate/null {table_name} row(s).'
-                )
+                logger.debug(f'[project_control.0003] Re-keyed {repaired_rows} '
+                    f'duplicate/null {table_name} row(s).')
 
             constraints = connection.introspection.get_constraints(cursor, table_name)
             id_is_unique = any(

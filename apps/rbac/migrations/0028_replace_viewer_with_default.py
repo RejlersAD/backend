@@ -22,8 +22,11 @@ Safety:
 
 Reverse: no-op (we never restore 'viewer' as the baseline).
 """
+
+import logging
 import uuid
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 def replace_viewer_with_default(apps, schema_editor):
@@ -45,7 +48,7 @@ def replace_viewer_with_default(apps, schema_editor):
     try:
         viewer_role = Role.objects.using(db_alias).get(code=viewer_code)
     except Role.DoesNotExist:
-        print(f"\n[0028] Viewer role not found — nothing to migrate.")
+        logger.debug(f"\n[0028] Viewer role not found — nothing to migrate.")
         return
 
     try:
@@ -53,10 +56,8 @@ def replace_viewer_with_default(apps, schema_editor):
             code=default_code, is_active=True
         )
     except Role.DoesNotExist:
-        print(
-            f"\n[0028] Default role (code='{default_code}') not seeded yet. "
-            "Run migration 0027 first. Skipping."
-        )
+        logger.debug(f"\n[0028] Default role (code='{default_code}') not seeded yet. "
+            "Run migration 0027 first. Skipping.")
         return
 
     # Every UserRole pointing at 'viewer'
@@ -112,11 +113,9 @@ def replace_viewer_with_default(apps, schema_editor):
         )
         replaced += 1
 
-    print(
-        f"\n[0028] Viewer -> Default migration complete. "
+    logger.debug(f"\n[0028] Viewer -> Default migration complete. "
         f"Replaced: {replaced} | Already had default: {already_default} | "
-        f"Removed from super admins: {removed_from_super}"
-    )
+        f"Removed from super admins: {removed_from_super}")
 
 
 def noop_reverse(apps, schema_editor):
