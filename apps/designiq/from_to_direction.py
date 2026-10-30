@@ -722,4 +722,4 @@ if __name__ == "__main__":
         logger.debug(f"{r.original_detection}:")
         logger.debug(f"  FROM: {r.from_line}")
         logger.debug(f"  TO: {r.to_line}")
-        logger.debug()
+        logger.debug('')
