@@ -204,6 +204,7 @@ test_*.py
 !apps/hr_core/tests/test_graph_assistant_governance.py
 !apps/hr_core/tests/test_business_approval_gates.py
 !apps/rbac/tests/test_profile_documents.py
+!apps/users/tests/test_password_expiry_middleware.py
 !apps/sales/tests/test_workflow.py
 !apps/portfolio/tests/*.py
 !apps/rbac/tests/test_organization_catalog_data.py
