@@ -22,6 +22,7 @@ router = DefaultRouter()
 router.register(r'clients', ClientViewSet, basename='client')
 router.register(r'contacts', ContactViewSet, basename='contact')
 router.register(r'deals', DealViewSet, basename='deal')
+router.register(r'opportunities', DealViewSet, basename='opportunity')
 router.register(r'quotes', QuoteViewSet, basename='quote')
 router.register(r'frameworks', FrameworkAgreementViewSet, basename='framework')
 router.register(r'project-handovers', ProjectHandoverViewSet, basename='project-handover')
@@ -67,12 +68,12 @@ urlpatterns = analytics_urlpatterns + [
 # - DELETE /api/sales/contacts/{id}/               - Delete contact
 # - GET    /api/sales/contacts/by_client/          - Get contacts by client
 #
-# DEALS:
-# - GET    /api/sales/deals/                       - List all deals
-# - POST   /api/sales/deals/                       - Create deal
-# - GET    /api/sales/deals/{id}/                  - Get deal details
-# - PUT    /api/sales/deals/{id}/                  - Update deal
-# - DELETE /api/sales/deals/{id}/                  - Delete deal
+# DEALS / OPPORTUNITIES:
+# - GET    /api/sales/deals/                       - List all deals (aliased as /api/sales/opportunities/)
+# - POST   /api/sales/deals/                       - Create deal (aliased as /api/sales/opportunities/)
+# - GET    /api/sales/deals/{id}/                  - Get deal details (aliased as /api/sales/opportunities/{id}/)
+# - PUT    /api/sales/deals/{id}/                  - Update deal (aliased as /api/sales/opportunities/{id}/)
+# - DELETE /api/sales/deals/{id}/                  - Delete deal (aliased as /api/sales/opportunities/{id}/)
 # - POST   /api/sales/deals/{id}/calculate_win_probability/
 # - POST   /api/sales/deals/{id}/score_lead/
 # - GET    /api/sales/deals/{id}/next_action/
