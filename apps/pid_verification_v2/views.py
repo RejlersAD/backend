@@ -1226,13 +1226,13 @@ def document_extraction(request, document_id):
         (s.document_id, s.page_index): s.pk
         for s in PIDVSheet.objects.filter(document=doc)
     }
-    # id → sl_no map for this document's findings (F-numbers shown in the UI)
+    # id → checklist-serial label for this document's findings (the same
+    # display ids the Findings list and drawing markers show)
     from .models import PIDVFinding as _PIDVFinding
-    finding_nos = {
-        f_id: sl for f_id, sl in _PIDVFinding.objects.filter(
-            drawing__document=doc,
-        ).values_list('id', 'sl_no')
-    }
+    from .services.display_ids import assign_display_ids as _assign_display_ids
+    finding_nos = _assign_display_ids(
+        _PIDVFinding.objects.filter(drawing__document=doc).select_related('drawing')
+    )
     if kind:
         if kind not in PIDVExtractionItem.Kind.values:
             return Response(
@@ -1344,13 +1344,17 @@ def document_scene3d(request, document_id):
             logger.debug('[Scene3D] ghost-equipment scan failed (non-fatal)', exc_info=True)
 
     from .services.scene3d import clean_finding_text
+    from .services.display_ids import assign_display_ids as _assign_display_ids
+    _scene_findings = list(PIDVFinding.objects.filter(drawing=drawing).select_related('drawing'))
+    _scene_labels = _assign_display_ids(_scene_findings)
     findings = [
         {
             'id': f.id, 'number': f.sl_no, 'severity': f.severity,
             'rule_id': f.rule_id, 'title': clean_finding_text(f.issue_observed),
             'bbox': f.bbox, 'entity_id': f.entity_id,
+            'display_id': _scene_labels.get(f.id),  # checklist-serial label
         }
-        for f in PIDVFinding.objects.filter(drawing=drawing)
+        for f in _scene_findings
     ]
 
     # Legend decode per field (LD-04 class split / LD-08 system /

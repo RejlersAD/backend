@@ -64,7 +64,7 @@ def _zones_reader(doc):
     return zones_for
 
 
-def _finding_view(f, sheet_label, zones_for=None, page=0):
+def _finding_view(f, sheet_label, zones_for=None, page=0, label=None):
     """Uniform dict for a PIDVFinding row (report_meta with fallbacks)."""
     rm = f.report_meta or {}
     sev = getattr(f, 'severity', '')
@@ -83,7 +83,8 @@ def _finding_view(f, sheet_label, zones_for=None, page=0):
         'ai_result': rm.get('ai_result') or ('Non-Conformance' if sev in ('critical', 'major') else 'Query'),
         'engineer_verification': rm.get('engineer_verification'),
         'remarks': rm.get('remarks') or '',
-        'n': f.sl_no,  # F-number shown in the Findings list — never the PK
+        'n': f.sl_no,  # legacy F-number
+        'label': label or f'F{f.sl_no}',  # checklist-serial display id (2 Nov 2026)
     }
 
 
@@ -149,9 +150,9 @@ def _fill_workbook(wb, template, header, items, findings_by_id, sheet_label, ext
         ws.cell(r, 11).value = item.get('remarks') or None
         if item.get('evidence'):
             note = 'RADAI AI: ' + item['evidence']
-            _fnos = item.get('finding_nos') or item.get('finding_ids')
+            _fnos = item.get('finding_labels') or item.get('finding_nos') or item.get('finding_ids')
             if _fnos:
-                note += '\nFindings: ' + ', '.join(f'F{f}' for f in _fnos)
+                note += '\nFindings: ' + ', '.join(str(f) if str(f).startswith('F') or '.' in str(f) else f'F{f}' for f in _fnos)
             c = Comment(note, 'RADAI')
             c.width, c.height = 320, 140
             ws.cell(r, 9).comment = c
@@ -160,7 +161,7 @@ def _fill_workbook(wb, template, header, items, findings_by_id, sheet_label, ext
             real = [findings_by_id[fid] for fid in fids if fid in findings_by_id]
             if real:
                 for fid, f in zip(fids, real):
-                    reg.append([item['no'], f"F{f.get('n') or fid}", f['sheet_label'], f['grid'], f['tag'],
+                    reg.append([item['no'], f.get('label') or f"F{f.get('n') or fid}", f['sheet_label'], f['grid'], f['tag'],
                                 f['finding_text'], f['reference'], f['ai_result'], item['severity'],
                                 f['suggested_correction'], f['confidence'], item['mode'],
                                 f['engineer_verification'], f['remarks']])
@@ -191,9 +192,11 @@ def build_checklist_report(doc, page: int, template=None):
     rev = (sheet.rev if sheet else '') or tb.get('revision') or ''
     sheet_label = f'{drawing_no} (p.{page + 1})'
 
-    findings = PIDVFinding.objects.filter(drawing=drawing) if drawing else []
+    findings = list(PIDVFinding.objects.filter(drawing=drawing)) if drawing else []
     zones_for = _zones_reader(doc)
-    findings_by_id = {f.id: _finding_view(f, sheet_label, zones_for, page) for f in findings}
+    from .display_ids import assign_display_ids
+    _labels = assign_display_ids(findings)
+    findings_by_id = {f.id: _finding_view(f, sheet_label, zones_for, page, label=_labels.get(f.id)) for f in findings}
 
     import datetime
     today = datetime.date.today().strftime('%d-%b-%Y')
@@ -238,6 +241,7 @@ def build_project_checklist_report(project, template=None):
     sheet_labels = {}
     all_findings = {}
     zones_by_doc = {}
+    from .display_ids import assign_display_ids
     for s in sheets:
         ev = evaluate_sheet(s.document, s.page_index, template)
         if ev is None:
@@ -246,9 +250,12 @@ def build_project_checklist_report(project, template=None):
         sheet_labels[s.pk] = label
         if s.document_id not in zones_by_doc:
             zones_by_doc[s.document_id] = _zones_reader(s.document)
-        for f in PIDVFinding.objects.filter(drawing__document_id=s.document_id,
-                                            drawing__page_index=s.page_index):
-            all_findings[f.id] = _finding_view(f, label, zones_by_doc[s.document_id], s.page_index)
+        sheet_findings = list(PIDVFinding.objects.filter(drawing__document_id=s.document_id,
+                                                         drawing__page_index=s.page_index))
+        _labels = assign_display_ids(sheet_findings)
+        for f in sheet_findings:
+            all_findings[f.id] = _finding_view(f, label, zones_by_doc[s.document_id], s.page_index,
+                                               label=_labels.get(f.id))
         for it in ev['items']:
             cur = per_item.setdefault(it['no'], {
                 **{k: it[k] for k in ('no', 'severity', 'mode', 'missing_inputs')},
@@ -277,9 +284,10 @@ def build_project_checklist_report(project, template=None):
             **cur,
             'evidence': ev_text,
             'finding_ids': _fids,
-            # sl_no for display — F-numbers must match the Findings list,
-            # not the database PKs.
+            # Checklist-serial labels for display — match the Findings list,
+            # never the database PKs.
             'finding_nos': [all_findings[fid]['n'] for fid in _fids if fid in all_findings],
+            'finding_labels': [all_findings[fid]['label'] for fid in _fids if fid in all_findings],
             'xlsx_row': items_meta[no].xlsx_row,
         })
 

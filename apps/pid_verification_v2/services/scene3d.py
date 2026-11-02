@@ -421,7 +421,7 @@ def build_scene(pdf, page, extraction, findings, decode=None):
                     anchor, ref = [obj['center'][0], obj['size'][1] + 0.6, obj['center'][2]], obj['id']
                 else:
                     q = obj['_q']; anchor, ref = M(p[0], p[1], RISE if q.get('riser') else RACK), obj['id']
-        out_f.append({'id': f.get('id') or f'F{n}', 'n': f.get('number') or n, 'rule': f.get('rule_id'), 'title': f.get('title'),
+        out_f.append({'id': f.get('id') or f'F{n}', 'n': f.get('number') or n, 'label': f.get('display_id'), 'rule': f.get('rule_id'), 'title': f.get('title'),
                       'kind': {'critical': 'error', 'major': 'error', 'error': 'error', 'minor': 'minor'}.get((f.get('severity') or '').lower(), 'query'),
                       'anchor': anchor, 'ref': ref})
 

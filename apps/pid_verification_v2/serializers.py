@@ -43,15 +43,36 @@ class PIDVProjectCreateSerializer(serializers.ModelSerializer):
 class PIDVFindingSerializer(serializers.ModelSerializer):
     locations = serializers.SerializerMethodField()
     sheet_id = serializers.SerializerMethodField()
+    display_id = serializers.SerializerMethodField()
 
     class Meta:
         model  = PIDVFinding
         fields = [
-            'id', 'sl_no', 'category', 'issue_observed',
+            'id', 'sl_no', 'display_id', 'category', 'issue_observed',
             'action_required', 'evidence', 'direction',
             'severity', 'status', 'rule_id', 'created_at',
             'entity_id', 'bbox', 'locations', 'sheet_id', 'report',
         ]
+
+    def get_display_id(self, obj):
+        """Checklist-serial label ('9.1', '9.1-2'…) — computed once per
+        request for the whole document and cached in the serializer
+        context; falls back to F<sl_no> for unmapped rules."""
+        m = self.context.get('_display_ids')
+        if m is None:
+            m = {}
+            doc = self.context.get('document')
+            if doc is not None:
+                try:
+                    from .services.display_ids import assign_display_ids
+                    m = assign_display_ids(
+                        PIDVFinding.objects.filter(drawing__document=doc)
+                        .select_related('drawing')
+                    )
+                except Exception:
+                    m = {}
+            self.context['_display_ids'] = m
+        return m.get(obj.id) or f'F{obj.sl_no}'
 
     def get_report(self, obj):
         """§2.5 fields for the AI Comment Register. `valid` is False when a
