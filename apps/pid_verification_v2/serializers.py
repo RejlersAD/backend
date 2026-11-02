@@ -44,6 +44,7 @@ class PIDVFindingSerializer(serializers.ModelSerializer):
     locations = serializers.SerializerMethodField()
     sheet_id = serializers.SerializerMethodField()
     display_id = serializers.SerializerMethodField()
+    report = serializers.SerializerMethodField()
 
     class Meta:
         model  = PIDVFinding
