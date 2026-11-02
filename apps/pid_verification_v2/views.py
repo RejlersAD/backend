@@ -783,6 +783,23 @@ def _inject_finding_locations(data: dict, doc) -> None:
             issue['locations'] = locs
 
 
+def _inject_display_ids(data: dict, doc) -> None:
+    """Add `display_id` (checklist-serial label: '9.1', '9.1-2'…) to every
+    issue in a serialized payload — used on the cache fast path, whose
+    snapshot may predate the display_id field (2 Nov 2026)."""
+    from .models import PIDVFinding
+    from .services.display_ids import assign_display_ids
+    labels = assign_display_ids(
+        PIDVFinding.objects.filter(drawing__document=doc)
+    )
+    for d in data.get('drawings', []):
+        for issue in d.get('issues', []) or []:
+            if not issue.get('display_id'):
+                lbl = labels.get(issue.get('id'))
+                if lbl:
+                    issue['display_id'] = lbl
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_results(request, document_id):
@@ -825,6 +842,7 @@ def get_results(request, document_id):
                     for i in (d.get('issues') or [])
                 ):
                     _inject_finding_locations(data, doc)
+                _inject_display_ids(data, doc)
                 return Response(data)
             data = dict(cached['full_data'])
             data['drawings'] = [
@@ -832,6 +850,7 @@ def get_results(request, document_id):
                 for d in data.get('drawings', [])
             ]
             _inject_finding_locations(data, doc)
+            _inject_display_ids(data, doc)
             return Response(data)
 
     # Soft-upgrade: backfill tag_positions for drawings that were processed
