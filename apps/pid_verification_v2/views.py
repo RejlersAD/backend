@@ -784,16 +784,18 @@ def _inject_finding_locations(data: dict, doc) -> None:
 
 
 def _inject_display_ids(data: dict, doc) -> None:
-    """Add `display_id` (checklist-serial label: '9.1', '9.1-2'…) to every
-    issue in a serialized payload — used on the cache fast path, whose
-    snapshot may predate the display_id field (2 Nov 2026)."""
+    """Add `display_id` (checklist-serial label: '9.1', '9.1-2'…) and
+    `in_checklist` to every issue in a serialized payload — used on the
+    cache fast path, whose snapshot may predate these fields (2 Nov 2026)."""
     from .models import PIDVFinding
-    from .services.display_ids import assign_display_ids
-    labels = assign_display_ids(
-        PIDVFinding.objects.filter(drawing__document=doc)
-    )
+    from .services.display_ids import assign_display_ids, checklist_serials
+    qs = PIDVFinding.objects.filter(drawing__document=doc)
+    labels = assign_display_ids(qs)
+    serials = checklist_serials(qs)
     for d in data.get('drawings', []):
         for issue in d.get('issues', []) or []:
+            if 'in_checklist' not in issue:
+                issue['in_checklist'] = serials.get(issue.get('id')) is not None
             if not issue.get('display_id'):
                 lbl = labels.get(issue.get('id'))
                 if lbl:
@@ -1363,15 +1365,18 @@ def document_scene3d(request, document_id):
             logger.debug('[Scene3D] ghost-equipment scan failed (non-fatal)', exc_info=True)
 
     from .services.scene3d import clean_finding_text
-    from .services.display_ids import assign_display_ids as _assign_display_ids
+    from .services.display_ids import assign_display_ids as _assign_display_ids, checklist_serials as _checklist_serials
     _scene_findings = list(PIDVFinding.objects.filter(drawing=drawing).select_related('drawing'))
     _scene_labels = _assign_display_ids(_scene_findings)
+    _scene_serials = _checklist_serials(_scene_findings)
     findings = [
         {
             'id': f.id, 'number': f.sl_no, 'severity': f.severity,
             'rule_id': f.rule_id, 'title': clean_finding_text(f.issue_observed),
             'bbox': f.bbox, 'entity_id': f.entity_id,
-            'display_id': _scene_labels.get(f.id),  # checklist-serial label
+            # label present only for checklist-mapped findings — the 3D view
+            # hides unmapped ones from the canvas (2 Nov 2026 alignment)
+            'display_id': _scene_labels.get(f.id) if _scene_serials.get(f.id) else None,
         }
         for f in _scene_findings
     ]

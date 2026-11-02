@@ -44,36 +44,46 @@ class PIDVFindingSerializer(serializers.ModelSerializer):
     locations = serializers.SerializerMethodField()
     sheet_id = serializers.SerializerMethodField()
     display_id = serializers.SerializerMethodField()
+    in_checklist = serializers.SerializerMethodField()
     report = serializers.SerializerMethodField()
 
     class Meta:
         model  = PIDVFinding
         fields = [
-            'id', 'sl_no', 'display_id', 'category', 'issue_observed',
+            'id', 'sl_no', 'display_id', 'in_checklist', 'category', 'issue_observed',
             'action_required', 'evidence', 'direction',
             'severity', 'status', 'rule_id', 'created_at',
             'entity_id', 'bbox', 'locations', 'sheet_id', 'report',
         ]
 
-    def get_display_id(self, obj):
-        """Checklist-serial label ('9.1', '9.1-2'…) — computed once per
-        request for the whole document and cached in the serializer
-        context; falls back to F<sl_no> for unmapped rules."""
-        m = self.context.get('_display_ids')
-        if m is None:
-            m = {}
+    def _display_maps(self):
+        """Build both maps (labels + serials) once per request and cache in
+        the serializer context."""
+        if self.context.get('_display_ids') is None:
+            labels, serials = {}, {}
             doc = self.context.get('document')
             if doc is not None:
                 try:
-                    from .services.display_ids import assign_display_ids
-                    m = assign_display_ids(
-                        PIDVFinding.objects.filter(drawing__document=doc)
-                        .select_related('drawing')
-                    )
+                    from .services.display_ids import assign_display_ids, checklist_serials
+                    qs = PIDVFinding.objects.filter(drawing__document=doc)
+                    labels = assign_display_ids(qs)
+                    serials = checklist_serials(qs)
                 except Exception:
-                    m = {}
-            self.context['_display_ids'] = m
-        return m.get(obj.id) or f'F{obj.sl_no}'
+                    labels, serials = {}, {}
+            self.context['_display_ids'] = labels
+            self.context['_display_serials'] = serials
+        return self.context['_display_ids'], self.context['_display_serials']
+
+    def get_in_checklist(self, obj):
+        _, serials = self._display_maps()
+        return serials.get(obj.id) is not None
+
+    def get_display_id(self, obj):
+        """Checklist-serial label ('9.1', '9.1-2'…); falls back to
+        F<sl_no> for unmapped rules (those are hidden in the UI via
+        in_checklist=False)."""
+        labels, _ = self._display_maps()
+        return labels.get(obj.id) or f'F{obj.sl_no}'
 
     def get_report(self, obj):
         """§2.5 fields for the AI Comment Register. `valid` is False when a

@@ -28,8 +28,16 @@ def _serial_for(f) -> Optional[str]:
     return items[0] if items else None
 
 
+def checklist_serials(findings: Iterable) -> Dict[int, Optional[str]]:
+    """{finding_pk: checklist serial or None} — None means the finding's
+    rule maps to no checklist item (the UI hides those from the Findings
+    list and the drawing canvas — 2 Nov 2026 alignment)."""
+    return {f.id: _serial_for(f) for f in findings}
+
+
 def assign_display_ids(findings: Iterable) -> Dict[int, str]:
     """{finding_pk: label} for an iterable of PIDVFinding rows."""
+    serials = checklist_serials(findings)
     labels: Dict[int, str] = {}
     # counter per (sheet key, serial) — sheet key keeps suffixes local to
     # one drawing so '9.1' on sheet 3 and '9.1' on sheet 7 both exist.
@@ -40,7 +48,7 @@ def assign_display_ids(findings: Iterable) -> Dict[int, str]:
         key=lambda f: (f.drawing_id or 0, f.sl_no or 0, f.id),
     )
     for f in ordered:
-        serial = _serial_for(f)
+        serial = serials.get(f.id)
         if serial is None:
             labels[f.id] = f'F{f.sl_no}'
             continue
