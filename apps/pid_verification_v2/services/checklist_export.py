@@ -83,6 +83,7 @@ def _finding_view(f, sheet_label, zones_for=None, page=0):
         'ai_result': rm.get('ai_result') or ('Non-Conformance' if sev in ('critical', 'major') else 'Query'),
         'engineer_verification': rm.get('engineer_verification'),
         'remarks': rm.get('remarks') or '',
+        'n': f.sl_no,  # F-number shown in the Findings list — never the PK
     }
 
 
@@ -148,8 +149,9 @@ def _fill_workbook(wb, template, header, items, findings_by_id, sheet_label, ext
         ws.cell(r, 11).value = item.get('remarks') or None
         if item.get('evidence'):
             note = 'RADAI AI: ' + item['evidence']
-            if item.get('finding_ids'):
-                note += '\nFindings: ' + ', '.join(f'F{f}' for f in item['finding_ids'])
+            _fnos = item.get('finding_nos') or item.get('finding_ids')
+            if _fnos:
+                note += '\nFindings: ' + ', '.join(f'F{f}' for f in _fnos)
             c = Comment(note, 'RADAI')
             c.width, c.height = 320, 140
             ws.cell(r, 9).comment = c
@@ -158,7 +160,7 @@ def _fill_workbook(wb, template, header, items, findings_by_id, sheet_label, ext
             real = [findings_by_id[fid] for fid in fids if fid in findings_by_id]
             if real:
                 for fid, f in zip(fids, real):
-                    reg.append([item['no'], f'F{fid}', f['sheet_label'], f['grid'], f['tag'],
+                    reg.append([item['no'], f"F{f.get('n') or fid}", f['sheet_label'], f['grid'], f['tag'],
                                 f['finding_text'], f['reference'], f['ai_result'], item['severity'],
                                 f['suggested_correction'], f['confidence'], item['mode'],
                                 f['engineer_verification'], f['remarks']])
@@ -270,10 +272,14 @@ def build_project_checklist_report(project, template=None):
     items = []
     for no, cur in per_item.items():
         ev_text = f"on {cur['sheets']} P&IDs: " + '; '.join(dict.fromkeys(cur['evidence'])) if cur['evidence'] else ''
+        _fids = list(dict.fromkeys(cur['finding_ids']))
         items.append({
             **cur,
             'evidence': ev_text,
-            'finding_ids': list(dict.fromkeys(cur['finding_ids'])),
+            'finding_ids': _fids,
+            # sl_no for display — F-numbers must match the Findings list,
+            # not the database PKs.
+            'finding_nos': [all_findings[fid]['n'] for fid in _fids if fid in all_findings],
             'xlsx_row': items_meta[no].xlsx_row,
         })
 

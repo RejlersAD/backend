@@ -193,7 +193,10 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
         return 'Query'
 
     def fid_list(fs):
-        return [f.id for f in fs]
+        # Both keys: 'id' (PK, used to open/navigate to the finding) and
+        # 'n' (sl_no — the F-number the Findings list and report show).
+        # The UI used to render F{pk}, which never matched F{sl_no}.
+        return [{'id': f.id, 'n': f.sl_no} for f in fs]
 
     # ── applicability: NA when the object type is not on the sheet ───────
     def is_na(item) -> bool:
@@ -292,7 +295,7 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             applicability, applicability_by = ('NA' if is_na(item) else 'Y'), 'ai'
 
         ai_result = evidence = None
-        finding_ids: list = []
+        finding_refs: list = []
         missing: list = []
         if applicability != 'Y':
             ai_result = None  # I stays empty when H is NA or N
@@ -306,7 +309,7 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             else:
                 got = handle(item)
                 if got:
-                    ai_result, evidence, finding_ids = got
+                    ai_result, evidence, finding_refs = got
                 elif item.mode == 'Automated':
                     ai_result = 'OK'
                     evidence = 'Checked by the related automated rules — no issues found'
@@ -332,7 +335,8 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             'applicability_by': applicability_by,
             'ai_result': ai_result,
             'evidence': evidence,
-            'finding_ids': finding_ids,
+            'finding_ids': [r['id'] for r in finding_refs],   # PKs — navigation
+            'finding_nos': [r['n'] for r in finding_refs],    # sl_no — display (F-numbers)
             'missing_inputs': missing,
             'engineer_verification': st.engineer_verification if st else None,
             'remarks': st.remarks if st else '',

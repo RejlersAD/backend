@@ -1167,7 +1167,8 @@ _EXTRACTION_ITEM_FIELDS = (
 from django.utils import timezone as _dj_timezone
 
 
-def _serialize_extraction_item(item, sheet_ids=None) -> dict:
+def _serialize_extraction_item(item, sheet_ids=None, finding_nos=None) -> dict:
+    fids = item.finding_ids or []
     return {
         'id': item.id,
         'kind': item.kind,
@@ -1178,7 +1179,10 @@ def _serialize_extraction_item(item, sheet_ids=None) -> dict:
         'bbox': item.bbox,
         'labels': item.labels,
         'flag': item.flag,
-        'finding_ids': item.finding_ids,
+        'finding_ids': fids,
+        # sl_no per linked finding — the F-number the Findings list shows;
+        # the raw PKs in finding_ids are for navigation only.
+        'finding_nos': [(finding_nos or {}).get(fid) for fid in fids] if fids else [],
         'source': item.source,
         'confidence': item.confidence,
         'confirmed': item.confirmed,
@@ -1222,6 +1226,13 @@ def document_extraction(request, document_id):
         (s.document_id, s.page_index): s.pk
         for s in PIDVSheet.objects.filter(document=doc)
     }
+    # id → sl_no map for this document's findings (F-numbers shown in the UI)
+    from .models import PIDVFinding as _PIDVFinding
+    finding_nos = {
+        f_id: sl for f_id, sl in _PIDVFinding.objects.filter(
+            drawing__document=doc,
+        ).values_list('id', 'sl_no')
+    }
     if kind:
         if kind not in PIDVExtractionItem.Kind.values:
             return Response(
@@ -1233,12 +1244,12 @@ def document_extraction(request, document_id):
             'document_id': str(doc.document_id),
             'kind': kind,
             'count': qs.count(),
-            'items': [_serialize_extraction_item(i, sheet_ids) for i in qs],
+            'items': [_serialize_extraction_item(i, sheet_ids, finding_nos) for i in qs],
         })
 
     grouped = {k: [] for k in PIDVExtractionItem.Kind.values}
     for item in qs:
-        grouped[item.kind].append(_serialize_extraction_item(item, sheet_ids))
+        grouped[item.kind].append(_serialize_extraction_item(item, sheet_ids, finding_nos))
     return Response({
         'document_id': str(doc.document_id),
         'counts': {k: len(v) for k, v in grouped.items()},
