@@ -58,6 +58,42 @@ ATTRIBUTE_WEIGHTS = {
 # Legend symbol matching — exact match required (no fuzzy matching for symbols)
 LEGEND_EXACT_MATCH = True
 
+# ── Register-dependent comparisons DISABLED (decision 29 Oct 2026) ────────
+# Registers (line list / instrument index / equipment list) are NO LONGER
+# inputs to the P&ID Checker V2 — only drawings, legend sheets and the
+# checklist are compulsory inputs. The register-driven comparisons below
+# (linelist/equipment/instrument, surfaced as LSZ-001/EQP-001/IMS-001 style
+# findings) were the source of ~1,100 false positives on a clean AFC sheet
+# (project "t", "One P&ID.pdf", tested 29 Oct 2026), because the uploaded
+# registers never matched drawing-extracted tags exactly.
+#
+# Soft-coded kill switch: when False, run_all_comparisons() skips the three
+# register comparisons and returns empty, clearly-labelled results for them
+# (zero findings). The compare_with_line_list / compare_with_equipment_list
+# / compare_with_instrument_index functions are KEPT intact below so the
+# code path stays documented and can be re-enabled here if registers ever
+# become inputs again. Old findings already stored in the DB are untouched.
+REGISTER_COMPARISONS_ENABLED = False
+
+
+def _disabled_register_result(comparison_type: str, pid_item_count: int) -> 'ComparisonResult':
+    """Empty ComparisonResult for a register comparison disabled by
+    REGISTER_COMPARISONS_ENABLED — zero findings, honest summary."""
+    return ComparisonResult(
+        comparison_type=comparison_type,
+        total_pid_items=pid_item_count,
+        total_ref_items=0,
+        matched_count=0,
+        missing_count=0,
+        extra_count=0,
+        mismatch_count=0,
+        findings=[],
+        summary=(
+            f'{comparison_type} comparison disabled — registers are no longer '
+            'inputs to the P&ID checker (decision 29 Oct 2026)'
+        ),
+    )
+
 # A normalized tag key must contain at least one letter AND one digit to be
 # treated as a real tag (line/equipment/instrument tags always mix letters
 # and digits — e.g. V803TF, 6FLAC3N8183, BDHS8001TF). A key that's purely
@@ -1392,14 +1428,27 @@ def run_all_comparisons(
     logger.info('[ComparisonEngine] Running legend comparison...')
     results['legend'] = compare_with_legend(pid_symbols, legend_data)
 
-    logger.info('[ComparisonEngine] Running line list comparison...')
-    results['linelist'] = compare_with_line_list(pid_lines, line_list_data or [], api_key=ai_api_key, model=ai_model)
+    if REGISTER_COMPARISONS_ENABLED:
+        logger.info('[ComparisonEngine] Running line list comparison...')
+        results['linelist'] = compare_with_line_list(pid_lines, line_list_data or [], api_key=ai_api_key, model=ai_model)
 
-    logger.info('[ComparisonEngine] Running equipment comparison...')
-    results['equipment'] = compare_with_equipment_list(pid_equipment, equipment_list_data or [], api_key=ai_api_key, model=ai_model)
+        logger.info('[ComparisonEngine] Running equipment comparison...')
+        results['equipment'] = compare_with_equipment_list(pid_equipment, equipment_list_data or [], api_key=ai_api_key, model=ai_model)
 
-    logger.info('[ComparisonEngine] Running instrument comparison...')
-    results['instrument'] = compare_with_instrument_index(pid_instruments, instrument_index_data or [], api_key=ai_api_key, model=ai_model)
+        logger.info('[ComparisonEngine] Running instrument comparison...')
+        results['instrument'] = compare_with_instrument_index(pid_instruments, instrument_index_data or [], api_key=ai_api_key, model=ai_model)
+    else:
+        # Registers are no longer inputs (decision 29 Oct 2026) — skip the
+        # register-driven comparisons so they produce ZERO findings while
+        # keeping the result keys present for downstream consumers.
+        logger.info(
+            '[ComparisonEngine] Register comparisons DISABLED '
+            '(REGISTER_COMPARISONS_ENABLED=False) — skipping linelist/'
+            'equipment/instrument comparisons'
+        )
+        results['linelist']   = _disabled_register_result('linelist', len(pid_lines))
+        results['equipment']  = _disabled_register_result('equipment', len(pid_equipment))
+        results['instrument'] = _disabled_register_result('instrument', len(pid_instruments))
 
     # Log summary
     total_findings = sum(len(r.findings) for r in results.values())

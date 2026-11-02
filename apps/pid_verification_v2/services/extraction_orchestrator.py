@@ -275,33 +275,34 @@ class MultiLayerExtractionOrchestrator:
     
     def _get_project_files(self, project: PIDVProject) -> List[Dict]:
         """Get all files in project for extraction."""
+        from apps.core.file_access import local_file_path
         files = []
-        
+
         # P&ID Documents
         for doc in project.documents.all():
             if doc.original_file:
                 files.append({
-                    'path': doc.original_file.path,
+                    'path': local_file_path(doc.original_file),
                     'type': 'pid_drawing',
                     'model': doc,
                     'priority': self.config['file_types']['pid_drawing']['priority'],
                 })
-        
+
         # Legend Sheets
         for legend in project.legend_sheets.all():
             if legend.original_file:
                 files.append({
-                    'path': legend.original_file.path,
+                    'path': local_file_path(legend.original_file),
                     'type': 'legend_sheet',
                     'model': legend,
                     'priority': self.config['file_types']['legend_sheet']['priority'],
                 })
-        
+
         # Reference Data (Equipment List, Line List, PMS)
         for ref_data in project.reference_data.all():
             if ref_data.original_file:
                 files.append({
-                    'path': ref_data.original_file.path,
+                    'path': local_file_path(ref_data.original_file),
                     'type': ref_data.data_type,  # 'equipment_list', 'line_list', 'pms'
                     'model': ref_data,
                     'priority': self.config['file_types'].get(ref_data.data_type, {}).get('priority', 5),

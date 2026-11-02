@@ -287,6 +287,46 @@ def upload_pid(request):
     # only ever consulted by get_results() (viewing), never here.
     file_hash = compute_file_hash(uploaded_file)
 
+    # Duplicate-revision guard (spec A1.3): single-page PDF uploads get an
+    # inline title-block read; a current project sheet with the SAME drawing
+    # number and revision conflicts with 409 (a newer revision proceeds and
+    # supersedes the old sheet during processing). Non-fatal by design.
+    if project is not None and file_ext == 'pdf' and request.data.get('allow_duplicate') != '1':
+        try:
+            import fitz
+            from .services.segmentation import _extract_title_block
+            from .services.sheets import pick_drawing_number, _rev_key
+            from .models import PIDVSheet
+            uploaded_file.seek(0)
+            pdf_bytes = uploaded_file.read()
+            uploaded_file.seek(0)
+            with fitz.open(stream=pdf_bytes, filetype='pdf') as _pdf:
+                if _pdf.page_count == 1:
+                    tb = _extract_title_block(_pdf[0])
+                    no, _confirmed = pick_drawing_number(
+                        [tb.get('drawing_number'), tb.get('drawing_number_base')],
+                    )
+                    rev = (tb.get('revision') or '').strip()
+                    if no:
+                        dup = PIDVSheet.objects.filter(
+                            project=project, drawing_no=no, is_drawing=True,
+                            superseded_by__isnull=True,
+                        ).first()
+                        if (dup is not None and _rev_key(dup.rev) is not None
+                                and _rev_key(dup.rev) == _rev_key(rev)):
+                            return Response(
+                                {
+                                    'conflict': 'duplicate_revision',
+                                    'sheet_id': dup.pk,
+                                    'document_id': str(dup.document_id),
+                                    'drawing_no': no,
+                                    'rev': rev,
+                                },
+                                status=status.HTTP_409_CONFLICT,
+                            )
+        except Exception:
+            logger.debug('[PIDVUpload] duplicate-revision check skipped', exc_info=True)
+
     # Create new document record
     doc = PIDVDocument.objects.create(
         file_name     = uploaded_file.name,
@@ -360,6 +400,23 @@ def upload_pid(request):
                             'metadata': seg.metadata,
                         },
                     )
+                    # Title-block refresh on reprocess (bug fix 29 Oct 2026 —
+                    # mirrors tasks._persist_segment_result): get_or_create keeps
+                    # the first run's row, so refresh title + title_block from
+                    # the fresh segmentation.
+                    _upd = []
+                    if seg.title and seg.title != drawing_obj.title:
+                        drawing_obj.title = seg.title
+                        _upd.append('title')
+                    _tb = (seg.metadata or {}).get('title_block') if isinstance(seg.metadata, dict) else None
+                    if _tb:
+                        _md = drawing_obj.metadata or {}
+                        if _md.get('title_block') != _tb:
+                            _md['title_block'] = _tb
+                            drawing_obj.metadata = _md
+                            _upd.append('metadata')
+                    if _upd:
+                        drawing_obj.save(update_fields=list(set(_upd)))
                     drawing_obj.findings.all().delete()
 
                     extraction = extract_drawing(file_path, page_index=seg.page_index)
@@ -430,48 +487,58 @@ def upload_pid(request):
         worker_check_enabled = getattr(settings, 'PIDV_WORKER_CHECK_ENABLED', True)
         use_celery = (not worker_check_enabled) or _has_active_celery_workers()
 
-        if not use_celery:
-            # No Celery workers detected – run in a daemon thread so the HTTP
-            # response is returned immediately while processing continues.
-            logger.info(
-                "[PIDVUpload] No active Celery workers detected – "
-                "processing doc_id=%s in background thread.", doc.document_id
-            )
-            t = threading.Thread(
-                target=_run_sync_pipeline,
-                args=(str(doc.document_id), byok_context),
-                daemon=True,
-                name=f"pidv-sync-{doc.document_id}",
-            )
-            t.start()
-        else:
-            # Workers available (or check disabled) – queue via Celery with
-            # sync fallback for when Redis itself is unavailable.
-            try:
-                RobustQueueService.queue_task(
-                    process_pid_document,
-                    args=(str(doc.document_id),),
-                    kwargs={'context': byok_context},
-                    # RobustQueueService._execute_with_fallback() calls
-                    # sync_fallback(*args, **kwargs) using the SAME args/kwargs
-                    # given to queue_task() above — i.e. it invokes this as
-                    # sync_fallback(str(doc.document_id), context=byok_context).
-                    # A zero-arg lambda here raised "got an unexpected keyword
-                    # argument 'context'" on every fallback, silently failing
-                    # every upload whose Celery enqueue didn't go through cleanly.
-                    sync_fallback=lambda doc_id, context=None: _run_sync_pipeline(doc_id, context),
-                    max_retries=3,
+        def _dispatch_processing():
+            if not use_celery:
+                # No Celery workers detected – run in a daemon thread so the HTTP
+                # response is returned immediately while processing continues.
+                logger.info(
+                    "[PIDVUpload] No active Celery workers detected – "
+                    "processing doc_id=%s in background thread.", doc.document_id
                 )
-                logger.info("[PIDVUpload] Task queued via Celery: doc_id=%s", doc.document_id)
-            except QueueUnavailableException as queue_exc:
-                logger.error("[PIDVUpload] Queue unavailable and sync fallback failed: %s", queue_exc)
-                doc.status = PIDVDocument.Status.FAILED
-                doc.error_message = "Processing service unavailable. Please try again."
-                doc.save(update_fields=["status", "error_message", "updated_at"])
-                return Response(
-                    {"error": "Processing queue unavailable. Please try again shortly."},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                t = threading.Thread(
+                    target=_run_sync_pipeline,
+                    args=(str(doc.document_id), byok_context),
+                    daemon=True,
+                    name=f"pidv-sync-{doc.document_id}",
                 )
+                t.start()
+            else:
+                # Workers available (or check disabled) – queue via Celery with
+                # sync fallback for when Redis itself is unavailable.
+                try:
+                    RobustQueueService.queue_task(
+                        process_pid_document,
+                        args=(str(doc.document_id),),
+                        kwargs={'context': byok_context},
+                        # RobustQueueService._execute_with_fallback() calls
+                        # sync_fallback(*args, **kwargs) using the SAME args/kwargs
+                        # given to queue_task() above — i.e. it invokes this as
+                        # sync_fallback(str(doc.document_id), context=byok_context).
+                        # A zero-arg lambda here raised "got an unexpected keyword
+                        # argument 'context'" on every fallback, silently failing
+                        # every upload whose Celery enqueue didn't go through cleanly.
+                        sync_fallback=lambda doc_id, context=None: _run_sync_pipeline(doc_id, context),
+                        max_retries=3,
+                    )
+                    logger.info("[PIDVUpload] Task queued via Celery: doc_id=%s", doc.document_id)
+                except QueueUnavailableException as queue_exc:
+                    # Runs after commit now (on_commit) — the 202 response is
+                    # already sent, so mark the doc FAILED instead of 503.
+                    logger.error("[PIDVUpload] Queue unavailable and sync fallback failed: %s", queue_exc)
+                    doc.status = PIDVDocument.Status.FAILED
+                    doc.error_message = "Processing service unavailable. Please try again."
+                    doc.save(update_fields=["status", "error_message", "updated_at"])
+
+        # BUG FIX (29 Oct 2026): dispatch AFTER the request's DB transaction
+        # commits. Observed live: doc fff30a03 (project ADNOC) stayed
+        # 'uploaded' forever because the Celery task executed 4 ms after
+        # dispatch, before the worker's connection could see the new row
+        # ("[PIDVTask] Document … not found", task "succeeded"). With
+        # autocommit (no active transaction) on_commit runs the dispatch
+        # immediately, preserving the original behavior; under a wrapping
+        # transaction it defers until the row is guaranteed visible.
+        from django.db import transaction
+        transaction.on_commit(_dispatch_processing)
     
     except Exception as exc:
         logger.error("[PIDVUpload] Unexpected error setting up task: %s", exc)
@@ -677,6 +744,28 @@ def get_status(request, document_id):
     })
 
 
+def _inject_finding_locations(data: dict, doc) -> None:
+    """Add `locations` (one bbox per linked extraction item) to every issue
+    in a serialized document payload — used on the per-sheet cache path,
+    whose snapshot may predate the serializer's locations field."""
+    from .models import PIDVExtractionItem
+    by_finding: dict = {}
+    for bbox, fids in (
+        PIDVExtractionItem.objects
+        .filter(document=doc)
+        .exclude(bbox__isnull=True)
+        .values_list('bbox', 'finding_ids')
+    ):
+        for fid in fids or []:
+            by_finding.setdefault(fid, []).append(bbox)
+    for d in data.get('drawings', []):
+        for issue in d.get('issues', []) or []:
+            locs = by_finding.get(issue.get('id')) or []
+            if not locs and issue.get('bbox'):
+                locs = [issue['bbox']]
+            issue['locations'] = locs
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_results(request, document_id):
@@ -686,6 +775,17 @@ def get_results(request, document_id):
 
     if doc.status not in (PIDVDocument.Status.COMPLETED, PIDVDocument.Status.FAILED):
         return Response({"error": "Processing not yet complete", "status": doc.status}, status=status.HTTP_202_ACCEPTED)
+
+    # Per-sheet fetch (30 Oct 2026): ?page=N (1-based, as in the UI sheet
+    # selector) restricts the findings to that sheet — a 76-sheet document
+    # answers in under a second instead of shipping a 1.1 MB payload.
+    page_index = None
+    _page_raw = request.query_params.get('page')
+    if _page_raw:
+        try:
+            page_index = max(int(_page_raw), 1) - 1
+        except (TypeError, ValueError):
+            page_index = None
 
     # Fast path for VIEWING an already-completed document: one cache read
     # instead of the doc.drawings.all() DB query plus both backfill passes
@@ -700,15 +800,33 @@ def get_results(request, document_id):
         cached = load_results_cache(doc)
         if cached and cached.get('file_hash') == doc.file_hash and cached.get('full_data'):
             logger.info('[PIDVResults] Results cache HIT for document_id=%s — serving instantly', document_id)
-            return Response(cached['full_data'])
+            if page_index is None:
+                data = dict(cached['full_data'])
+                if any(
+                    'locations' not in i
+                    for d in data.get('drawings', [])
+                    for i in (d.get('issues') or [])
+                ):
+                    _inject_finding_locations(data, doc)
+                return Response(data)
+            data = dict(cached['full_data'])
+            data['drawings'] = [
+                {**d, 'issues': d.get('issues', []) if d.get('page_index') == page_index else []}
+                for d in data.get('drawings', [])
+            ]
+            _inject_finding_locations(data, doc)
+            return Response(data)
 
     # Soft-upgrade: backfill tag_positions for drawings that were processed
     # before line-size coordinate extraction was added.  Runs only when the
     # original file is stored locally and PyMuPDF is available.  Non-blocking
     # — any error here is silently ignored so the result is still returned.
-    if doc.status == PIDVDocument.Status.COMPLETED and doc.original_file:
+    # Skipped for per-sheet fetches (they run on every sheet switch; the
+    # full-document fetch owns the upgrade passes).
+    if page_index is None and doc.status == PIDVDocument.Status.COMPLETED and doc.original_file:
         try:
-            file_path = doc.original_file.path
+            from apps.core.file_access import local_file_path
+            file_path = local_file_path(doc.original_file)
             from .services.extraction import _extract_tag_positions
             for drawing in doc.drawings.all():
                 meta = drawing.metadata or {}
@@ -740,14 +858,15 @@ def get_results(request, document_id):
     # Trigger condition: a drawing has no LSZ-009 finding yet AND either has no
     # line_tags metadata or none have cloud_truncation_detected set.
     # Soft-coded: set PIDV_LINE_TAGS_BACKFILL=false in settings to disable.
-    _backfill_enabled = getattr(settings, 'PIDV_LINE_TAGS_BACKFILL', True)
+    _backfill_enabled = getattr(settings, 'PIDV_LINE_TAGS_BACKFILL', True) and page_index is None
     if _backfill_enabled and doc.status == PIDVDocument.Status.COMPLETED and doc.original_file:
         try:
             from .services.extraction import _extract_pipeline_tags_multi_angle
             from .services.rule_engine import _check_pipeline_tag_duplicates
             from .models import PIDVFinding as _PIDVFinding
+            from apps.core.file_access import local_file_path as _local_file_path
 
-            _file_path = doc.original_file.path
+            _file_path = _local_file_path(doc.original_file)
             for _drawing in doc.drawings.all():
                 # Soft-coded: deduplicate any LSZ-007/008 findings that were added
                 # multiple times by previous runs of this backfill block (bug fix).
@@ -838,7 +957,9 @@ def get_results(request, document_id):
         except Exception as _lt_exc:
             logger.debug('[PIDVResults] line_tags backfill skipped: %s', _lt_exc)
 
-    return Response(PIDVDocumentSerializer(doc).data)
+    return Response(PIDVDocumentSerializer(
+        doc, context={'request': request, 'document': doc, 'page': page_index},
+    ).data)
 
 
 @api_view(["GET"])
@@ -935,11 +1056,11 @@ def list_documents(request):
     return Response(PIDVDocumentListSerializer(qs, many=True).data)
 
 
-@api_view(["PATCH"])
+@api_view(["PATCH", "PUT"])
 @permission_classes([IsAuthenticated])
 def update_document(request, document_id):
     """
-    PATCH /api/v2/pid-verification/update/<document_id>/
+    PATCH|PUT /api/v2/pid-verification/update/<document_id>/
 
     Soft-coded: DOCUMENT_EDITABLE_FIELDS lists the only PIDVDocument fields a
     user may edit from the "Previous Uploads" list. Currently just the
@@ -950,7 +1071,7 @@ def update_document(request, document_id):
     if doc is None:
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    DOCUMENT_EDITABLE_FIELDS = {'file_name'}
+    DOCUMENT_EDITABLE_FIELDS = {'file_name', 'drawing_type'}
     updates = {k: v for k, v in request.data.items() if k in DOCUMENT_EDITABLE_FIELDS}
     if not updates:
         return Response(
@@ -966,6 +1087,12 @@ def update_document(request, document_id):
             return Response({"error": "file_name must be 512 characters or fewer"}, status=status.HTTP_400_BAD_REQUEST)
         doc.file_name = new_name
 
+    if 'drawing_type' in updates:
+        new_type = str(updates['drawing_type']).strip()
+        if new_type not in {'PFD', 'P&ID', 'UFD', ''}:
+            return Response({"error": "drawing_type must be one of PFD, P&ID, UFD"}, status=status.HTTP_400_BAD_REQUEST)
+        doc.drawing_type = new_type
+
     doc.save(update_fields=list(updates.keys()) + ['updated_at'])
 
     logger.info("[PIDVUpdate] document_id=%s updated fields=%s by user=%s", document_id, list(updates.keys()), request.user)
@@ -973,6 +1100,7 @@ def update_document(request, document_id):
     return Response({
         "document_id": str(doc.document_id),
         "file_name":   doc.file_name,
+        "drawing_type": doc.drawing_type,
         "message":     "Document updated",
     })
 
@@ -983,7 +1111,16 @@ def delete_document(request, document_id):
     doc = _get_doc_or_404(document_id, request.user)
     if doc is None:
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+    project = doc.project
     doc.delete()
+
+    # Cross-drawing checks are project-wide: re-run after a delete (spec A2).
+    if project is not None:
+        try:
+            from .services.cross_checks import run_cross_checks
+            run_cross_checks(project)
+        except Exception:
+            logger.warning('[PIDVDelete] Cross checks re-run failed (non-fatal)', exc_info=True)
 
     # Soft-hook: keep cross-feature snapshot updated in background.
     try:
@@ -993,6 +1130,867 @@ def delete_document(request, document_id):
         logger.warning("[PIDVDelete] Cross snapshot queue skipped: %s", exc)
 
     return Response({"message": "Document deleted"}, status=status.HTTP_200_OK)
+
+
+# ===========================================================================
+# EXTRACTION ITEMS  (engine prompt §4 — per-document extraction table)
+# ===========================================================================
+
+_EXTRACTION_ITEM_FIELDS = (
+    'id', 'kind', 'text', 'parsed', 'page', 'bbox', 'labels', 'flag',
+    'finding_ids', 'source', 'confidence', 'confirmed', 'confirmed_at',
+)
+
+
+# views.py's top-level `timezone` is datetime.timezone — use Django's here.
+from django.utils import timezone as _dj_timezone
+
+
+def _serialize_extraction_item(item, sheet_ids=None) -> dict:
+    return {
+        'id': item.id,
+        'kind': item.kind,
+        'text': item.text,
+        'parsed': item.parsed,
+        'page': item.page,
+        'sheet_id': (sheet_ids or {}).get((item.document_id, item.page)),
+        'bbox': item.bbox,
+        'labels': item.labels,
+        'flag': item.flag,
+        'finding_ids': item.finding_ids,
+        'source': item.source,
+        'confidence': item.confidence,
+        'confirmed': item.confirmed,
+        'confirmed_by': item.confirmed_by_id,
+        'confirmed_at': item.confirmed_at,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def document_extraction(request, document_id):
+    """
+    GET /api/v2/pid-verification/documents/<id>/extraction/?kind=lines|instruments|equipment|connectors|notes&page=N
+
+    List extraction items for a document. No `kind` param = all kinds,
+    grouped by kind in the response. `page` (1-based, as in the UI sheet
+    selector) restricts the items to that sheet — a 76-sheet document
+    answers in under a second instead of a 2.5 MB payload (30 Oct 2026).
+    """
+    from .models import PIDVExtractionItem
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    page = request.query_params.get('page', '').strip()
+    page_index = None
+    if page:
+        try:
+            page_index = max(int(page), 1) - 1
+        except (TypeError, ValueError):
+            page_index = None
+
+    kind = request.query_params.get('kind', '').strip()
+    qs = PIDVExtractionItem.objects.filter(document=doc)
+    if page_index is not None:
+        qs = qs.filter(page=page_index)
+
+    from .models import PIDVSheet
+    sheet_ids = {
+        (s.document_id, s.page_index): s.pk
+        for s in PIDVSheet.objects.filter(document=doc)
+    }
+    if kind:
+        if kind not in PIDVExtractionItem.Kind.values:
+            return Response(
+                {'error': f'Invalid kind. Must be one of: {", ".join(PIDVExtractionItem.Kind.values)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        qs = qs.filter(kind=kind)
+        return Response({
+            'document_id': str(doc.document_id),
+            'kind': kind,
+            'count': qs.count(),
+            'items': [_serialize_extraction_item(i, sheet_ids) for i in qs],
+        })
+
+    grouped = {k: [] for k in PIDVExtractionItem.Kind.values}
+    for item in qs:
+        grouped[item.kind].append(_serialize_extraction_item(item, sheet_ids))
+    return Response({
+        'document_id': str(doc.document_id),
+        'counts': {k: len(v) for k, v in grouped.items()},
+        'items': grouped,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def document_scene3d(request, document_id):
+    """
+    GET /api/v2/pid-verification/documents/<id>/scene3d/?page=N   (1-based,
+    as in the UI sheet selector)
+
+    3D scene JSON for the PidScene3D viewer, built from the sheet's own
+    vector strokes + the extraction items + the findings (services/
+    scene3d.build_scene). Cached per (document, page, run) — computed
+    lazily on first request for a sheet, under 1 s per sheet.
+
+    → 200 { status:'ok', units:'m', preliminary:true, page, lines[],
+            valves[], equipment[], connectors[], findings[], bounds }
+    → 200 { status:'no_vector_geometry' }   (scanned / OCR sheet)
+    """
+    from .models import PIDVExtractionItem, PIDVFinding
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        page = max(int(request.query_params.get('page', '1')), 1) - 1
+    except (TypeError, ValueError):
+        page = 0
+
+    drawing = doc.drawings.filter(page_index=page).first()
+    if drawing is None:
+        return Response({"error": f"This document has no sheet {page + 1}."}, status=status.HTTP_404_NOT_FOUND)
+
+    from .services.scene3d_cache import load_scene3d_cache, save_scene3d_cache
+    cached = load_scene3d_cache(doc, page)
+    if cached:
+        return Response(cached)
+
+    if not doc.original_file:
+        return Response({'status': 'no_vector_geometry'})
+
+    extraction = {k: [] for k in ('lines', 'equipment', 'connectors')}
+    for it in PIDVExtractionItem.objects.filter(document=doc, page=page, kind__in=extraction.keys()):
+        extraction[it.kind].append({
+            'id': it.id, 'text': it.text, 'parsed': it.parsed or {}, 'bbox': it.bbox,
+        })
+
+    # Ghost-equipment fallback: sheets whose equipment appears only in a
+    # survey/reference table (no extraction rows) still get their ghosts —
+    # area-prefixed tags whose code is in the legend register's equipment
+    # designation table, located from the text layer (30 Oct 2026).
+    if not extraction['equipment'] and doc.project_id and doc.original_file:
+        try:
+            import re as _re
+            import fitz as _fitz
+            from .services.legend_register import get_register_codes
+            from .services.scene3d_cache import get_pdf_bytes
+            eq_codes = set()
+            for cat, table in get_register_codes(doc.project).items():
+                if 'equipment' in cat.lower():
+                    eq_codes.update(c.upper() for c in table)
+            if eq_codes:
+                with _fitz.open(stream=get_pdf_bytes(doc), filetype='pdf') as _pdf:
+                    P = _pdf[page]
+                    text = P.get_text('text')
+                    W, H = P.rect.width, P.rect.height
+                    seen = set()
+                    for m in _re.finditer(r'\b\d{2}-([A-Z]{1,3})-\d{4,6}[A-Z]?\b', text):
+                        code = m.group(1).upper()
+                        if code not in eq_codes:
+                            continue
+                        tag = m.group(0)
+                        if tag in seen:
+                            continue
+                        seen.add(tag)
+                        rects = P.search_for(tag)
+                        if not rects:
+                            continue
+                        r = rects[0]
+                        extraction['equipment'].append({
+                            'id': None, 'text': tag,
+                            'parsed': {'tag': tag, 'code': code},
+                            'bbox': [round(r.x0 / W * 100, 2), round(r.y0 / H * 100, 2),
+                                     round(r.x1 / W * 100, 2), round(r.y1 / H * 100, 2)],
+                        })
+        except Exception:
+            logger.debug('[Scene3D] ghost-equipment scan failed (non-fatal)', exc_info=True)
+
+    from .services.scene3d import clean_finding_text
+    findings = [
+        {
+            'id': f.id, 'number': f.sl_no, 'severity': f.severity,
+            'rule_id': f.rule_id, 'title': clean_finding_text(f.issue_observed),
+            'bbox': f.bbox, 'entity_id': f.entity_id,
+        }
+        for f in PIDVFinding.objects.filter(drawing=drawing)
+    ]
+
+    # Legend decode per field (LD-04 class split / LD-08 system /
+    # insulation) — never a bare code lookup across all tables.
+    register_codes = {}
+    if doc.project_id:
+        try:
+            from .services.legend_register import get_register_codes
+            register_codes = get_register_codes(doc.project)
+        except Exception:
+            logger.debug('[Scene3D] register read failed', exc_info=True)
+
+    from .services.extraction_items import _decode_with_register
+
+    def _decode(pr):
+        legend = _decode_with_register(pr, register_codes) if register_codes else {}
+        return {
+            'cls_desc': (legend.get('piping_class') or {}).get('description'),
+            'ins_desc': (legend.get('insulation') or {}).get('description'),
+            'service': None,  # service colour comes from the fluid code / red strokes
+        }
+
+    try:
+        # Bytes, not a path: the uploaded PDF lives in S3, where
+        # FileField.path raises NotImplementedError (30 Oct 2026 500s).
+        from .services.scene3d_cache import get_pdf_bytes
+        from .services.scene3d import build_scene
+        scene = build_scene(get_pdf_bytes(doc), page, extraction, findings, _decode)
+    except Exception as exc:
+        # Real failure: full traceback in the log, short message to the UI.
+        logger.exception('[Scene3D] build failed for doc=%s page=%s', document_id, page)
+        return Response({'status': 'error', 'message': str(exc)[:300]},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    if scene.get('status') == 'ok':
+        try:
+            save_scene3d_cache(doc, page, scene)
+        except Exception:
+            logger.debug('[Scene3D] cache write failed (non-fatal)', exc_info=True)
+    return Response(scene)
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def update_extraction_item(request, document_id, entity_id):
+    """
+    PATCH /api/v2/pid-verification/documents/<id>/extraction/<entity_id>/
+
+    Body: { confirmed: bool, corrected_value?: str }
+    A corrected_value is stored in parsed['corrected_value'] (with the
+    pre-correction parsed preserved under parsed['correction_note']) — the
+    original `text` as read from the sheet is NEVER overwritten.
+    """
+    from .models import PIDVExtractionItem
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    item = PIDVExtractionItem.objects.filter(document=doc, id=entity_id).first()
+    if item is None:
+        return Response({"error": "Extraction item not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    confirmed = request.data.get('confirmed', None)
+    corrected_value = request.data.get('corrected_value', None)
+
+    if corrected_value is not None:
+        parsed = dict(item.parsed or {})
+        parsed['corrected_value'] = str(corrected_value)
+        parsed['correction_note'] = (
+            f"Corrected by {request.user.username} from reader value "
+            f"'{item.text}' — original text preserved in `text`."
+        )
+        item.parsed = parsed
+
+    if confirmed is not None:
+        from django.utils import timezone as dj_timezone
+        item.confirmed = bool(confirmed)
+        if item.confirmed:
+            item.confirmed_by = request.user
+            item.confirmed_at = dj_timezone.now()
+        else:
+            item.confirmed_by = None
+            item.confirmed_at = None
+
+    if confirmed is None and corrected_value is None:
+        return Response(
+            {"error": "Nothing to update — provide 'confirmed' and/or 'corrected_value'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    item.save()
+    return Response(_serialize_extraction_item(item))
+
+
+# ===========================================================================
+# CHECKLIST (AI-PID-02 — 125 points, per sheet)
+# ===========================================================================
+
+def _checklist_page(request):
+    try:
+        return max(int(request.query_params.get('page', '1')), 1) - 1
+    except (TypeError, ValueError):
+        return 0
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def document_checklist(request, document_id):
+    """GET /api/v2/pid-verification/documents/<id>/checklist/?page=N
+    → {template, items[125], summary} — computed live from the current
+    inputs + findings; engineer state (H override, J, K) overlaid."""
+    from .services.checklist_ai02 import evaluate_sheet
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+    if doc.status not in (PIDVDocument.Status.COMPLETED, PIDVDocument.Status.FAILED):
+        return Response({"error": "Processing not yet complete", "status": doc.status}, status=status.HTTP_202_ACCEPTED)
+
+    page = _checklist_page(request)
+    ev = evaluate_sheet(doc, page)
+    if ev is None:
+        return Response({"error": "No checklist template imported yet (run import_checklist_template)."},
+                        status=status.HTTP_404_NOT_FOUND)
+    return Response({
+        'document_id': str(doc.document_id),
+        'page': page,
+        **ev,
+    })
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def document_checklist_item(request, document_id, item_no):
+    """PATCH /api/v2/pid-verification/documents/<id>/checklist/<item_no>/?page=N
+    body {applicability?, engineer_verification?, remarks?} — engineer state
+    for one item (exact Excel strings stored verbatim for the export)."""
+    from .models import PIDVChecklistResult
+    from .services.checklist_ai02 import project_template
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+    template = project_template(doc.project)
+    if template is None:
+        return Response({"error": "No checklist template imported yet."}, status=status.HTTP_404_NOT_FOUND)
+    item = template.items.filter(no=item_no).first()
+    if item is None:
+        return Response({"error": f"Unknown item '{item_no}'"}, status=status.HTTP_404_NOT_FOUND)
+
+    page = _checklist_page(request)
+    applicability = request.data.get('applicability')
+    verification = request.data.get('engineer_verification')
+    remarks = request.data.get('remarks')
+    if applicability is not None and applicability not in ('Y', 'N', 'NA'):
+        return Response({"error": "applicability must be Y, N or NA"}, status=status.HTTP_400_BAD_REQUEST)
+    if verification is not None and verification not in ('Agree', 'Disagree', 'Modified', ''):
+        return Response({"error": "engineer_verification must be Agree, Disagree or Modified"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    from django.utils import timezone as dj_tz
+    res, _ = PIDVChecklistResult.objects.get_or_create(
+        document=doc, page=page, item=item,
+        defaults={'ai_result': None},
+    )
+    if applicability is not None:
+        res.applicability = applicability
+        res.applicability_by = 'engineer'
+    if verification is not None:
+        res.engineer_verification = verification or None
+        res.verified_by = request.user
+        res.verified_at = dj_tz.now()
+    if remarks is not None:
+        res.remarks = str(remarks)
+    res.save()
+    return Response({
+        'no': item.no, 'applicability': res.applicability,
+        'applicability_by': res.applicability_by,
+        'engineer_verification': res.engineer_verification,
+        'remarks': res.remarks,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def document_checklist_report(request, document_id):
+    """GET /api/v2/pid-verification/documents/<id>/checklist-report.xlsx?page=N
+    — fills the template workbook (one P&ID)."""
+    from .services.checklist_export import build_checklist_report, TemplateChanged
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+    page = _checklist_page(request)
+    try:
+        data, filename = build_checklist_report(doc, page)
+    except TemplateChanged as exc:
+        return Response({'error': f'Template changed, re-import it ({exc})'},
+                        status=status.HTTP_409_CONFLICT)
+    if data is None:
+        return Response({"error": "No checklist template imported yet."}, status=status.HTTP_404_NOT_FOUND)
+    response = HttpResponse(data, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def document_checklist_report_import(request, document_id):
+    """POST …/checklist-report/import/?page=N — engineer-edited workbook back
+    in. Reads H/J/K from 'AI P&ID Checklist' by ITEM NUMBER in column A and
+    M/N from 'AI Comment Register' by Finding ID — never by row index.
+    Ignores any other change; returns the list of what was updated."""
+    import io as _io
+    import re
+    import openpyxl
+    from django.utils import timezone as dj_tz
+    from .models import PIDVChecklistResult
+    from .services.checklist_ai02 import project_template
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+    template = project_template(doc.project)
+    if template is None:
+        return Response({"error": "No checklist template imported yet."}, status=status.HTTP_404_NOT_FOUND)
+    up = request.FILES.get('file')
+    if up is None:
+        return Response({"error": "Attach the reviewed .xlsx as 'file'."}, status=status.HTTP_400_BAD_REQUEST)
+
+    wb = openpyxl.load_workbook(_io.BytesIO(up.read()))
+    if 'AI P&ID Checklist' not in wb.sheetnames:
+        return Response({"error": "Sheet 'AI P&ID Checklist' not found in the workbook."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    ws = wb['AI P&ID Checklist']
+    item_by_no = {it.no: it for it in template.items.all()}
+    page = _checklist_page(request)
+    updated = []
+
+    for row in ws.iter_rows(min_row=8):
+        no = str(row[0].value or '').strip()
+        item = item_by_no.get(no)
+        if not item:
+            continue
+        h, j, k = row[7].value, row[9].value, row[10].value
+        res, _ = PIDVChecklistResult.objects.get_or_create(document=doc, page=page, item=item)
+        changed = False
+        if h in ('Y', 'N', 'NA') and (res.applicability != h or res.applicability_by != 'engineer'):
+            res.applicability, res.applicability_by = h, 'engineer'
+            changed = True
+        if j in ('Agree', 'Disagree', 'Modified') and res.engineer_verification != j:
+            res.engineer_verification, res.verified_by, res.verified_at = j, request.user, dj_tz.now()
+            changed = True
+        if k is not None and str(k) != res.remarks:
+            res.remarks = str(k)
+            changed = True
+        if changed:
+            res.save()
+            updated.append({'no': no, 'applicability': res.applicability,
+                            'engineer_verification': res.engineer_verification, 'remarks': res.remarks})
+
+    # Comment register: M/N by Finding ID.
+    if 'AI Comment Register' in wb.sheetnames:
+        cr = wb['AI Comment Register']
+        reg_updated = 0
+        for row in cr.iter_rows(min_row=4):
+            fid_raw = str(row[1].value or '').strip()
+            m = re.match(r'^F(\d+)$', fid_raw) if fid_raw else None
+            if not m:
+                continue
+            j, k = row[12].value, row[13].value
+            f = PIDVFinding.objects.filter(pk=int(m.group(1)), drawing__document=doc).first()
+            if f is None:
+                continue
+            rm = dict(f.report_meta or {})
+            if j in ('Agree', 'Disagree', 'Modified'):
+                rm['engineer_verification'] = j
+            if k is not None:
+                rm['remarks'] = str(k)
+            if rm != (f.report_meta or {}):
+                f.report_meta = rm
+                f.save(update_fields=['report_meta'])
+                reg_updated += 1
+        if reg_updated:
+            updated.append({'register_rows': reg_updated})
+
+    return Response({'updated': updated, 'count': len(updated)})
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def document_review_meta(request, document_id):
+    """PATCH /api/v2/pid-verification/documents/<id>/review-meta/
+    {reviewed_by?, approved_by?} — step 6 names, written to C5/F5 of the
+    checklist report."""
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+    for field in ('reviewed_by', 'approved_by'):
+        if field in request.data:
+            setattr(doc, field, str(request.data[field]).strip()[:255])
+    doc.save(update_fields=['reviewed_by', 'approved_by', 'updated_at'])
+    return Response({'reviewed_by': doc.reviewed_by, 'approved_by': doc.approved_by})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_checklist(request, project_id):
+    """GET /api/v2/pid-verification/projects/<id>/checklist/ — worst-of per
+    item over the project's current sheets, with the per-sheet breakdown
+    (the All-P&IDs checklist view, spec §3.4)."""
+    from .models import PIDVSheet
+    from .services.checklist_ai02 import project_template, evaluate_sheet, summarize
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+    template = project_template(project)
+    if template is None:
+        return Response({"error": "No checklist template imported yet."}, status=status.HTTP_404_NOT_FOUND)
+
+    order = {'OK': 3, 'Not Verifiable': 2, 'Query': 1, 'Non-Conformance': 0, None: 4}
+    per_item = {}
+    for s in PIDVSheet.objects.filter(project=project, is_drawing=True, superseded_by__isnull=True):
+        ev = evaluate_sheet(s.document, s.page_index, template)
+        if ev is None:
+            continue
+        label = s.drawing_no or f'p.{s.page_index + 1}'
+        for it in ev['items']:
+            cur = per_item.setdefault(it['no'], {
+                **{k: it[k] for k in ('no', 'section', 'section_title', 'sub_heading', 'check_point',
+                                      'mode', 'severity', 'ai_task', 'ref_inputs', 'evidence_required')},
+                'applicability': 'N', 'ai_result': None, 'sheets': [],
+            })
+            if it['applicability'] == 'Y':
+                cur['applicability'] = 'Y'
+            a, b = cur['ai_result'], it['ai_result']
+            if b and order.get(b, 4) < order.get(a, 4):
+                cur['ai_result'] = b
+            cur['sheets'].append({
+                'sheet_id': s.pk, 'document_id': str(s.document_id), 'page_index': s.page_index,
+                'drawing_no': label, 'applicability': it['applicability'], 'ai_result': it['ai_result'],
+            })
+    items = sorted(per_item.values(), key=lambda x: [int(p) for p in x['no'].split('.')])
+    return Response({
+        'template': {'code': template.code, 'version': template.version, 'item_count': template.item_count},
+        'items': items,
+        'summary': summarize(items),
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_checklist_report(request, project_id):
+    """GET /api/v2/pid-verification/projects/<id>/checklist-report.xlsx?scope=all"""
+    from .services.checklist_export import build_project_checklist_report, TemplateChanged
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        data, filename = build_project_checklist_report(project)
+    except TemplateChanged as exc:
+        return Response({'error': f'Template changed, re-import it ({exc})'},
+                        status=status.HTTP_409_CONFLICT)
+    if data is None:
+        return Response({"error": "No checklist template imported yet."}, status=status.HTTP_404_NOT_FOUND)
+    response = HttpResponse(data, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def document_extraction_summary(request, document_id):
+    """
+    GET /api/v2/pid-verification/documents/<id>/extraction/summary/
+
+    -> { lines, instruments, equipment, connectors, notes, confirmed, total }
+    """
+    from .models import PIDVExtractionItem
+
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    qs = PIDVExtractionItem.objects.filter(document=doc)
+    counts = {k: qs.filter(kind=k).count() for k in PIDVExtractionItem.Kind.values}
+    confirmed = qs.filter(confirmed=True).count()
+    return Response({
+        **counts,
+        'confirmed': confirmed,
+        'total': qs.count(),
+    })
+
+
+# ===========================================================================
+# SHEETS + PROJECT REVIEW (multi-file / multi-sheet — spec A, 30 Oct 2026)
+# ===========================================================================
+
+def _sheet_json(s, findings_count=0, cross_count=0):
+    doc = s.document
+    return {
+        'sheet_id': s.pk,
+        'document_id': str(doc.document_id),
+        'file_name': doc.file_name,
+        'page_index': s.page_index,
+        'page_count': doc.drawings.count(),
+        'drawing_no': s.drawing_no or None,
+        'drawing_no_confirmed': s.drawing_no_confirmed,
+        'rev': s.rev or None,
+        'title': s.title or None,
+        'status': s.status or doc.status,
+        'drawing_type': doc.drawing_type or None,
+        'findings': findings_count,
+        'cross': cross_count,
+        'superseded': s.superseded_by_id is not None,
+        'superseded_by_rev': s.superseded_by.rev if s.superseded_by_id else None,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_sheets(request, project_id):
+    """GET /api/v2/pid-verification/projects/<id>/sheets/ — one row per sheet."""
+    from .models import PIDVCrossFinding, PIDVFinding, PIDVSheet
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    sheets = list(
+        PIDVSheet.objects
+        .filter(project=project)
+        .select_related('document', 'superseded_by')
+        .order_by('document_id', 'page_index')
+    )
+    # finding counts per (document, page)
+    fcounts = {}
+    for row in (
+        PIDVFinding.objects.filter(drawing__document__project=project)
+        .values('drawing__document_id', 'drawing__page_index')
+        .annotate(n=models.Count('id'))
+    ):
+        fcounts[(row['drawing__document_id'], row['drawing__page_index'])] = row['n']
+    ccounts = {}
+    for cf in PIDVCrossFinding.objects.filter(project=project).values_list('sheets', flat=True):
+        for sid in cf or []:
+            ccounts[sid] = ccounts.get(sid, 0) + 1
+    return Response([
+        _sheet_json(
+            s,
+            findings_count=fcounts.get((s.document_id, s.page_index), 0),
+            cross_count=ccounts.get(s.pk, 0),
+        )
+        for s in sheets
+    ])
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_review(request, project_id):
+    """GET /api/v2/pid-verification/projects/<id>/review/
+
+    Combined "All P&IDs" payload. Cached per project run — the cache key
+    carries the newest document update + sheet/cross counts, so any upload,
+    re-run or delete invalidates it automatically.
+    """
+    from .models import PIDVCrossFinding, PIDVSheet
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    latest = (project.documents.order_by('-updated_at').values_list('updated_at', flat=True).first())
+    n_sheets = PIDVSheet.objects.filter(project=project).count()
+    n_cross = PIDVCrossFinding.objects.filter(project=project).count()
+    cache_key = f'pidv2:review:{project.pk}:{latest}:{n_sheets}:{n_cross}'
+    data = cache.get(cache_key)
+    if data is not None:
+        return Response(data)
+
+    # First visit before any cross-check run (e.g. sheets backfilled by the
+    # data migration): compute once — fast, deterministic, DB-only.
+    if not (project.metadata or {}).get('cross_stats') and n_sheets:
+        from .services.cross_checks import run_cross_checks
+        run_cross_checks(project)
+        project.refresh_from_db()
+
+    sheets = list(
+        PIDVSheet.objects
+        .filter(project=project, is_drawing=True)
+        .select_related('document', 'superseded_by')
+        .order_by('document_id', 'page_index')
+    )
+    cross = list(PIDVCrossFinding.objects.filter(project=project).order_by('number'))
+    md = project.metadata or {}
+    links = md.get('cross_links', [])
+    external_refs = md.get('external_refs', [])
+    stats = md.get('cross_stats') or {}
+    stats.setdefault('sheets', len([s for s in sheets if s.superseded_by_id is None]))
+    stats.setdefault('files', len({s.document_id for s in sheets}))
+    stats.setdefault('external_refs', len(external_refs))
+
+    cross_by_sheet = {}
+    for cf in cross:
+        for sid in cf.sheets or []:
+            cross_by_sheet[sid] = cross_by_sheet.get(sid, 0) + 1
+
+    from .models import PIDVFinding as _PF
+    fcounts = {}
+    for row in (
+        _PF.objects.filter(drawing__document__project=project)
+        .values('drawing__document_id', 'drawing__page_index')
+        .annotate(n=models.Count('id'))
+    ):
+        fcounts[(row['drawing__document_id'], row['drawing__page_index'])] = row['n']
+
+    data = {
+        'stats': stats,
+        'sheets': [
+            _sheet_json(
+                s,
+                findings_count=fcounts.get((s.document_id, s.page_index), 0),
+                cross_count=cross_by_sheet.get(s.pk, 0),
+            )
+            for s in sheets
+        ],
+        'links': links,
+        'cross': [
+            {
+                'id': cf.pk, 'number': cf.number, 'code': cf.code, 'kind': cf.kind,
+                'title': cf.title, 'detail': cf.detail, 'sheets': cf.sheets,
+                'evidence': cf.evidence,
+            }
+            for cf in cross
+        ],
+        'external_refs': external_refs,
+    }
+    cache.set(cache_key, data, 60 * 60 * 24)
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_findings(request, project_id):
+    """GET /api/v2/pid-verification/projects/<id>/findings/?scope=all|sheet&sheet_id=&kind=sheet|cross"""
+    from .models import PIDVCrossFinding, PIDVFinding, PIDVSheet
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    kind = request.query_params.get('kind', 'sheet')
+    scope = request.query_params.get('scope', 'all')
+    sheet_id = request.query_params.get('sheet_id')
+
+    if kind == 'cross':
+        qs = PIDVCrossFinding.objects.filter(project=project).order_by('number')
+        if sheet_id:
+            qs = [cf for cf in qs if int(sheet_id) in (cf.sheets or [])]
+        return Response([
+            {
+                'id': cf.pk, 'number': f'X{cf.number}', 'code': cf.code, 'kind': cf.kind,
+                'title': cf.title, 'detail': cf.detail, 'sheets': cf.sheets,
+                'evidence': cf.evidence, 'status': 'open',
+            }
+            for cf in qs
+        ])
+
+    qs = (
+        PIDVFinding.objects
+        .filter(drawing__document__project=project)
+        .select_related('drawing')
+        .order_by('drawing__page_index', 'sl_no')
+    )
+    if scope == 'sheet' and sheet_id:
+        try:
+            sheet = PIDVSheet.objects.get(pk=sheet_id, project=project)
+            qs = qs.filter(drawing__document_id=sheet.document_id, drawing__page_index=sheet.page_index)
+        except (PIDVSheet.DoesNotExist, ValueError):
+            return Response({"error": "Sheet not found"}, status=status.HTTP_404_NOT_FOUND)
+    return Response([
+        {
+            'id': f.id, 'number': f.sl_no, 'rule_id': f.rule_id, 'severity': f.severity,
+            'status': f.status, 'title': f.issue_observed, 'evidence': f.evidence,
+            'bbox': f.bbox, 'entity_id': f.entity_id,
+            'document_id': str(f.drawing.document_id), 'page_index': f.drawing.page_index,
+        }
+        for f in qs
+    ])
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def project_cross_check(request, project_id):
+    """POST /api/v2/pid-verification/projects/<id>/cross-check/ — re-run A2."""
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+    from .services.cross_checks import run_cross_checks
+    stats = run_cross_checks(project)
+    return Response({'status': 'ok', 'stats': stats})
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def sheet_detail(request, sheet_id):
+    """PATCH /api/v2/pid-verification/sheets/<id>/ — confirm/edit a drawing number."""
+    from .models import PIDVSheet
+
+    sheet = PIDVSheet.objects.filter(pk=sheet_id, project__created_by=request.user).first()
+    if sheet is None:
+        return Response({"error": "Sheet not found"}, status=status.HTTP_404_NOT_FOUND)
+    drawing_no = str(request.data.get('drawing_no', '')).strip()
+    if not drawing_no:
+        return Response({"error": "drawing_no is required"}, status=status.HTTP_400_BAD_REQUEST)
+    sheet.drawing_no = drawing_no
+    sheet.drawing_no_confirmed = True
+    sheet.save(update_fields=['drawing_no', 'drawing_no_confirmed'])
+    return Response(_sheet_json(sheet))
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def project_checklist_template_upload(request, project_id):
+    """POST /api/v2/pid-verification/projects/<id>/checklist-template/ —
+    an uploaded workbook whose row-7 headers equal the template's is
+    recognised as the AI-PID-02 format and imported as a new version
+    (pinned to this project). Returns the diff against the current version."""
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+    up = request.FILES.get('file')
+    if up is None:
+        return Response({"error": "Attach the workbook as 'file'."}, status=status.HTTP_400_BAD_REQUEST)
+    from .services.checklist_import import NotChecklistFormat, import_new_version
+    try:
+        template, diff = import_new_version(up.read(), up.name)
+    except NotChecklistFormat as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    md = dict(project.metadata or {})
+    md['checklist_template_id'] = template.pk
+    project.metadata = md
+    project.save(update_fields=['metadata', 'updated_at'])
+    return Response({
+        'template': {'code': template.code, 'version': template.version, 'item_count': template.item_count},
+        'diff': diff,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_report_excel(request, project_id):
+    """GET /api/v2/pid-verification/projects/<id>/report.xlsx?scope=all —
+    one tab per P&ID + Cross-drawing + Not uploaded."""
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+    from .services.export_service import generate_project_excel
+    import re
+    data = generate_project_excel(project)
+    safe = re.sub(r'[^A-Za-z0-9_-]+', '_', project.project_name)[:60]
+    response = HttpResponse(
+        data,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = f'attachment; filename="pidv_project_{safe}.xlsx"'
+    return response
 
 
 # ===========================================================================
@@ -1373,6 +2371,7 @@ def compare_accuracy(request, document_id):
         from .tasks import process_pid_document
         from .services import extraction as ex
         from .models import PIDVFinding
+        from apps.core.file_access import local_file_path
     except Exception as exc:
         return Response({"error": f"Failed to initialize comparison services: {exc}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -1380,7 +2379,7 @@ def compare_accuracy(request, document_id):
     process_pid_document.apply(args=[str(doc.document_id)])
     doc.refresh_from_db()
 
-    raw_text = ex._run_ocr(doc.original_file.path, 0)
+    raw_text = ex._run_ocr(local_file_path(doc.original_file), 0)
 
     default_ins = set(ex._DEFAULT_INSTRUMENT_PREFIXES)
     default_val = set(ex._DEFAULT_VALVE_PREFIXES)
@@ -1408,11 +2407,11 @@ def compare_accuracy(request, document_id):
     before = _extract_with_prefixes(raw_text, default_ins, default_val)
 
     ex._legend_prefixes.cache_clear()
-    after = ex.extract_drawing(doc.original_file.path, 0)
+    after = ex.extract_drawing(local_file_path(doc.original_file), 0)
     legend_data = load_legend_knowledge()
 
     findings = PIDVFinding.objects.filter(drawing__document=doc)
-    sev_counts = {s: findings.filter(severity=s).count() for s in ["critical", "major", "minor", "info"]}
+    sev_counts = {s: findings.filter(severity=s).count() for s in ["critical", "major", "minor", "info", "query"]}
 
     before_summary = {
         "tags": len(before["tags"]),
@@ -1520,7 +2519,8 @@ def upload_reference_data(request, project_id):
     Upload reference data files for cross-checking P&ID drawings.
     
     Form fields:
-      data_type — 'line_list' | 'equipment_list' | 'instrument_index'
+      data_type — 'line_list' | 'equipment_list' | 'instrument_index' |
+                  'legend_pid' | 'checklist'
       file      — single file upload (Excel/CSV/PDF)
     
     Supported formats: .xlsx, .xls, .csv, .pdf, .txt
@@ -1537,7 +2537,7 @@ def upload_reference_data(request, project_id):
     if not data_type:
         return Response({'error': 'data_type is required'}, status=status.HTTP_400_BAD_REQUEST)
     
-    if data_type not in ['line_list', 'equipment_list', 'instrument_index']:
+    if data_type not in ['line_list', 'equipment_list', 'instrument_index', 'legend_pid', 'checklist']:
         return Response({'error': 'Invalid data_type'}, status=status.HTTP_400_BAD_REQUEST)
 
     if not uploaded_file:
@@ -2023,7 +3023,8 @@ def check_naming(request, document_id):
     run_ai     = bool(body.get("run_ai", True))
 
     try:
-        file_path = doc.original_file.path
+        from apps.core.file_access import local_file_path
+        file_path = local_file_path(doc.original_file)
     except Exception:
         return Response(
             {"error": "File path unavailable — storage may be remote"},

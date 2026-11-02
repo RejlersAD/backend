@@ -266,6 +266,10 @@ class PipelineContext:
     # Performance tracking
     stage_results: List[StageResult] = field(default_factory=list)
     start_time: datetime = field(default_factory=timezone.now)
+
+    # Run-level metadata written by stages (e.g. checklist configuration
+    # recorded by ReportGenerationStage).
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def add_result(self, result: StageResult):
         """Add a stage result to the pipeline context."""
@@ -735,10 +739,88 @@ class ComparisonEngineStage(StageExecutor):
         }
     
     def _fetch_legend_data(self, context: PipelineContext) -> List:
-        """Fetch legend reference data."""
+        """Fetch legend reference data.
+
+        Primary source: project.legend_knowledge_data (AI-extracted from
+        uploaded PDF legend sheets). When that is absent, fall back to an
+        uploaded Excel legend register (PIDVReferenceData,
+        data_type='legend_pid', e.g. Borouge_PID_Legend_Register.xlsx):
+        rows with a recognizable symbol/type code column are exposed as
+        legend 'symbols' so compare_with_legend() can run against the
+        register instead of a PDF-derived legend.
+        """
         if context.project and hasattr(context.project, 'legend_knowledge_data'):
-            return context.project.legend_knowledge_data or []
+            knowledge = context.project.legend_knowledge_data
+            if knowledge:
+                return knowledge
+        if context.project:
+            register_legend = self._legend_register_as_legend_data(context.project)
+            if register_legend:
+                return register_legend
         return []
+
+    @staticmethod
+    def _legend_register_as_legend_data(project) -> Optional[Dict[str, Any]]:
+        """Convert the project's latest COMPLETED legend_pid register's
+        parsed rows into the legend_data shape expected by
+        compare_with_legend() ({'symbols': [{'type': code, ...}]}).
+
+        Only rows whose code column looks symbol-like are used; returns
+        None when no register exists or no usable symbol column is found.
+        """
+        try:
+            from apps.pid_verification_v2.models import PIDVReferenceData
+            ref = (
+                PIDVReferenceData.objects
+                .filter(
+                    project=project,
+                    data_type=PIDVReferenceData.DataType.LEGEND_PID,
+                    status=PIDVReferenceData.Status.COMPLETED,
+                )
+                .exclude(parsed_data__isnull=True)
+                .order_by('-created_at')
+                .first()
+            )
+        except Exception:
+            logger.debug('[ComparisonEngine] Legend register query failed', exc_info=True)
+            return None
+        if not ref or not ref.parsed_data:
+            return None
+
+        rows = ref.parsed_data
+        # Multi-sheet register shape (since 29 Oct 2026): the Codes sheet is
+        # a CODE dictionary, not a symbol list — feeding it to
+        # compare_with_legend produced 387 bogus LGN-001 "symbol defined in
+        # Legend but not found on P&ID" findings (29 Oct 2026). The register
+        # is consumed by legend lookups / project rules instead.
+        if isinstance(rows, dict) and 'sheets' in rows:
+            return None
+
+        columns = list(rows[0].keys()) if rows else []
+        lowered = {str(c).lower().strip(): c for c in columns}
+        symbol_col = next(
+            (lowered[k] for k in lowered if any(
+                h in k for h in ('symbol', 'type', 'code')
+            )),
+            None,
+        )
+        if symbol_col is None:
+            return None
+
+        symbols = []
+        seen = set()
+        for row in rows:
+            code = str(row.get(symbol_col, '')).strip()
+            if code and code.upper() not in seen:
+                seen.add(code.upper())
+                symbols.append({'type': code, 'description': str(row)})
+        if not symbols:
+            return None
+        logger.info(
+            '[ComparisonEngine] Using Excel legend register %s as legend '
+            'data (%d symbol codes)', ref.file_name, len(symbols),
+        )
+        return {'symbols': symbols, 'source': f'legend_register:{ref.reference_id}'}
     
     def _fetch_line_list_data(self, context: PipelineContext) -> List:
         """Fetch line list reference data."""
@@ -961,12 +1043,19 @@ class LegendSymbolBridgeStage(StageExecutor):
         super().__init__('legend_symbol_bridge')
 
     def _execute_impl(self, context: PipelineContext) -> Dict[str, Any]:
-        from .legend_bridge import get_legend_lookup_fields, match_text_against_legend, cross_reference
+        from .legend_bridge import (
+            get_legend_lookup_fields, match_text_against_legend, cross_reference,
+            PERSIST_TEXT_ONLY_MATCHES,
+        )
         from apps.pid_verification_v2.models import PIDVComparisonFinding
 
         doc = context.document
         user = getattr(doc, 'uploaded_by', None)
-        fields = get_legend_lookup_fields(user)
+        # project is passed so an uploaded Excel legend register
+        # (PIDVReferenceData data_type='legend_pid', e.g.
+        # Borouge_PID_Legend_Register.xlsx) feeds the legend lookup in
+        # addition to PDF-legend-derived templates.
+        fields = get_legend_lookup_fields(user, project=context.project)
 
         # Symbol vision now runs PER PAGE inside AIAnalysisStage (which
         # already sends the real page image to Claude for findings — the
@@ -1031,7 +1120,11 @@ class LegendSymbolBridgeStage(StageExecutor):
                     location_info={'drawing_id': seg.drawing_id, 'symbol_location': item['symbol'].get('location')},
                 ))
 
-            for item in xref['text_only']:
+            # Low-confidence free-text 'text_only' matches are suppressed
+            # (decision 29 Oct 2026 — they produced 55 bogus "PP-150 →
+            # CRUDE OIL"-style findings on a clean AFC sheet). Only
+            # 'linked' matches (text + vision symbol agree) are persisted.
+            for item in (xref['text_only'] if PERSIST_TEXT_ONLY_MATCHES else []):
                 findings_to_create.append(PIDVComparisonFinding(
                     project=context.project,
                     finding_type=PIDVComparisonFinding.FindingType.SYMBOL_LEGEND_MATCH,
@@ -1086,10 +1179,28 @@ class ReportGenerationStage(StageExecutor):
     def _execute_impl(self, context: PipelineContext) -> Dict[str, Any]:
         # Report generation implementation (existing code)
         # ... (kept for brevity)
-        
+
+        # Checklist resolution (decision 29 Oct 2026: checklist is a
+        # compulsory input alongside drawings and legend sheets). Records
+        # which checklist the run is configured with — default PRO-001
+        # Rev A (104 points) when the project has no uploaded checklist.
+        # Point evaluation honestly reports 'not_checked' until per-point
+        # evaluators exist (see services/checklist.py).
+        from .checklist import get_project_checklist
+        checklist = get_project_checklist(context.project)
+        context.metadata['checklist'] = {
+            'code': checklist['code'],
+            'revision': checklist['revision'],
+            'configured': checklist['configured'],
+            'source': checklist['source'],
+            'point_count': checklist['point_count'],
+            'evaluation': checklist['evaluation'],
+        }
+
         return {
             'excel_generated': False,
             'pdf_generated': False,
+            'checklist': context.metadata['checklist'],
         }
 
 

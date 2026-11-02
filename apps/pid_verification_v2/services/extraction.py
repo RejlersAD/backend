@@ -21,7 +21,7 @@ from apps.core.ai_consumer_clients import provider_api_key
 import logging
 import re
 from functools import lru_cache
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from celery.exceptions import SoftTimeLimitExceeded
 
@@ -144,7 +144,15 @@ def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | Non
     if not tesseract_used and not vision_used and not tesseract_ok and not api_key:
         raise NoExtractionMethodAvailableError()
 
-    raw_text = _merge_ocr_text(tesseract_text, vision_text)
+    # Vector PDFs carry a real text layer — merge it in (line-deduplicated).
+    # OCR of a vector sheet loses/fragments content (observed 29 Oct 2026 on
+    # Borouge 13-PP-152-20070: Tesseract read 6,262 chars and missed every
+    # equipment tag, while the PDF text layer holds 8,992 chars including
+    # '52-HE-1402' etc.). On scanned pages this returns '' and nothing
+    # changes.
+    pdf_layer_text = _pdf_text_layer(file_path, page_index)
+
+    raw_text = _merge_ocr_text(_merge_ocr_text(tesseract_text, vision_text), pdf_layer_text)
 
     extraction_info = {
         'tesseract_available': tesseract_ok,
@@ -195,6 +203,60 @@ def _extraction_scenario_message(tesseract_ok: bool, has_api_key: bool) -> str |
     if tesseract_ok and not has_api_key:
         return 'Add an API key for better accuracy with AI Vision.'
     return None  # neither available — handled by NoExtractionMethodAvailableError instead
+
+
+def _pdf_text_layer(file_path: str, page_index: int) -> str:
+    """Return the PDF's own embedded text layer for the page (vector PDFs
+    only; '' for scanned/image pages or any failure)."""
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(file_path) as doc:
+            if page_index >= len(doc):
+                return ''
+            return doc[page_index].get_text('text') or ''
+    except Exception:
+        logger.debug('[PIDExtraction] PDF text-layer read failed (non-fatal)', exc_info=True)
+        return ''
+
+
+def read_text_layer_lines(file_path: str, page_index: int) -> List[Dict[str, Any]]:
+    """
+    Read the page's text layer LINE BY LINE with bounding boxes via PyMuPDF
+    get_text('dict') — the authoritative read for vector PDFs (no OCR
+    damage possible; e.g. '1-EX-S300' never becomes '1-£X-$300').
+
+    Returns [{'text', 'x', 'y', 'x1', 'y1', 'vertical'}] with coordinates
+    in % of sheet width/height; [] when the page has no text layer
+    (scanned PDF → callers fall back to OCR and label items source='ocr').
+    """
+    try:
+        import fitz  # PyMuPDF
+        out = []
+        with fitz.open(file_path) as doc:
+            if page_index >= len(doc):
+                return []
+            page = doc[page_index]
+            w, h = page.rect.width or 1.0, page.rect.height or 1.0
+            for block in page.get_text('dict').get('blocks', []):
+                if block.get('type') != 0:
+                    continue
+                for line in block.get('lines', []):
+                    text = ''.join(s.get('text', '') for s in line.get('spans', [])).strip()
+                    if not text:
+                        continue
+                    x0, y0, x1, y1 = line['bbox']
+                    dx, _dy = line.get('dir', (1.0, 0.0))
+                    out.append({
+                        'text': text,
+                        'x': round(x0 / w * 100, 2), 'y': round(y0 / h * 100, 2),
+                        'x1': round(x1 / w * 100, 2), 'y1': round(y1 / h * 100, 2),
+                        # dir (0,±1) = vertical text
+                        'vertical': abs(dx) < 0.01,
+                    })
+        return out
+    except Exception:
+        logger.debug('[PIDExtraction] text-layer line read failed (non-fatal)', exc_info=True)
+        return []
 
 
 def _merge_ocr_text(tesseract_text: str, vision_text: str) -> str:
@@ -346,6 +408,31 @@ _LINE_SIZE_PATTERN = re.compile(r'\b(\d+(?:\.\d+)?)\s*(?:"|”|\'\'|mm|DN)(?=\s|
 # P&ID-only tag "V-803" AND a "missing" register tag "V-803-TF").
 _EQUIPMENT_TYPES   = re.compile(r'\b(V|E|T|K|C|P|H|X|F|R)-\d{3,5}(-[A-Z]{1,4})?\b')
 
+# Borouge/ADNOC-style area-prefixed equipment tags, e.g. 52-HE-1402,
+# 52-PC-1401A, 53-FB-1401B, 13-HE-304: {area 2d}-{class 2-3 letters}-
+# {serial 3-5d}[optional unit letter]. (29 Oct 2026: the single-letter
+# pattern above never matched these, so equipment extraction returned 0 on
+# Borouge AFC sheets.)
+_EQUIPMENT_TYPES_AREA = re.compile(r'\b\d{2}-([A-Z]{2,3})-\d{3,5}[A-Z]?(?:/[A-Z]){0,3}(?!\s*-\d)\b')
+
+# Soft-coded: equipment class codes accepted for the area-prefixed pattern
+# above — keeps drawing-number fragments ('13-PP-152') and valve tags
+# ('13-FV-1204') out of the equipment list. Extend per project.
+_AREA_EQUIPMENT_CLASSES = {
+    'HE',   # heat exchanger
+    'PC',   # package / compressor package
+    'FB',   # filter/strainer package
+    'VT',   # vessel/tank (vertical)
+    'TK',   # tank
+    'SE',   # separator
+    'BL',   # blower
+    'PU',   # pump unit
+    'FL',   # filter
+    'ST',   # strainer
+    'HD',   # head/drum
+    'DC',   # drum/column
+}
+
 # Pipeline line designation pattern.
 # Matches designations like: 2"-D-6152-033842-X-N  or  4"-D-5690-013842-X_N
 # Format: {NPS}[inch_mark]{sep}{fluid_code}{sep}{area_code}{sep}{seq_no}[{sep}{pipe_class}][{sep}{insulation}]
@@ -443,6 +530,11 @@ def _extract_equipment(text: str):
     items = []
     for m in _EQUIPMENT_TYPES.finditer(text):
         items.append({'tag': m.group(0), 'type': m.group(0).split('-')[0]})
+    for m in _EQUIPMENT_TYPES_AREA.finditer(text):
+        if m.group(1) not in _AREA_EQUIPMENT_CLASSES:
+            continue
+        tag = m.group(0)
+        items.append({'tag': tag, 'type': m.group(1)})
     # Deduplicate by tag
     seen = set()
     unique = []
@@ -459,12 +551,16 @@ def _extract_notes(text: str):
 
 def _extract_holds(text: str):
     holds = [m.group(0).strip() for m in _HOLD_PATTERN.finditer(text)]
-    # Capture common drawing hold headers even when no HOLD-<n> token exists.
+    # Capture hold markers even without a HOLD-<n> token: the line must BE
+    # a hold marker (start with HOLD, e.g. the hold cloud / hold list), not
+    # merely contain the word — "SHALL HOLD LAST GOOD READING" inside note
+    # 52 is a sentence, not a HOLD item (NTS-002 false positive, 30 Oct
+    # 2026).
     for line in text.splitlines():
         ln = line.strip()
         if not ln:
             continue
-        if 'HOLD' in ln.upper() and ln not in holds:
+        if re.match(r'(?i)^HOLD\b', ln) and ln not in holds:
             holds.append(ln[:200])
     return holds
 

@@ -51,45 +51,219 @@ SYMBOL_BATCH_SIZE = 40
 SYMBOL_BATCH_CONCURRENT_CALLS = 4
 
 
-def get_legend_lookup_fields(user) -> list[dict]:
+# ── Legend text-match persistence (soft-coded) ────────────────────────────
+# 29 Oct 2026: the old free-text matching produced bogus "comparison
+# findings" like "PP-150 → CRUDE OIL" (the tag merely STARTED WITH the
+# lookup code 'P' = 'CRUDE OIL' — 55 bogus findings on a clean AFC sheet).
+# Matching is now FIELD-POSITION based (see match_text_against_legend), and
+# the low-confidence single-source 'text_only' findings are suppressed
+# entirely — only 'linked' matches (text AND vision symbol agree) are
+# persisted by the orchestrator's LegendSymbolBridgeStage.
+PERSIST_TEXT_ONLY_MATCHES = False
+
+# Column-name hints used to detect the code / description / position
+# columns of an uploaded Excel legend register (data_type='legend_pid').
+_REGISTER_CODE_HINTS    = ('code', 'symbol', 'abbr', 'abbreviation', 'letter', 'field id')
+_REGISTER_DESC_HINTS    = ('description', 'meaning', 'full name', 'definition', 'desc', 'name')
+_REGISTER_POS_HINTS     = ('position', 'pos', 'field position', 'seq', 'order')
+# A legend-register code is a short uppercase-ish token (LD-08 style field
+# ids allowed: letters/digits/dash, <= 8 chars).
+_REGISTER_CODE_RE = re.compile(r'^[A-Za-z0-9]{1,8}(-[A-Za-z0-9]{1,4})?$')
+
+
+def get_legend_lookup_fields(user, project=None) -> list[dict]:
     """Collect legend lookup tables to text-match extracted P&ID tags
     against: pid_checker_v2's built-in default templates (always
     available), overlaid per-section with the user's own ACTIVE
-    PidCheckerV2LegendSheet definition where one exists.
+    PidCheckerV2LegendSheet definition where one exists, and — when
+    `project` is given — extended with the project's uploaded Excel legend
+    register (PIDVReferenceData, data_type='legend_pid', e.g.
+    Borouge_PID_Legend_Register.xlsx).
 
-    Returns a list of field dicts: {key, label, lookup, section}.
+    Each field dict carries its 'position' — the field's index within its
+    section template (e.g. Line List: size=0, service=1, spec=2, ...) — so
+    match_text_against_legend() can match codes by FIELD POSITION within a
+    composite line number instead of free-text token matching. Register-
+    sourced fields use the register's own position column when present,
+    otherwise position=None (exact-token match only).
+
+    Returns a list of field dicts: {key, label, lookup, section, position}.
     """
     from apps.pid_checker_v2.legend_defaults import DEFAULT_TEMPLATES
 
     fields: dict[tuple, dict] = {}
     for section, template in DEFAULT_TEMPLATES.items():
-        for f in template.get('definition', {}).get('fields', []):
+        for pos, f in enumerate(template.get('definition', {}).get('fields', [])):
             if f.get('lookup'):
-                fields[(section, f['key'])] = {**f, 'section': section}
+                fields[(section, f['key'])] = {**f, 'section': section, 'position': pos}
 
     if user is not None and getattr(user, 'is_authenticated', False):
         try:
             from apps.pid_checker_v2.models import PidCheckerV2LegendSheet
             active_sheets = PidCheckerV2LegendSheet.objects.filter(created_by=user, is_active=True)
             for sheet in active_sheets:
-                for f in (sheet.definition or {}).get('fields', []):
+                for pos, f in enumerate((sheet.definition or {}).get('fields', [])):
                     if f.get('lookup'):
-                        fields[(sheet.section, f['key'])] = {**f, 'section': sheet.section}
+                        fields[(sheet.section, f['key'])] = {**f, 'section': sheet.section, 'position': pos}
         except Exception:
             logger.debug('[LegendBridge] Could not load user legend sheets', exc_info=True)
+
+    if project is not None:
+        for reg_field in _legend_register_lookup_fields(project):
+            # Register fields extend (never overwrite) template fields.
+            fields.setdefault(
+                (reg_field['section'], reg_field['key']), reg_field
+            )
 
     return list(fields.values())
 
 
+def _legend_register_lookup_fields(project) -> list[dict]:
+    """Build lookup fields from the project's most recent COMPLETED Excel
+    legend register (PIDVReferenceData, data_type='legend_pid').
+
+    The parsed_data rows (pandas records from parse_reference_data_task)
+    are scanned for a code column (short code-like values), a description
+    column (free text), and an optional position column (field position
+    within the line number, e.g. LD-08 / LD-04 per the legend register).
+    Each code column becomes one lookup field keyed by that position.
+
+    Returns [] when no register is uploaded or it has no recognizable
+    code/description columns — legend checks then run on the built-in
+    templates only.
+    """
+    try:
+        from apps.pid_verification_v2.models import PIDVReferenceData
+        ref = (
+            PIDVReferenceData.objects
+            .filter(
+                project=project,
+                data_type=PIDVReferenceData.DataType.LEGEND_PID,
+                status=PIDVReferenceData.Status.COMPLETED,
+            )
+            .exclude(parsed_data__isnull=True)
+            .order_by('-created_at')
+            .first()
+        )
+    except Exception:
+        logger.debug('[LegendBridge] Could not query legend register', exc_info=True)
+        return []
+
+    if not ref or not ref.parsed_data:
+        return []
+
+    # Multi-sheet registers (parsed after 29 Oct 2026): build one lookup
+    # field per category GROUP of the 'Codes' sheet (e.g. 'Equipment
+    # designation code', 'Line class', 'Insulation code').
+    if isinstance(ref.parsed_data, dict) and 'sheets' in ref.parsed_data:
+        from .legend_register import get_register_codes
+        fields = []
+        for category, codes in get_register_codes(project).items():
+            if codes:
+                fields.append({
+                    'key': f'register_{re.sub(r"[^A-Za-z0-9]+", "_", category).strip("_").lower()}',
+                    'label': f'Legend Register: {category}',
+                    'lookup': codes,
+                    'code_positions': {},
+                    'section': 'legend_register',
+                    'position': None,
+                })
+        logger.info(
+            '[LegendBridge] Loaded %d legend-register category lookups from %s (%s)',
+            len(fields), ref.file_name, ref.reference_id,
+        )
+        return fields
+
+    rows = ref.parsed_data
+    columns = list(rows[0].keys()) if rows else []
+    lowered = {str(c).lower().strip(): c for c in columns}
+
+    def _find_col(hints):
+        for hint in hints:
+            for low, orig in lowered.items():
+                if hint in low:
+                    return orig
+        return None
+
+    desc_col = _find_col(_REGISTER_DESC_HINTS)
+    pos_col  = _find_col(_REGISTER_POS_HINTS)
+
+    def _looks_like_code_col(col) -> bool:
+        values = [str(r.get(col, '')).strip() for r in rows[:50]]
+        values = [v for v in values if v]
+        if not values:
+            return False
+        code_like = sum(1 for v in values if _REGISTER_CODE_RE.match(v))
+        return code_like / len(values) >= 0.8
+
+    code_cols = [
+        c for c in columns
+        if c != desc_col and _looks_like_code_col(c)
+    ]
+    if not code_cols or not desc_col:
+        logger.info(
+            '[LegendBridge] Legend register %s has no recognizable code/'
+            'description columns (columns=%s) — skipped',
+            ref.reference_id, columns,
+        )
+        return []
+
+    fields: list[dict] = []
+    for code_col in code_cols:
+        lookup: dict[str, str] = {}
+        positions: dict[str, int] = {}
+        for row in rows:
+            code = str(row.get(code_col, '')).strip().upper()
+            desc = str(row.get(desc_col, '')).strip()
+            if not code or not desc or not _REGISTER_CODE_RE.match(code):
+                continue
+            lookup.setdefault(code, desc)
+            if pos_col is not None:
+                try:
+                    positions[code] = int(float(str(row.get(pos_col, '')).strip()))
+                except (ValueError, TypeError):
+                    pass
+        if not lookup:
+            continue
+        fields.append({
+            'key': f'register_{code_col}',
+            'label': f'Legend Register: {code_col}',
+            'lookup': lookup,
+            # Per-code positions from the register's position column
+            # (empty dict → exact-token match fallback).
+            'code_positions': positions,
+            'section': 'legend_register',
+            'position': None,
+        })
+
+    logger.info(
+        '[LegendBridge] Loaded %d legend-register lookup field(s) from %s '
+        '(%s)', len(fields), ref.file_name, ref.reference_id,
+    )
+    return fields
+
+
 def match_text_against_legend(extraction: dict, fields: list[dict]) -> list[dict]:
     """Match extracted P&ID text (tags/instruments/valves/equipment/
-    line_tags) against legend lookup tables, e.g. tag 'FL-CS-1001' contains
-    code 'FL', which the Line List section's 'service' field maps to
-    'FLARE GAS'.
+    line_tags) against legend lookup tables, e.g. tag '6"-FL-8183-AC3N'
+    has code 'FL' at FIELD POSITION 1 (after the size), which the Line
+    List section's 'service' field maps to 'FLARE GAS'.
 
-    A code matches when it appears as its own token in the tag (split on
-    non-alphanumeric separators) or the tag starts with it — avoids
-    matching a code that's merely a substring of an unrelated word.
+    Matching is by FIELD POSITION within the composite tag, NOT free text:
+      - Template fields (position=N): the code must equal the tag's N-th
+        token (tokens split on non-alphanumeric separators). E.g. the
+        'service' field (position 1) only matches the second token of a
+        line designation.
+      - Fields whose lookup carries per-code positions ('code_positions'
+        from an Excel legend register, e.g. LD-08 / LD-04): the code must
+        sit at its register-defined token position.
+      - Fields with no position information at all: exact-token match only
+        (code == one whole token).
+
+    The previous "tag starts with the code" fallback was REMOVED — it
+    produced bogus matches like 'PP-150 → CRUDE OIL' (code 'P' prefix-
+    matching tag 'PP-150'), 55 false findings on one clean AFC sheet
+    (29 Oct 2026).
 
     Returns a list of {tag, code, description, section, field_key, field_label}.
     """
@@ -104,29 +278,42 @@ def match_text_against_legend(extraction: dict, fields: list[dict]) -> list[dict
         if tag:
             candidates.add(str(tag).upper())
 
+    def _code_matches(code_u: str, tag_tokens: list[str], field: dict) -> bool:
+        # Per-code register position (e.g. LD-08 / LD-04) wins when present.
+        code_pos = (field.get('code_positions') or {}).get(code_u)
+        if code_pos is not None:
+            return 0 <= code_pos < len(tag_tokens) and tag_tokens[code_pos] == code_u
+        # Template field position (size=0, service=1, ...).
+        field_pos = field.get('position')
+        if field_pos is not None:
+            return field_pos < len(tag_tokens) and tag_tokens[field_pos] == code_u
+        # No position information — exact whole-token match only.
+        return code_u in tag_tokens
+
     matches: list[dict] = []
     seen: set[tuple] = set()
     for tag in candidates:
-        tokens = set(_TOKEN_RE.findall(tag))
+        tag_tokens = _TOKEN_RE.findall(tag)  # ordered
         for field in fields:
             lookup = field.get('lookup') or {}
             for code, description in lookup.items():
                 code_u = str(code).upper()
-                if code_u in tokens or tag.startswith(code_u):
-                    key = (tag, field['section'], field['key'], code_u)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    matches.append({
-                        'tag': tag,
-                        'code': code_u,
-                        'description': description,
-                        'section': field['section'],
-                        'field_key': field['key'],
-                        'field_label': field.get('label', field['key']),
-                    })
-                    if len(matches) >= MAX_TEXT_MATCHES_PER_DOCUMENT:
-                        return matches
+                if not _code_matches(code_u, tag_tokens, field):
+                    continue
+                key = (tag, field['section'], field['key'], code_u)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append({
+                    'tag': tag,
+                    'code': code_u,
+                    'description': description,
+                    'section': field['section'],
+                    'field_key': field['key'],
+                    'field_label': field.get('label', field['key']),
+                })
+                if len(matches) >= MAX_TEXT_MATCHES_PER_DOCUMENT:
+                    return matches
     return matches
 
 

@@ -230,17 +230,10 @@ def _resolve_file_path(doc) -> str:
     region, or credential logic to keep in sync by hand ever again.
     """
     if doc.original_file:
-        # Try local path first (works for FileSystemStorage and ResilientMediaStorage)
-        try:
-            path = doc.original_file.path
-            if path:
-                return path
-        except NotImplementedError:
-            pass  # S3Boto3Storage raises NotImplementedError for .path
-
-        if doc.original_file.name:
-            logger.info('[PIDVTask] Downloading file via storage backend: %s', doc.original_file.name)
-            return _download_via_storage(doc.original_file)
+        # Storage-agnostic: local fast path, else stream to a temp file
+        # (FileField.path raises NotImplementedError under S3 — 30 Oct 2026).
+        from apps.core.file_access import local_file_path
+        return local_file_path(doc.original_file)
 
     # Explicit s3_path field (legacy / manually set) — no Storage object
     # attached to a plain CharField, so this one genuinely does need a raw
@@ -1022,14 +1015,11 @@ def extract_legend_sheet_task(self, legend_id: str):
     try:
         # ── Resolve file path ──────────────────────────────────────────────
         if sheet.original_file:
-            try:
-                tmp_path = sheet.original_file.path
-                need_cleanup = False
-            except NotImplementedError:
-                # S3-backed storage — download to temp file
-                s3_key     = getattr(sheet.original_file, 'name', None)
-                tmp_path   = _download_from_s3(s3_key) if s3_key else None
-                need_cleanup = True
+            # Storage-agnostic (FileField.path raises under S3).
+            from apps.core.file_access import local_file_path
+            tmp_path = local_file_path(sheet.original_file)
+            # Only clean up temp downloads, never a real local file.
+            need_cleanup = tmp_path.startswith(tempfile.gettempdir())
         elif sheet.s3_path:
             tmp_path  = _download_from_s3(sheet.s3_path)
             need_cleanup = True
@@ -1206,23 +1196,10 @@ def parse_reference_data_task(self, reference_id: str):
     try:
         # ── Resolve file path ──────────────────────────────────────────────
         if ref_data.original_file:
-            try:
-                tmp_path = ref_data.original_file.path
-                need_cleanup = False
-            except NotImplementedError:
-                # Remote storage (S3) — read through Django's storage API so the
-                # backend handles location prefixes / auth itself (plain S3 key
-                # download misses the storage `location` prefix and 404s).
-                import tempfile as _tf
-                with ref_data.original_file.open('rb') as src:
-                    fd, tmp_path = _tf.mkstemp(suffix='_' + (ref_data.file_name or 'refdata'))
-                    with os.fdopen(fd, 'wb') as dst:
-                        while True:
-                            chunk = src.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            dst.write(chunk)
-                need_cleanup = True
+            # Storage-agnostic (FileField.path raises under S3).
+            from apps.core.file_access import local_file_path
+            tmp_path = local_file_path(ref_data.original_file)
+            need_cleanup = tmp_path.startswith(tempfile.gettempdir())
         elif ref_data.s3_path:
             tmp_path = _download_from_s3(ref_data.s3_path)
             need_cleanup = True

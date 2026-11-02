@@ -47,7 +47,7 @@ def _reference_data_upload_path(instance, filename):
     project_slug = (
         str(instance.project.id) if instance.project_id else 'global'
     )
-    data_type = instance.data_type  # 'line_list', 'equipment_list', 'instrument_index'
+    data_type = instance.data_type  # 'line_list', 'equipment_list', 'instrument_index', 'legend_pid', 'checklist'
     return f'pid_verification_v2/projects/{project_slug}/reference_data/{data_type}/{instance.reference_id}/{filename}'
 
 
@@ -143,6 +143,14 @@ class PIDVDocument(models.Model):
     status        = models.CharField(max_length=20, choices=Status.choices, default=Status.UPLOADED)
     error_message = models.TextField(blank=True)
 
+    # Drawing classification (spec B: user-set Type select on the project
+    # workspace; drives the PFD / P&ID filter chips and set grouping)
+    class DrawingType(models.TextChoices):
+        PFD = 'PFD', 'PFD'
+        PID = 'P&ID', 'P&ID'
+        UFD = 'UFD', 'UFD'
+    drawing_type  = models.CharField(max_length=10, choices=DrawingType.choices, blank=True, default='')
+
     # Owner
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -154,6 +162,10 @@ class PIDVDocument(models.Model):
     # Exports (filled after processing)
     excel_s3_url = models.CharField(max_length=1024, blank=True)
     pdf_s3_url   = models.CharField(max_length=1024, blank=True)
+
+    # Step 6 sign-off names (written to C5/F5 of the checklist report).
+    reviewed_by = models.CharField(max_length=255, blank=True)
+    approved_by = models.CharField(max_length=255, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -214,6 +226,10 @@ class PIDVFinding(models.Model):
         MAJOR    = 'major',    'Major'
         MINOR    = 'minor',    'Minor'
         INFO     = 'info',     'Info'
+        # 'query' — notes/HOLDs requiring engineer confirmation rather than
+        # errors (introduced 29 Oct 2026 for RED-001 semantics). Choices are
+        # Python-level only (column is varchar(10)), so no migration needed.
+        QUERY    = 'query',    'Query'
 
     class FindingStatus(models.TextChoices):
         OPEN     = 'open',     'Open'
@@ -237,6 +253,14 @@ class PIDVFinding(models.Model):
     severity        = models.CharField(max_length=10, choices=Severity.choices, default=Severity.MAJOR)
     status          = models.CharField(max_length=10, choices=FindingStatus.choices, default=FindingStatus.OPEN)
     rule_id         = models.CharField(max_length=50, blank=True, help_text='Rule that triggered this finding')
+    # Link back to the extraction item this finding is about (engine prompt
+    # §3/§7d): entity_id + bbox (percent of sheet) for the overlay.
+    entity_id       = models.BigIntegerField(null=True, blank=True)
+    bbox            = models.JSONField(null=True, blank=True)
+    # Report metadata for the AI-PID-02 comment register (spec §2.5):
+    # {sheet_label, grid, tag, finding_text, reference, suggested_correction,
+    #  confidence, ai_result, checklist_items} — filled at finalize.
+    report_meta     = models.JSONField(default=dict, blank=True)
     created_at      = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -250,6 +274,111 @@ class PIDVFinding(models.Model):
 
     def __str__(self):
         return f'[{self.sl_no}] {self.category}: {self.issue_observed[:60]}'
+
+
+# ---------------------------------------------------------------------------
+# PIDVExtractionItem  (per-document extraction table — engine prompt §4)
+# ---------------------------------------------------------------------------
+
+class PIDVExtractionItem(models.Model):
+    """
+    One extracted item (line label, instrument, equipment, off-page
+    connector, note) of a processed P&ID document.
+
+    Populated during the normal pipeline run from the page's extraction
+    result and drawing metadata (line_tags / instruments / equipment /
+    continuation_refs / notes). Only what the reader actually extracts is
+    stored — fields with no extracted value stay null/empty, never
+    fabricated.
+
+    `parsed` schema per kind:
+      lines       : {size, system, fluid_code, serial, piping_class,
+                     insulation, design_cases: [{no, p_barg, t_c, stc}],
+                     legend: {field_key: {code, description}}}
+      instruments : {tag, function_letters, loop, hookup_type}
+      equipment   : {tag, code, description, data_block}
+      connectors  : {drawing_no, connector_no, direction, service,
+                     in_register}
+      notes       : {number, text, referenced_at: [], deleted}
+    """
+
+    class Kind(models.TextChoices):
+        LINES       = 'lines',       'Line Labels'
+        INSTRUMENTS = 'instruments', 'Instruments'
+        EQUIPMENT   = 'equipment',   'Equipment'
+        CONNECTORS  = 'connectors',  'Off-Page / C&E Connectors'
+        NOTES       = 'notes',       'Notes'
+
+    class Source(models.TextChoices):
+        VECTOR = 'vector', 'Vector (PDF text layer)'
+        OCR    = 'ocr',    'OCR'
+
+    document     = models.ForeignKey(
+        PIDVDocument, on_delete=models.CASCADE, related_name='extraction_items'
+    )
+    kind         = models.CharField(max_length=20, choices=Kind.choices, db_index=True)
+    text         = models.TextField(help_text='Text as read from the sheet')
+    parsed       = models.JSONField(default=dict, blank=True)
+    page         = models.PositiveSmallIntegerField(default=0)
+
+    # Bounding box in % of sheet width/height (x0, y0, x1, y1); null when
+    # the reader produced no coordinates.
+    bbox         = models.JSONField(null=True, blank=True)
+    # How many times this exact (normalized) text appears on the drawing.
+    labels       = models.PositiveIntegerField(default=1)
+
+    flag         = models.CharField(max_length=120, null=True, blank=True)
+    finding_ids  = models.JSONField(default=list, blank=True)
+
+    source       = models.CharField(max_length=10, choices=Source.choices, default=Source.VECTOR)
+    confidence   = models.FloatField(default=1.0)
+
+    confirmed    = models.BooleanField(default=False)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='pidv2_extraction_confirmations',
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pidv2_extraction_items'
+        ordering = ['document', 'kind', 'page', 'id']
+        indexes  = [
+            models.Index(fields=['document', 'kind']),
+        ]
+
+    def __str__(self):
+        return f'{self.kind}: {self.text[:60]} (doc={self.document_id})'
+
+
+# ---------------------------------------------------------------------------
+# PIDVChecklistOverride  (engineer overrides of PRO-001 point results)
+# ---------------------------------------------------------------------------
+
+class PIDVChecklistOverride(models.Model):
+    """Engineer's manual result for one checklist point of one document.
+
+    Automatic/legend evaluations are computed live by
+    services/checklist_pro001.evaluate_checklist(); a row here overrides
+    the computed result (PATCH endpoint)."""
+
+    document   = models.ForeignKey(
+        PIDVDocument, on_delete=models.CASCADE, related_name='checklist_overrides'
+    )
+    point_id   = models.PositiveSmallIntegerField()
+    result     = models.CharField(max_length=20)
+    comment    = models.TextField(blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pidv2_checklist_overrides'
+        unique_together = [('document', 'point_id')]
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +572,8 @@ class PIDVReferenceData(models.Model):
         LINE_LIST         = 'line_list',         'Line List'
         EQUIPMENT_LIST    = 'equipment_list',    'Equipment List'
         INSTRUMENT_INDEX  = 'instrument_index',  'Instrument Index'
+        LEGEND_PID        = 'legend_pid',        'Legend Sheets (P&ID)'
+        CHECKLIST         = 'checklist',         'Client Checklist'
     
     class Status(models.TextChoices):
         PENDING    = 'pending',    'Pending'
@@ -1063,4 +1194,186 @@ class PIDVTagIndex(models.Model):
 
     def __str__(self):
         return f'{self.tag} (p{self.page_number}) — {self.document_id}'
+
+
+# ---------------------------------------------------------------------------
+# Sheet  (one PDF page = one P&ID — multi-file and multi-sheet uploads)
+# ---------------------------------------------------------------------------
+
+class PIDVSheet(models.Model):
+    """One P&ID sheet. Created one per PDF page after the title block is
+    read (sync in tasks.py; backfilled for existing documents by data
+    migration 0014). Pages with no title block get is_drawing=False and are
+    skipped by all checks. Per-sheet extraction, findings and scene3d stay
+    keyed by (document, page_index) — this row adds project-wide identity:
+    drawing number, revision, supersession.
+    """
+
+    project      = models.ForeignKey(
+        PIDVProject, on_delete=models.CASCADE, related_name='sheets',
+        null=True, blank=True,
+    )
+    document     = models.ForeignKey(
+        PIDVDocument, on_delete=models.CASCADE, related_name='sheets',
+    )
+    page_index   = models.PositiveSmallIntegerField(default=0)
+    drawing_no   = models.CharField(max_length=255, blank=True, db_index=True)
+    # False when only a contractor number (e.g. 'AA-E3-P-FP', '&AA-…') was
+    # found — the client number pattern is preferred; the UI shows
+    # "Drawing number to confirm".
+    drawing_no_confirmed = models.BooleanField(default=True)
+    rev          = models.CharField(max_length=20, blank=True)
+    title        = models.CharField(max_length=512, blank=True)
+    status       = models.CharField(max_length=20, blank=True)  # mirrors the document's
+    is_drawing   = models.BooleanField(default=True)
+    superseded_by = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='supersedes',
+    )
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'pidv2_sheets'
+        unique_together = [('document', 'page_index')]
+        ordering = ['document', 'page_index']
+        indexes = [
+            models.Index(fields=['project', 'drawing_no']),
+        ]
+
+    def __str__(self):
+        return f'{self.drawing_no or "?"} (doc={self.document_id} p{self.page_index})'
+
+
+# ---------------------------------------------------------------------------
+# CrossFinding  (project-wide checks over current sheets — cross_checks.py)
+# ---------------------------------------------------------------------------
+
+class PIDVCrossFinding(models.Model):
+    """One cross-drawing finding (X1…Xn per run): XCON-001 connector
+    return, XLINE-001 same line different data, XTAG-001 same tag different
+    type/service, XREV-001 revision drift. `evidence` carries
+    {sheet_id, entity_id, bbox} per sheet so the UI can open each drawing
+    at the spot."""
+
+    class Kind(models.TextChoices):
+        ERROR = 'error', 'Error'
+        QUERY = 'query', 'Query'
+        MINOR = 'minor', 'Minor'
+
+    project   = models.ForeignKey(
+        PIDVProject, on_delete=models.CASCADE, related_name='cross_findings',
+    )
+    number    = models.PositiveIntegerField(help_text='X<number> within the run')
+    code      = models.CharField(max_length=20)   # XCON-001 | XLINE-001 | XTAG-001 | XREV-001
+    kind      = models.CharField(max_length=10, choices=Kind.choices, default=Kind.QUERY)
+    title     = models.CharField(max_length=512)
+    detail    = models.TextField(blank=True)
+    sheets    = models.JSONField(default=list, blank=True)    # [sheet_id, …]
+    evidence  = models.JSONField(default=list, blank=True)    # [{sheet_id, entity_id, bbox}]
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'pidv2_cross_findings'
+        ordering = ['number']
+
+    def __str__(self):
+        return f'X{self.number} {self.code}: {self.title[:60]}'
+
+
+# ---------------------------------------------------------------------------
+# Checklist template + results (AI_PID_Review_Checklist_02 — spec §2)
+# ---------------------------------------------------------------------------
+
+class PIDVChecklistTemplate(models.Model):
+    """An imported AI-PID-02-format workbook. The original .xlsx is kept in
+    `source_file` (S3) and the export FILLS it — the download is identical
+    to the engineer's template apart from the cells we write."""
+
+    code        = models.CharField(max_length=40, db_index=True)   # 'AI-PID-02'
+    title       = models.CharField(max_length=255, blank=True)
+    version     = models.PositiveIntegerField(default=1)
+    source_file = models.FileField(upload_to='pidv2/checklist_templates/', max_length=500)
+    is_default  = models.BooleanField(default=False)
+    item_count  = models.PositiveIntegerField(default=0)
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'pidv2_checklist_templates'
+        unique_together = [('code', 'version')]
+        ordering = ['code', '-version']
+
+    def __str__(self):
+        return f'{self.code} v{self.version} ({self.item_count} items)'
+
+
+class PIDVChecklistItem(models.Model):
+    """One item row of the template (rows 8–148 of 'AI P&ID Checklist').
+    `xlsx_row` anchors the export: a template whose column A changed raises
+    TemplateChanged (HTTP 409) instead of writing to the wrong row."""
+
+    template    = models.ForeignKey(
+        PIDVChecklistTemplate, on_delete=models.CASCADE, related_name='items',
+    )
+    no          = models.CharField(max_length=10)          # '0.1' … '13.4'
+    section_no  = models.CharField(max_length=4)           # '0' … '13'
+    section_title = models.CharField(max_length=255)
+    sub_heading = models.CharField(max_length=60, blank=True)  # 'Piping' | 'Valves' (section 9)
+    check_point = models.TextField()
+    mode        = models.CharField(max_length=20)          # Automated | AI-Assisted | Engineer-Led
+    ai_task     = models.TextField(blank=True)             # col D
+    ref_inputs  = models.TextField(blank=True)             # col E
+    evidence_required = models.TextField(blank=True)       # col F
+    severity    = models.CharField(max_length=10)          # Critical | Major | Minor
+    change_vs_original = models.CharField(max_length=60, blank=True)  # col L
+    xlsx_row    = models.PositiveIntegerField()
+    order       = models.PositiveIntegerField()
+
+    class Meta:
+        db_table = 'pidv2_checklist_items'
+        unique_together = [('template', 'no')]
+        ordering = ['order']
+
+    def __str__(self):
+        return f'{self.no} {self.check_point[:50]}'
+
+
+class PIDVChecklistResult(models.Model):
+    """Engineer-side state (and last AI snapshot) for one item of one sheet
+    of one document. The AI result columns are recomputed live on every
+    GET (checklist_ai02.evaluate_sheet) from the current inputs and
+    findings — this row is authoritative for applicability overrides,
+    engineer verification and remarks only."""
+
+    APPLICABILITY = [('Y', 'Y'), ('N', 'N'), ('NA', 'NA')]
+    AI_RESULTS = [('OK', 'OK'), ('Non-Conformance', 'Non-Conformance'),
+                  ('Query', 'Query'), ('Not Verifiable', 'Not Verifiable')]
+    VERIFICATION = [('Agree', 'Agree'), ('Disagree', 'Disagree'), ('Modified', 'Modified')]
+
+    document    = models.ForeignKey(
+        PIDVDocument, on_delete=models.CASCADE, related_name='checklist_results',
+    )
+    page        = models.PositiveSmallIntegerField(default=0)
+    item        = models.ForeignKey(
+        PIDVChecklistItem, on_delete=models.CASCADE, related_name='results',
+    )
+    applicability    = models.CharField(max_length=3, choices=APPLICABILITY, default='Y')
+    applicability_by = models.CharField(max_length=10, default='ai')  # 'ai' | 'engineer'
+    ai_result        = models.CharField(max_length=20, choices=AI_RESULTS, null=True, blank=True)
+    evidence         = models.TextField(blank=True)
+    finding_ids      = models.JSONField(default=list, blank=True)
+    missing_inputs   = models.JSONField(default=list, blank=True)
+    engineer_verification = models.CharField(max_length=10, choices=VERIFICATION, null=True, blank=True)
+    remarks          = models.TextField(blank=True)
+    verified_by      = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='pidv2_checklist_verifications',
+    )
+    verified_at      = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'pidv2_checklist_results'
+        unique_together = [('document', 'page', 'item')]
+
+    def __str__(self):
+        return f'{self.item.no} @ doc {self.document_id} p{self.page}: {self.ai_result}'
 

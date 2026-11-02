@@ -231,13 +231,15 @@ def _drawing_to_images(drawing_obj) -> list[str]:
         import fitz
         from PIL import Image
 
-        # Resolve the django file field path
+        # Resolve the django file field path (storage-agnostic — S3 has no
+        # local path).
         doc_file = drawing_obj.document.original_file
         if not doc_file:
             logger.warning('[DCSAnalyzer] No original_file on document')
             return images
 
-        file_path = doc_file.path
+        from apps.core.file_access import local_file_path
+        file_path = local_file_path(doc_file)
         if not Path(file_path).exists():
             logger.warning('[DCSAnalyzer] File not found: %s', file_path)
             return images

@@ -84,8 +84,27 @@ def process_pid_document(self, document_id: str, context: dict = None):
     # ── 1. Load document ──────────────────────────────────────────────────
     try:
         doc = PIDVDocument.objects.get(document_id=document_id)
-    except PIDVDocument.DoesNotExist:
-        logger.error('[PIDVTask] Document %s not found', document_id)
+    except PIDVDocument.DoesNotExist as dne:
+        # BUG FIX (29 Oct 2026): previously this logged and RETURNED, so an
+        # upload whose task executed before the row was visible to the
+        # worker's connection (observed live: doc fff30a03 stuck at
+        # 'uploaded' forever — task ran 4ms after dispatch and saw no row)
+        # was silently never processed. Retry briefly instead of giving up;
+        # also drop the worker's DB connection first so a stale transaction
+        # snapshot on a reused connection can't keep hiding the new row.
+        from django.db import connections
+        for conn in connections.all():
+            conn.close()
+        if self.request.retries < (self.max_retries or 0):
+            logger.warning(
+                '[PIDVTask] Document %s not found yet (attempt %d) — retrying in 30s',
+                document_id, self.request.retries + 1,
+            )
+            raise self.retry(exc=dne, countdown=30)
+        logger.error(
+            '[PIDVTask] Document %s not found after %d retries — giving up',
+            document_id, self.max_retries,
+        )
         return
 
     doc.status = PIDVDocument.Status.PROCESSING
@@ -96,17 +115,27 @@ def process_pid_document(self, document_id: str, context: dict = None):
     # completed legend sheet OR legend_knowledge_data is already populated
     # (e.g. loaded from S3 cache on a previous upload).
     if LEGEND_REQUIRED_FOR_QC and doc.project_id:
+        from apps.pid_verification_v2.models import PIDVReferenceData
         project = doc.project
+        # 29 Oct 2026: an uploaded Excel legend register (data_type
+        # 'legend_pid', e.g. Borouge_PID_Legend_Register.xlsx) is a valid
+        # legend input alongside PDF legend sheets — it feeds the legend
+        # lookup via legend_bridge / ComparisonEngineStage.
         legend_ready = (
             project.legend_knowledge_data is not None
             or project.legend_sheets.filter(status='completed').exists()
+            or project.reference_data.filter(
+                data_type=PIDVReferenceData.DataType.LEGEND_PID,
+                status=PIDVReferenceData.Status.COMPLETED,
+            ).exclude(parsed_data__isnull=True).exists()
         )
         if not legend_ready:
             doc.status        = PIDVDocument.Status.LEGEND_PENDING
             doc.error_message = (
                 'Legend symbols have not been extracted yet.  '
-                'Please upload a legend sheet for this project and wait for '
-                'extraction to complete before running the quality check.'
+                'Please upload a legend sheet (PDF) or a legend register '
+                '(Excel) for this project and wait for extraction to '
+                'complete before running the quality check.'
             )
             doc.save(update_fields=['status', 'error_message', 'updated_at'])
             logger.warning(
@@ -241,7 +270,8 @@ def process_pid_document(self, document_id: str, context: dict = None):
 
             # Mark document as completed
             doc.status = PIDVDocument.Status.COMPLETED
-            doc.save(update_fields=['status', 'updated_at'])
+            doc.error_message = ''  # clear stale gate/legend messages from earlier attempts
+            doc.save(update_fields=['status', 'error_message', 'updated_at'])
             logger.info('[PIDVTask] V2 Pipeline completed successfully for document_id=%s', document_id)
 
             # Result caching (S3/local) — never fatal: a caching failure
@@ -316,6 +346,28 @@ def process_pid_document(self, document_id: str, context: dict = None):
                     'metadata':   seg.metadata,
                 }
             )
+            # Title-block refresh on reprocess (bug fix 29 Oct 2026 —
+            # same as _persist_segment_result): get_or_create keeps the
+            # first run's row, so refresh title + title_block here too.
+            _upd = []
+            if seg.title and seg.title != drawing_obj.title:
+                drawing_obj.title = seg.title
+                _upd.append('title')
+            _tb = (seg.metadata or {}).get('title_block') if isinstance(seg.metadata, dict) else None
+            if _tb:
+                _md = drawing_obj.metadata or {}
+                if _md.get('title_block') != _tb:
+                    _md['title_block'] = _tb
+                    drawing_obj.metadata = _md
+                    _upd.append('metadata')
+            if _upd:
+                drawing_obj.save(update_fields=list(set(_upd)))
+            # Sheet registry: one PDF page = one P&ID (30 Oct 2026).
+            try:
+                from apps.pid_verification_v2.services.sheets import sync_sheet_for_drawing
+                sync_sheet_for_drawing(doc, drawing_obj)
+            except Exception:
+                logger.warning('[PIDVTask] Sheet sync failed (non-fatal)', exc_info=True)
             # Clear any previous findings (re-process idempotency)
             drawing_obj.findings.all().delete()
 
@@ -615,7 +667,8 @@ def process_pid_document(self, document_id: str, context: dict = None):
             doc.pdf_s3_url = upload_to_s3(pdf_bytes, key, 'application/pdf')
 
         doc.status = PIDVDocument.Status.COMPLETED
-        doc.save(update_fields=['status', 'excel_s3_url', 'pdf_s3_url', 'updated_at'])
+        doc.error_message = ''  # clear stale gate/legend messages from earlier attempts
+        doc.save(update_fields=['status', 'error_message', 'excel_s3_url', 'pdf_s3_url', 'updated_at'])
         logger.info('[PIDVTask] Completed document_id=%s  total_findings=%d', document_id, all_findings_count)
 
     except Exception as exc:
@@ -653,6 +706,34 @@ def _persist_segment_result(doc, seg, result_context) -> int:
             'metadata': seg.metadata,
         },
     )
+
+    # ── Title-block refresh on REPROCESS (bug fix 29 Oct 2026) ──────────
+    # get_or_create() above keeps the FIRST run's row untouched, so a drawing
+    # segmented before the title-block fix kept the misread title ('AP7E')
+    # and never gained metadata['title_block']. Segmentation runs fresh on
+    # every process/reprocess (process_pid_document always re-segments from
+    # the stored PDF), so persist the freshly computed title-block fields
+    # into the existing row here.
+    update_fields = []
+    if seg.title and seg.title != drawing_obj.title:
+        drawing_obj.title = seg.title
+        update_fields.append('title')
+    _tb = (seg.metadata or {}).get('title_block') if isinstance(seg.metadata, dict) else None
+    if _tb:
+        _md = drawing_obj.metadata or {}
+        if _md.get('title_block') != _tb:
+            _md['title_block'] = _tb
+            drawing_obj.metadata = _md
+            update_fields.append('metadata')
+    if update_fields:
+        drawing_obj.save(update_fields=list(set(update_fields)))
+
+    # Sheet registry: one PDF page = one P&ID (30 Oct 2026).
+    try:
+        from apps.pid_verification_v2.services.sheets import sync_sheet_for_drawing
+        sync_sheet_for_drawing(doc, drawing_obj)
+    except Exception:
+        logger.warning('[PIDVTask] Sheet sync failed (non-fatal)', exc_info=True)
 
     # Clear existing findings for this page (re-process idempotency)
     drawing_obj.findings.all().delete()
@@ -752,16 +833,112 @@ def _persist_segment_result(doc, seg, result_context) -> int:
             seg.drawing_id, exc_info=True,
         )
 
+    # ── Extraction items table (engine prompt §4) ────────────────────────
+    # Persist this page's extraction into PIDVExtractionItem (lines /
+    # instruments / equipment / connectors / notes). Non-fatal — a failure
+    # here never loses the findings above.
+    _layout_out: list = []  # receives the Linde layout for project rules
+    try:
+        from apps.pid_verification_v2.services.extraction_items import persist_extraction_items
+        from apps.pid_verification_v2.services.legend_bridge import get_legend_lookup_fields
+
+        _user = getattr(doc, 'uploaded_by', None)
+        _legend_fields = get_legend_lookup_fields(_user, project=doc.project if doc.project_id else None)
+        _cont_refs = (drawing_obj.metadata or {}).get('continuation_refs', [])
+        _file_path = getattr(result_context, 'file_path', None) or _resolve_file_path(doc)
+        persist_extraction_items(
+            doc, drawing_obj, extraction,
+            continuation_refs=_cont_refs,
+            legend_fields=_legend_fields,
+            file_path=_file_path,
+            layout_out=_layout_out,
+        )
+    except Exception:
+        logger.warning(
+            '[PIDVTask] Extraction-item persistence failed for drawing_id=%s (non-fatal)',
+            seg.drawing_id, exc_info=True,
+        )
+
     # Merge findings for THIS page only
+    rule_findings = list(seg_bucket.get('rule_findings', []))
     page_findings = (
-        seg_bucket.get('rule_findings', []) +
+        rule_findings +
         seg_bucket.get('comparison_findings', []) +
         seg_bucket.get('ai_findings', [])
     )
 
+    # ── Linde-layout post-processing of rule findings (29 Oct 2026) ──────
+    # When the Linde layout reader succeeded, the sheet's notes/connectors
+    # are structured extraction items — RED-001's red-text groupings are
+    # superseded (they duplicate note items) and LN-001/LN-002 code checks
+    # validate against the uploaded legend register instead of the static
+    # project list.
+    layout = _layout_out[0] if _layout_out else None
+    register_codes = {}
+    if layout is not None and doc.project_id:
+        from apps.pid_verification_v2.services.legend_register import get_register_codes
+        register_codes = get_register_codes(doc.project)
+
+    if layout is not None:
+        def _code_in_register(code):
+            cu = (code or '').strip().upper()
+            return any(cu in {c.upper() for c in tbl} for tbl in register_codes.values())
+
+        filtered = []
+        for rf in rule_findings:
+            if rf.rule_id == 'RED-001':
+                continue  # superseded by structured note items + BRG rules
+            if rf.rule_id in ('LN-001', 'LN-002') and register_codes:
+                # keep only codes genuinely unknown to the legend register
+                m = re.search(r"'([A-Za-z0-9]+)'", rf.evidence or rf.issue_observed or '')
+                if m and _code_in_register(m.group(1)):
+                    continue
+            filtered.append(rf)
+        page_findings = filtered + page_findings[len(rule_findings):]
+
+        # ── Borouge project rules (BRG-001…007, see services/project_rules)
+        try:
+            from apps.pid_verification_v2.services.project_rules import run_borouge_rules
+            from apps.pid_verification_v2.services.legend_register import get_register_documents
+            from apps.pid_verification_v2.services.rule_engine import RuleFinding
+
+            for prf in run_borouge_rules(layout, register_codes, get_register_documents(doc.project),
+                                         project=doc.project):
+                rf = RuleFinding(
+                    category='project_rule',
+                    rule_id=prf['rule_id'],
+                    issue_observed=prf['issue_observed'],
+                    action_required=prf['action_required'],
+                    evidence=prf.get('evidence', ''),
+                    severity=prf.get('severity', 'major'),
+                )
+                rf._item_texts = prf.get('item_texts', [])
+                rf._confidence = prf.get('confidence')
+                page_findings.append(rf)
+        except Exception:
+            logger.warning('[PIDVTask] Project rules failed for drawing_id=%s (non-fatal)',
+                           seg.drawing_id, exc_info=True)
+
+    # Unique sequential numbering AFTER sorting (bug fix 29 Oct 2026:
+    # cross-reference findings previously restarted at 1 → duplicate F1/F2).
+    page_findings.sort(key=lambda f: (f.rule_id, f.issue_observed))
+
+    # Entity linking: resolve each finding's referenced extraction items to
+    # entity_id + bbox (§3/§7d), and stamp the items' flag + finding_ids.
+    from apps.pid_verification_v2.models import PIDVExtractionItem
+    page_items = list(PIDVExtractionItem.objects.filter(document=doc, page=drawing_obj.page_index))
+    items_by_text = {}
+    for it in page_items:
+        items_by_text.setdefault(it.text.strip(), []).append(it)
+        # Whitespace-normalised alias: rule item_texts come from the layout
+        # parser whose spacing can differ from the stored item text (30 Oct
+        # 2026 — FB / A0JU01 findings missed their entity link over this).
+        items_by_text.setdefault(re.sub(r'\s+', '', it.text), []).append(it)
+
     bulk = []
+    created_links = []  # (finding_index_in_bulk, [item])
     for sl, rf in enumerate(page_findings, start=1):
-        bulk.append(PIDVFinding(
+        finding = PIDVFinding(
             drawing=drawing_obj,
             sl_no=sl,
             category=rf.category,
@@ -772,29 +949,112 @@ def _persist_segment_result(doc, seg, result_context) -> int:
             direction=rf.direction,
             severity=rf.severity,
             status='open',
-        ))
+        )
+        linked_items = []
+        seen_item_ids = set()
+        for txt in getattr(rf, '_item_texts', []) or []:
+            t = str(txt).strip()
+            for hit in items_by_text.get(t, []) or items_by_text.get(re.sub(r'\s+', '', t), []):
+                if hit.id not in seen_item_ids:
+                    seen_item_ids.add(hit.id)
+                    linked_items.append(hit)
+        if linked_items:
+            finding.entity_id = linked_items[0].id
+            finding.bbox = linked_items[0].bbox
+        elif getattr(rf, 'evidence', None) and _layout_out and _layout_out[0]:
+            # §3 goal "no drawing coordinates = 0": no linked item — fall
+            # back to the bbox of the evidence text on the text layer.
+            ev = str(rf.evidence).strip()
+            ev_parts = [ev] + [p.strip() for p in ev.split('|')] if ' | ' in ev else [ev]
+            for tl in _layout_out[0].get('_text_lines', []):
+                if any(ep and ep in tl.get('text', '') for ep in ev_parts):
+                    finding.bbox = [tl['x'], tl['y'], tl['x1'], tl['y1']]
+                    break
+        bulk.append(finding)
+        created_links.append((sl, linked_items))
 
     if bulk:
         PIDVFinding.objects.bulk_create(bulk, batch_size=500)
         logger.info('[PIDVTask] Created %d findings for drawing_id=%s', len(bulk), seg.drawing_id)
 
+    # Backfill finding_ids + flag on the linked extraction items.
+    try:
+        sl_to_finding = {f.sl_no: f for f in bulk}
+        for sl, linked in created_links:
+            if not linked:
+                continue
+            f = sl_to_finding.get(sl)
+            if not f or not f.id:
+                continue
+            flag_val = f.severity if f.severity in ('query', 'minor', 'major', 'critical') else 'flagged'
+            for it in linked:
+                ids = list(it.finding_ids or [])
+                if f.id not in ids:
+                    ids.append(f.id)
+                    it.finding_ids = ids
+                    it.flag = flag_val
+                    it.save(update_fields=['finding_ids', 'flag', 'updated_at'])
+    except Exception:
+        logger.warning('[PIDVTask] Finding↔item linking failed (non-fatal)', exc_info=True)
+
+    # ── report_meta for the AI-PID-02 comment register (spec §2.5) ──────
+    # sheet_label + grid + tag + reference + checklist items, computed once
+    # per page (the grid zones are read from the PDF text layer; findings
+    # without coordinates keep '-'). Non-fatal.
+    try:
+        if bulk:
+            from apps.pid_verification_v2.services.checklist_map import RULE_TO_ITEMS
+            from apps.pid_verification_v2.services.grid_zones import read_grid_zones, grid_label
+            import fitz as _fitz
+
+            _pdf_path = getattr(result_context, 'file_path', None) or _resolve_file_path(doc)
+            _tb = (drawing_obj.metadata or {}).get('title_block') or {}
+            _no = _tb.get('drawing_number') or drawing_obj.title or seg.drawing_id
+            _sheet_label = f'{_no} (p.{drawing_obj.page_index + 1})'
+            with _fitz.open(_pdf_path) as _pdf:
+                _zones = read_grid_zones(_pdf[drawing_obj.page_index]) if drawing_obj.page_index < _pdf.page_count else None
+            for f in bulk:
+                tag_m = re.search(r'\b[A-Z]{1,4}-\d{3,5}[A-Z]?\b', f.evidence or '')
+                centre = None
+                if isinstance(f.bbox, list) and len(f.bbox) == 4:
+                    centre = ((f.bbox[0] + f.bbox[2]) / 2, (f.bbox[1] + f.bbox[3]) / 2)
+                f.report_meta = {
+                    'sheet_label': _sheet_label,
+                    'grid': grid_label(_zones, *centre) if centre else '-',
+                    'tag': tag_m.group(0) if tag_m else (f.evidence or '').strip()[:40] or '-',
+                    'finding_text': f.issue_observed,
+                    'reference': f'AI-PID-02 item {" / ".join(RULE_TO_ITEMS.get(f.rule_id, [])) or "—"} · rule {f.rule_id}',
+                    'suggested_correction': f.action_required,
+                    'confidence': 'High' if f.severity in ('critical', 'major') else ('Medium' if f.severity == 'query' else 'Low'),
+                    'ai_result': 'Non-Conformance' if f.severity in ('critical', 'major') else 'Query',
+                    'checklist_items': RULE_TO_ITEMS.get(f.rule_id, []),
+                }
+            PIDVFinding.objects.bulk_update(bulk, ['report_meta'], batch_size=500)
+    except Exception:
+        logger.warning('[PIDVTask] report_meta fill failed (non-fatal)', exc_info=True)
+
     return len(bulk)
 
 
 def _finalize_cross_reference(doc, document_id: str) -> None:
-    """Cross-reference: multi-page tags + continuation markers — runs ONCE
-    per document, called from BOTH completion paths (the inline pipeline
-    above and finalize_pid_document below), now that every page's
-    PIDVTagIndex rows and continuation_refs (drawing.metadata) exist — see
+    """Cross-reference: continuation markers — runs ONCE per document,
+    called from BOTH completion paths (the inline pipeline above and
+    finalize_pid_document below), now that every page's PIDVTagIndex rows
+    and continuation_refs (drawing.metadata) exist — see
     _persist_segment_result's own comment for why those are written
     per-page instead of returned.
 
-    Persisted as regular PIDVFinding rows (category='cross_reference') so
-    the existing Cross-Reference UI panel (PIDVerification.jsx /
-    PIDVerificationV2.jsx — both already built, waiting for exactly this
-    data, no new UI needed) picks them up with no separate fetch. Mirrors
-    apps.pid_verification.tasks._finalize_document exactly — non-fatal, a
-    failure here never blocks the document from completing.
+    Multi-page tag occurrences (formerly XREF-001 findings) are not
+    findings: they are computed on demand from PIDVTagIndex by the list
+    serializer for the "Tags across sheets" table in Drawing sets.
+
+    Continuation markers persist as regular PIDVFinding rows
+    (category='cross_reference') so the existing Cross-Reference UI panel
+    (PIDVerification.jsx / PIDVerificationV2.jsx — both already built,
+    waiting for exactly this data, no new UI needed) picks them up with no
+    separate fetch. Mirrors apps.pid_verification.tasks._finalize_document
+    exactly — non-fatal, a failure here never blocks the document from
+    completing.
     """
     try:
         from apps.pid_verification_v2.models import PIDVFinding
@@ -813,28 +1073,32 @@ def _finalize_cross_reference(doc, document_id: str) -> None:
         continuations = resolve_continuations(page_refs, known_pages)
 
         xref_bulk = []
-        if drawings and (multi_page_tags or continuations):
+        if drawings and continuations:
             anchor_drawing = drawings[0]
-            for t in multi_page_tags:
-                pages_1indexed = ', '.join(str(p + 1) for p in t['pages'])
-                xref_bulk.append(PIDVFinding(
-                    drawing=anchor_drawing,
-                    sl_no=len(xref_bulk) + 1,
-                    category='cross_reference',
-                    rule_id='XREF-001',
-                    issue_observed=f"Tag {t['tag']} found on pages {pages_1indexed}",
-                    action_required='Verify this tag is consistently represented on every listed sheet.',
-                    evidence=f"type={t['tag_type']}",
-                    direction='N/A',
-                    severity='info',
-                    status='open',
-                ))
+            # BUG FIX (29 Oct 2026): numbering must continue after the
+            # page's existing findings — restarting at 1 produced duplicate
+            # F1/F1, F2/F2 numbers in the report.
+            sl_offset = (
+                PIDVFinding.objects.filter(drawing=anchor_drawing)
+                .order_by('-sl_no').values_list('sl_no', flat=True).first() or 0
+            )
+            # XREF-001 (multi-page tag occurrences) is NOT a finding: it is
+            # cross-sheet information shown in the "Tags across sheets"
+            # table in Drawing sets (30 Oct 2026 — 105 info-noise rows on
+            # the Borouge Package 2 acceptance document). The same data is
+            # computed on demand from PIDVTagIndex by the list serializer.
             for c in continuations:
-                rule_id = {'confirmed': 'XREF-002', 'missing': 'XREF-003', 'unresolvable': 'XREF-004'}[c['status']]
+                # XREF-004 ('unresolvable') is noise: continuation markers
+                # are extraction items now (PIDVExtractionItem
+                # kind='connectors'), not findings (29 Oct 2026, ×42 on the
+                # acceptance sheet).
+                if c['status'] == 'unresolvable':
+                    continue
+                rule_id = {'confirmed': 'XREF-002', 'missing': 'XREF-003'}[c['status']]
                 to_display = str(c['to_page'] + 1) if c['to_page'] is not None else (c['matched_text'] or '?')
                 xref_bulk.append(PIDVFinding(
                     drawing=anchor_drawing,
-                    sl_no=len(xref_bulk) + 1,
+                    sl_no=sl_offset + len(xref_bulk) + 1,
                     category='cross_reference',
                     rule_id=rule_id,
                     issue_observed=(
@@ -1031,7 +1295,9 @@ def finalize_pid_document(self, page_results, document_id: str):
         doc.error_message = (
             f'Completed \u2014 {len(failed)} of {total} page(s) failed to process (see logs).'
         )
-        update_fields.append('error_message')
+    else:
+        doc.error_message = ''  # clear stale gate/legend messages from earlier attempts
+    update_fields.append('error_message')
     doc.save(update_fields=update_fields)
     logger.info('[PIDVFinalize] Completed document_id=%s (%d/%d pages ok)', document_id, succeeded, total)
 
@@ -1043,6 +1309,15 @@ def finalize_pid_document(self, page_results, document_id: str):
         save_results_cache(doc, doc.file_hash)
     except Exception:
         logger.exception('[PIDVFinalize] Result cache write failed for document_id=%s (non-fatal)', document_id)
+
+    # Cross-drawing checks over the project's current sheets (spec A2) —
+    # runs on every upload/re-run completion; also on delete (views.py).
+    if doc.project_id:
+        try:
+            from apps.pid_verification_v2.services.cross_checks import run_cross_checks
+            run_cross_checks(doc.project)
+        except Exception:
+            logger.exception('[PIDVFinalize] Cross checks failed for document_id=%s (non-fatal)', document_id)
 
 
 def _resolve_file_path(doc) -> str:
@@ -1056,21 +1331,10 @@ def _resolve_file_path(doc) -> str:
     Raises ValueError when no source is available.
     """
     if doc.original_file:
-        # Try local path first (works for FileSystemStorage and ResilientMediaStorage)
-        try:
-            path = doc.original_file.path
-            if path:
-                return path
-        except NotImplementedError:
-            pass  # S3Boto3Storage raises NotImplementedError for .path
-
-        # S3-backed FileField — use the field's own storage backend so any
-        # storage `location` prefix (e.g. S3Boto3Storage's location='media')
-        # is resolved correctly instead of guessed from the raw .name.
-        s3_key = getattr(doc.original_file, 'name', None)
-        if s3_key:
-            logger.info('[PIDVTask] Downloading file via storage backend: %s', s3_key)
-            return _download_field_file(doc.original_file)
+        # Storage-agnostic: local fast path, else stream to a temp file
+        # (FileField.path raises NotImplementedError under S3 — 30 Oct 2026).
+        from apps.core.file_access import local_file_path
+        return local_file_path(doc.original_file)
 
     # Explicit s3_path field (legacy / manually set)
     if doc.s3_path:
@@ -1160,14 +1424,10 @@ def extract_legend_sheet_task(self, legend_id: str):
     try:
         # ── Resolve file path ──────────────────────────────────────────────
         if sheet.original_file:
-            try:
-                tmp_path = sheet.original_file.path
-                need_cleanup = False
-            except NotImplementedError:
-                # S3-backed storage — download via the field's own storage
-                # backend (resolves any storage `location` prefix correctly)
-                tmp_path   = _download_field_file(sheet.original_file) if sheet.original_file.name else None
-                need_cleanup = True
+            # Storage-agnostic (FileField.path raises under S3).
+            from apps.core.file_access import local_file_path
+            tmp_path = local_file_path(sheet.original_file)
+            need_cleanup = tmp_path.startswith(tempfile.gettempdir())
         elif sheet.s3_path:
             tmp_path  = _download_from_s3(sheet.s3_path)
             need_cleanup = True
@@ -1491,14 +1751,10 @@ def parse_reference_data_task(self, reference_id: str):
     try:
         # ── Resolve file path ──────────────────────────────────────────────
         if ref_data.original_file:
-            try:
-                tmp_path = ref_data.original_file.path
-                need_cleanup = False
-            except NotImplementedError:
-                # S3-backed storage — download via the field's own storage
-                # backend (resolves any storage `location` prefix correctly)
-                tmp_path = _download_field_file(ref_data.original_file) if ref_data.original_file.name else None
-                need_cleanup = True
+            # Storage-agnostic (FileField.path raises under S3).
+            from apps.core.file_access import local_file_path
+            tmp_path = local_file_path(ref_data.original_file)
+            need_cleanup = tmp_path.startswith(tempfile.gettempdir())
         elif ref_data.s3_path:
             tmp_path = _download_from_s3(ref_data.s3_path)
             need_cleanup = True
@@ -1511,7 +1767,67 @@ def parse_reference_data_task(self, reference_id: str):
         
         file_ext = Path(ref_data.file_name).suffix.lower()
         
-        if file_ext in ['.xlsx', '.xls']:
+        if file_ext in ['.xlsx', '.xls'] and ref_data.data_type == PIDVReferenceData.DataType.LEGEND_PID:
+            # Legend registers are multi-sheet workbooks (Index / Codes /
+            # ID Letters / Notes / Documents / Drawing Register / …).
+            # Reading only the first sheet (pandas default) captured just
+            # the cover page — observed 29 Oct 2026 on
+            # Borouge_PID_Legend_Register.xlsx (34 rows of contents instead
+            # of the 619-row Codes table). Read ALL sheets and store them
+            # keyed by sheet name.
+            all_sheets = pd.read_excel(tmp_path, sheet_name=None, header=None)
+            _HDR_HINTS = {
+                'code', 'description', 'category', 'drawing', 'title', 'doc',
+                'no', 'no.', 'rev', 'status', 'letter', 'symbol', 'id',
+                'document', 'date', 'note',
+            }
+
+            def _sheet_records(raw_df):
+                """Detect the true header row (cover/title rows precede it)
+                and return records with real column names."""
+                import re as _re
+                best_idx = None
+                for idx in range(min(12, len(raw_df))):
+                    cells = [str(c).strip().lower() for c in raw_df.iloc[idx].tolist()]
+                    hits = sum(1 for c in cells if c and (
+                        c in _HDR_HINTS
+                        or any(h in c for h in ('code', 'desc', 'title', 'drawing', 'doc', 'rev', 'status'))
+                    ))
+                    if hits >= 2:
+                        best_idx = idx
+                        break
+                if best_idx is None:
+                    return []
+                header = [
+                    str(c).strip() or f'col_{i}'
+                    for i, c in enumerate(raw_df.iloc[best_idx].tolist())
+                ]
+                body = raw_df.iloc[best_idx + 1:]
+                body.columns = header
+                return body.fillna('').to_dict(orient='records')
+
+            parsed_data = {
+                'sheets': {
+                    name: _sheet_records(sheet_df)
+                    for name, sheet_df in all_sheets.items()
+                }
+            }
+            ref_data.parsed_data = parsed_data
+            ref_data.metadata = {
+                'row_count': sum(len(v) for v in parsed_data['sheets'].values()),
+                'columns': [],
+                'sheets': {name: len(v) for name, v in parsed_data['sheets'].items()},
+                'file_size_bytes': os.path.getsize(tmp_path),
+            }
+            ref_data.status = PIDVReferenceData.Status.COMPLETED
+            ref_data.error_message = ''
+            ref_data.save(update_fields=['parsed_data', 'metadata', 'status', 'error_message', 'updated_at'])
+            logger.info(
+                '[ReferenceDataTask] Legend register %s parsed: sheets=%s',
+                reference_id, ref_data.metadata['sheets'],
+            )
+            return
+        elif file_ext in ['.xlsx', '.xls']:
             df = pd.read_excel(tmp_path)
         elif file_ext == '.csv':
             df = pd.read_csv(tmp_path)

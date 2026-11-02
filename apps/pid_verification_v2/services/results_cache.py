@@ -41,7 +41,7 @@ CACHE_FILE_NAME = 'results.json'
 
 # Simple severity-weighted score for the cache snapshot only — a summary
 # figure alongside the cached findings, not wired into the main UI/serializer.
-_SEVERITY_PENALTY = {'critical': 10, 'major': 5, 'minor': 2, 'info': 1}
+_SEVERITY_PENALTY = {'critical': 10, 'major': 5, 'query': 3, 'minor': 2, 'info': 1}
 
 
 def _cache_path(document_id) -> str:
@@ -67,7 +67,9 @@ def build_cache_payload(doc, file_hash: str) -> dict:
     """
     from ..serializers import PIDVDocumentSerializer
 
-    data = PIDVDocumentSerializer(doc).data
+    # 'document' in context lets PIDVFindingSerializer.locations resolve
+    # the per-item bboxes (one marker per linked extraction item).
+    data = PIDVDocumentSerializer(doc, context={'document': doc}).data
     drawings = data.get('drawings') or []
 
     findings = [

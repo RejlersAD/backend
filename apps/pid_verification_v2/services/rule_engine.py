@@ -10,9 +10,9 @@ Rule catalogue:
   TAG-003  Tag format inconsistency  
   TAG-004  Tag referenced in notes but absent from drawing
 
-  CON-001  Isolated instrument (no pipeline connection)
-  CON-002  Isolated valve     (no pipeline connection)
   CON-003  Orphan node        (no connections at all in graph)
+  (CON-001 / CON-002 removed 30 Oct 2026: graph connectivity from text
+   alone is not reliable — hundreds of false "possible orphan" majors.)
 
   VLV-001  Valve without a tag
   VLV-002  Globe valve bore exceeds maximum recommended NPS (default 16")
@@ -48,8 +48,8 @@ Rule catalogue:
   RED-001  Red-colored annotation detected (revision mark / HOLD / scope-change indicator)
            Vector PDFs only — scanned drawings return no color metadata.
 
-  ANN-001  Pressure annotation exceeds soft-coded threshold (default 50 bar)
-           Pattern: "{class} @ {N} bar" — validate piping class handles stated pressure.
+  (ANN-001 removed 30 Oct 2026: bare pressure annotations are
+   information, not findings.)
 """
 import re
 import math
@@ -284,6 +284,27 @@ _RED001_MAX_FINDINGS = 15
 # Filters out single-character or empty stray marks.
 _RED001_MIN_TEXT_LEN = 2
 
+# ── RED-001 semantics (acceptance re-test 29 Oct 2026) ─────────────────────
+# On a clean AFC sheet, red text is revision highlighting and drawing NOTES,
+# not errors. Intended semantics:
+#   * Numbered drawing notes / HOLDs / revision markers  -> severity 'query'
+#     (one finding per NOTE, continuation lines grouped into their note).
+#   * Title-block red text (e.g. 'PACKAGE 2')            -> excluded (it is
+#     sheet metadata, not an annotation).
+#   * Standalone identifier-like red text (e.g. piping-class codes
+#     'IP-B-B3-M3-L-3210AE')                             -> ONE grouped 'minor'
+#     finding per drawing listing all instances.
+# Verified against Borouge 13-PP-152-20070 Rev AFC: 20 raw red spans group
+# into 6 numbered notes + 2 class codes => 6 queries + 1 minor (7 total).
+# Title-block exclusion zone (fraction of page %; mirrors segmentation.py).
+_RED001_TITLEBLOCK_X_MIN_PCT = 55.0
+_RED001_TITLEBLOCK_Y_MIN_PCT = 70.0
+# x_pct at/above which a red line is considered to live in the drawing's
+# NOTES column (continuation lines of a numbered note attach to it).
+_RED001_NOTES_COLUMN_X_MIN_PCT = 80.0
+# A line starting with "N." or "N)" begins a new numbered note.
+_RED001_NOTE_START_RE = re.compile(r'^\s*\d{1,3}[\).]\s*\S')
+
 # ── RED-001 fragment-suppression patterns ────────────────────────────────────
 # Vector PDF text rendering splits a full line designation like
 # '2"-BD-6156-033842-X-N' into multiple colour spans.  Fragments such as
@@ -326,7 +347,11 @@ _RED001_FRAGMENT_PATTERNS = [
 #   _DEDUPE_NORMALISE_EVIDENCE : function applied before dedupe-comparison.
 #                                Default: upper-case + collapse whitespace.
 # ═══════════════════════════════════════════════════════════════════════════
-_DISABLED_RULE_IDS: set = set()        # e.g. {'TAG-003'} silences "non-standard format" globally
+# CON-003 (orphan graph node) and EQP-002 (item code vs static catalogue)
+# proved to be pure noise on the 29 Oct 2026 acceptance sheet (CON-003 ×5,
+# EQP-002 ×3 — '13' is the unit/area number per LD-01, not an item code).
+# Disabled globally; re-enable per project by removing from the set.
+_DISABLED_RULE_IDS: set = {'CON-003', 'EQP-002', 'LSZ-005'}  # LSZ-005: multi-size observation is noise on real sheets (29 Oct 2026)
 _RULE_SEVERITY_OVERRIDES: Dict[str, str] = {
     # Example (commented — uncomment per-project):
     # 'TAG-003': 'minor',
@@ -428,7 +453,6 @@ def run_rules(extraction: Dict[str, Any], graph) -> List[RuleFinding]:
     findings.extend(_check_red_annotations(extraction))
     findings.extend(_check_valve_type_size(extraction))
     findings.extend(_check_reducers(extraction))
-    findings.extend(_check_pressure_annotations(extraction))
     findings.extend(_check_equipment_size_annotations(extraction))
     findings.extend(_check_compressor_equipment(extraction))
 
@@ -521,21 +545,16 @@ def _check_connectivity(extraction: Dict[str, Any], graph) -> List[RuleFinding]:
     raw_text_len = len(extraction.get('raw_text', '') or '')
 
     for node in sorted(isolated):
-        if node in instr_tags:
-            kind = 'instrument'
-            rule_id = 'CON-001'
-            noun = 'Instrument'
-            action = 'Connect instrument to process line or verify if stand-alone'
-        elif node in valve_tags:
-            kind = 'valve'
-            rule_id = 'CON-002'
-            noun = 'Valve'
-            action = 'Connect valve to upstream and downstream pipelines'
-        else:
-            kind = 'other'
-            rule_id = 'CON-003'
-            noun = 'Node'
-            action = 'Verify element belongs to this drawing; connect or remove'
+        if node in instr_tags or node in valve_tags:
+            # CON-001 / CON-002 removed 30 Oct 2026: "possible orphan
+            # instrument/valve" from text-only graph connectivity is not
+            # reliable (326 + 216 false majors on the Borouge Package 2
+            # acceptance set).
+            continue
+        kind = 'other'
+        rule_id = 'CON-003'
+        noun = 'Node'
+        action = 'Verify element belongs to this drawing; connect or remove'
 
         confidence = _orphan_confidence(node, extraction, kind)
         band = _confidence_band(confidence, raw_text_len)
@@ -1572,7 +1591,7 @@ def _classify_red_annotation(text: str) -> tuple:
             "— added or changed in this revision's scope cloud.",
             "Confirm this line designation appears in the revision change register. "
             "Ensure the line list, MTO, and associated isometrics are updated.",
-            'major',
+            'minor',
         )
 
     # 2. Pressure annotation
@@ -1605,18 +1624,18 @@ def _classify_red_annotation(text: str) -> tuple:
                 "— verify the reducer is specified and sized correctly.",
                 "Confirm the reducer is included in the piping line specification and stress model. "
                 "Check velocity and pressure drop across the transition.",
-                'major',
+                'minor',
             )
         except (ValueError, TypeError):
             pass
 
-    # 4. HOLD item
+    # 4. HOLD item — a query to resolve, not an error (29 Oct 2026 semantics)
     if re.search(r'\bHOLD\b', t, re.I):
         return (
             f"HOLD annotation in red: '{t}' — action item requires resolution before IFC.",
             "Resolve the HOLD and update the drawing revision. "
             "Document the resolution in the project HOLD register.",
-            'critical',
+            'query',
         )
 
     # 5. Revision / change keyword
@@ -1625,7 +1644,7 @@ def _classify_red_annotation(text: str) -> tuple:
             f"Revision marker in red: '{t}' — verify this change is in the revision record.",
             "Confirm this annotation is documented in the drawing revision register. "
             "Ensure affected systems (MTO, datasheets, isometrics) are updated.",
-            'major',
+            'query',
         )
 
     # 6. Bare NPS pipe size  e.g. '18"', '6"'
@@ -1635,7 +1654,7 @@ def _classify_red_annotation(text: str) -> tuple:
             "— verify line designations on the affected segment match this size.",
             "Check all line designations on the affected pipe segment agree with this annotated size. "
             "Confirm reducers and spec-breaks are documented.",
-            'major',
+            'minor',
         )
 
     # 7. Fallback — general meaningful annotation
@@ -1643,30 +1662,58 @@ def _classify_red_annotation(text: str) -> tuple:
         f"Red-colored annotation: '{t}' — review against the revision change record.",
         "Verify this annotation is intentional and covered by the current revision record. "
         "If it is a scope-change item, confirm alignment with the revision cloud on the drawing.",
-        'major',
+        'minor',
     )
+
+
+def _red_annotation_is_standalone_classified(text: str) -> bool:
+    """True when _classify_red_annotation() would return a SPECIFIC class
+    (pipeline designation / pressure / reducer / HOLD / revision / bare NPS)
+    rather than its generic fallback — used to group fallback identifier-like
+    red text (e.g. piping-class codes) into a single minor finding."""
+    t = text.strip()
+    if _PIPELINE_DESIG_RE.search(t):
+        return True
+    if _ANN_PRESSURE_RE.search(t):
+        return True
+    if _REDUCER_RE.search(t):
+        return True
+    if re.search(r'\bHOLD\b', t, re.I):
+        return True
+    if re.search(r'\b(?:REV|REVISION|ISSUED|ADDED|DELETED|MODIFIED|CHANGED|NEW)\b', t, re.I):
+        return True
+    if re.fullmatch(r'\d{1,2}(?:\.\d+)?\s*(?:"|\'\')', t):
+        return True
+    return False
 
 
 def _check_red_annotations(extraction: Dict[str, Any]) -> List[RuleFinding]:
     """
-    RED-001  A meaningful red-colored text span was detected on the drawing.
+    RED-001  Red-colored annotation detected (revision mark / note / HOLD).
 
-    Fragment spans produced by the PDF renderer splitting a single annotation
-    across multiple color runs are automatically suppressed via
-    _is_red_fragment().  Only self-contained annotations are reported.
+    Semantics (acceptance re-test 29 Oct 2026 — see _RED001 knobs above):
+      * Fragment spans split by the PDF renderer are suppressed
+        (_is_red_fragment).
+      * Red text inside the TITLE-BLOCK region (e.g. 'PACKAGE 2') is sheet
+        metadata, not an annotation — excluded.
+      * Numbered drawing notes ('1. ...', '56) ...') are GROUPED: one
+        finding per note, continuation lines (same notes column, no note
+        number) merged into it. Severity 'query'.
+      * HOLD / revision markers -> 'query'.
+      * Specifically-classified standalone annotations (pipeline
+        designation, pressure, reducer, bare NPS) -> individual findings.
+      * Remaining standalone identifier-like red text (piping-class codes
+        etc.) -> ONE grouped 'minor' finding per drawing.
 
-    Each finding carries a specific issue message and action derived from the
-    annotation type (line tag, pressure, reducer, HOLD, revision marker, etc.)
-    so the engineer can act immediately without manual interpretation.
-
-    Soft-coded via _RED001_MAX_FINDINGS, _RED001_MIN_TEXT_LEN, and
-    _RED001_FRAGMENT_PATTERNS — all adjustable per project.
+    Verified on Borouge 13-PP-152-20070 (clean AFC): 20 raw red spans ->
+    6 queries (notes 1, 2, 3, 56, 58, 59) + 1 minor (2 grouped class codes).
     """
     out: List[RuleFinding] = []
     red_anns = extraction.get('red_annotations', [])
     if not red_anns:
         return out
 
+    items: List[tuple] = []  # (text, y_pct, x_pct)
     for ann in red_anns:
         text = str(ann.get('text', '')).strip()
         if len(text) < _RED001_MIN_TEXT_LEN:
@@ -1674,19 +1721,92 @@ def _check_red_annotations(extraction: Dict[str, Any]) -> List[RuleFinding]:
         # Suppress sub-token fragments (e.g. '013842-X', 'BD', 'X-N')
         if _is_red_fragment(text):
             continue
-        issue, action, sev = _classify_red_annotation(text)
+        x_pct = ann.get('x_pct')
+        y_pct = ann.get('y_pct')
+        # Title-block red text is sheet metadata, not an annotation.
+        if (
+            isinstance(x_pct, (int, float)) and isinstance(y_pct, (int, float))
+            and x_pct >= _RED001_TITLEBLOCK_X_MIN_PCT
+            and y_pct >= _RED001_TITLEBLOCK_Y_MIN_PCT
+        ):
+            continue
+        items.append((text, float(y_pct or 0.0), float(x_pct or 0.0)))
+
+    if not items:
+        return out
+
+    # Reading order (top→bottom, left→right) so note continuations attach
+    # to the correct numbered note.
+    items.sort(key=lambda it: (it[1], it[2]))
+
+    notes: List[List[str]] = []
+    standalone: List[str] = []
+    current_note: List[str] | None = None
+    for text, y_pct, x_pct in items:
+        if _RED001_NOTE_START_RE.match(text):
+            current_note = [text]
+            notes.append(current_note)
+        elif current_note is not None and x_pct >= _RED001_NOTES_COLUMN_X_MIN_PCT:
+            # Continuation line of the current numbered note (same column).
+            current_note.append(text)
+        else:
+            standalone.append(text)
+
+    # One 'query' finding per numbered note (notes/holds are queries).
+    for note_lines in notes:
+        full_text = ' '.join(note_lines)
+        is_hold = bool(re.search(r'\bHOLD\b', full_text, re.I))
+        out.append(RuleFinding(
+            category='notes',
+            rule_id='RED-001',
+            issue_observed=(
+                f"Red HOLD note on drawing: '{full_text[:200]}'"
+                if is_hold else
+                f"Red (revision-highlighted) drawing note: '{full_text[:200]}'"
+            ),
+            action_required=(
+                'Review this note with the responsible discipline and confirm it is '
+                'covered by the current revision record / HOLD register.'
+            ),
+            evidence=full_text[:500],
+            severity='query',
+        ))
+
+    # Standalone annotations: specifically-classified ones get individual
+    # findings; identifier-like fallback text is grouped into ONE minor finding.
+    grouped_identifiers: List[str] = []
+    for text in standalone:
+        if _red_annotation_is_standalone_classified(text):
+            issue, action, sev = _classify_red_annotation(text)
+            out.append(RuleFinding(
+                category='line_designation',
+                rule_id='RED-001',
+                issue_observed=issue,
+                action_required=action,
+                evidence=text,
+                severity=sev,
+            ))
+        else:
+            grouped_identifiers.append(text)
+
+    if grouped_identifiers:
+        listed = ', '.join(grouped_identifiers[:10])
         out.append(RuleFinding(
             category='line_designation',
             rule_id='RED-001',
-            issue_observed=issue,
-            action_required=action,
-            evidence=text,
-            severity=sev,
+            issue_observed=(
+                f'{len(grouped_identifiers)} red-colored identifier annotation(s) on drawing '
+                f'(revision-highlighted): {listed}'
+            ),
+            action_required=(
+                'Confirm these identifiers are intentional revision highlights and are '
+                'covered by the current revision record.'
+            ),
+            evidence=' | '.join(grouped_identifiers)[:500],
+            severity='minor',
         ))
-        if len(out) >= _RED001_MAX_FINDINGS:
-            break
 
-    return out
+    return out[:_RED001_MAX_FINDINGS]
 
 
 # ---------------------------------------------------------------------------
@@ -1828,84 +1948,11 @@ def _check_reducers(extraction: Dict[str, Any]) -> List[RuleFinding]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# ANN-001  PRESSURE ANNOTATION CHECK
-# Soft-coded via _ANN_PRESSURE_MAX_BAR and _ANN_PRESSURE_RE above.
-# ---------------------------------------------------------------------------
-
-def _check_pressure_annotations(extraction: Dict[str, Any]) -> List[RuleFinding]:
-    """
-    ANN-001  A pressure annotation on the drawing (format: ``{class} @ {N} bar``)
-             was detected.
-
-    Patterns caught::
-        H @ 65 bar   (heat-insulated line at 65 barg — check PMC covers 65 bar)
-        P @ 120 bar  (personnel protection insulation at 120 barg — critical)
-        @ 65 bar     (standalone pressure callout near a valve or nozzle)
-
-    Annotations ≤ _ANN_PRESSURE_MAX_BAR are reported as 'info' (informational).
-    Annotations > _ANN_PRESSURE_MAX_BAR are reported as 'critical' and require
-    the engineer to confirm the piping material class (PMC) is rated accordingly.
-
-    Soft-coded via _ANN_PRESSURE_MAX_BAR (default 50 bar) and _ANN_PRESSURE_RE.
-    """
-    out: List[RuleFinding] = []
-    raw_text = extraction.get('raw_text', '')
-    if not raw_text:
-        return out
-
-    seen: set = set()
-    for line in raw_text.splitlines():
-        for m in _ANN_PRESSURE_RE.finditer(line):
-            try:
-                pressure = float(m.group(1))
-            except (ValueError, TypeError):
-                continue
-            if pressure <= 0 or pressure > 999:
-                continue
-            key = round(pressure, 1)
-            if key in seen:
-                continue
-            seen.add(key)
-            evidence_text = line.strip()[:120]
-
-            if pressure > _ANN_PRESSURE_MAX_BAR:
-                out.append(RuleFinding(
-                    category='line_designation',
-                    rule_id='ANN-001',
-                    issue_observed=(
-                        f"High-pressure annotation detected: {pressure} bar "
-                        f"({pressure * 14.504:.0f} psi). "
-                        f"Exceeds the soft threshold of {_ANN_PRESSURE_MAX_BAR} bar. "
-                        "Verify the piping material class (PMC) and all inline components "
-                        "(valves, instruments, nozzles) are rated for this pressure."
-                    ),
-                    action_required=(
-                        "Cross-check the stated pressure against the project Piping Class "
-                        "index. Confirm all valves, instruments, and flanges on this line "
-                        "are rated to the stated design pressure. Add a pressure basis note "
-                        "if this deviates from the standard class."
-                    ),
-                    evidence=evidence_text,
-                    severity='critical',
-                ))
-            else:
-                out.append(RuleFinding(
-                    category='line_designation',
-                    rule_id='ANN-001',
-                    issue_observed=(
-                        f"Pressure annotation detected: {pressure} bar. "
-                        "Verify this matches the line's design pressure in the piping class."
-                    ),
-                    action_required=(
-                        "Confirm the annotated pressure matches the piping material class "
-                        "design pressure for this service. No action needed if pressure matches."
-                    ),
-                    evidence=evidence_text,
-                    severity='info',
-                ))
-
-    return out
+# ANN-001 (pressure annotation check) was REMOVED 30 Oct 2026: a bare
+# pressure value on a drawing is information, not a finding (36 false
+# 'info' rows on the Borouge Package 2 acceptance set). The soft-coded
+# knobs _ANN_PRESSURE_MAX_BAR / _ANN_PRESSURE_RE stay — LSZ rules reuse
+# them to parse "{class} @ {N} bar" notations.
 
 
 # ---------------------------------------------------------------------------

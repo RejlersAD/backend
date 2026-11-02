@@ -32,6 +32,23 @@ urlpatterns = [
     # Engineer review — finding overrides
     path('findings/<int:finding_id>/',         views.update_finding,  name='update-finding'),
 
+    # Extraction items (engine prompt §4)
+    # summary/ MUST come before <entity_id>/ so 'summary' isn't captured as an id.
+    path('documents/<str:document_id>/extraction/',                 views.document_extraction,         name='document-extraction'),
+    path('documents/<str:document_id>/scene3d/',                    views.document_scene3d,            name='document-scene3d'),
+    path('documents/<str:document_id>/extraction/summary/',         views.document_extraction_summary, name='document-extraction-summary'),
+    path('documents/<str:document_id>/extraction/<int:entity_id>/', views.update_extraction_item,      name='update-extraction-item'),
+
+    # Checklist (PRO-001 Rev A)
+    path('documents/<str:document_id>/checklist/',                  views.document_checklist,          name='document-checklist'),
+    path('documents/<str:document_id>/checklist/<str:item_no>/',    views.document_checklist_item,     name='document-checklist-item'),
+    path('documents/<str:document_id>/checklist-report.xlsx',       views.document_checklist_report,   name='document-checklist-report'),
+    path('documents/<str:document_id>/checklist-report/import/',    views.document_checklist_report_import, name='document-checklist-import'),
+    path('documents/<str:document_id>/review-meta/',                views.document_review_meta,        name='document-review-meta'),
+    path('projects/<str:project_id>/checklist/',                    views.project_checklist,           name='project-checklist'),
+    path('projects/<str:project_id>/checklist-template/',           views.project_checklist_template_upload, name='project-checklist-template'),
+    path('projects/<str:project_id>/checklist-report.xlsx',         views.project_checklist_report,    name='project-checklist-report'),
+
     # Legend-backed recognition controls
     path('legend-knowledge/',                  views.legend_knowledge,           name='legend-knowledge'),
     path('legend-knowledge/build/',            views.build_legend_knowledge_api, name='build-legend-knowledge'),
@@ -49,6 +66,13 @@ urlpatterns = [
 
     # Reference Data — line list, equipment list, instrument index uploads
     path('projects/<str:project_id>/reference-data/',         views.project_reference_data,  name='project-reference-data'),
+    # Sheets + combined review (multi-file / multi-sheet, 30 Oct 2026)
+    path('projects/<str:project_id>/sheets/',                 views.project_sheets,          name='project-sheets'),
+    path('projects/<str:project_id>/review/',                 views.project_review,          name='project-review'),
+    path('projects/<str:project_id>/findings/',               views.project_findings,        name='project-findings'),
+    path('projects/<str:project_id>/cross-check/',            views.project_cross_check,     name='project-cross-check'),
+    path('projects/<str:project_id>/report.xlsx',             views.project_report_excel,    name='project-report-excel'),
+    path('sheets/<int:sheet_id>/',                            views.sheet_detail,            name='sheet-detail'),
     path('projects/<str:project_id>/reference-data/upload/',  views.upload_reference_data,   name='upload-reference-data'),
     path('reference-data/<str:reference_id>/',                views.reference_data_detail,   name='reference-data-detail'),
 

@@ -704,3 +704,74 @@ def upload_to_s3(data: bytes, s3_key: str, content_type: str) -> str:
     except Exception as exc:
         logger.error('[Export] S3 upload failed: %s', exc)
         return ''
+
+
+# ---------------------------------------------------------------------------
+# Project report (spec A3): scope=all ? one tab per P&ID + Cross-drawing +
+# Not uploaded (references to drawings that were never uploaded).
+# ---------------------------------------------------------------------------
+
+PROJECT_SHEET_COLUMNS = ['F No.', 'Rule', 'Severity', 'Status', 'Issue', 'Evidence']
+
+
+def generate_project_excel(project) -> bytes:
+    """Build the project-wide workbook: one tab per current P&ID sheet, a
+    Cross-drawing tab (X findings) and a Not uploaded tab (external refs)."""
+    from openpyxl import Workbook
+    from apps.pid_verification_v2.models import (
+        PIDVCrossFinding, PIDVFinding, PIDVSheet,
+    )
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    sheets = list(
+        PIDVSheet.objects
+        .filter(project=project, is_drawing=True, superseded_by__isnull=True)
+        .select_related('document')
+        .order_by('drawing_no', 'document_id', 'page_index')
+    )
+
+    used_names = set()
+    for s in sheets:
+        base = (s.drawing_no or f'Sheet p{s.page_index + 1}')[:28]
+        name, i = base, 1
+        while name in used_names:
+            i += 1
+            name = f'{base[:25]} ({i})'
+        used_names.add(name)
+        ws = wb.create_sheet(name)
+        ws.append([s.drawing_no or '?', s.title or '', f'Rev {s.rev}' if s.rev else ''])
+        ws.append(PROJECT_SHEET_COLUMNS)
+        try:
+            drawing = s.document.drawings.get(page_index=s.page_index)
+            qs = PIDVFinding.objects.filter(drawing=drawing).order_by('sl_no')
+        except Exception:
+            qs = []
+        for f in qs:
+            ws.append([f'F{f.sl_no}', f.rule_id, f.severity, f.status,
+                       f.issue_observed, f.evidence])
+        for col, w in zip('ABCDEF', (8, 12, 10, 10, 80, 40)):
+            ws.column_dimensions[col].width = w
+
+    # Cross-drawing tab
+    ws = wb.create_sheet('Cross-drawing')
+    ws.append(['X No.', 'Code', 'Kind', 'Title', 'Detail', 'Sheets'])
+    sheet_no_by_id = {s.pk: s.drawing_no for s in sheets}
+    for f in PIDVCrossFinding.objects.filter(project=project).order_by('number'):
+        ws.append([f'X{f.number}', f.code, f.kind, f.title, f.detail,
+                   ' ? '.join(sheet_no_by_id.get(sid, str(sid)) for sid in f.sheets)])
+    for col, w in zip('ABCDEF', (8, 12, 10, 60, 90, 40)):
+        ws.column_dimensions[col].width = w
+
+    # Not uploaded tab
+    ws = wb.create_sheet('Not uploaded')
+    ws.append(['Referenced from sheet', 'Drawing number', 'References'])
+    for r in (project.metadata or {}).get('external_refs', []):
+        ws.append([sheet_no_by_id.get(r.get('sheet_id'), '?'), r.get('drawing_no'), r.get('count')])
+    for col, w in zip('ABC', (30, 30, 12)):
+        ws.column_dimensions[col].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
