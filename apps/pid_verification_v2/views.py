@@ -834,24 +834,29 @@ def get_results(request, document_id):
         cached = load_results_cache(doc)
         if cached and cached.get('file_hash') == doc.file_hash and cached.get('full_data'):
             logger.info('[PIDVResults] Results cache HIT for document_id=%s — serving instantly', document_id)
-            if page_index is None:
+            try:  # TEMP-DIAG (2 Nov 2026): surface the failing block
+                if page_index is None:
+                    data = dict(cached['full_data'])
+                    if any(
+                        'locations' not in i
+                        for d in data.get('drawings', [])
+                        for i in (d.get('issues') or [])
+                    ):
+                        _inject_finding_locations(data, doc)
+                    _inject_display_ids(data, doc)
+                    return Response(data)
                 data = dict(cached['full_data'])
-                if any(
-                    'locations' not in i
+                data['drawings'] = [
+                    {**d, 'issues': d.get('issues', []) if d.get('page_index') == page_index else []}
                     for d in data.get('drawings', [])
-                    for i in (d.get('issues') or [])
-                ):
-                    _inject_finding_locations(data, doc)
+                ]
+                _inject_finding_locations(data, doc)
                 _inject_display_ids(data, doc)
                 return Response(data)
-            data = dict(cached['full_data'])
-            data['drawings'] = [
-                {**d, 'issues': d.get('issues', []) if d.get('page_index') == page_index else []}
-                for d in data.get('drawings', [])
-            ]
-            _inject_finding_locations(data, doc)
-            _inject_display_ids(data, doc)
-            return Response(data)
+            except Exception as _diag_exc:
+                logger.exception('[PIDVResults] cache fast path failed')
+                return Response({'diag': 'cache_fast_path', 'error': str(_diag_exc)[:300]},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # Soft-upgrade: backfill tag_positions for drawings that were processed
     # before line-size coordinate extraction was added.  Runs only when the
@@ -993,9 +998,14 @@ def get_results(request, document_id):
         except Exception as _lt_exc:
             logger.debug('[PIDVResults] line_tags backfill skipped: %s', _lt_exc)
 
-    return Response(PIDVDocumentSerializer(
-        doc, context={'request': request, 'document': doc, 'page': page_index},
-    ).data)
+    try:  # TEMP-DIAG (2 Nov 2026): surface the failing block
+        return Response(PIDVDocumentSerializer(
+            doc, context={'request': request, 'document': doc, 'page': page_index},
+        ).data)
+    except Exception as _diag_exc:
+        logger.exception('[PIDVResults] serializer path failed')
+        return Response({'diag': 'serializer_path', 'error': str(_diag_exc)[:300]},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["GET"])
