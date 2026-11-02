@@ -589,6 +589,12 @@ def upload_pid(request):
 # Prevents accidentally re-queuing a currently-processing document.
 REPROCESS_ALLOWED_STATUSES = {'completed', 'failed', 'legend_pending'}
 
+# A document sitting in 'uploaded' or 'processing' longer than this has a
+# dead pipeline run (worker down / web process restarted before the sync
+# fallback thread ran) — its status will never advance on its own, so
+# re-check must be allowed or the user is permanently locked out.
+STUCK_PROCESSING_MINUTES = 10
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def reprocess_document(request, document_id):
@@ -607,9 +613,20 @@ def reprocess_document(request, document_id):
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
 
     if doc.status not in REPROCESS_ALLOWED_STATUSES:
-        return Response(
-            {"error": f"Document is currently '{doc.status}' — wait for it to finish before re-checking."},
-            status=status.HTTP_409_CONFLICT,
+        from django.utils import timezone as _tz
+        stuck_minutes = (_tz.now() - doc.updated_at).total_seconds() / 60
+        is_stuck = (
+            doc.status in {'uploaded', 'processing'}
+            and stuck_minutes > STUCK_PROCESSING_MINUTES
+        )
+        if not is_stuck:
+            return Response(
+                {"error": f"Document is currently '{doc.status}' — wait for it to finish before re-checking."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        logger.warning(
+            "[PIDVReprocess] Document %s stuck in '%s' for %.0f min — allowing re-check",
+            document_id, doc.status, stuck_minutes,
         )
 
     # BUG FIX (2026-09-08): this endpoint never read or forwarded ANY BYOK
@@ -1038,7 +1055,11 @@ def list_documents(request):
                 # Validate UUID format to prevent errors
                 import uuid
                 uuid.UUID(project_id_str)
-                qs = qs.filter(project__id=project_id_str)
+                # PIDVProject's PK is a BigAutoField; the public identifier
+                # is the unique UUID `project_id`. Filtering on project__id
+                # with a UUID silently matched nothing / raised depending on
+                # Django version, leaking other projects' documents.
+                qs = qs.filter(project__project_id=project_id_str)
                 logger.info(
                     "[PIDVList] Filtering by project_id=%s, user=%s, result_count=%d",
                     project_id_str,
