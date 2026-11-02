@@ -231,6 +231,13 @@ if is_app_installed('apps.sld_verification'):
     urlpatterns.append(path('api/v1/sld-verification/', include('apps.sld_verification.urls')))
     logger.debug("[URL] ✅ SLD Verification URLs registered")
 
+# SLD Checker — engineering checks layered on the electrical_comparison SLD analysis.
+# Feature-flagged: when SLD_CHECKER_ENABLED is False the URLs are not mounted (404).
+from django.conf import settings as _sldc_settings  # noqa: E402
+if getattr(_sldc_settings, 'SLD_CHECKER_ENABLED', False) and is_app_installed('apps.sld_checker'):
+    urlpatterns.append(path('api/v1/sld-checker/', include('apps.sld_checker.urls')))
+    logger.debug("[URL] ✅ SLD Checker URLs registered")
+
 # PFD Quality Checker — deterministic rule engine
 if is_app_installed('apps.pfd_quality'):
     urlpatterns.append(path('api/v1/pfd-quality/', include('apps.pfd_quality.urls')))

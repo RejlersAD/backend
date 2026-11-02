@@ -214,6 +214,7 @@ INSTALLED_APPS = [
     'apps.valve_mto',            # Valve MTO — server-side persistence for the Piping Valve MTO workspace
     'apps.critical_line_list',   # Critical Line List — per-project CLL workspace persistence (DB or S3)
     'apps.electrical_comparison', # Electrical Comparison — P&ID electrical tag vs Equipment/Load List comparison
+    'apps.sld_checker',           # SLD Checker — reads electrical_comparison results, writes only its own tables
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.project_organizer',    # Project Organizer — shared, cross-tool project registry (additive)
     'apps.valve_standards',      # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
@@ -736,6 +737,9 @@ HR_ASSISTANT_LLM_ENABLED = config('HR_ASSISTANT_LLM_ENABLED', default=False, cas
 # Temporarily disabled; both inventory and destructive maintenance endpoints
 # require an explicit opt-in before database cleaning can be enabled again.
 DATABASE_MAINTENANCE_ENABLED = config('DATABASE_MAINTENANCE_ENABLED', default=False, cast=bool)
+# SLD Checker — engineering checks on top of the electrical_comparison SLD analysis.
+# When False the app's URLs return 404 (not mounted in config/urls.py).
+SLD_CHECKER_ENABLED = config('SLD_CHECKER_ENABLED', default=True, cast=bool)
 
 # ==============================================================================
 # RAILWAY PRODUCTION SAFETY CHECK
