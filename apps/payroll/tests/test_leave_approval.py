@@ -101,6 +101,7 @@ class LeaveApprovalTests(TestCase):
         self.client.force_authenticate(self.manager)
         detail = self.client.get(f"/api/v1/payroll/leave-requests/{response.data['id']}/")
         self.assertEqual(detail.data['employee_photo_url'], 'https://example.com/employee.jpg')
+        self.assertEqual(detail.data['employee_profile_id'], str(profile.pk))
         self.employee_record.photo_url = ''
         self.employee_record.save()
         profile.profile_photo = 'profile_photos/employee.jpg'

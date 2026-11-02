@@ -23,7 +23,7 @@ def role_codes(user):
 
 def is_hr(user):
     return bool(user and (user.is_staff or user.is_superuser or role_codes(user) & {
-        'hr_manager', 'hr_admin', 'human_resource', 'admin', 'super_admin',
+        'hr_manager', 'hr_admin', 'admin', 'super_admin',
     }))
 
 

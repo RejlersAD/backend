@@ -9,11 +9,14 @@ Based on commit: c6c3a7e (9-3-26 : First Commit)
 Date: 2026-03-11
 """
 
+import logging
+
 import json
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse
+logger = logging.getLogger(__name__)
 
 
 class EnvironmentConfig:
@@ -46,16 +49,16 @@ class EnvironmentConfig:
         config_file = next((p for p in candidates if p.exists()), None)
 
         if not config_file:
-            print(f"[CONFIG] WARNING: environments.json not found in any of: {[str(p) for p in candidates]}")
+            logger.debug(f"[CONFIG] WARNING: environments.json not found in any of: {[str(p) for p in candidates]}")
             self._config = {}
             return
         
         try:
             with open(config_file, 'r') as f:
                 self._config = json.load(f)
-            print(f"[CONFIG] ✅ Loaded configuration from {config_file}")
+            logger.debug(f"[CONFIG] ✅ Loaded configuration from {config_file}")
         except Exception as e:
-            print(f"[CONFIG] ERROR: Failed to load configuration: {e}")
+            logger.debug(f"[CONFIG] ERROR: Failed to load configuration: {e}")
             self._config = {}
     
     def get_environment(self) -> str:
@@ -110,7 +113,7 @@ class EnvironmentConfig:
                     return 'dev'
             # 5. DATABASE_URL present but no branch signal → safer to assume production
             # (production CORS list includes radai.ae; 'dev' would block it entirely)
-            print('[CONFIG] WARNING: Could not detect environment from branch — defaulting to production (DATABASE_URL present)')
+            logger.debug('[CONFIG] WARNING: Could not detect environment from branch — defaulting to production (DATABASE_URL present)')
             return 'production'
 
         # 6. Default to local
@@ -189,32 +192,32 @@ class EnvironmentConfig:
     def print_current_config(self):
         """Print current environment configuration (debug helper)"""
         env = self.get_environment()
-        print(f"\n{'='*60}")
-        print(f"[CONFIG] Current Environment: {env}")
-        print(f"{'='*60}")
+        logger.debug(f"\n{'='*60}")
+        logger.debug(f"[CONFIG] Current Environment: {env}")
+        logger.debug(f"{'='*60}")
         
         backend = self.get_backend_config()
-        print(f"\n[BACKEND]")
+        logger.debug(f"\n[BACKEND]")
         for key, value in backend.items():
-            print(f"  {key}: {value}")
+            logger.debug(f"  {key}: {value}")
         
         frontend = self.get_frontend_config()
-        print(f"\n[FRONTEND]")
+        logger.debug(f"\n[FRONTEND]")
         for key, value in frontend.items():
-            print(f"  {key}: {value}")
+            logger.debug(f"  {key}: {value}")
         
         database = self.get_database_config()
-        print(f"\n[DATABASE]")
+        logger.debug(f"\n[DATABASE]")
         for key, value in database.items():
             # Don't print passwords
             if 'password' in key.lower():
-                print(f"  {key}: ****")
+                logger.debug(f"  {key}: ****")
             else:
-                print(f"  {key}: {value}")
+                logger.debug(f"  {key}: {value}")
         
-        print(f"\n[CORS] Allowed Origins: {self.get_cors_origins()}")
-        print(f"[CSRF] Trusted Origins: {self.get_csrf_origins()}")
-        print(f"{'='*60}\n")
+        logger.debug(f"\n[CORS] Allowed Origins: {self.get_cors_origins()}")
+        logger.debug(f"[CSRF] Trusted Origins: {self.get_csrf_origins()}")
+        logger.debug(f"{'='*60}\n")
 
 
 # Singleton instance
@@ -283,10 +286,10 @@ if __name__ == '__main__':
     # Test the configuration
     config.print_current_config()
     
-    print("\n[TEST] Testing configuration functions:")
-    print(f"  Environment: {get_environment()}")
-    print(f"  Backend URL: {get_backend_url()}")
-    print(f"  API URL: {get_api_url()}")
-    print(f"  Database URL: {get_database_url()}")
-    print(f"  CORS Origins: {get_cors_origins()}")
-    print(f"  CSRF Origins: {get_csrf_origins()}")
+    logger.debug("\n[TEST] Testing configuration functions:")
+    logger.debug(f"  Environment: {get_environment()}")
+    logger.debug(f"  Backend URL: {get_backend_url()}")
+    logger.debug(f"  API URL: {get_api_url()}")
+    logger.debug(f"  Database URL: {get_database_url()}")
+    logger.debug(f"  CORS Origins: {get_cors_origins()}")
+    logger.debug(f"  CSRF Origins: {get_csrf_origins()}")

@@ -12,13 +12,13 @@ Any changes to extraction logic, text detection, or filtering should be made her
 """
 
 import re
-import fitz  # PyMuPDF - better for annotations
+import pymupdf  # PyMuPDF - better for annotations
 import PyPDF2
 from typing import List, Dict, Optional
 from io import BytesIO
 import logging
-
 logger = logging.getLogger(__name__)
+
 
 
 # ============================================
@@ -187,12 +187,12 @@ def extract_reviewer_comments(
             logger.warning(f"⚠️ Could not initialize comment cleaner: {e}")
     
     try:
-        # Use PyMuPDF (fitz) for better annotation extraction
+        # Use PyMuPDF (pymupdf) for better annotation extraction
         pdf_start = time.time()
         pdf_bytes = pdf_buffer.read()
         pdf_buffer.seek(0)  # Reset for potential re-use
         
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         logger.info(f"[PERF] PDF open took {time.time() - pdf_start:.2f}s")
         logger.info(f"📄 Opened PDF with {len(doc)} pages")
         

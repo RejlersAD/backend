@@ -26,8 +26,8 @@ from django.conf import settings
 from django.db.models import Q
 
 from ..models import NonTeffBatch, NonTeffBatchItem, NonTeffExtractionJob
-
 logger = logging.getLogger(__name__)
+
 
 
 # ---------------------------------------------------------------------------
@@ -226,14 +226,14 @@ def search_records(
 def _open_pdf(path: str):
     """Lazy import PyMuPDF and return an open document, or None if unavailable."""
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
     except ImportError:
         logger.warning("PyMuPDF not installed — locator disabled")
         return None
     if not path or not os.path.exists(path):
         return None
     try:
-        return fitz.open(path)
+        return pymupdf.open(path)
     except Exception:
         logger.exception("Failed to open PDF for locate: %s", path)
         return None
@@ -310,8 +310,8 @@ def render_pdf_page_png(file_path: str, page_no: int, item_key: str) -> Optional
             return None
         page = doc.load_page(page_no - 1)
         zoom = dpi / 72.0
-        import fitz  # local import (already verified by _open_pdf)
-        mat = fitz.Matrix(zoom, zoom)
+        import pymupdf  # local import (already verified by _open_pdf)
+        mat = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         pix.save(out_path)
         return out_path

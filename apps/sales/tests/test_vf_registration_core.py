@@ -108,6 +108,20 @@ class VFRegistrationCoreTests(TestCase):
         self.assertEqual(deal.created_by, self.actor)
         self.assertEqual(deal.deal_name, 'Reviewed title')
 
+    def test_updates_cannot_change_soft_delete_fields(self):
+        deal = self.register()
+        serializer = DealCreateSerializer(
+            deal,
+            data={'is_deleted': True, 'deleted_at': '2026-10-30T09:00:00Z'},
+            partial=True,
+            context={'actor': self.actor},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        deal.refresh_from_db()
+        self.assertFalse(deal.is_deleted)
+        self.assertIsNone(deal.deleted_at)
+
     def test_creator_history_does_not_claim_current_owner_created_record(self):
         deal = self.register(owner=self.peer.pk)
         history = DealDetailSerializer(deal).data['stage_history']

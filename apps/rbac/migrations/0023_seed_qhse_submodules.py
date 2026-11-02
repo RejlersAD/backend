@@ -18,7 +18,10 @@ can be independently toggled per role in the Role Management panel:
 All new modules are idempotently created and granted to super_admin,
 admin, and all engineering-discipline roles that already have 'qhse'.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded catalogue for this migration ───────────────────────────────────
 NEW_MODULES = [
@@ -105,28 +108,28 @@ def seed_qhse_submodules(apps, schema_editor):
             obj.save(using=db_alias, update_fields=['name', 'description', 'order', 'is_active'])
         module_objs[m['code']] = obj
         status = 'created' if created else 'updated'
-        print(f'  [0023] ✓ Module {status}: {m["code"]}')
+        logger.debug(f'  [0023] ✓ Module {status}: {m["code"]}')
 
     # 2. Grant all new sub-modules to the target roles
     for role_code in GRANT_TO_ROLES:
         try:
             role = Role.objects.using(db_alias).get(code=role_code, is_active=True)
         except Role.DoesNotExist:
-            print(f'  [0023]   ⚠ Role not found (skipping): {role_code}')
+            logger.debug(f'  [0023]   ⚠ Role not found (skipping): {role_code}')
             continue
         for module in module_objs.values():
             _, created = RoleModule.objects.using(db_alias).get_or_create(
                 role=role, module=module,
             )
             if created:
-                print(f'  [0023]   ✓ Granted {module.code} → {role_code}')
+                logger.debug(f'  [0023]   ✓ Granted {module.code} → {role_code}')
 
     # 3. Also grant to any role that already has the parent 'qhse' module
     #    (covers custom org roles not listed in GRANT_TO_ROLES)
     try:
         parent_module = Module.objects.using(db_alias).get(code='qhse')
     except Module.DoesNotExist:
-        print('  [0023]   ⚠ Parent module "qhse" not found — skipping auto-grant')
+        logger.debug('  [0023]   ⚠ Parent module "qhse" not found — skipping auto-grant')
         return
 
     already_granted_roles = set(GRANT_TO_ROLES)
@@ -143,7 +146,7 @@ def seed_qhse_submodules(apps, schema_editor):
                 role=role, module=module,
             )
             if created:
-                print(f'  [0023]   ✓ Auto-granted {module.code} → {role.code}')
+                logger.debug(f'  [0023]   ✓ Auto-granted {module.code} → {role.code}')
 
 
 def noop(apps, schema_editor):

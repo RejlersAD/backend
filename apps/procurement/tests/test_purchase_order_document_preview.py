@@ -4,7 +4,7 @@ from io import BytesIO
 import json
 from unittest.mock import patch
 
-import fitz
+import pymupdf
 from docx import Document
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
@@ -39,7 +39,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
 
     def text(self, response):
         self.assertEqual(response.status_code, 200, getattr(response, 'data', response.content[:500]))
-        with fitz.open(stream=response.content, filetype='pdf') as document:
+        with pymupdf.open(stream=response.content, filetype='pdf') as document:
             return '\n'.join(page.get_text() for page in document)
 
     def test_new_draft_pdf_and_word_use_current_editor_content_without_any_save(self):
@@ -83,7 +83,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
             word_response = self.preview(snapshot, format='word')
             self.assertEqual(word_response.status_code, 200)
         artwork.assert_not_called()
-        with fitz.open(stream=response.content, filetype='pdf') as document:
+        with pymupdf.open(stream=response.content, filetype='pdf') as document:
             cover = document[0].get_text()
             self.assertIn('590001, 590002, 590003', cover)
             self.assertIn('Jarmo Suominen', cover)
@@ -116,7 +116,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         saved, _ = build_purchase_order_pdf(order)
         response = self.preview({'description': order.description}, order_id=str(order.pk))
         self.assertEqual(response.status_code, 200)
-        with fitz.open(stream=saved, filetype='pdf') as first, fitz.open(stream=response.content, filetype='pdf') as second:
+        with pymupdf.open(stream=saved, filetype='pdf') as first, pymupdf.open(stream=response.content, filetype='pdf') as second:
             self.assertEqual(len(first), len(second))
             self.assertEqual([page.get_pixmap().samples for page in first], [page.get_pixmap().samples for page in second])
 
@@ -209,7 +209,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
         saved, _ = build_purchase_order_pdf(order)
         preview = self.preview({'summary': 'Short vendor summary', 'contact_persons': contacts}, order_id=str(order.pk))
         self.assertIn('Short vendor summary', self.text(preview))
-        with fitz.open(stream=saved, filetype='pdf') as first, fitz.open(stream=preview.content, filetype='pdf') as second:
+        with pymupdf.open(stream=saved, filetype='pdf') as first, pymupdf.open(stream=preview.content, filetype='pdf') as second:
             self.assertEqual([p.get_pixmap().samples for p in first], [p.get_pixmap().samples for p in second])
 
     def test_explicit_project_removals_survive_save_reload_and_pdf_preview(self):
@@ -237,7 +237,7 @@ class PurchaseOrderDocumentPreviewTests(TestCase):
                 self.assertEqual(reloaded.data['project_display'], number or None)
                 self.assertEqual(reloaded.data['contact_persons']['project_selections'], selections)
                 saved, _ = build_purchase_order_pdf(order)
-                with fitz.open(stream=saved, filetype='pdf') as pdf:
+                with pymupdf.open(stream=saved, filetype='pdf') as pdf:
                     saved_text = pdf[0].get_text()
                 preview_text = self.text(self.preview(snapshot, order_id=str(order.pk)))
                 for text in (saved_text, preview_text):

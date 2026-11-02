@@ -20,7 +20,7 @@ from .models import (
 
 
 LIFECYCLE_ADMIN_ROLES = {'super_admin', 'admin'}
-LIFECYCLE_HR_ROLES = {'hr_admin', 'hr_manager', 'human_resource'}
+LIFECYCLE_HR_ROLES = {'hr_admin', 'hr_manager'}
 LIFECYCLE_IT_ROLES = {'ict_admin', 'admin_it'}
 LIFECYCLE_MANAGER_ROLES = {'manager', 'project_manager'}
 LIFECYCLE_FINANCE_ROLES = {'finance_admin', 'finance_manager', 'payroll_admin'}

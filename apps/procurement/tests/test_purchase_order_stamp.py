@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-import fitz
+import pymupdf
 from docx import Document
 from docx.oxml.ns import qn
 from PIL import Image as PILImage
@@ -65,7 +65,7 @@ class PurchaseOrderStampTests(TestCase):
 
     def assert_artwork_absent(self, order):
         content, _warnings = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             dimensions = [image[2:4] for page in pdf for image in page.get_images()]
             self.assertNotIn(SIGNATURE_SIZE, dimensions)
             self.assertNotIn(self.stamp_size, dimensions)
@@ -78,7 +78,7 @@ class PurchaseOrderStampTests(TestCase):
         order = self.recorded_order()
         content, warnings = build_purchase_order_pdf(order)
         self.assertFalse(warnings)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertEqual(len(pdf), 3)
             export_fixtures.PurchaseOrderExportTests._assert_body_clear_of_footer(self, pdf)
             page = pdf[0]
@@ -109,7 +109,7 @@ class PurchaseOrderStampTests(TestCase):
                 self.assertLess(rectangle.y1, page.rect.height - 40 * mm)
             # Inspect rendered pixels too: an embedded but transparent/covered
             # stamp is not a visible stamp.
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=stamp_rect, colorspace=fitz.csRGB, alpha=False)
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=stamp_rect, colorspace=pymupdf.csRGB, alpha=False)
             rendered = PILImage.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
             blue_ink = sum(1 for red, green, blue in rendered.getdata()
                            if blue > red + 20 and blue > green + 10 and min(red, green) < 190)
@@ -138,7 +138,7 @@ class PurchaseOrderStampTests(TestCase):
     def test_compact_cover_keeps_signature_and_seal_at_signer_name(self):
         order = self.recorded_order(dense=False)
         content, _warnings = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             page = pdf[0]
             name = page.search_for(order.approved_by_name)[0]
             signature = next(image for image in page.get_images() if image[2:4] == SIGNATURE_SIZE)
@@ -189,7 +189,7 @@ class PurchaseOrderStampTests(TestCase):
         order = self.recorded_order()
         order.approval_stamp = ''
         content, _warnings = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             self.assertIn(self.stamp_size, [image[2:4] for image in pdf[0].get_images()])
         document = Document(BytesIO(build_purchase_order_docx(order)))
         self.assertIn(self.stamp_size, self.image_parts(document))
@@ -203,7 +203,7 @@ class PurchaseOrderStampTests(TestCase):
         custom_bytes = stream.getvalue()
         order.approval_stamp = 'data:image/png;base64,' + base64.b64encode(custom_bytes).decode()
         content, _warnings = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             dimensions = [image[2:4] for page in pdf for image in page.get_images()]
             self.assertIn(custom_size, dimensions)
             self.assertNotIn(self.stamp_size, dimensions)
@@ -234,7 +234,7 @@ class PurchaseOrderStampTests(TestCase):
         order.approved_by_name = 'Synthetic Procurement Approver'
         order.approved_by_title = 'Procurement Manager'
         content, _warnings = build_purchase_order_pdf(order)
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             text = '\n'.join(page.get_text() for page in pdf)
             self.assertIn(''.join(order.approved_by_name.split()), ''.join(text.split()))
         self.assertNotIn('Jarmo Suominen', text)

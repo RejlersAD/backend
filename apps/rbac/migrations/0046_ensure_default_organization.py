@@ -1,6 +1,9 @@
+import logging
+
 # Generated migration for ensuring default organization exists
 
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 def create_default_organization(apps, schema_editor):
@@ -9,13 +12,16 @@ def create_default_organization(apps, schema_editor):
     
     # Check if any organization exists
     if not Organization.objects.exists():
-        Organization.objects.create(
+        _, created = Organization.objects.get_or_create(
             code='DEFAULT_ORG',
-            name='Default Organization',
-            description='Auto-created default organization for user profiles',
-            is_active=True,
+            defaults={
+                'name': 'Default Organization',
+                'description': 'Auto-created default organization for user profiles',
+                'is_active': True,
+            },
         )
-        print('✅ Created default organization')
+        if created:
+            logger.debug('Created default organization')
     else:
         # Ensure at least one organization is active
         active_count = Organization.objects.filter(is_active=True).count()
@@ -25,7 +31,7 @@ def create_default_organization(apps, schema_editor):
             if first_org:
                 first_org.is_active = True
                 first_org.save()
-                print(f'✅ Activated organization: {first_org.name}')
+                logger.debug(f'✅ Activated organization: {first_org.name}')
 
 
 def reverse_migration(apps, schema_editor):

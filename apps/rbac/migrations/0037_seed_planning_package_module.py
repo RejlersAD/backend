@@ -21,7 +21,10 @@ See also: rbac_config.py ALL_MODULES_CATALOGUE / ROLE_MODULE_POLICY['admin']
 (single source of truth going forward) and frontend
 rbacAccess/RoleManagement.jsx NON_ENGINEERING_GROUPS['project_control'].
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 NEW_MODULE = {
     'code':        'planning_package',
@@ -60,17 +63,17 @@ def seed_planning_package_module(apps, schema_editor):
         module.is_active   = True
         module.save(using=db_alias)
     action = 'created' if created else 'updated'
-    print(f'  [0037] ✓ Module {action}: {module.code}')
+    logger.debug(f'  [0037] ✓ Module {action}: {module.code}')
 
     for role_code in GRANT_TO_ROLES:
         try:
             role = Role.objects.using(db_alias).get(code=role_code)
         except Role.DoesNotExist:
-            print(f'  [0037] ⚠ Role not found: {role_code} — skipping')
+            logger.debug(f'  [0037] ⚠ Role not found: {role_code} — skipping')
             continue
         _, created = RoleModule.objects.using(db_alias).get_or_create(role=role, module=module)
         if created:
-            print(f'  [0037] ✓ Granted {module.code} → {role_code}')
+            logger.debug(f'  [0037] ✓ Granted {module.code} → {role_code}')
 
     # Mirror the grant for any OTHER role that already has 'project_control'
     # (covers roles granted ad-hoc outside rbac_config.py, e.g. via a one-off
@@ -87,7 +90,7 @@ def seed_planning_package_module(apps, schema_editor):
         for role_id in role_ids_with_pc:
             _, created = RoleModule.objects.using(db_alias).get_or_create(role_id=role_id, module=module)
             if created:
-                print(f'  [0037] ✓ Mirrored project_control grant → role_id={role_id}')
+                logger.debug(f'  [0037] ✓ Mirrored project_control grant → role_id={role_id}')
 
 
 def noop(apps, schema_editor):

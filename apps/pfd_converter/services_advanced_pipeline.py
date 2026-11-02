@@ -39,11 +39,11 @@ from django.conf import settings
 import re
 from typing import Dict, List, Tuple, Any
 import numpy as np
-import fitz  # PyMuPDF for PDF to image conversion
+import pymupdf  # PyMuPDF for PDF to image conversion
 from .ai_drawing_generator import AIPIDDrawingGenerator
 from .validation_engine import EngineeringValidationEngine
-
 logger = logging.getLogger(__name__)
+
 
 # Initialize OpenAI client
 try:
@@ -842,14 +842,14 @@ class AdvancedPFDToPIDPipeline:
             logger.info("  → Converting PDF to PNG...")
             try:
                 # Open PDF with PyMuPDF
-                pdf_document = fitz.open(stream=file_content, filetype="pdf")
+                pdf_document = pymupdf.open(stream=file_content, filetype="pdf")
                 
                 # Get first page
                 first_page = pdf_document[0]
                 
                 # Render page to pixmap (high resolution for better OCR)
                 # zoom=2.0 gives 144 DPI (default is 72 DPI)
-                mat = fitz.Matrix(2.0, 2.0)
+                mat = pymupdf.Matrix(2.0, 2.0)
                 pix = first_page.get_pixmap(matrix=mat)
                 
                 # Convert pixmap to PNG bytes

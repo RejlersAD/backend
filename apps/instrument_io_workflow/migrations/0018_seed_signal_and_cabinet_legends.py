@@ -9,7 +9,10 @@ this migration or these sections.
 created_by is copied from an existing seeded legend rather than hardcoded,
 so this works the same regardless of which user owns the other rows.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SIGNAL_TYPES_LOOKUP = {
     'AI': 'ANALOG INPUT',
@@ -87,7 +90,7 @@ def seed_forward(apps, schema_editor):
             definition=definition,
             is_active=True,
         )
-        print(f'[instrument_io_workflow] Seeded 1 legend for section={section!r}.')
+        logger.debug(f'[instrument_io_workflow] Seeded 1 legend for section={section!r}.')
 
 
 class Migration(migrations.Migration):

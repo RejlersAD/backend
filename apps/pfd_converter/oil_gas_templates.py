@@ -5,6 +5,9 @@ Implements intelligent P&ID generation with industry-standard templates
 Uses generative AI concepts to create complete process units
 """
 
+import logging
+logger = logging.getLogger(__name__)
+
 class OilGasProcessTemplates:
     """Industry-standard Oil & Gas process unit templates"""
     
@@ -434,7 +437,7 @@ def enrich_with_oil_gas_intelligence(base_specs: dict) -> dict:
     """
     # If equipment count is low, use complete template
     if len(base_specs.get('equipment', [])) < 3:
-        print("📊 Using complete Oil & Gas process template...")
+        logger.debug("📊 Using complete Oil & Gas process template...")
         return OilGasProcessTemplates.get_complete_process_unit()
     
     # Otherwise enrich existing data

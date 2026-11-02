@@ -1,3 +1,5 @@
+import logging
+
 from apps.rbac.ai_telemetry import tracked_pid
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
@@ -18,6 +20,7 @@ from .serializers import (
 from .services import PIDAnalysisService
 from .rag_service import RAGService
 from .document_processor import DocumentProcessor
+logger = logging.getLogger(__name__)
 
 
 @api_view(['GET'])
@@ -95,31 +98,31 @@ def export_report(request, pk):
     """
     from .export_service import PIDReportExportService
     
-    print(f"[EXPORT] ===== STANDALONE EXPORT REQUEST =====")
-    print(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
-    print(f"[EXPORT] Drawing ID: {pk}")
+    logger.debug(f"[EXPORT] ===== STANDALONE EXPORT REQUEST =====")
+    logger.debug(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
+    logger.debug(f"[EXPORT] Drawing ID: {pk}")
     
     # Get drawing - filter by user for security
     drawing = get_object_or_404(PIDDrawing, id=pk, uploaded_by=request.user)
-    print(f"[EXPORT] Drawing found: {drawing.drawing_number}")
+    logger.debug(f"[EXPORT] Drawing found: {drawing.drawing_number}")
     
     # Check if report exists
     if not hasattr(drawing, 'analysis_report'):
-        print(f"[EXPORT ERROR] No analysis report for drawing {pk}")
+        logger.debug(f"[EXPORT ERROR] No analysis report for drawing {pk}")
         return Response(
             {'error': 'No analysis report available'},
             status=status.HTTP_404_NOT_FOUND
         )
     
-    print(f"[EXPORT] Report found: {drawing.analysis_report.id}")
+    logger.debug(f"[EXPORT] Report found: {drawing.analysis_report.id}")
     
     export_format = request.query_params.get('format', 'pdf')
-    print(f"[EXPORT] Format: {export_format}")
+    logger.debug(f"[EXPORT] Format: {export_format}")
     
     export_service = PIDReportExportService()
     
     try:
-        print(f"[EXPORT] Generating {export_format}...")
+        logger.debug(f"[EXPORT] Generating {export_format}...")
         if export_format == 'pdf':
             response = export_service.export_pdf(drawing)
         elif export_format == 'excel':
@@ -131,10 +134,10 @@ def export_report(request, pk):
                 {'error': 'Invalid format. Use pdf, excel, or csv'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        print(f"[EXPORT] Success - returning file")
+        logger.debug(f"[EXPORT] Success - returning file")
         return response
     except Exception as e:
-        print(f"[EXPORT ERROR] {str(e)}")
+        logger.debug(f"[EXPORT ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         return Response(
@@ -163,19 +166,19 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
     def upload(self, request):
         """
         Upload P&ID drawing and optionally start analysis
-        
+
         POST /api/v1/pid/drawings/upload/
         """
-        print(f"[UPLOAD_VIEW] === UPLOAD REQUEST RECEIVED ===")
-        print(f"[UPLOAD_VIEW] Method: {request.method}")
-        print(f"[UPLOAD_VIEW] User: {request.user} (authenticated: {request.user.is_authenticated})")
-        print(f"[UPLOAD_VIEW] Origin: {request.META.get('HTTP_ORIGIN', 'NO ORIGIN')}")
-        print(f"[UPLOAD_VIEW] Content-Type: {request.content_type}")
-        print(f"[UPLOAD_VIEW] Files: {list(request.FILES.keys())}")
+        logger.debug(f"[UPLOAD_VIEW] === UPLOAD REQUEST RECEIVED ===")
+        logger.debug(f"[UPLOAD_VIEW] Method: {request.method}")
+        logger.debug(f"[UPLOAD_VIEW] User: {request.user} (authenticated: {request.user.is_authenticated})")
+        logger.debug(f"[UPLOAD_VIEW] Origin: {request.META.get('HTTP_ORIGIN', 'NO ORIGIN')}")
+        logger.debug(f"[UPLOAD_VIEW] Content-Type: {request.content_type}")
+        logger.debug(f"[UPLOAD_VIEW] Files: {list(request.FILES.keys())}")
         
         # Handle OPTIONS request for CORS preflight
         if request.method == 'OPTIONS':
-            print("[UPLOAD_VIEW] HANDLING OPTIONS PREFLIGHT")
+            logger.debug("[UPLOAD_VIEW] HANDLING OPTIONS PREFLIGHT")
             from django.http import HttpResponse
             response = HttpResponse()
             response['Access-Control-Allow-Origin'] = '*'
@@ -185,35 +188,35 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         # CRITICAL: Verify authentication manually since we used AllowAny
         if not request.user.is_authenticated:
-            print("[ERROR] User not authenticated - rejecting request")
+            logger.debug("[ERROR] User not authenticated - rejecting request")
             return Response(
                 {'detail': 'Authentication credentials were not provided or are invalid.'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
-        print(f"[DEBUG] ===== UPLOAD REQUEST RECEIVED =====")
-        print(f"[DEBUG] User: {request.user} (authenticated: {request.user.is_authenticated})")
-        print(f"[DEBUG] Content-Type: {request.content_type}")
-        print(f"[DEBUG] Request data keys: {list(request.data.keys())}")
-        print(f"[DEBUG] Request FILES: {list(request.FILES.keys())}")
-        print(f"[DEBUG] Request encoding: {getattr(request, 'encoding', 'Unknown')}")
+        logger.debug(f"[DEBUG] ===== UPLOAD REQUEST RECEIVED =====")
+        logger.debug(f"[DEBUG] User: {request.user} (authenticated: {request.user.is_authenticated})")
+        logger.debug(f"[DEBUG] Content-Type: {request.content_type}")
+        logger.debug(f"[DEBUG] Request data keys: {list(request.data.keys())}")
+        logger.debug(f"[DEBUG] Request FILES: {list(request.FILES.keys())}")
+        logger.debug(f"[DEBUG] Request encoding: {getattr(request, 'encoding', 'Unknown')}")
         
         # Debug all form fields
         for key, value in request.data.items():
             if key == 'file':
                 file_obj = request.FILES.get('file')
                 if file_obj:
-                    print(f"[DEBUG]   {key}: [File: {file_obj.name}, {file_obj.size} bytes, {file_obj.content_type}]")
+                    logger.debug(f"[DEBUG]   {key}: [File: {file_obj.name}, {file_obj.size} bytes, {file_obj.content_type}]")
                 else:
-                    print(f"[DEBUG]   {key}: {value} (NOT A FILE OBJECT!)")
+                    logger.debug(f"[DEBUG]   {key}: {value} (NOT A FILE OBJECT!)")
             else:
-                print(f"[DEBUG]   {key}: '{value}' (type: {type(value).__name__})")
+                logger.debug(f"[DEBUG]   {key}: '{value}' (type: {type(value).__name__})")
         
         # Check if file is in FILES instead of data
         file_in_files = request.FILES.get('file')
         if file_in_files:
-            print(f"[DEBUG] ✓ File found in request.FILES: {file_in_files.name}")
+            logger.debug(f"[DEBUG] ✓ File found in request.FILES: {file_in_files.name}")
         else:
-            print(f"[DEBUG] ✗ No file found in request.FILES")
+            logger.debug(f"[DEBUG] ✗ No file found in request.FILES")
         
         # Prepare data for serializer - DON'T use .copy() on request.data as it may deepcopy file objects
         # Instead, create a new dict with only the non-file fields
@@ -227,7 +230,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         if file_in_files:
             serializer_data['file'] = file_in_files
         
-        print(f"[DEBUG] Serializer data keys: {list(serializer_data.keys())}")
+        logger.debug(f"[DEBUG] Serializer data keys: {list(serializer_data.keys())}")
         
         # SOFT-CODED: Extract reference documents if present (5 key documents only)
         reference_documents = {}
@@ -238,7 +241,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             ref_key = f'reference_{key}'
             if ref_key in request.FILES:
                 reference_documents[key] = request.FILES[ref_key]
-                print(f"[DEBUG] Reference document found: {key} - {reference_documents[key].name}")
+                logger.debug(f"[DEBUG] Reference document found: {key} - {reference_documents[key].name}")
         
         # SOFT-CODED: Handle JSON line list imported from DesignIQ (no file upload needed)
         line_list_json_raw = request.data.get('line_list_json')
@@ -247,9 +250,9 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             try:
                 parsed = _json.loads(line_list_json_raw) if isinstance(line_list_json_raw, str) else line_list_json_raw
                 reference_documents['line_list_json'] = parsed
-                print(f"[DEBUG] DesignIQ line list JSON received: {len(parsed) if isinstance(parsed, list) else 'dict'} items")
+                logger.debug(f"[DEBUG] DesignIQ line list JSON received: {len(parsed) if isinstance(parsed, list) else 'dict'} items")
             except Exception as _e:
-                print(f"[WARNING] Failed to parse line_list_json: {_e}")
+                logger.debug(f"[WARNING] Failed to parse line_list_json: {_e}")
 
         # SOFT-CODED: Handle JSON critical stress line list imported from DesignIQ
         critical_stress_json_raw = request.data.get('critical_stress_json')
@@ -258,9 +261,9 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             try:
                 parsed_css = _json.loads(critical_stress_json_raw) if isinstance(critical_stress_json_raw, str) else critical_stress_json_raw
                 reference_documents['critical_stress_json'] = parsed_css
-                print(f"[DEBUG] DesignIQ critical stress JSON received: {len(parsed_css) if isinstance(parsed_css, list) else 'dict'} items")
+                logger.debug(f"[DEBUG] DesignIQ critical stress JSON received: {len(parsed_css) if isinstance(parsed_css, list) else 'dict'} items")
             except Exception as _e:
-                print(f"[WARNING] Failed to parse critical_stress_json: {_e}")
+                logger.debug(f"[WARNING] Failed to parse critical_stress_json: {_e}")
 
         # ── Analysis mode: 'standard' (drawing-only) vs 'premium' (with RAD/external refs) ──
         # In Standard mode, reference documents are intentionally cleared so Pass 2
@@ -271,26 +274,26 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             analysis_mode = 'standard'
 
         if analysis_mode == 'standard' and reference_documents:
-            print(f"[INFO] Standard mode selected — clearing {len(reference_documents)} reference doc(s) (drawing-only analysis)")
+            logger.debug(f"[INFO] Standard mode selected — clearing {len(reference_documents)} reference doc(s) (drawing-only analysis)")
             reference_documents = {}
         elif analysis_mode == 'premium':
-            print(f"[INFO] Premium mode selected — {len(reference_documents)} reference doc(s) will be used")
+            logger.debug(f"[INFO] Premium mode selected — {len(reference_documents)} reference doc(s) will be used")
 
         if reference_documents:
-            print(f"[DEBUG] Total reference documents: {len(reference_documents)}")
+            logger.debug(f"[DEBUG] Total reference documents: {len(reference_documents)}")
         
         # Validate request data
         serializer = PIDDrawingUploadSerializer(data=serializer_data)
         
         if not serializer.is_valid():
-            print(f"[ERROR] Validation failed: {serializer.errors}")
+            logger.debug(f"[ERROR] Validation failed: {serializer.errors}")
             return Response(
                 serializer.errors,
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        print(f"[DEBUG] Serializer validated successfully")
-        print(f"[DEBUG] Validated data: {serializer.validated_data.keys()}")
+        logger.debug(f"[DEBUG] Serializer validated successfully")
+        logger.debug(f"[DEBUG] Validated data: {serializer.validated_data.keys()}")
         
         # Create or reuse PIDDrawing
         # If the same user uploads the same filename, reuse the existing drawing record
@@ -302,7 +305,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         ).order_by('-created_at').first()
 
         if existing_drawing:
-            print(f'[UPLOAD_VIEW] Existing drawing found (ID: {existing_drawing.id}) for filename "{file.name}" — reusing record')
+            logger.debug(f'[UPLOAD_VIEW] Existing drawing found (ID: {existing_drawing.id}) for filename "{file.name}" — reusing record')
             # Delete previous report and issues so a fresh analysis is saved
             if hasattr(existing_drawing, 'analysis_report'):
                 existing_drawing.analysis_report.issues.all().delete()
@@ -333,7 +336,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         saved_reference_docs = {}
         saved_reference_files = {}  # Store file objects/paths separately
         if reference_documents:
-            print(f"[DEBUG] Saving {len(reference_documents)} reference documents")
+            logger.debug(f"[DEBUG] Saving {len(reference_documents)} reference documents")
             for doc_type, doc_file in reference_documents.items():
                 try:
                     ref_doc = ReferenceDocument.objects.create(
@@ -348,25 +351,25 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                     saved_reference_docs[doc_type] = ref_doc
                     # Store the file PATH STRING for processing (pickle-safe)
                     saved_reference_files[doc_type] = ref_doc.file.path  # String path is pickle-safe
-                    print(f"[DEBUG] Saved reference document: {ref_doc.title} (ID: {ref_doc.id}, Path: {ref_doc.file.path})")
+                    logger.debug(f"[DEBUG] Saved reference document: {ref_doc.title} (ID: {ref_doc.id}, Path: {ref_doc.file.path})")
                 except Exception as e:
-                    print(f"[ERROR] Failed to save reference document {doc_type}: {e}")
+                    logger.debug(f"[ERROR] Failed to save reference document {doc_type}: {e}")
         
         # Auto-analyze if requested (WITH REFERENCE DOCUMENTS)
         if serializer.validated_data.get('auto_analyze', True):
             try:
-                print(f"[DEBUG] Starting auto-analysis for drawing ID: {drawing.id}")
+                logger.debug(f"[DEBUG] Starting auto-analysis for drawing ID: {drawing.id}")
                 # Start analysis
                 drawing.status = 'processing'
                 drawing.analysis_started_at = timezone.now()
                 drawing.save()
                 
                 # Perform analysis with COMPREHENSIVE SERVICE (multi-pass LLM with reference documents)
-                print(f"[DEBUG] Using PIDAnalysisService with reference document cross-verification")
+                logger.debug(f"[DEBUG] Using PIDAnalysisService with reference document cross-verification")
                 from .services import PIDAnalysisService
                 
                 analysis_service = PIDAnalysisService()
-                print(f"[DEBUG] Calling analyze_pid_drawing() with reference documents")
+                logger.debug(f"[DEBUG] Calling analyze_pid_drawing() with reference documents")
                 
                 # Pass file object and reference documents to service
                 analysis_result = analysis_service.analyze_pid_drawing(
@@ -375,7 +378,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                     reference_documents=saved_reference_files,
                     analysis_mode='comprehensive'  # Full multi-pass analysis
                 )
-                print(f"[DEBUG] Analysis completed, result keys: {list(analysis_result.keys())}")
+                logger.debug(f"[DEBUG] Analysis completed, result keys: {list(analysis_result.keys())}")
                 
                 # Create report
                 report = PIDAnalysisReport.objects.create(
@@ -425,7 +428,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 drawing.save()
                 
             except Exception as e:
-                print(f"[ERROR] Analysis failed: {type(e).__name__}: {str(e)}")
+                logger.debug(f"[ERROR] Analysis failed: {type(e).__name__}: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 
@@ -463,7 +466,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         # Return created drawing
         response_data = PIDDrawingSerializer(drawing).data
         response_data['success'] = True
-        print(f"[DEBUG] Upload successful, drawing ID: {drawing.id}, status: {drawing.status}")
+        logger.debug(f"[DEBUG] Upload successful, drawing ID: {drawing.id}, status: {drawing.status}")
         
         return Response(
             response_data,
@@ -501,7 +504,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             drawing.analysis_started_at = timezone.now()
             drawing.save()
             
-            print(f"[ANALYZE] Starting analysis - Mode: {analysis_mode}")
+            logger.debug(f"[ANALYZE] Starting analysis - Mode: {analysis_mode}")
             
             # Delete existing report if any
             if hasattr(drawing, 'analysis_report'):
@@ -579,7 +582,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             drawing.analysis_completed_at = timezone.now()
             drawing.save()
             
-            print(f"[ANALYZE] Complete - {len(issues)} issues found")
+            logger.debug(f"[ANALYZE] Complete - {len(issues)} issues found")
             
             return Response(
                 PIDDrawingSerializer(drawing).data,
@@ -588,7 +591,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             
         except Exception as e:
             import traceback
-            print(f"[ANALYZE ERROR] {e}")
+            logger.debug(f"[ANALYZE ERROR] {e}")
             traceback.print_exc()
             drawing.status = 'failed'
             drawing.save()
@@ -614,7 +617,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         """
         from .pipeline.main_pipeline import PIDValidationPipeline
         
-        print(f"[HYBRID PIPELINE] ===== STARTING HYBRID ANALYSIS =====")
+        logger.debug(f"[HYBRID PIPELINE] ===== STARTING HYBRID ANALYSIS =====")
         
         drawing = self.get_object()
         
@@ -694,7 +697,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             drawing.analysis_completed_at = timezone.now()
             drawing.save()
             
-            print(f"[HYBRID PIPELINE] Analysis complete - {len(transformed_issues)} issues found")
+            logger.debug(f"[HYBRID PIPELINE] Analysis complete - {len(transformed_issues)} issues found")
             
             return Response(
                 {
@@ -708,7 +711,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             
         except Exception as e:
             import traceback
-            print(f"[HYBRID PIPELINE ERROR] {e}")
+            logger.debug(f"[HYBRID PIPELINE ERROR] {e}")
             traceback.print_exc()
             
             drawing.status = 'failed'
@@ -769,46 +772,46 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         from .export_service import PIDReportExportService
         
         # EXTREMELY VERBOSE LOGGING
-        print(f"\n{'='*80}", file=sys.stderr)
-        print(f"[EXPORT ACTION] ===== EXPORT REQUEST RECEIVED =====", file=sys.stderr)
-        print(f"[EXPORT ACTION] Request path: {request.path}", file=sys.stderr)
-        print(f"[EXPORT ACTION] Request method: {request.method}", file=sys.stderr)
-        print(f"[EXPORT ACTION] User: {request.user} (authenticated: {request.user.is_authenticated})", file=sys.stderr)
-        print(f"[EXPORT ACTION] Drawing ID (pk): {pk}", file=sys.stderr)
-        print(f"[EXPORT ACTION] Query params: {dict(request.query_params)}", file=sys.stderr)
-        print(f"{'='*80}\n", file=sys.stderr)
-        
-        print(f"[EXPORT] ===== EXPORT REQUEST RECEIVED =====")
-        print(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
-        print(f"[EXPORT] Drawing ID: {pk}")
+        logger.debug(f"\n{'='*80}")
+        logger.debug(f"[EXPORT ACTION] ===== EXPORT REQUEST RECEIVED =====")
+        logger.debug(f"[EXPORT ACTION] Request path: {request.path}")
+        logger.debug(f"[EXPORT ACTION] Request method: {request.method}")
+        logger.debug(f"[EXPORT ACTION] User: {request.user} (authenticated: {request.user.is_authenticated})")
+        logger.debug(f"[EXPORT ACTION] Drawing ID (pk): {pk}")
+        logger.debug(f"[EXPORT ACTION] Query params: {dict(request.query_params)}")
+        logger.debug(f"{'='*80}\n")
+
+        logger.debug(f"[EXPORT] ===== EXPORT REQUEST RECEIVED =====")
+        logger.debug(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
+        logger.debug(f"[EXPORT] Drawing ID: {pk}")
         
         # Enforce the same ownership boundary as the drawing detail endpoint.
         try:
             drawing = PIDDrawing.objects.get(id=pk, uploaded_by=request.user)
-            print(f"[EXPORT] Drawing found: {drawing.drawing_number}")
+            logger.debug(f"[EXPORT] Drawing found: {drawing.drawing_number}")
         except PIDDrawing.DoesNotExist:
-            print(f"[EXPORT ERROR] Drawing {pk} does not exist")
+            logger.debug(f"[EXPORT ERROR] Drawing {pk} does not exist")
             return Response(
                 {'error': f'Drawing {pk} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
         if not hasattr(drawing, 'analysis_report'):
-            print(f"[EXPORT ERROR] No analysis report available for drawing {pk}")
+            logger.debug(f"[EXPORT ERROR] No analysis report available for drawing {pk}")
             return Response(
                 {'error': 'No analysis report available'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        print(f"[EXPORT] Report found: {drawing.analysis_report.id}")
+        logger.debug(f"[EXPORT] Report found: {drawing.analysis_report.id}")
         
         export_format = request.query_params.get('format', 'pdf')
-        print(f"[EXPORT] Format requested: {export_format}")
+        logger.debug(f"[EXPORT] Format requested: {export_format}")
         
         export_service = PIDReportExportService()
         
         try:
-            print(f"[EXPORT] Starting export as {export_format}...")
+            logger.debug(f"[EXPORT] Starting export as {export_format}...")
             if export_format == 'pdf':
                 response = export_service.export_pdf(drawing)
             elif export_format == 'excel':
@@ -816,15 +819,15 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             elif export_format == 'csv':
                 response = export_service.export_csv(drawing)
             else:
-                print(f"[EXPORT ERROR] Invalid format: {export_format}")
+                logger.debug(f"[EXPORT ERROR] Invalid format: {export_format}")
                 return Response(
                     {'error': 'Invalid format. Use pdf, excel, or csv'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            print(f"[EXPORT] Export successful, returning {export_format} file")
+            logger.debug(f"[EXPORT] Export successful, returning {export_format} file")
             return response
         except Exception as e:
-            print(f"[EXPORT ERROR] Export failed: {str(e)}")
+            logger.debug(f"[EXPORT ERROR] Export failed: {str(e)}")
             import traceback
             traceback.print_exc()
             return Response(
@@ -977,13 +980,13 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
             response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
             response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
             return response
-        print(f"[INFO] Reference document upload request from user: {request.user}")
+        logger.debug(f"[INFO] Reference document upload request from user: {request.user}")
         
         # Validate request data
         serializer = ReferenceDocumentUploadSerializer(data=request.data)
         
         if not serializer.is_valid():
-            print(f"[ERROR] Validation failed: {serializer.errors}")
+            logger.debug(f"[ERROR] Validation failed: {serializer.errors}")
             return Response(
                 serializer.errors,
                 status=status.HTTP_400_BAD_REQUEST
@@ -1001,7 +1004,7 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
                 embedding_status='pending'
             )
             
-            print(f"[INFO] Created reference document: {ref_doc.title} (ID: {ref_doc.id})")
+            logger.debug(f"[INFO] Created reference document: {ref_doc.title} (ID: {ref_doc.id})")
             
             # Process document in background
             try:
@@ -1021,7 +1024,7 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
                 ref_doc.content_text = content_text
                 ref_doc.save()
                 
-                print(f"[INFO] Extracted {len(content_text)} characters from document")
+                logger.debug(f"[INFO] Extracted {len(content_text)} characters from document")
                 
                 # Add to RAG system (generate embeddings and store)
                 rag_service = RAGService()
@@ -1041,10 +1044,10 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
                 ref_doc.embedding_status = 'completed'
                 ref_doc.save()
                 
-                print(f"[INFO] Document embedded successfully with {len(chunk_data)} chunks")
+                logger.debug(f"[INFO] Document embedded successfully with {len(chunk_data)} chunks")
                 
             except Exception as e:
-                print(f"[ERROR] Document processing failed: {str(e)}")
+                logger.debug(f"[ERROR] Document processing failed: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 
@@ -1063,7 +1066,7 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
             )
             
         except Exception as e:
-            print(f"[ERROR] Upload failed: {str(e)}")
+            logger.debug(f"[ERROR] Upload failed: {str(e)}")
             import traceback
             traceback.print_exc()
             

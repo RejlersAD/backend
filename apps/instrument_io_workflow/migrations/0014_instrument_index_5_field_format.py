@@ -13,7 +13,10 @@ The instrument_classification lookup table (35 ISA-5.1-style codes,
 including the XZSC/XZSO entries added in 0013) is carried over unchanged
 under the renamed field key 'instrument_classification'.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'instrument_index'
 
@@ -110,7 +113,7 @@ def fix_forward(apps, schema_editor):
         description=NEW_DESCRIPTION,
         definition=NEW_DEFINITION,
     )
-    print(f'[instrument_io_workflow] Switched to 5-field format on {updated} '
+    logger.debug(f'[instrument_io_workflow] Switched to 5-field format on {updated} '
           f'{SECTION!r} legend row(s).')
 
 

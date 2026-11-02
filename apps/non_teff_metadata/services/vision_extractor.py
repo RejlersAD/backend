@@ -57,8 +57,8 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from django.conf import settings
-
 logger = logging.getLogger(__name__)
+
 
 
 # ---------------------------------------------------------------------------
@@ -300,18 +300,18 @@ def _has_tesseract() -> bool:
 def _render_page_to_pil(file_path: str, page_no: int, dpi: int):
     """Render *page_no* (0-based) of the PDF to a PIL.Image. Returns None on failure."""
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
     except ImportError:
         return None
     try:
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         if page_no >= doc.page_count:
             doc.close()
             return None
         page = doc.load_page(page_no)
         zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
         doc.close()

@@ -12,6 +12,9 @@ from decouple import config
 import json
 import datetime
 import os
+import logging
+logger = logging.getLogger(__name__)
+
 
 
 class CorsTestView(View):
@@ -91,11 +94,11 @@ def cors_health_check(request):
     origin = request.META.get('HTTP_ORIGIN', 'NO_ORIGIN')
     user_agent = request.META.get('HTTP_USER_AGENT', 'NO_USER_AGENT')[:100]
     
-    print(f"[CORS_HEALTH] === CORS HEALTH CHECK CALLED ===")
-    print(f"[CORS_HEALTH] Method: {request.method}")
-    print(f"[CORS_HEALTH] Origin: {origin}")
-    print(f"[CORS_HEALTH] User-Agent: {user_agent}")
-    print(f"[CORS_HEALTH] Path: {request.path}")
+    logger.debug("[CORS_HEALTH] Health check called")
+    logger.debug("[CORS_HEALTH] Method: %s", request.method)
+    logger.debug("[CORS_HEALTH] Origin: %s", origin)
+    logger.debug("[CORS_HEALTH] User-Agent: %s", user_agent)
+    logger.debug("[CORS_HEALTH] Path: %s", request.path)
     
     # Create comprehensive health response
     health_data = {
@@ -136,8 +139,8 @@ def cors_health_check(request):
         except json.JSONDecodeError:
             health_data['message'] = 'CORS POST test successful (invalid JSON)'
     
-    print(f"[CORS_HEALTH] Health check successful for {origin}")
-    print(f"[CORS_HEALTH] Response: {health_data['message']}")
+    logger.debug("[CORS_HEALTH] Health check successful for %s", origin)
+    logger.debug("[CORS_HEALTH] Response: %s", health_data['message'])
     
     # Return JSON response (CORS headers will be added by middleware)
     return JsonResponse(health_data, status=200)

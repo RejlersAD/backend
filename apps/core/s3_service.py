@@ -11,6 +11,7 @@ from datetime import datetime
 from django.conf import settings
 from botocore.exceptions import ClientError
 import logging
+logger = logging.getLogger(__name__)
 
 # Import unified folder configuration
 try:
@@ -18,9 +19,8 @@ try:
     UNIFIED_CONFIG_AVAILABLE = True
 except ImportError:
     UNIFIED_CONFIG_AVAILABLE = False
-    print("[WARNING] Unified folder config not available, using legacy folder structure")
+    logger.debug("[WARNING] Unified folder config not available, using legacy folder structure")
 
-logger = logging.getLogger(__name__)
 
 
 class S3Service:

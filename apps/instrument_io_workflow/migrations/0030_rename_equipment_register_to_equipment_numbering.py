@@ -7,7 +7,10 @@ definition untouched.
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'equipment_register'
 OLD_NAME = 'Main Equipment — XX-XX-AAAA-XX-XX-XX (default)'
@@ -17,7 +20,7 @@ NEW_NAME = 'Equipment Numbering — XX-XX-AAAA-XX-XX-XX (default)'
 def rename_forward(apps, schema_editor):
     IOListLegendSheet = apps.get_model('instrument_io_workflow', 'IOListLegendSheet')
     updated = IOListLegendSheet.objects.filter(section=SECTION, name=OLD_NAME).update(name=NEW_NAME)
-    print(f'[instrument_io_workflow] Relabelled {SECTION!r} legend name on {updated} row(s).')
+    logger.debug(f'[instrument_io_workflow] Relabelled {SECTION!r} legend name on {updated} row(s).')
 
 
 def rename_backward(apps, schema_editor):

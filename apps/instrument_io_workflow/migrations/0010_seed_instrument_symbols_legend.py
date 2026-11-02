@@ -7,7 +7,10 @@ name->name lookup table, regex matching any of the literal symbol names
 created_by is copied from an existing seeded legend rather than hardcoded,
 so this works the same regardless of which user owns the other 21 rows.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 LOOKUP = {
     'SELECTOR SWITCH - DCS': 'SELECTOR SWITCH - DCS',
@@ -78,7 +81,7 @@ def seed_forward(apps, schema_editor):
         definition=DEFINITION,
         is_active=True,
     )
-    print('[instrument_io_workflow] Seeded 1 legend for section=instrument_symbols.')
+    logger.debug('[instrument_io_workflow] Seeded 1 legend for section=instrument_symbols.')
 
 
 class Migration(migrations.Migration):

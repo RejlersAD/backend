@@ -36,15 +36,15 @@ import re
 import tempfile
 import time
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.utils import timezone
 
 from . import pdf_parse
 from .models import ValveMTOJob, ValveMTORow
-
 logger = logging.getLogger(__name__)
+
 
 JOB_STEPS = [
     'Reading text layer',
@@ -217,7 +217,7 @@ def run_extraction(job: ValveMTOJob, vision_provider: str = None, vision_api_key
     drawing.file.open('rb')
     pdf_bytes = drawing.file.read()
     drawing.file.close()
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     parsed = drawing.parsed or pdf_parse.parse_drawing(pdf_bytes, drawing.original_name)
     mark(0, 'done', f"{parsed.get('counts', {}).get('line_labels', 0)} line labels")
 

@@ -25,8 +25,8 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.utils.text import get_valid_filename
 import uuid
-
 logger = logging.getLogger(__name__)
+
 
 # ==============================================================================
 # SOFT-CODED CONFIGURATION
@@ -228,11 +228,11 @@ def extract_text_from_pdf_tesseract(pdf_bytes: bytes, *, max_pages: int | None =
     # Method 2: PyMuPDF text extraction (faster but worse for scanned PDFs)
     native_file_errors = ()
     try:
-        import fitz  # PyMuPDF
-        native_file_errors = (fitz.FileDataError,)
+        import pymupdf  # PyMuPDF
+        native_file_errors = (pymupdf.FileDataError,)
         logger.info('[PyMuPDF] Attempting text extraction...')
         full_text = ''
-        with fitz.open(stream=io.BytesIO(pdf_bytes), filetype='pdf') as doc:
+        with pymupdf.open(stream=io.BytesIO(pdf_bytes), filetype='pdf') as doc:
             if max_pages is not None and doc.needs_pass:
                 unreadable_document = True
                 raise PDFTextUnreadableError('The PDF is password protected.')

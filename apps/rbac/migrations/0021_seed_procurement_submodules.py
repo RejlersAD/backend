@@ -17,7 +17,10 @@ can be independently toggled per role in the Role Management panel:
 All new modules are idempotently created and granted to super_admin
 and admin roles.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded catalogue for this migration ───────────────────────────────────
 NEW_MODULES = [
@@ -82,21 +85,21 @@ def seed_procurement_submodules(apps, schema_editor):
             obj.save(using=db_alias)
         module_objs[m['code']] = obj
         action = 'created' if created else 'updated'
-        print(f'  [0021] ✓ Module {action}: {m["code"]}')
+        logger.debug(f'  [0021] ✓ Module {action}: {m["code"]}')
 
     # 2. Grant to target roles
     for role_code in GRANT_TO_ROLES:
         try:
             role = Role.objects.using(db_alias).get(code=role_code)
         except Role.DoesNotExist:
-            print(f'  [0021] ⚠ Role not found: {role_code} — skipping')
+            logger.debug(f'  [0021] ⚠ Role not found: {role_code} — skipping')
             continue
         for mod in module_objs.values():
             _, created = RoleModule.objects.using(db_alias).get_or_create(
                 role=role, module=mod,
             )
             if created:
-                print(f'  [0021] ✓ Granted {mod.code} → {role_code}')
+                logger.debug(f'  [0021] ✓ Granted {mod.code} → {role_code}')
 
 
 def noop(apps, schema_editor):

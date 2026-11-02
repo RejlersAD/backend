@@ -25,7 +25,10 @@ Only the exact seeded default row is touched (matched by name).
 pid_checker_v2 only — apps.instrument_io_workflow is not touched by, and
 does not read, this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'line_list'
 NAME = 'Line List — XX-AA-XXXX-XXXXXX-X-X (default)'
@@ -85,7 +88,7 @@ def apply_forward(apps, schema_editor):
             lookup.update(NEW_CODES)
             lookup.update(UPDATED_COMPATIBLE)
             added = set(lookup.keys()) - before
-            print(f'[pid_checker_v2] Added {len(added)} new service code(s) to {SECTION!r}: {sorted(added)}')
+            logger.debug(f'[pid_checker_v2] Added {len(added)} new service code(s) to {SECTION!r}: {sorted(added)}')
     row.definition = definition
     row.save(update_fields=['definition'])
 

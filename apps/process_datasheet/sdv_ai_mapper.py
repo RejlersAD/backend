@@ -9,8 +9,8 @@ from typing import Dict, List, Optional
 from openai import OpenAI
 from django.conf import settings
 import json
-
 logger = logging.getLogger(__name__)
+
 
 
 def log_and_print(message):
@@ -488,10 +488,10 @@ def test_ai_mapper():
     mapper = SDVDatasheetAIMapper()
     result = mapper.map_pid_hmb_to_datasheet(sample_pid_data, sample_hmb_data)
     
-    print(json.dumps(result, indent=2))
+    logger.debug(json.dumps(result, indent=2))
     
     validation = mapper.validate_mapped_data(result)
-    print(f"\nValidation: {validation}")
+    logger.debug(f"\nValidation: {validation}")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,10 @@ merged with, not replacing, the existing signal-type entries.
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'signal_line_types'
 NAME = 'Line Representation — Signal Type (default)'
@@ -40,7 +43,7 @@ def add_forward(apps, schema_editor):
             field.setdefault('lookup', {}).update(NEW_ENTRIES)
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[instrument_io_workflow] Added {len(NEW_ENTRIES)} line-representation entries to {SECTION!r}.')
+    logger.debug(f'[instrument_io_workflow] Added {len(NEW_ENTRIES)} line-representation entries to {SECTION!r}.')
 
 
 def add_backward(apps, schema_editor):

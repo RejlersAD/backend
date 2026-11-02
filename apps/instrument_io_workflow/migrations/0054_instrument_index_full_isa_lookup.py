@@ -26,7 +26,10 @@ Only the exact seeded default row is touched (matched by name).
 I/O List only — apps.pid_checker_v2 / apps.pid_verification are not
 touched by, and do not read, this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'instrument_index'
 NAME = 'Instrument Tagging — [XX-[XX-]]AAAA-XXXXB[-X] (default)'
@@ -294,7 +297,7 @@ def apply_forward(apps, schema_editor):
             field['lookup'] = NEW_LOOKUP
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[instrument_io_workflow] Set {SECTION!r} lookup to {len(NEW_LOOKUP)} entries '
+    logger.debug(f'[instrument_io_workflow] Set {SECTION!r} lookup to {len(NEW_LOOKUP)} entries '
           f'({len(FULL_ISA_LOOKUP)} from the ISA sheet + {len(PRESERVED_LEGACY_LOOKUP)} preserved).')
 
 

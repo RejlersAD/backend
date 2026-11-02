@@ -3,6 +3,8 @@ Site Visit Tracking — DRF ViewSets and APIViews
 ================================================
 REST API endpoints for managing client sites, visit requests, and check-ins.
 """
+
+import logging
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -22,6 +24,7 @@ from .serializers import (
 )
 from . import config as site_config
 from apps.rbac.approval_eligibility import guarded_business_approval
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -374,4 +377,4 @@ class SiteVisitCheckInViewSet(viewsets.ModelViewSet):
                 )
         except Exception as e:
             # Don't fail the check-in/out if timesheet sync fails
-            print(f'Warning: Failed to sync to timesheet: {e}')
+            logger.debug(f'Warning: Failed to sync to timesheet: {e}')

@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-import fitz
+import pymupdf
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import resolve
 
@@ -189,7 +189,7 @@ class RequisitionPartialLinesAPITests(TestCase):
         response = self.client.get(url + 'export_pdf/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response['Content-Type'], 'application/pdf')
-        with fitz.open(stream=response.content, filetype='pdf') as document:
+        with pymupdf.open(stream=response.content, filetype='pdf') as document:
             text = '\n'.join(page.get_text() for page in document)
         self.assertIn('Pending price detail', text)
         self.assertIn('100.00', text)

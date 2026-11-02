@@ -23,8 +23,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
 logger = logging.getLogger(__name__)
+
 
 # ── Config path ───────────────────────────────────────────────────────────────
 _CONFIG_PATH = (
@@ -275,14 +275,14 @@ def run_deterministic_checks(tags: List[str], raw_text: str, config: Dict[str, A
 def _render_page_to_b64(file_path: str, page_index: int = 0) -> Optional[str]:
     """Render a PDF or image page to base64-encoded PNG for AI vision."""
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
         ext = Path(file_path).suffix.lower().lstrip(".")
         if ext == "pdf":
-            doc = fitz.open(file_path)
+            doc = pymupdf.open(file_path)
             if page_index >= len(doc):
                 page_index = 0
             page = doc[page_index]
-            mat = fitz.Matrix(2.0, 2.0)  # approx 150 dpi
+            mat = pymupdf.Matrix(2.0, 2.0)  # approx 150 dpi
             pix = page.get_pixmap(matrix=mat, alpha=False)
             png_bytes = pix.tobytes("png")
             doc.close()

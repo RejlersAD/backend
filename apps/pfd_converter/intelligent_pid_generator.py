@@ -25,14 +25,14 @@ import openai
 from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 from django.conf import settings
+logger = logging.getLogger(__name__)
 
 try:
-    import fitz  # PyMuPDF
+    import pymupdf  # PyMuPDF
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
 
-logger = logging.getLogger(__name__)
 
 # Initialize OpenAI
 client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
@@ -353,10 +353,10 @@ Make it detailed and complete."""
         """Convert PDF to image if needed"""
         if file_path.lower().endswith('.pdf'):
             if HAS_PYMUPDF:
-                doc = fitz.open(file_path)
+                doc = pymupdf.open(file_path)
                 page = doc[0]
                 zoom = 300 / 72
-                mat = fitz.Matrix(zoom, zoom)
+                mat = pymupdf.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat)
                 
                 image_path = file_path.replace('.pdf', '_converted.png')

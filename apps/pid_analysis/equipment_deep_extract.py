@@ -42,8 +42,8 @@ from apps.core.ai_consumer_clients import (
     lazy_provider_client,
 )
 from apps.core.ai_credentials import get_provider_configuration
-
 logger = logging.getLogger(__name__)
+
 
 # Register schema fields the AI may return (mirrors _pid_item_to_register_schema
 # keys; sl_no is assigned during merge).  Soft-coded prompt picks this up.
@@ -81,22 +81,22 @@ def _provider_ready(provider: str) -> bool:
 
 def _render_page_images(file_bytes: bytes, deep_cfg: dict) -> list:
     """Render PDF pages to base64 PNG strings, capped for vision payloads."""
-    import fitz
+    import pymupdf
 
     max_pages = int(deep_cfg.get('max_pages', 6))
     dpi = int(deep_cfg.get('dpi', 150))
     max_edge = int(deep_cfg.get('max_image_edge_px', 2400))
     zoom = dpi / 72.0
     images = []
-    with fitz.open(stream=file_bytes, filetype='pdf') as doc:
+    with pymupdf.open(stream=file_bytes, filetype='pdf') as doc:
         for page in doc:
             if len(images) >= max_pages:
                 break
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
             long_edge = max(pix.width, pix.height)
             if long_edge > max_edge:
                 shrink = max_edge / long_edge
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom * shrink, zoom * shrink))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom * shrink, zoom * shrink))
             images.append(base64.b64encode(pix.tobytes('png')).decode('ascii'))
     return images
 

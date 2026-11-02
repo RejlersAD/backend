@@ -13,7 +13,10 @@ Only the exact seeded default row is touched (matched by name).
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'instrument_index'
 OLD_NAME = 'Instrument Index — NNN-AAAA-XXXXB (default)'
@@ -110,7 +113,7 @@ def update_forward(apps, schema_editor):
     updated = IOListLegendSheet.objects.filter(section=SECTION, name=OLD_NAME).update(
         name=NEW_NAME, description=NEW_DESCRIPTION, definition=NEW_DEFINITION,
     )
-    print(f'[instrument_io_workflow] Made {SECTION!r} accept flexible 2-5 part tags on {updated} row(s).')
+    logger.debug(f'[instrument_io_workflow] Made {SECTION!r} accept flexible 2-5 part tags on {updated} row(s).')
 
 
 def update_backward(apps, schema_editor):

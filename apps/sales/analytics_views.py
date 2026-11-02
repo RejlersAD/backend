@@ -1,33 +1,30 @@
 """
 Sales Intelligence Analytics Views
 ===================================
-Generates sales-relevant intelligence from REAL platform data:
-  - system_activity  (11k+ API request records)
-  - users            (56 registered users)
-  - rbac_user_profiles (department / job_title info)
-  - user_session     (live session data)
+Generates sales intelligence from GOVERNED CRM data:
+  - Deal (Opportunity)         — pipeline, stages, values, probabilities
+  - SalesForecast              — AI forecasts and actuals
+  - ProjectHandover            — conversion-to-delivery evidence
+  - Client                     — account intelligence
 
-No CRM tables are required — all insights are derived from
-actual usage patterns, user registration data, and engagement metrics.
-
-Soft-coded strategy:
-  ENGAGEMENT_STAGES  — activity thresholds → pipeline stage assignment
-  COMPANY_TIER_THRESHOLDS — user count → tier
-  INSIGHT_RULES      — generates AI-style observations from metrics
+All values reconcile to persisted opportunity/proposal/handover records.
+No synthetic values are manufactured.
 """
-from datetime import timedelta, date
-from collections import defaultdict
-import hashlib
-import json
+from datetime import timedelta
+from decimal import Decimal
 import logging
 
-from django.db.models import Count, Max, Avg, Min
+from django.db.models import Count, Sum, Avg, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
+from django.contrib.auth import get_user_model
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.data_visibility_config import build_visibility_filter
+
+from .models import Deal, SalesForecast, ProjectHandover, Client
 
 logger = logging.getLogger(__name__)
 
@@ -35,260 +32,32 @@ logger = logging.getLogger(__name__)
 # SOFT-CODED CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Maps request count → pipeline stage
-ENGAGEMENT_STAGES = [
-    (500, 'negotiation'),
-    (100, 'proposal'),
-    (20,  'qualified'),
-    (1,   'lead'),
-    (0,   'lead'),
-]
-
-# Maps user count per company → client tier
-COMPANY_TIER_THRESHOLDS = [
-    (10, 'enterprise'),
-    (5,  'premium'),
-    (2,  'standard'),
-    (1,  'basic'),
-]
-
-# Maps email domain → industry label (soft-coded so teams can extend later)
-DOMAIN_INDUSTRY_MAP = {
-    'rejlers.ae':      'Engineering & Consulting',
-    'radai.ae':        'AI Software Platform',
-    'engineering.ae':  'Engineering Services',
-    'consultant.ae':   'Consulting Services',
-    'gmail.com':       'Individual User',
-    'outlook.com':     'Individual User',
-}
-
-# Discipline key → compact label
-DISCIPLINE_MAP = [
-    ('pid',                  'Process (P&ID)'),
-    ('pfd',                  'Digitization (PFD)'),
-    ('process-datasheet',    'Process Datasheet'),
-    ('electrical-datasheet', 'Electrical Datasheet'),
-    ('crs',                  'CRS Documents'),
-    ('designiq',             'DesignIQ'),
-    ('finance',              'Finance'),
-    ('procurement',          'Procurement'),
-    ('qhse',                 'QHSE'),
-    ('projects',             'Project Control'),
-    ('sales',                'Sales'),
-    ('rbac',                 'Admin / RBAC'),
-    ('users',                'User Management'),
-    ('notifications',        'Notifications'),
-]
-
-# Stage display info (mirrors frontend CONFIG.pipelineStages).
-# Soft-coded per-stage AED value ranges + win probability ranges + close-date
-# horizons. All numeric output is derived from these maps so a tweak here
-# uniformly rebalances the synthesised pipeline.
-#
-# Ranges reflect realistic Oil & Gas / Engineering EPC services contracts
-# in the UAE (AED). Values inside a range are picked deterministically per
-# company via a stable hash so KPIs don't flicker between requests.
-STAGE_META = {
-    'lead':        {'label': 'Lead',        'order': 1, 'value_min':    60_000, 'value_max':   180_000, 'win_min':  5, 'win_max': 15, 'days_min':  90, 'days_max': 180},
-    'qualified':   {'label': 'Qualified',   'order': 2, 'value_min':   180_000, 'value_max':   600_000, 'win_min': 20, 'win_max': 35, 'days_min':  60, 'days_max': 120},
-    'proposal':    {'label': 'Proposal',    'order': 3, 'value_min':   600_000, 'value_max': 2_500_000, 'win_min': 45, 'win_max': 65, 'days_min':  30, 'days_max':  90},
-    'negotiation': {'label': 'Negotiation', 'order': 4, 'value_min': 2_500_000, 'value_max': 8_000_000, 'win_min': 70, 'win_max': 85, 'days_min':  15, 'days_max':  45},
-    'closed_won':  {'label': 'Won ✓',       'order': 5, 'value_min': 1_200_000, 'value_max':15_000_000, 'win_min':100, 'win_max':100, 'days_min':   0, 'days_max':   0},
-    'closed_lost': {'label': 'Lost',        'order': 6, 'value_min':         0, 'value_max':         0, 'win_min':  0, 'win_max':  0, 'days_min':   0, 'days_max':   0},
-}
-
-# Tier multiplier applied on top of the per-stage range (enterprise prospects
-# negotiate larger contracts).
-TIER_VALUE_MULTIPLIER = {
-    'enterprise': 1.40,
-    'premium':    1.15,
-    'standard':   1.00,
-    'basic':      0.85,
-}
-
-# Discipline-coverage bonus: each engineering discipline a company actively
-# uses signals broader scope, so add up to +30% based on coverage breadth.
-DISCIPLINE_BREADTH_BONUS_PCT = 0.06   # +6% per discipline used (capped at +30%)
-DISCIPLINE_BREADTH_BONUS_CAP = 0.30
-
-# Currency (frontend reads this back from API to keep formatting consistent).
-CURRENCY_CODE   = 'AED'
-CURRENCY_LOCALE = 'en-AE'
-
-# Closed_won / closed_lost detection thresholds (soft-coded).
-CLOSED_WON_MIN_REQUESTS  = 1500   # very-high engagement
-CLOSED_WON_MIN_USERS     = 5      # broad team adoption
-CLOSED_LOST_INACTIVE_DAYS = 60    # stale lead with prior activity
-CLOSED_LOST_MIN_PRIOR_REQUESTS = 50
-
-# S3 cache for the heavy aggregation (re-used by /pipeline + /clients /
-# /forecast endpoints). TTL keeps the dashboard snappy without showing
-# stale numbers.
-S3_CACHE_PREFIX     = 'sales-analytics'
-S3_CACHE_TTL_SECONDS = 600        # 10 minutes
-
-ANALYSIS_WINDOW_DAYS = 30   # default lookback for analytics
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _get_activity_model():
-    from apps.activity.models import SystemActivity
-    return SystemActivity
 
 
-def _get_user_model():
-    from django.contrib.auth import get_user_model
-    return get_user_model()
 
 
-def _classify_discipline(description):
-    """Extract (key, label) from a SystemActivity description string."""
-    if not description:
-        return 'other', 'Other'
-    # description format: 'GET /api/v1/{key}/...'
-    parts = description.split(' ', 1)
-    path = parts[1] if len(parts) > 1 else parts[0]
-    path_lower = path.lower()
-    for key, label in DISCIPLINE_MAP:
-        if f'/{key}/' in path_lower or f'/{key}' == path_lower.rstrip('/').split('?')[0][-len(key)-1:]:
-            return key, label
-    return 'other', 'Other'
 
 
-def _engagement_stage(request_count):
-    """Map total request count to pipeline stage key."""
-    for threshold, stage in ENGAGEMENT_STAGES:
-        if request_count >= threshold:
-            return stage
-    return 'lead'
+
+# Non-terminal pipeline stages (active sales pipeline)
+OPEN_PIPELINE_STAGES = {'lead', 'qualified', 'proposal', 'negotiation', 'award_pending'}
+
+# Terminal stages
+TERMINAL_STAGES = {'no_bid', 'lost', 'cancelled', 'converted'}
+
+# Won stages (for win-rate / won-value calculations)
+WON_STAGES = {'awarded'}
 
 
-def _company_tier(user_count):
-    for threshold, tier in COMPANY_TIER_THRESHOLDS:
-        if user_count >= threshold:
-            return tier
-    return 'basic'
+def _visibility_qs(request, model_class):
+    """Apply role-scoped tenant filtering to a model queryset."""
+    filter_q = build_visibility_filter(request.user, model_class)
+    return model_class.objects.filter(filter_q)
 
 
-def _stable_unit(seed: str) -> float:
-    """Return a stable float in [0, 1) derived from `seed`. Same seed always
-    yields the same number, so deal values and close dates don't flicker
-    between requests for a given company."""
-    h = hashlib.sha256(seed.encode('utf-8')).hexdigest()
-    return int(h[:8], 16) / 0xFFFFFFFF
 
-
-def _realistic_deal_value(*, domain: str, stage: str, tier: str, discipline_count: int, requests: int) -> float:
-    """Compute a realistic AED deal value from the soft-coded STAGE_META range,
-    with a deterministic per-company variance, tier multiplier, and
-    discipline-breadth bonus.
-    """
-    meta = STAGE_META.get(stage, STAGE_META['lead'])
-    lo, hi = meta['value_min'], meta['value_max']
-    if hi <= lo:
-        return float(lo)
-
-    # 1. Base value: deterministic point inside the stage range.
-    base = lo + _stable_unit(f'{domain}|value|{stage}') * (hi - lo)
-
-    # 2. Tier multiplier (enterprise prospects = larger contracts).
-    base *= TIER_VALUE_MULTIPLIER.get(tier, 1.0)
-
-    # 3. Discipline-breadth bonus (capped).
-    bonus = min(discipline_count * DISCIPLINE_BREADTH_BONUS_PCT, DISCIPLINE_BREADTH_BONUS_CAP)
-    base *= (1.0 + bonus)
-
-    # 4. Engagement nudge: very-active accounts skew toward the upper part of
-    #    the band (caps at +10% to avoid double-counting tier).
-    nudge = min(requests / 5000.0, 0.10)
-    base *= (1.0 + nudge)
-
-    # Round to nearest AED 5,000 for clean dashboard numbers.
-    return round(base / 5000.0) * 5000.0
-
-
-def _realistic_win_probability(*, domain: str, stage: str) -> int:
-    """Pick a stable win probability inside the stage's band."""
-    meta = STAGE_META.get(stage, STAGE_META['lead'])
-    lo, hi = meta['win_min'], meta['win_max']
-    if hi <= lo:
-        return int(lo)
-    return int(lo + _stable_unit(f'{domain}|winprob|{stage}') * (hi - lo))
-
-
-def _realistic_close_date(*, domain: str, stage: str):
-    """Pick a stable expected close date inside the stage's day-horizon band."""
-    meta = STAGE_META.get(stage, STAGE_META['lead'])
-    lo, hi = meta['days_min'], meta['days_max']
-    if hi <= lo:
-        days = lo
-    else:
-        days = int(lo + _stable_unit(f'{domain}|close|{stage}') * (hi - lo))
-    return (timezone.now() + timedelta(days=days)).date().isoformat()
-
-
-def _resolve_pipeline_stage(*, requests: int, recent_requests: int, user_count: int, last_seen, now) -> str:
-    """Pick the pipeline stage including closed_won / closed_lost detection.
-
-    Soft-coded rules (override the simple ENGAGEMENT_STAGES ladder):
-      - closed_won  : sustained high engagement + broad team adoption
-      - closed_lost : significant prior activity but inactive for too long
-      - else        : fall back to engagement-count ladder
-    """
-    if last_seen and (now - last_seen).days >= CLOSED_LOST_INACTIVE_DAYS and requests >= CLOSED_LOST_MIN_PRIOR_REQUESTS:
-        return 'closed_lost'
-    if requests >= CLOSED_WON_MIN_REQUESTS and user_count >= CLOSED_WON_MIN_USERS and recent_requests > 0:
-        return 'closed_won'
-    return _engagement_stage(requests)
-
-
-def _cache_to_s3(kind: str, payload: dict) -> None:
-    """Persist an analytics snapshot to S3 for caching + audit history.
-
-    Reuses the existing smart_storage S3 client (region/SigV4 already
-    configured). The API response is not blocked on S3 success — caller
-    wraps in a try/except.
-    """
-    try:
-        from apps.electrical_datasheet.smart_storage import smart_storage
-    except Exception:
-        return
-    if not getattr(smart_storage, 'is_enabled', lambda: False)():
-        return
-    ts = timezone.now().strftime('%Y%m%dT%H%M%S')
-    key = f'{S3_CACHE_PREFIX}/{kind}/{ts}.json'
-    try:
-        smart_storage.client.put_object(
-            Bucket=getattr(__import__('apps.electrical_datasheet.smart_storage', fromlist=['S3_BUCKET']), 'S3_BUCKET'),
-            Key=key,
-            Body=json.dumps(payload, default=str).encode('utf-8'),
-            ContentType='application/json',
-            Metadata={'kind': kind, 'cached-at': timezone.now().isoformat()},
-        )
-    except Exception as exc:
-        logger.warning(f'[sales-analytics] put_object failed: {exc}')
-
-
-def _domain_from_email(email):
-    """Extract domain from email address."""
-    return email.split('@')[-1] if '@' in email else 'unknown'
-
-
-def _company_name_from_domain(domain):
-    """Convert email domain to a human-readable company name."""
-    name_map = {
-        'rejlers.ae':     'Rejlers Engineering',
-        'radai.ae':       'RAD AI Platform',
-        'engineering.ae': 'Engineering Services AE',
-        'consultant.ae':  'Consultant AE',
-    }
-    if domain in name_map:
-        return name_map[domain]
-    parts = domain.split('.')
-    return ' '.join(w.capitalize() for w in parts[:-1]) or domain
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,193 +67,92 @@ def _company_name_from_domain(domain):
 class SalesPipelineAnalyticsView(APIView):
     """
     GET /api/v1/sales/analytics/pipeline/
-    Returns pipeline summary synthesised from real platform usage data.
-    Groups users by email domain as "client companies".
-    Assigns pipeline stage based on engagement depth.
+    Returns pipeline analytics aggregated over governed Deal (Opportunity),
+    SalesForecast, and ProjectHandover records.
+
+    Filters:
+      - is_deleted=False (soft-deleted opportunities excluded)
+      - Non-terminal stages for active pipeline
+      - Role-scoped tenant filtering via build_visibility_filter
     """
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
 
     def get(self, request):
-        SystemActivity = _get_activity_model()
-        User = _get_user_model()
+        # ── Base queryset: non-deleted opportunities ────────────────────────
+        base_qs = _visibility_qs(request, Deal).filter(is_deleted=False)
 
-        cutoff = timezone.now() - timedelta(days=ANALYSIS_WINDOW_DAYS)
-        week_ago = timezone.now() - timedelta(days=7)
+        # ── Active pipeline (non-terminal stages) ───────────────────────────
+        pipeline_qs = base_qs.filter(stage__in=OPEN_PIPELINE_STAGES)
 
-        # ── 1. Get all users grouped by email domain ──────────────────────
-        users = list(User.objects.values('id', 'email', 'first_name', 'last_name', 'is_active', 'date_joined', 'last_login'))
+        # ── Won deals ───────────────────────────────────────────────────────
+        won_qs = base_qs.filter(stage__in=WON_STAGES)
 
-        # ── 2. Activity counts per email ──────────────────────────────────
-        activity_qs = (
-            SystemActivity.objects
-            .filter(timestamp__gte=cutoff)
-            .exclude(user_email='')
-            .values('user_email')
-            .annotate(
-                total=Count('id'),
-                last_seen=Max('timestamp'),
-                first_seen=Min('timestamp'),
-                avg_ms=Avg('duration_ms'),
-            )
+        # ── Totals (guard: incomplete values return None, not zero) ─────────
+        def _safe_sum(qs, field):
+            """Return None if any record is missing the field or currency."""
+            if qs.filter(Q(**{f'{field}__isnull': True}) | Q(currency='')).exists():
+                return None
+            return qs.aggregate(total=Sum(field))['total'] or Decimal('0')
+
+        pipeline_value = _safe_sum(pipeline_qs, 'estimated_value')
+        won_value = _safe_sum(won_qs, 'actual_value') or _safe_sum(won_qs, 'estimated_value')
+
+        # ── Deal counts by stage ────────────────────────────────────────────
+        stage_counts = (
+            base_qs.values('stage')
+            .annotate(deal_count=Count('id'))
+            .order_by('stage')
         )
-        activity_map = {r['user_email']: r for r in activity_qs}
+        stage_count_map = {r['stage']: r['deal_count'] for r in stage_counts}
 
-        # ── 3. Discipline coverage per email (last 30 days) ───────────────
-        disc_by_email = defaultdict(set)
-        for row in SystemActivity.objects.filter(timestamp__gte=cutoff).exclude(user_email='').values('user_email', 'description'):
-            key, _ = _classify_discipline(row['description'])
-            disc_by_email[row['user_email']].add(key)
-
-        # ── 4. Recent activity (last 7 days) per email ────────────────────
-        recent_map = {}
-        for r in SystemActivity.objects.filter(timestamp__gte=week_ago).exclude(user_email='').values('user_email').annotate(cnt=Count('id')):
-            recent_map[r['user_email']] = r['cnt']
-
-        # ── 5. Group users by domain → companies ─────────────────────────
-        companies = defaultdict(lambda: {
-            'users': [], 'total_requests': 0, 'last_seen': None,
-            'disciplines': set(), 'recent_requests': 0, 'first_seen': None,
-        })
-
-        for u in users:
-            email = u['email']
-            domain = _domain_from_email(email)
-            act = activity_map.get(email, {})
-            companies[domain]['users'].append(u)
-            companies[domain]['total_requests'] += act.get('total', 0)
-            companies[domain]['recent_requests'] += recent_map.get(email, 0)
-            companies[domain]['disciplines'].update(disc_by_email.get(email, set()))
-            ls = act.get('last_seen')
-            if ls and (not companies[domain]['last_seen'] or ls > companies[domain]['last_seen']):
-                companies[domain]['last_seen'] = ls
-            fs = act.get('first_seen') or u.get('date_joined')
-            if fs and (not companies[domain]['first_seen'] or fs < companies[domain]['first_seen']):
-                companies[domain]['first_seen'] = fs
-
-        # ── 6. Build deals (one per company) ──────────────────────────────
-        deals = []
-        stage_counts = defaultdict(lambda: {'deal_count': 0, 'total_value': 0})
-        total_pipeline = 0
-        won_value = 0
-
-        for i, (domain, data) in enumerate(companies.items()):
-            company_name = _company_name_from_domain(domain)
-            requests = data['total_requests']
-            tier = _company_tier(len(data['users']))
-
-            # Stage with closed_won / closed_lost detection.
-            stage = _resolve_pipeline_stage(
-                requests=requests,
-                recent_requests=data['recent_requests'],
-                user_count=len(data['users']),
-                last_seen=data['last_seen'],
-                now=timezone.now(),
-            )
-
-            disc_list = sorted(data['disciplines'] - {'other'})
-
-            # Realistic AED deal value (stable per-company hash + tier + breadth).
-            est_value = _realistic_deal_value(
-                domain=domain,
-                stage=stage,
-                tier=tier,
-                discipline_count=len(disc_list),
-                requests=requests,
-            )
-
-            # Realistic win probability + close date inside the stage band.
-            win_prob = _realistic_win_probability(domain=domain, stage=stage)
-            expected_close = _realistic_close_date(domain=domain, stage=stage)
-
-            # Days since first engagement
-            first_seen = data['first_seen']
-            days_in_pipeline = 0
-            if first_seen:
-                fs_aware = first_seen if hasattr(first_seen, 'tzinfo') and first_seen.tzinfo else timezone.make_aware(first_seen) if not hasattr(first_seen, 'tzinfo') else first_seen
-                try:
-                    days_in_pipeline = (timezone.now() - fs_aware).days
-                except Exception:
-                    days_in_pipeline = 30
-
-            # Priority based on recent activity
-            if data['recent_requests'] > 100:
-                priority = 'high'
-            elif data['recent_requests'] > 20:
-                priority = 'medium'
-            else:
-                priority = 'low'
-
-            deal = {
-                'id':                 i + 1,
-                'title':              f'{company_name} — Platform Engagement',
-                'client':             company_name,
-                'client_name':        company_name,
-                'stage':              stage,
-                'value':              est_value,
-                'deal_value':         est_value,
-                'currency':           CURRENCY_CODE,
-                'win_probability':    win_prob,
-                'win_prob':           win_prob,
-                'priority':           priority,
-                'expected_close_date': expected_close,
-                'domains_active':     list(disc_list)[:5],
-                'user_count':         len(data['users']),
-                'total_requests':     requests,
-                'recent_requests':    data['recent_requests'],
-                'days_in_pipeline':   days_in_pipeline,
-                'tier':               tier,
-            }
-
-            deals.append(deal)
-
-            stage_counts[stage]['deal_count'] += 1
-            stage_counts[stage]['total_value'] += est_value
-
-            if stage not in ('closed_lost',):
-                total_pipeline += est_value
-            if stage == 'closed_won':
-                won_value += est_value
-
-        # ── 7. Stage summary list (sorted by pipeline order) ──────────────
+        # ── Stage labels (mirrors models.DEAL_STAGES) ───────────────────────
+        from .models import DEAL_STAGES
         by_stage = []
-        for stage_key, meta in sorted(STAGE_META.items(), key=lambda x: x[1]['order']):
-            sc = stage_counts.get(stage_key, {'deal_count': 0, 'total_value': 0})
+        for stage_key in sorted(DEAL_STAGES.keys(), key=lambda k: DEAL_STAGES[k]['order']):
             by_stage.append({
                 'stage':       stage_key,
-                'stage_label': meta['label'],
-                'deal_count':  sc['deal_count'],
-                'total_value': round(sc['total_value'], -3),
+                'stage_label': DEAL_STAGES[stage_key]['name'],
+                'deal_count':  stage_count_map.get(stage_key, 0),
+                'order':       DEAL_STAGES[stage_key]['order'],
+                'is_terminal': stage_key in TERMINAL_STAGES,
             })
 
-        total_closed = stage_counts.get('closed_won', {}).get('deal_count', 0) + \
-                       stage_counts.get('closed_lost', {}).get('deal_count', 0)
-        win_rate = round(stage_counts.get('closed_won', {}).get('deal_count', 0) / max(total_closed, 1) * 100, 1)
+        # ── Forecast aggregates ─────────────────────────────────────────────
+        forecast_qs = _visibility_qs(request, SalesForecast)
+        forecast_next_month = forecast_qs.aggregate(
+            total=Sum('forecast_value')
+        )['total'] or Decimal('0')
 
-        # Avg days in pipeline across all deals (non-zero)
-        avg_days = round(sum(d['days_in_pipeline'] for d in deals) / max(len(deals), 1))
+        # ── Handover evidence ───────────────────────────────────────────────
+        handover_qs = _visibility_qs(request, ProjectHandover)
+        handover_count = handover_qs.count()
+        handover_completed = handover_qs.filter(status='accepted').count()
+
+        # ── Win rate ────────────────────────────────────────────────────────
+        total_closed = stage_count_map.get('awarded', 0) + stage_count_map.get('lost', 0)
+        win_rate = round(stage_count_map.get('awarded', 0) / max(total_closed, 1) * 100, 1)
+
+        # ── Avg deal size (won) ─────────────────────────────────────────────
+        won_deals_for_avg = won_qs.exclude(actual_value__isnull=True).exclude(currency='')
+        avg_deal_size = won_deals_for_avg.aggregate(avg=Avg('actual_value'))['avg']
 
         payload = {
-            'total_deals':          len(deals),
-            'total_pipeline_value': round(total_pipeline, -3),
-            'total_value':          round(total_pipeline, -3),
-            'won_value':            round(won_value, -3),
-            'won_deals':            stage_counts.get('closed_won', {}).get('deal_count', 0),
-            'win_rate':             win_rate,
-            'avg_deal_days':        avg_days,
-            'avg_cycle_days':       avg_days,
-            'currency':             CURRENCY_CODE,
-            'currency_locale':      CURRENCY_LOCALE,
-            'by_stage':             by_stage,
-            'deals':                sorted(deals, key=lambda d: -d['total_requests']),
-            'generated_at':         timezone.now().isoformat(),
+            'total_opportunities': base_qs.count(),
+            'active_pipeline_count': pipeline_qs.count(),
+            'total_pipeline_value': pipeline_value,
+            'won_value': won_value,
+            'won_deals': stage_count_map.get('awarded', 0),
+            'lost_deals': stage_count_map.get('lost', 0),
+            'win_rate': win_rate,
+            'avg_deal_size': float(avg_deal_size) if avg_deal_size is not None else None,
+            'forecast_next_month': float(forecast_next_month),
+            'handover_count': handover_count,
+            'handover_completed': handover_completed,
+            'currency': 'AED',
+            'by_stage': by_stage,
+            'generated_at': timezone.now().isoformat(),
         }
-        # Best-effort S3 snapshot (cache + audit history). Failures are logged
-        # but never break the API response.
-        try:
-            _cache_to_s3('pipeline', payload)
-        except Exception as exc:
-            logger.warning(f'[sales-analytics] S3 cache write failed: {exc}')
 
         return Response(payload)
 
@@ -492,108 +160,67 @@ class SalesPipelineAnalyticsView(APIView):
 class SalesClientsAnalyticsView(APIView):
     """
     GET /api/v1/sales/analytics/clients/
-    Returns top clients + at-risk clients derived from usage patterns.
+    Returns client analytics aggregated over governed Client records with
+    related Deal (Opportunity) pipeline data.
+
+    Filters:
+      - Role-scoped tenant filtering via build_visibility_filter
     """
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
 
     def get(self, request):
-        SystemActivity = _get_activity_model()
-        User = _get_user_model()
+        # ── Base client queryset with visibility filter ─────────────────────
+        base_qs = _visibility_qs(request, Client)
 
-        cutoff = timezone.now() - timedelta(days=ANALYSIS_WINDOW_DAYS)
-        week_ago = timezone.now() - timedelta(days=7)
-
-        users = list(User.objects.values('id', 'email', 'first_name', 'last_name', 'is_active', 'date_joined'))
-
-        activity_qs = (
-            SystemActivity.objects
-            .filter(timestamp__gte=cutoff)
-            .exclude(user_email='')
-            .values('user_email')
-            .annotate(total=Count('id'), last_seen=Max('timestamp'))
+        # ── Annotate each client with deal pipeline ─────────────────────────
+        clients_qs = base_qs.annotate(
+            deal_count=Count('deals', filter=Q(deals__is_deleted=False)),
+            pipeline_value=Sum(
+                'deals__estimated_value',
+                filter=Q(deals__is_deleted=False, deals__stage__in=OPEN_PIPELINE_STAGES),
+            ),
+            won_value=Sum(
+                'deals__actual_value',
+                filter=Q(deals__is_deleted=False, deals__stage__in=WON_STAGES),
+            ),
         )
-        activity_map = {r['user_email']: r for r in activity_qs}
 
-        recent_map = {}
-        for r in SystemActivity.objects.filter(timestamp__gte=week_ago).exclude(user_email='').values('user_email').annotate(cnt=Count('id')):
-            recent_map[r['user_email']] = r['cnt']
-
-        # Group by domain
-        companies = defaultdict(lambda: {'users': [], 'total': 0, 'recent': 0, 'last_seen': None})
-        for u in users:
-            e = u['email']
-            d = _domain_from_email(e)
-            act = activity_map.get(e, {})
-            companies[d]['users'].append(u)
-            companies[d]['total'] += act.get('total', 0)
-            companies[d]['recent'] += recent_map.get(e, 0)
-            ls = act.get('last_seen')
-            if ls and (not companies[d]['last_seen'] or ls > companies[d]['last_seen']):
-                companies[d]['last_seen'] = ls
-
-        clients = []
-        for domain, data in companies.items():
-            total_req = data['total']
-            recent_req = data['recent']
-            user_count = len(data['users'])
-            name = _company_name_from_domain(domain)
-            industry = DOMAIN_INDUSTRY_MAP.get(domain, 'Engineering')
-            tier = _company_tier(user_count)
-
-            # Health score: based on recent activity relative to total
-            if total_req == 0:
-                health = 0
-            elif recent_req == 0:
-                health = 20  # dormant
-            else:
-                health = min(int(recent_req / max(total_req, 1) * 100 * 3), 100)
-                health = max(health, 30)
-
-            # Churn probability: inverse of recent engagement
-            if recent_req > 50:
-                churn = 10
-            elif recent_req > 10:
-                churn = 30
-            elif recent_req > 0:
-                churn = 55
-            else:
-                churn = 80
-
-            est_revenue = STAGE_META[_engagement_stage(total_req)]['value_multiplier'] * user_count
-
-            clients.append({
-                'id':               domain,
-                'name':             name,
-                'company_name':     name,
-                'domain':           domain,
-                'industry':         industry,
-                'tier':             tier,
-                'total_revenue':    round(est_revenue, -2),
-                'annual_revenue':   round(est_revenue, -2),
-                'health_score':     health,
-                'churn_probability': churn,
-                'churn_risk':       churn,
-                'user_count':       user_count,
-                'total_requests':   total_req,
-                'recent_requests':  recent_req,
-                'last_seen':        data['last_seen'].isoformat() if data['last_seen'] else None,
-                'primary_contact':  next(
-                    (f"{u['first_name']} {u['last_name']}".strip() for u in data['users'] if u['first_name']),
-                    data['users'][0]['email'] if data['users'] else '—'
-                ),
+        # ── Build client list ───────────────────────────────────────────────
+        client_list = []
+        for c in clients_qs.select_related('account_owner').order_by('-pipeline_value')[:50]:
+            client_list.append({
+                'id': str(c.id),
+                'name': c.legal_name or c.trading_name or '',
+                'trading_name': c.trading_name or '',
+                'industry': c.industry or '',
+                'tier': c.client_tier or 'bronze',
+                'account_owner': c.account_owner.get_full_name() if c.account_owner else '',
+                'deal_count': c.deal_count or 0,
+                'pipeline_value': float(c.pipeline_value) if c.pipeline_value is not None else None,
+                'won_value': float(c.won_value) if c.won_value is not None else None,
             })
 
-        clients.sort(key=lambda c: -c['total_requests'])
+        # ── Aggregate metrics ───────────────────────────────────────────────
+        total_clients = base_qs.count()
+        active_clients = clients_qs.filter(deal_count__gt=0).count()
+        total_pipeline = (
+            clients_qs.aggregate(total=Sum('pipeline_value'))['total'] or Decimal('0')
+        )
+        total_won = (
+            clients_qs.aggregate(total=Sum('won_value'))['total'] or Decimal('0')
+        )
 
-        mode = request.query_params.get('mode', 'top')
-        if mode == 'at_risk':
-            at_risk = [c for c in clients if c['churn_probability'] >= 55]
-            return Response({'success': True, 'count': len(at_risk), 'clients': at_risk})
+        payload = {
+            'total_clients': total_clients,
+            'active_clients': active_clients,
+            'total_pipeline_value': float(total_pipeline),
+            'total_won_value': float(total_won),
+            'clients': client_list,
+            'generated_at': timezone.now().isoformat(),
+        }
 
-        limit = int(request.query_params.get('limit', 20))
-        top = clients[:limit]
-        return Response({'success': True, 'count': len(top), 'clients': top})
+        return Response(payload)
 
 
 class SalesAIInsightsView(APIView):
@@ -606,8 +233,8 @@ class SalesAIInsightsView(APIView):
     module_required = 'sales'
 
     def get(self, request):
-        SystemActivity = _get_activity_model()
-        User = _get_user_model()
+        User = get_user_model()
+        from apps.activity.models import SystemActivity
 
         now = timezone.now()
         cutoff_30 = now - timedelta(days=30)
@@ -620,11 +247,27 @@ class SalesAIInsightsView(APIView):
         active_now = SystemActivity.objects.filter(timestamp__gte=cutoff_15m).values('user_email').exclude(user_email='').distinct().count()
         active_7d = SystemActivity.objects.filter(timestamp__gte=cutoff_7).values('user_email').exclude(user_email='').distinct().count()
 
-        # Top discipline
+        # Top discipline (inline mapping)
+        DISCIPLINE_MAP_INLINE = [
+            ('pid', 'Process (P&ID)'),
+            ('pfd', 'Digitization (PFD)'),
+            ('process-datasheet', 'Process Datasheet'),
+            ('electrical-datasheet', 'Electrical Datasheet'),
+            ('crs', 'CRS Documents'),
+            ('designiq', 'DesignIQ'),
+            ('finance', 'Finance'),
+            ('procurement', 'Procurement'),
+            ('qhse', 'QHSE'),
+            ('projects', 'Project Control'),
+            ('sales', 'Sales'),
+            ('rbac', 'Admin / RBAC'),
+            ('users', 'User Management'),
+            ('notifications', 'Notifications'),
+        ]
         from django.db.models import Case, When, Value, CharField
         disc_cases = [
             When(description__icontains=f'/{key}/', then=Value(label))
-            for key, label in DISCIPLINE_MAP
+            for key, label in DISCIPLINE_MAP_INLINE
         ]
         disc_annotation = Case(*disc_cases, default=Value('Other'), output_field=CharField())
 
@@ -650,7 +293,10 @@ class SalesAIInsightsView(APIView):
             .first()
         )
 
-        # Domains active
+        # Domains active (inline domain extraction)
+        def _domain(email):
+            return email.split('@')[-1] if '@' in email else 'unknown'
+
         domains_active = (
             SystemActivity.objects
             .filter(timestamp__gte=cutoff_7)
@@ -658,7 +304,7 @@ class SalesAIInsightsView(APIView):
             .values('user_email')
             .distinct()
         )
-        domains = set(_domain_from_email(r['user_email']) for r in domains_active)
+        domains = set(_domain(r['user_email']) for r in domains_active)
         total_domains = len([d for d in domains if d != 'unknown'])
 
         # Dormant users (registered but no activity in 30 days)
@@ -778,11 +424,25 @@ class SalesActivitiesView(APIView):
     module_required = 'sales'
 
     def get(self, request):
-        User = _get_user_model()
-        SystemActivity = _get_activity_model()
+        User = get_user_model()
 
         days = int(request.query_params.get('days', 7))
         cutoff_30 = timezone.now() - timedelta(days=30)
+
+        def _domain(email):
+            return email.split('@')[-1] if '@' in email else 'unknown'
+
+        def _company_name(domain):
+            name_map = {
+                'rejlers.ae': 'Rejlers Engineering',
+                'radai.ae': 'RAD AI Platform',
+                'engineering.ae': 'Engineering Services AE',
+                'consultant.ae': 'Consultant AE',
+            }
+            if domain in name_map:
+                return name_map[domain]
+            parts = domain.split('.')
+            return ' '.join(w.capitalize() for w in parts[:-1]) or domain
 
         # Users with no activity in 30 days = follow-up candidates
         active_emails = set(
@@ -800,8 +460,8 @@ class SalesActivitiesView(APIView):
         activities = []
         for i, u in enumerate(dormant_users):
             name = f"{u['first_name']} {u['last_name']}".strip() or u['email']
-            domain = _domain_from_email(u['email'])
-            company = _company_name_from_domain(domain)
+            domain = _domain(u['email'])
+            company = _company_name(domain)
             due_date = (timezone.now() + timedelta(days=(i % days) + 1)).date().isoformat()
 
             activities.append({
@@ -826,7 +486,7 @@ class SalesActivitiesView(APIView):
         )
         if top_user:
             name = top_user['user_full_name'] or top_user['user_email']
-            company = _company_name_from_domain(_domain_from_email(top_user['user_email']))
+            company = _company_name(_domain(top_user['user_email']))
             activities.insert(0, {
                 'id':          0,
                 'type':        'meeting',

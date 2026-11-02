@@ -3,15 +3,16 @@ PDF Comment Extractor - NEW HELPER MODULE
 Extracts reviewer comments from ConsolidatedComments PDF
 Does NOT modify existing code or APIs
 Enhanced with intelligent comment cleaning
-Uses PyMuPDF (fitz) for better annotation extraction
+Uses PyMuPDF (pymupdf) for better annotation extraction
 """
 
 import re
-import fitz  # PyMuPDF - better for annotations
+import pymupdf  # PyMuPDF - better for annotations
 import PyPDF2
 from typing import List, Dict, Optional
 from io import BytesIO
 import logging
+logger = logging.getLogger(__name__)
 
 # Import comment cleaner for intelligent text processing
 try:
@@ -20,7 +21,6 @@ try:
 except ImportError:
     CLEANER_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
 
 
 def _pre_clean_annotation_text(text: str) -> str:
@@ -67,7 +67,7 @@ class ReviewerComment:
 
 def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) -> List[ReviewerComment]:
     """
-    Extract reviewer comments from PDF using PyMuPDF (fitz)
+    Extract reviewer comments from PDF using PyMuPDF (pymupdf)
     
     Args:
         pdf_buffer: BytesIO object containing PDF file
@@ -92,12 +92,12 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
             logger.warning(f"⚠️ Could not initialize comment cleaner: {e}")
     
     try:
-        # Use PyMuPDF (fitz) for better annotation extraction
+        # Use PyMuPDF (pymupdf) for better annotation extraction
         pdf_start = time.time()
         pdf_bytes = pdf_buffer.read()
         pdf_buffer.seek(0)  # Reset for potential re-use
         
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         logger.info(f"[PERF] PDF open took {time.time() - pdf_start:.2f}s")
         logger.info(f"📄 Opened PDF with {len(doc)} pages")
         

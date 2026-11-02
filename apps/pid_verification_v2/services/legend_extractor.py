@@ -29,8 +29,8 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Optional
-
 logger = logging.getLogger(__name__)
+
 
 
 # ── Soft-coded: extraction config ─────────────────────────────────────────────
@@ -323,8 +323,8 @@ def extract_legend_sheet(file_path: str, use_ai: bool = True, pages_b64: list = 
 def _extract_pdf_text(file_path: str) -> str:
     """Extract plain text from all pages of a PDF via PyMuPDF."""
     try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(file_path)
+        import pymupdf  # PyMuPDF
+        doc = pymupdf.open(file_path)
         chunks = []
         for page in doc:
             chunks.append(page.get_text('text'))
@@ -350,13 +350,13 @@ def _render_pages_to_b64(file_path: str) -> list[str]:
 
     try:
         if suffix == '.pdf':
-            import fitz
-            doc = fitz.open(file_path)
+            import pymupdf
+            doc = pymupdf.open(file_path)
             # Process ALL pages — legend sheets for scanned P&IDs can be 16+ pages
             for i in range(len(doc)):
                 page = doc[i]
                 # Render using soft-coded DPI scale for clear small-text extraction
-                mat = fitz.Matrix(AI_IMAGE_DPI_SCALE, AI_IMAGE_DPI_SCALE)
+                mat = pymupdf.Matrix(AI_IMAGE_DPI_SCALE, AI_IMAGE_DPI_SCALE)
                 pix = page.get_pixmap(matrix=mat)
                 png_bytes = pix.tobytes('png')
                 # Resize if too large for OpenAI (max AI_IMAGE_MAX_PX)

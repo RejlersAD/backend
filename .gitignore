@@ -166,6 +166,10 @@ test-results/
 # Test files and utility scripts folder
 test/
 test_*.py
+# Django's configured runtime test runner is production code, despite its filename.
+!config/test_runner.py
+# Runtime detection helper is imported by startup and migration receivers.
+!apps/core/test_runtime.py
 # Application regression suites and their isolated test app configuration.
 !apps/sales/tests/test_mailbox_search.py
 !apps/core/tests/test_shared_records.py
@@ -200,6 +204,7 @@ test_*.py
 !apps/hr_core/tests/test_graph_assistant_governance.py
 !apps/hr_core/tests/test_business_approval_gates.py
 !apps/rbac/tests/test_profile_documents.py
+!apps/users/tests/test_password_expiry_middleware.py
 !apps/sales/tests/test_workflow.py
 !apps/portfolio/tests/*.py
 !apps/rbac/tests/test_organization_catalog_data.py

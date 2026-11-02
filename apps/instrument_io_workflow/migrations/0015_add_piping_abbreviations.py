@@ -5,7 +5,10 @@ keeping I/O List's independent copy in structural parity (data stays
 independently editable; this is a one-time content addition, not an
 ongoing link between the two systems).
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'piping'
 
@@ -77,7 +80,7 @@ def add_forward(apps, schema_editor):
             field['lookup'] = NEW_LOOKUP
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[instrument_io_workflow] Added {len(ABBREVIATIONS)} piping abbreviations to the {SECTION!r} legend.')
+    logger.debug(f'[instrument_io_workflow] Added {len(ABBREVIATIONS)} piping abbreviations to the {SECTION!r} legend.')
 
 
 def add_backward(apps, schema_editor):

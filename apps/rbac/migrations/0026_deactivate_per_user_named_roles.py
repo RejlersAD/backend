@@ -21,8 +21,11 @@ Safety rules (same as migration 0025):
 
 Data is DEACTIVATED, never hard-deleted, for audit trail integrity.
 """
+
+import logging
 from django.db import migrations
 from django.db.models import Q
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded target configuration ──────────────────────────────────────────
 
@@ -58,7 +61,7 @@ def deactivate_named_org_roles(apps, schema_editor):
         )
     except Role.DoesNotExist:
         fallback_role = None
-        print(f'  [0026]   ⚠ Fallback role "{FALLBACK_ROLE_CODE}" not found')
+        logger.debug(f'  [0026]   ⚠ Fallback role "{FALLBACK_ROLE_CODE}" not found')
 
     # Build combined queryset: exact names + prefix matches
     q = Q()
@@ -74,12 +77,12 @@ def deactivate_named_org_roles(apps, schema_editor):
     )
 
     if not candidates.exists():
-        print('  [0026] ℹ No matching roles found (already absent or renamed)')
+        logger.debug('  [0026] ℹ No matching roles found (already absent or renamed)')
         return
 
     for role in candidates:
         if not role.is_active:
-            print(f'  [0026] ℹ Already inactive: "{role.name}"')
+            logger.debug(f'  [0026] ℹ Already inactive: "{role.name}"')
             continue
 
         # Migrate orphaned users to fallback role
@@ -100,11 +103,11 @@ def deactivate_named_org_roles(apps, schema_editor):
                 orphan_count += 1
 
         if orphan_count:
-            print(f'  [0026]   ✓ {orphan_count} user(s) assigned fallback "{FALLBACK_ROLE_CODE}"')
+            logger.debug(f'  [0026]   ✓ {orphan_count} user(s) assigned fallback "{FALLBACK_ROLE_CODE}"')
 
         role.is_active = False
         role.save(using=db_alias, update_fields=['is_active'])
-        print(f'  [0026] ✓ Deactivated: "{role.name}" (code={role.code})')
+        logger.debug(f'  [0026] ✓ Deactivated: "{role.name}" (code={role.code})')
 
 
 def noop(apps, schema_editor):

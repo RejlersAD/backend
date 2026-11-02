@@ -27,13 +27,13 @@ import time
 from pdf2image import convert_from_bytes
 from PIL import Image
 import openpyxl
+logger = logging.getLogger(__name__)
 
 # Disable PIL's DecompressionBomb limit — large P&ID drawings (A0/A1 at 150 DPI)
 # legitimately produce images above the 89 MP default threshold.
 Image.MAX_IMAGE_PIXELS = None
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-logger = logging.getLogger(__name__)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -3440,8 +3440,8 @@ class InstrumentIndexService:
                 if (not self._byok_exclusive()
                         and not self._gemini_quota_exceeded and self.gemini_client):
                     try:
-                        import fitz as _fitz
-                        _doc = _fitz.open(stream=pid_bytes, filetype="pdf")
+                        import pymupdf as _pymupdf
+                        _doc = _pymupdf.open(stream=pid_bytes, filetype="pdf")
                         _pdf_text = "\n".join(
                             _doc[_p].get_text("text") or "" for _p in range(len(_doc))
                         )
@@ -3678,11 +3678,11 @@ class InstrumentIndexService:
         """
         result = {}
         try:
-            import fitz
+            import pymupdf
         except ImportError:
             return result
         try:
-            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pid_bytes, filetype="pdf")
         except Exception:
             return result
         try:
@@ -3702,8 +3702,8 @@ class InstrumentIndexService:
         """Return {page_number → full text} for line-context filtering."""
         out = {}
         try:
-            import fitz
-            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+            import pymupdf
+            doc = pymupdf.open(stream=pid_bytes, filetype="pdf")
         except Exception:
             return out
         try:
@@ -5204,13 +5204,13 @@ class InstrumentIndexService:
 
         # ── Open PDF ──────────────────────────────────────────────────────
         try:
-            import fitz
+            import pymupdf
         except ImportError:
             logger.warning("[Enrich] PyMuPDF not installed — skipping contextual enrichment")
             return instruments
 
         try:
-            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pid_bytes, filetype="pdf")
         except Exception as ex:
             logger.warning(f"[Enrich] Cannot open PDF for enrichment: {ex}")
             return instruments
@@ -5888,12 +5888,12 @@ Rules:
     def _extract_drawing_number_from_pdf(self, pid_bytes):
         """Extract best DWG/P&ID number candidate from PDF text."""
         try:
-            import fitz
+            import pymupdf
         except ImportError:
             return ""
 
         try:
-            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pid_bytes, filetype="pdf")
         except Exception:
             return ""
 
@@ -6144,8 +6144,8 @@ Rules:
         if not pdf_bytes:
             return ""
         try:
-            import fitz
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            import pymupdf
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             try:
                 return "\n".join(
                     doc[idx].get_text("text") or ""
@@ -6233,13 +6233,13 @@ Rules:
         rev = drawing_info.get("revision", "0")
 
         try:
-            import fitz  # PyMuPDF
+            import pymupdf  # PyMuPDF
         except ImportError:
             logger.warning("[InstrumentIndex] PyMuPDF not installed — skipping text-layer extraction")
             return []
 
         try:
-            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pid_bytes, filetype="pdf")
         except Exception as e:
             logger.warning(f"[InstrumentIndex] PyMuPDF open error: {e}")
             return []

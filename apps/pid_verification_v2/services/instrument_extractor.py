@@ -27,8 +27,8 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Optional
-
 logger = logging.getLogger(__name__)
+
 
 # ── Soft-coded: extraction config ─────────────────────────────────────────────
 MIN_TEXT_CHARS_FOR_TEXT_ONLY = 300     # chars; below this we fall back to AI Vision
@@ -275,8 +275,8 @@ def extract_instrument_symbols(file_path: str, use_ai: bool = True, pages_b64: l
 def _extract_pdf_text(file_path: str) -> str:
     """Extract all text from every page of the PDF using PyMuPDF."""
     try:
-        import fitz  # PyMuPDF
-        doc   = fitz.open(file_path)
+        import pymupdf  # PyMuPDF
+        doc   = pymupdf.open(file_path)
         pages = [page.get_text('text') for page in doc]
         doc.close()
         return '\n'.join(pages)
@@ -295,11 +295,11 @@ def _pdf_to_images(file_path: str) -> list:
     """
     images = []
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         for page in doc:
-            mat  = fitz.Matrix(AI_IMAGE_DPI_SCALE, AI_IMAGE_DPI_SCALE)   # soft-coded DPI scale
+            mat  = pymupdf.Matrix(AI_IMAGE_DPI_SCALE, AI_IMAGE_DPI_SCALE)   # soft-coded DPI scale
             pix  = page.get_pixmap(matrix=mat, alpha=False)
             img  = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
             img  = _resize_image(img, AI_IMAGE_MAX_PX)

@@ -10,7 +10,10 @@ with the other symbol-lookup sections that already allow '-').
 
 Only the exact seeded default row is touched (matched by name).
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'piping'
 
@@ -82,7 +85,7 @@ def add_forward(apps, schema_editor):
             field['lookup'] = NEW_LOOKUP
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[pid_checker_v2] Added {len(ABBREVIATIONS)} piping abbreviations to the {SECTION!r} legend.')
+    logger.debug(f'[pid_checker_v2] Added {len(ABBREVIATIONS)} piping abbreviations to the {SECTION!r} legend.')
 
 
 def add_backward(apps, schema_editor):

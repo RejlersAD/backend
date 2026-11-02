@@ -2,12 +2,15 @@
 ULTRA-SIMPLE CORS Middleware
 Guaranteed to work without any imports that could fail
 """
+
+import logging
 import re
 import time
 from django.db import transaction
 from django.conf import settings
 from django.http import HttpResponse
 from django.utils import timezone
+logger = logging.getLogger(__name__)
 
 # RFC 1034/1035: underscores are not valid in hostnames.
 # Docker container names (e.g. backend_local, aiflow_backend_local) contain underscores,
@@ -50,18 +53,18 @@ class CorsMiddleware:
     
     def __init__(self, get_response):
         self.get_response = get_response
-        print("[CorsMiddleware] Ultra-simple CORS initialized")
+        logger.debug("[CorsMiddleware] Ultra-simple CORS initialized")
 
     def __call__(self, request):
-        print(f"[CorsMiddleware] {request.method} {request.path}")
+        logger.debug(f"[CorsMiddleware] {request.method} {request.path}")
         
         # Get origin - use safe default
         origin = request.META.get('HTTP_ORIGIN', 'https://airflow-frontend.vercel.app')
-        print(f"[CorsMiddleware] Origin: {origin}")
+        logger.debug(f"[CorsMiddleware] Origin: {origin}")
         
         # Handle OPTIONS immediately
         if request.method == 'OPTIONS':
-            print("[CorsMiddleware] Handling OPTIONS preflight")
+            logger.debug("[CorsMiddleware] Handling OPTIONS preflight")
             response = HttpResponse('')
             response['Access-Control-Allow-Origin'] = '*'
             response['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
@@ -78,7 +81,7 @@ class CorsMiddleware:
         response['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With'
         response['Access-Control-Expose-Headers'] = 'Content-Type'
         
-        print("[CorsMiddleware] CORS headers added")
+        logger.debug("[CorsMiddleware] CORS headers added")
         return response
 
 

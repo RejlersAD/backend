@@ -22,7 +22,10 @@ What this migration does (all idempotent / safe to re-run):
      merge its user assignments into the proper admin role, then delete orphan
   7. Fix tanzeem.agra@rejlers.ae → assign super_admin role
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 # ── Pull config from rbac_config (available at migration time) ────────────────
@@ -50,24 +53,23 @@ def upgrade_rbac(apps, schema_editor):
     for org in Organization.objects.filter(code=''):
         org.code = 'REJ_UAE'
         org.save(update_fields=['code'])
-        print(f'  [0009] Fixed org code → REJ_UAE for: {org.name}')
+        logger.debug(f'  [0009] Fixed org code → REJ_UAE for: {org.name}')
 
     # Ensure default org exists — look up by code (safe after the fix above)
-    default_org = Organization.objects.filter(code='REJ_UAE').first()
-    if default_org is None:
-        default_org = Organization.objects.create(
-            name='Rejlers Abu Dhabi',
-            code='REJ_UAE',
-            description='Default organization for Rejlers Oil & Gas AI Platform',
-            s3_bucket_name='user-management-rejlers',
-            s3_region='us-east-1',
-            is_active=True,
-            primary_contact_name='Admin',
-            primary_contact_email='admin@rejlers.ae',
-            city='Abu Dhabi',
-            country='United Arab Emirates',
-        )
-        print(f'  [0009] Created default org: {default_org.name}')
+    default_org, _ = Organization.objects.get_or_create(
+        code='REJ_UAE',
+        defaults={
+            'name': 'Rejlers Abu Dhabi',
+            'description': 'Default organization for Rejlers Oil & Gas AI Platform',
+            's3_bucket_name': 'user-management-rejlers',
+            's3_region': 'us-east-1',
+            'is_active': True,
+            'primary_contact_name': 'Admin',
+            'primary_contact_email': 'admin@rejlers.ae',
+            'city': 'Abu Dhabi',
+            'country': 'United Arab Emirates',
+        },
+    )
 
     # ── 2. Create missing modules ─────────────────────────────────────────────
     modules_map = {}
@@ -84,7 +86,7 @@ def upgrade_rbac(apps, schema_editor):
         )
         modules_map[mod.code] = mod
         if created:
-            print(f'  [0009] ✓ Created module: {mod.name} ({mod.code})')
+            logger.debug(f'  [0009] ✓ Created module: {mod.name} ({mod.code})')
 
     # Also pick up any modules already in DB that aren't in the catalogue
     for mod in Module.objects.all():
@@ -104,7 +106,7 @@ def upgrade_rbac(apps, schema_editor):
             }
         )
         if created:
-            print(f'  [0009] ✓ Created role: {role.name} ({role.code})')
+            logger.debug(f'  [0009] ✓ Created role: {role.name} ({role.code})')
         else:
             # Ensure system flag + level are correct for existing roles
             changed = False
@@ -137,7 +139,7 @@ def upgrade_rbac(apps, schema_editor):
                 if created:
                     new_count += 1
         if new_count:
-            print(f'  [0009]   → Assigned {new_count} new modules to {role.name}')
+            logger.debug(f'  [0009]   → Assigned {new_count} new modules to {role.name}')
 
     # ── 6. Fix the orphan "Admin" role (empty code) ───────────────────────────
     # This role was manually created with no code; merge users into proper admin
@@ -155,9 +157,9 @@ def upgrade_rbac(apps, schema_editor):
                 )
                 if created:
                     moved += 1
-            print(f'  [0009] Orphan Admin role: moved {moved} user(s) to proper admin role')
+            logger.debug(f'  [0009] Orphan Admin role: moved {moved} user(s) to proper admin role')
             orphan.delete()
-            print(f'  [0009] ✓ Deleted orphan Admin role (empty code)')
+            logger.debug(f'  [0009] ✓ Deleted orphan Admin role (empty code)')
 
     # ── 7. Fix tanzeem.agra's role → super_admin ─────────────────────────────
     TARGET_EMAIL = 'tanzeem.agra@rejlers.ae'
@@ -177,25 +179,24 @@ def upgrade_rbac(apps, schema_editor):
                     defaults={'assigned_by': user}
                 )
                 if created:
-                    print(f'  [0009] ✓ Assigned super_admin to {TARGET_EMAIL}')
+                    logger.debug(f'  [0009] ✓ Assigned super_admin to {TARGET_EMAIL}')
                 else:
-                    print(f'  [0009]   {TARGET_EMAIL} already has super_admin')
+                    logger.debug(f'  [0009]   {TARGET_EMAIL} already has super_admin')
             except UserProfile.DoesNotExist:
-                profile = UserProfile.objects.create(
+                profile, _ = UserProfile.objects.get_or_create(
                     user=user,
-                    organization=default_org,
-                    status='active'
+                    defaults={'organization': default_org, 'status': 'active'},
                 )
-                UserRole.objects.create(
+                UserRole.objects.get_or_create(
                     user_profile=profile,
                     role=super_admin_role,
-                    assigned_by=user
+                    defaults={'assigned_by': user},
                 )
-                print(f'  [0009] ✓ Created profile + super_admin for {TARGET_EMAIL}')
+                logger.debug(f'  [0009] ✓ Created profile + super_admin for {TARGET_EMAIL}')
         except User.DoesNotExist:
-            print(f'  [0009]   User {TARGET_EMAIL} not found — skipping')
+            logger.debug(f'  [0009]   User {TARGET_EMAIL} not found — skipping')
 
-    print('  [0009] ✅ Full RBAC upgrade complete')
+    logger.debug('  [0009] ✅ Full RBAC upgrade complete')
 
 
 def downgrade_rbac(apps, schema_editor):

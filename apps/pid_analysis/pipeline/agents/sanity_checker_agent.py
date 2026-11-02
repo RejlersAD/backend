@@ -1,7 +1,10 @@
 """
 Sanity Checker Agent - Removes hallucinations and false positives
 """
+
+import logging
 from typing import Dict, List, Any
+logger = logging.getLogger(__name__)
 
 
 class SanityCheckerAgent:
@@ -32,7 +35,7 @@ class SanityCheckerAgent:
         Returns:
             Filtered issues (only valid ones)
         """
-        print(f"[SANITY CHECKER] Checking {len(issues)} issue(s) for hallucinations...")
+        logger.debug(f"[SANITY CHECKER] Checking {len(issues)} issue(s) for hallucinations...")
         
         valid_issues = []
         removed_count = 0
@@ -42,10 +45,10 @@ class SanityCheckerAgent:
                 valid_issues.append(issue)
             else:
                 removed_count += 1
-                print(f"[SANITY CHECKER] Removed hallucinated issue: {issue.get('description', 'N/A')[:60]}")
+                logger.debug(f"[SANITY CHECKER] Removed hallucinated issue: {issue.get('description', 'N/A')[:60]}")
         
-        print(f"[SANITY CHECKER] Removed {removed_count} hallucinated issue(s)")
-        print(f"[SANITY CHECKER] {len(valid_issues)} valid issue(s) remaining")
+        logger.debug(f"[SANITY CHECKER] Removed {removed_count} hallucinated issue(s)")
+        logger.debug(f"[SANITY CHECKER] {len(valid_issues)} valid issue(s) remaining")
         
         return valid_issues
     
@@ -67,13 +70,13 @@ class SanityCheckerAgent:
             # Check if line exists in extracted data
             line_exists = any(line_number in line for line in lines)
             if not line_exists:
-                print(f"[SANITY CHECKER] Line '{line_number}' not in extracted data")
+                logger.debug(f"[SANITY CHECKER] Line '{line_number}' not in extracted data")
                 return False
         
         # CHECK 2: Don't reference DELETED notes
         for note_id in deleted_notes:
             if f'NOTE {note_id}' in description or f'NOTE{note_id}' in description:
-                print(f"[SANITY CHECKER] References deleted note {note_id}")
+                logger.debug(f"[SANITY CHECKER] References deleted note {note_id}")
                 return False
         
         # CHECK 3: Don't reference notes that don't exist
@@ -82,7 +85,7 @@ class SanityCheckerAgent:
         for note_ref in note_refs:
             note_id = int(note_ref)
             if note_id not in notes and note_id not in deleted_notes:
-                print(f"[SANITY CHECKER] References non-existent note {note_id}")
+                logger.debug(f"[SANITY CHECKER] References non-existent note {note_id}")
                 return False
         
         # CHECK 4: Don't reference equipment/instruments not in extracted data
@@ -102,7 +105,7 @@ class SanityCheckerAgent:
             # Check if this matches a line number pattern component
             is_inside_line = any(eq in line for line in lines)
             if is_inside_line and eq not in equipment:
-                print(f"[SANITY CHECKER] '{eq}' is part of line number, not equipment")
+                logger.debug(f"[SANITY CHECKER] '{eq}' is part of line number, not equipment")
                 return False
         
         # CHECK 6: Don't reference standards not mentioned in raw text
@@ -117,7 +120,7 @@ class SanityCheckerAgent:
         
         for keyword in false_positive_keywords:
             if keyword in description and keyword not in raw_text:
-                print(f"[SANITY CHECKER] References standard '{keyword}' not in document")
+                logger.debug(f"[SANITY CHECKER] References standard '{keyword}' not in document")
                 return False
         
         # Passed all checks

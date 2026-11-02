@@ -9,8 +9,11 @@ Soft-coded configuration via environment variables:
 - CSRF_EXEMPT_ENABLED: Enable/disable CSRF exemption (default: True)
 """
 
+import logging
+
 import os
 from django.utils.deprecation import MiddlewareMixin
+logger = logging.getLogger(__name__)
 
 
 class CsrfExemptMiddleware(MiddlewareMixin):
@@ -32,9 +35,9 @@ class CsrfExemptMiddleware(MiddlewareMixin):
         exempt_paths_str = os.getenv('CSRF_EXEMPT_PATHS', '/api/')
         self.exempt_paths = [p.strip() for p in exempt_paths_str.split(',') if p.strip()]
         
-        print(f"[CsrfExemptMiddleware] Initialized")
-        print(f"[CsrfExemptMiddleware] Enabled: {self.enabled}")
-        print(f"[CsrfExemptMiddleware] Exempt paths: {self.exempt_paths}")
+        logger.debug(f"[CsrfExemptMiddleware] Initialized")
+        logger.debug(f"[CsrfExemptMiddleware] Enabled: {self.enabled}")
+        logger.debug(f"[CsrfExemptMiddleware] Exempt paths: {self.exempt_paths}")
     
     def process_request(self, request):
         """
@@ -46,7 +49,7 @@ class CsrfExemptMiddleware(MiddlewareMixin):
         # Check if request path matches any exempt pattern
         for exempt_path in self.exempt_paths:
             if request.path.startswith(exempt_path):
-                print(f"[CsrfExemptMiddleware] ✓ Exempting {request.path} from CSRF protection")
+                logger.debug(f"[CsrfExemptMiddleware] ✓ Exempting {request.path} from CSRF protection")
                 # Mark request as CSRF exempt
                 setattr(request, '_dont_enforce_csrf_checks', True)
                 break

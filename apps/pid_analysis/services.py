@@ -2,6 +2,8 @@
 P&ID Analysis Service - Multi-Pass Comprehensive Analysis
 Architecture: OCR + Vision + Cross-Validation + Chain-of-Thought + Reference Verification
 """
+
+import logging
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import base64
@@ -12,10 +14,11 @@ import uuid
 from typing import Dict, List, Any, Optional, Set, Tuple
 from django.conf import settings
 from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 from .reference_processor import ReferenceDocumentProcessor
 from .element_classifier import get_classifier, ElementType
+logger = logging.getLogger(__name__)
 
 
 def ocr_inventory_contains(inventory: set, token: str) -> bool:
@@ -76,7 +79,7 @@ class PIDAnalysisService:
         Both models are vision-capable — GPT-3.5 / GPT-4-base are NOT used.
         """
         # ── Primary attempt ────────────────────────────────────────────────────
-        print(f"[INFO] {pass_label}: calling {self._PRIMARY_MODEL}...")
+        logger.debug(f"[INFO] {pass_label}: calling {self._PRIMARY_MODEL}...")
         try:
             resp = self.client.chat.completions.create(
                 model=self._PRIMARY_MODEL,
@@ -88,16 +91,16 @@ class PIDAnalysisService:
             )
             text = (resp.choices[0].message.content or "").strip() if resp and resp.choices else ""
         except Exception as ex:
-            print(f"[WARNING] {pass_label}: {self._PRIMARY_MODEL} call failed ({ex}) — trying fallback.")
+            logger.debug(f"[WARNING] {pass_label}: {self._PRIMARY_MODEL} call failed ({ex}) — trying fallback.")
             text = ""
 
         if text and not self._model_refused_image(text):
-            print(f"[DEBUG {pass_label}] {self._PRIMARY_MODEL} OK | len={len(text)} | preview={text[:120]}")
+            logger.debug(f"[DEBUG {pass_label}] {self._PRIMARY_MODEL} OK | len={len(text)} | preview={text[:120]}")
             return text
 
         # ── Fallback to lighter vision model ───────────────────────────────────
         reason = "refused image" if text else "empty response"
-        print(f"[WARNING] {pass_label}: {self._PRIMARY_MODEL} {reason} — retrying with {self._FALLBACK_MODEL}...")
+        logger.debug(f"[WARNING] {pass_label}: {self._PRIMARY_MODEL} {reason} — retrying with {self._FALLBACK_MODEL}...")
         try:
             fb_resp = self.client.chat.completions.create(
                 model=self._FALLBACK_MODEL,
@@ -109,15 +112,15 @@ class PIDAnalysisService:
             )
             fb_text = (fb_resp.choices[0].message.content or "").strip() if fb_resp and fb_resp.choices else ""
         except Exception as fb_ex:
-            print(f"[WARNING] {pass_label}: {self._FALLBACK_MODEL} also failed ({fb_ex}).")
+            logger.debug(f"[WARNING] {pass_label}: {self._FALLBACK_MODEL} also failed ({fb_ex}).")
             return ""
 
         if fb_text and not self._model_refused_image(fb_text):
-            print(f"[DEBUG {pass_label}] {self._FALLBACK_MODEL} OK | len={len(fb_text)} | preview={fb_text[:120]}")
-            print(f"[INFO] {pass_label}: {self._FALLBACK_MODEL} succeeded as fallback.")
+            logger.debug(f"[DEBUG {pass_label}] {self._FALLBACK_MODEL} OK | len={len(fb_text)} | preview={fb_text[:120]}")
+            logger.debug(f"[INFO] {pass_label}: {self._FALLBACK_MODEL} succeeded as fallback.")
             return fb_text
 
-        print(f"[WARNING] {pass_label}: both models refused / returned empty — returning empty.")
+        logger.debug(f"[WARNING] {pass_label}: both models refused / returned empty — returning empty.")
         return ""
 
     def __init__(self):
@@ -127,9 +130,9 @@ class PIDAnalysisService:
         # Initialize multi-model AI service (supports both OpenAI and Gemini)
         try:
             self.ai_service = MultiModelAIService()
-            print('[INFO] ✅ Multi-Model AI Service initialized (OpenAI + Gemini)')
+            logger.debug('[INFO] ✅ Multi-Model AI Service initialized (OpenAI + Gemini)')
         except Exception as e:
-            print(f'[WARNING] Multi-model service failed, falling back to OpenAI only: {e}')
+            logger.debug(f'[WARNING] Multi-model service failed, falling back to OpenAI only: {e}')
             # Fallback to OpenAI only
             api_key = (
                 provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or
@@ -155,7 +158,7 @@ class PIDAnalysisService:
         
         # CONTEXT ISOLATION: Generate unique session ID for this analysis
         self.session_id = str(uuid.uuid4())
-        print(f'[CONTEXT ISOLATION] Session ID: {self.session_id}')
+        logger.debug(f'[CONTEXT ISOLATION] Session ID: {self.session_id}')
         
         # Get deterministic classifier instance
         self.classifier = get_classifier()
@@ -164,7 +167,7 @@ class PIDAnalysisService:
         self._load_analysis_config()
         # Initialize optional Google Gemini client
         self._init_gemini_client()
-        print('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
+        logger.debug('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
 
     # =========================================================================
     # SOFT-CODED CONFIGURATION LOADER
@@ -202,10 +205,10 @@ class PIDAnalysisService:
             try:
                 with open(_p3_prompt_path, 'r', encoding='utf-8') as _pf:
                     self.pass3_system_prompt = _pf.read().strip()
-                print(f'[INFO] Pass 3 prompt loaded from {_p3_prompt_file} ({len(self.pass3_system_prompt)} chars)')
+                logger.debug(f'[INFO] Pass 3 prompt loaded from {_p3_prompt_file} ({len(self.pass3_system_prompt)} chars)')
             except Exception as _pe:
                 self.pass3_system_prompt = None
-                print(f'[WARNING] Could not load {_p3_prompt_file} ({_pe}) — using built-in Pass 3 prompt')
+                logger.debug(f'[WARNING] Could not load {_p3_prompt_file} ({_pe}) — using built-in Pass 3 prompt')
 
             _p5 = cfg.get('pass_5', {})
             self.pass5_max_tokens    = int(_p5.get('max_tokens', 12000))
@@ -264,19 +267,19 @@ class PIDAnalysisService:
                 c.lower().strip() for c in cfg.get('suppressed_categories', [])
             ]
             if self.suppressed_categories:
-                print(f'[INFO] Suppressed categories: {self.suppressed_categories}')
+                logger.debug(f'[INFO] Suppressed categories: {self.suppressed_categories}')
 
             # Evidence writing guidance (SOFT-CODED: controls how the AI justifies every finding)
             # Injected as a block into every pass system prompt so all passes enforce the same standard.
             _ev = cfg.get('evidence_guidance', {})
             self.evidence_guidance_block = self._build_evidence_block(_ev)
             if self.evidence_guidance_block:
-                print(f'[INFO] Evidence guidance block loaded ({len(self.evidence_guidance_block)} chars)')
+                logger.debug(f'[INFO] Evidence guidance block loaded ({len(self.evidence_guidance_block)} chars)')
 
-            print('[INFO] pid_analysis_config.json loaded successfully')
+            logger.debug('[INFO] pid_analysis_config.json loaded successfully')
 
         except Exception as _ex:
-            print(f'[WARNING] Could not load pid_analysis_config.json ({_ex}) — using built-in defaults')
+            logger.debug(f'[WARNING] Could not load pid_analysis_config.json ({_ex}) — using built-in defaults')
             self.pdf_dpi                = 300
             self.ocr_sparse_threshold   = 10
             self.ocr_tesseract_fallback = True
@@ -379,7 +382,7 @@ class PIDAnalysisService:
         """
         self._gemini_client = None
         if not getattr(self, 'gemini_enabled', False):
-            print('[INFO] Gemini provider disabled in config (gemini.enabled=false)')
+            logger.debug('[INFO] Gemini provider disabled in config (gemini.enabled=false)')
             return
         try:
             from google import genai
@@ -389,15 +392,15 @@ class PIDAnalysisService:
                 or getattr(settings, 'GEMINI_API_KEY', None))))
             )
             if not api_key:
-                print('[WARNING] Gemini enabled but GEMINI_API_KEY env var not set — Gemini disabled')
+                logger.debug('[WARNING] Gemini enabled but GEMINI_API_KEY env var not set — Gemini disabled')
                 return
             self._gemini_client = observed_google(lazy_provider_client('gemini', genai.Client, api_key=lambda: (api_key)))
-            print(f'[INFO] Google Gemini client initialized (primary={self._GEMINI_PRIMARY_MODEL})')
+            logger.debug(f'[INFO] Google Gemini client initialized (primary={self._GEMINI_PRIMARY_MODEL})')
         except ImportError:
-            print('[WARNING] google-genai not installed — Gemini disabled. '
+            logger.debug('[WARNING] google-genai not installed — Gemini disabled. '
                   'Run: pip install google-genai>=0.8.0')
         except Exception as _ex:
-            print(f'[WARNING] Gemini initialization failed: {_ex} — falling back to OpenAI only')
+            logger.debug(f'[WARNING] Gemini initialization failed: {_ex} — falling back to OpenAI only')
 
     def _call_gemini_vision(
         self,
@@ -448,13 +451,11 @@ class PIDAnalysisService:
                                     mime_type=mime,
                                 ))
             if not parts:
-                print(f'[WARNING] {pass_label}: no content parts for Gemini — skipping')
+                logger.debug(f'[WARNING] {pass_label}: no content parts for Gemini — skipping')
                 return ''
             model_name = getattr(self, '_GEMINI_PRIMARY_MODEL', 'gemini-3.8-flash')
-            print(
-                f'[INFO] {pass_label}: calling Gemini {model_name}'
-                f' ({len(parts)} parts, max_tokens={max_tokens})...'
-            )
+            logger.debug(f'[INFO] {pass_label}: calling Gemini {model_name}'
+                f' ({len(parts)} parts, max_tokens={max_tokens})...')
             config = _gtypes.GenerateContentConfig(
                 system_instruction=system_prompt or None,
                 max_output_tokens=min(max_tokens, 65536),
@@ -470,10 +471,10 @@ class PIDAnalysisService:
             _meta = getattr(response, 'usage_metadata', None)
             tokens_in  = getattr(_meta, 'prompt_token_count', 0)
             tokens_out = getattr(_meta, 'candidates_token_count', 0)
-            print(f'[INFO] {pass_label}: Gemini ✓ {len(result_text)} chars | in={tokens_in} out={tokens_out}')
+            logger.debug(f'[INFO] {pass_label}: Gemini ✓ {len(result_text)} chars | in={tokens_in} out={tokens_out}')
             return result_text
         except Exception as _gex:
-            print(f'[WARNING] {pass_label}: Gemini call failed ({_gex}) — cascading to OpenAI')
+            logger.debug(f'[WARNING] {pass_label}: Gemini call failed ({_gex}) — cascading to OpenAI')
             return ''
 
     def _call_ai_vision(
@@ -495,7 +496,7 @@ class PIDAnalysisService:
         # Use multi-model service if available (supports both OpenAI and Gemini with auto-fallback)
         if hasattr(self, 'ai_service') and self.ai_service:
             try:
-                print(f"[INFO] {pass_label}: Using multi-model service (provider: {provider})...")
+                logger.debug(f"[INFO] {pass_label}: Using multi-model service (provider: {provider})...")
                 
                 # Extract images from messages for vision analysis
                 images_base64 = []
@@ -524,12 +525,12 @@ class PIDAnalysisService:
                 )
                 
                 if response_text:
-                    print(f"[INFO] {pass_label}: Multi-model vision analysis successful")
+                    logger.debug(f"[INFO] {pass_label}: Multi-model vision analysis successful")
                     return response_text
                     
             except Exception as e:
-                print(f"[WARNING] {pass_label}: Multi-model service failed: {e}")
-                print(f"[INFO] {pass_label}: Falling back to legacy OpenAI chain...")
+                logger.debug(f"[WARNING] {pass_label}: Multi-model service failed: {e}")
+                logger.debug(f"[INFO] {pass_label}: Falling back to legacy OpenAI chain...")
         
         # Legacy fallback: use original provider-based routing
         if provider == 'gemini' and getattr(self, '_gemini_client', None):
@@ -542,7 +543,7 @@ class PIDAnalysisService:
             )
             if gemini_text and not self._model_refused_image(gemini_text):
                 return gemini_text
-            print(f'[INFO] {pass_label}: Gemini empty/refused — cascading to OpenAI')
+            logger.debug(f'[INFO] {pass_label}: Gemini empty/refused — cascading to OpenAI')
         # OpenAI chain: primary gpt-4o → fallback gpt-4o-mini
         return self._call_with_vision_fallback(
             messages=messages,
@@ -707,10 +708,8 @@ class PIDAnalysisService:
 
             layout_context_str = '\n'.join(ctx_lines)
 
-            print(
-                f"[INFO] Layout detection: {standard} | {drw_type} | {len(zones)} zones | "
-                f"notes@{notes_pos} | legend@{legend_pos}"
-            )
+            logger.debug(f"[INFO] Layout detection: {standard} | {drw_type} | {len(zones)} zones | "
+                f"notes@{notes_pos} | legend@{legend_pos}")
 
             return {
                 'zones': zones,
@@ -720,7 +719,7 @@ class PIDAnalysisService:
             }
 
         except Exception as _ex:
-            print(f"[WARNING] Layout detection failed ({_ex}) — using default 9-zone grid")
+            logger.debug(f"[WARNING] Layout detection failed ({_ex}) — using default 9-zone grid")
             return {
                 'zones': self.layout_default_zones,
                 'layout_context_str': '',
@@ -767,7 +766,7 @@ class PIDAnalysisService:
             from decouple import config as _dcfg
             bucket = _dcfg(self.cache_s3_bucket_env, default='')
             if not bucket:
-                print('[CACHE] AWS_STORAGE_BUCKET_NAME not set — cache disabled')
+                logger.debug('[CACHE] AWS_STORAGE_BUCKET_NAME not set — cache disabled')
                 return None
             s3 = _boto3.client(
                 's3',
@@ -790,19 +789,19 @@ class PIDAnalysisService:
                 for idx, i in enumerate(result['issues'], 1):
                     i['serial_number'] = idx
                 if len(result['issues']) < before:
-                    print(f'[CACHE] Suppressed {before - len(result["issues"])} cached finding(s)')
-            print(f'[CACHE HIT] {s3_key} — returning stored report ({len(compressed):,} bytes compressed)')
+                    logger.debug(f'[CACHE] Suppressed {before - len(result["issues"])} cached finding(s)')
+            logger.debug(f'[CACHE HIT] {s3_key} — returning stored report ({len(compressed):,} bytes compressed)')
             # Guard: if the cached result has issues but none have an evidence field,
             # this is a stale pre-v2 cache entry — invalidate and force fresh analysis.
             issues = result.get('issues') or []
             if issues and not any(i.get('evidence') for i in issues):
-                print('[CACHE] Stale cache entry detected (no evidence fields) — invalidating, running fresh analysis')
+                logger.debug('[CACHE] Stale cache entry detected (no evidence fields) — invalidating, running fresh analysis')
                 return None
             return result
         except Exception as _e:
             code = getattr(getattr(_e, 'response', None) or {}, 'get', lambda *a: '')('Error', {}).get('Code', '')
             if code not in ('NoSuchKey', '404'):
-                print(f'[CACHE] S3 get error ({_e}) — proceeding with fresh analysis')
+                logger.debug(f'[CACHE] S3 get error ({_e}) — proceeding with fresh analysis')
             return None
 
     def _cache_put(self, s3_key: str, result: dict) -> None:
@@ -838,9 +837,9 @@ class PIDAnalysisService:
                 import datetime as _dt2
                 put_kwargs['Expires'] = _dt2.datetime.utcnow() + _dt2.timedelta(days=ttl)
             s3.put_object(**put_kwargs)
-            print(f'[CACHE STORED] {s3_key} ({len(compressed):,} bytes compressed / {len(payload):,} raw)')
+            logger.debug(f'[CACHE STORED] {s3_key} ({len(compressed):,} bytes compressed / {len(payload):,} raw)')
         except Exception as _e:
-            print(f'[CACHE] S3 put error ({_e}) — result still returned to caller')
+            logger.debug(f'[CACHE] S3 put error ({_e}) — result still returned to caller')
 
     def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None, reference_documents: Dict[str, Any] = None, analysis_mode: str = 'standard') -> Dict[str, Any]:
         """
@@ -869,13 +868,13 @@ class PIDAnalysisService:
             Dictionary with comprehensive analysis results including reference compliance
         """
         try:
-            print(f"[INFO] ========== MULTI-PASS ANALYSIS WITH REFERENCE VERIFICATION ==========")
-            print(f"[INFO] Drawing: {drawing_number or 'Unknown'}")
+            logger.debug(f"[INFO] ========== MULTI-PASS ANALYSIS WITH REFERENCE VERIFICATION ==========")
+            logger.debug(f"[INFO] Drawing: {drawing_number or 'Unknown'}")
             # Store for use across passes (e.g. Pass 7 drawing-number exclusion)
             self._supplied_drawing_number = drawing_number or ''
-            print(f"[INFO] Analysis Mode: {analysis_mode.upper()}")
+            logger.debug(f"[INFO] Analysis Mode: {analysis_mode.upper()}")
             if reference_documents:
-                print(f"[INFO] Reference documents provided: {list(reference_documents.keys())}")
+                logger.debug(f"[INFO] Reference documents provided: {list(reference_documents.keys())}")
 
             # ── S3 cache check ───────────────────────────────────────────────────────
             # Compute a content-based key from the raw PDF bytes.  If the SAME file
@@ -887,23 +886,23 @@ class PIDAnalysisService:
             if _cached is not None:
                 _cached.setdefault('analysis_metadata', {})['cache_hit'] = True
                 return _cached
-            print('[CACHE MISS] No cached result found — running full 8-pass analysis')
+            logger.debug('[CACHE MISS] No cached result found — running full 8-pass analysis')
 
             # PASS 1: OCR Text Extraction
-            print(f"[INFO] PASS 1: OCR Text Extraction")
+            logger.debug(f"[INFO] PASS 1: OCR Text Extraction")
             images_base64 = self._pdf_to_base64_images(pdf_file)
             self._extract_text_from_pdf(pdf_file)
             self._parse_extracted_data()
             
-            print(f"[INFO] Extracted {len(self.instrument_tags)} instrument tags")
-            print(f"[INFO] Extracted {len(self.equipment_tags)} equipment tags")
-            print(f"[INFO] Extracted {len(self.line_numbers)} line numbers")
-            print(f"[INFO] Extracted {len(self.notes_references)} note references")
+            logger.debug(f"[INFO] Extracted {len(self.instrument_tags)} instrument tags")
+            logger.debug(f"[INFO] Extracted {len(self.equipment_tags)} equipment tags")
+            logger.debug(f"[INFO] Extracted {len(self.line_numbers)} line numbers")
+            logger.debug(f"[INFO] Extracted {len(self.notes_references)} note references")
             
             # PASS 2: Reference Document Processing (SOFT-CODED: AI-Powered Intelligence)
             reference_data = {}
             if reference_documents:
-                print(f"[INFO] PASS 2: Reference Document Intelligence Extraction")
+                logger.debug(f"[INFO] PASS 2: Reference Document Intelligence Extraction")
                 # SOFT-CODED: Separate JSON-typed references (e.g. DesignIQ line list) from file paths
                 json_references = {}
                 file_references = {}
@@ -915,47 +914,47 @@ class PIDAnalysisService:
                 try:
                     if file_references:
                         reference_data = self._process_reference_documents(file_references)
-                    print(f"[INFO] Reference data extracted: {len(reference_data)} categories")
+                    logger.debug(f"[INFO] Reference data extracted: {len(reference_data)} categories")
                 except Exception as e:
-                    print(f"[WARNING] Reference document processing failed (non-critical): {e}")
+                    logger.debug(f"[WARNING] Reference document processing failed (non-critical): {e}")
                     reference_data = {}
                 # Merge JSON references directly (already structured — no file processing needed)
                 reference_data.update(json_references)
                 if json_references:
-                    print(f"[INFO] Merged {len(json_references)} JSON reference(s) from DesignIQ: {list(json_references.keys())}")
+                    logger.debug(f"[INFO] Merged {len(json_references)} JSON reference(s) from DesignIQ: {list(json_references.keys())}")
             else:
-                print(f"[INFO] PASS 2: Skipped (No reference documents provided)")
+                logger.debug(f"[INFO] PASS 2: Skipped (No reference documents provided)")
 
             # PRE-PASS (Layout Detection): lightweight gpt-4o-mini call that identifies the
             # drawing's zone grid, company standard, and section positions.  The resulting
             # layout_context_str is injected into Passes 3, 5, and 6 so the AI adapts to
             # the ACTUAL layout of this specific P&ID rather than assuming a fixed 9-zone grid.
-            print(f"[INFO] PRE-PASS: Layout Detection (adaptive zone grid for this drawing)")
+            logger.debug(f"[INFO] PRE-PASS: Layout Detection (adaptive zone grid for this drawing)")
             layout_info = {'layout_context_str': '', 'zones': self.layout_default_zones, 'detected': False}
             if self.layout_detection_enabled:
                 try:
                     layout_info = self._detect_pid_layout(images_base64)
                 except Exception as _le:
-                    print(f"[WARNING] Layout detection failed (non-critical): {_le}")
+                    logger.debug(f"[WARNING] Layout detection failed (non-critical): {_le}")
             else:
-                print(f"[INFO] Layout detection disabled in config — using default 9-zone grid")
+                logger.debug(f"[INFO] Layout detection disabled in config — using default 9-zone grid")
 
             # PASS 3: Vision Analysis with Chain-of-Thought & Reference Cross-Verification
-            print(f"[INFO] PASS 3: Vision Analysis (Chain-of-Thought + Reference Verification)")
+            logger.debug(f"[INFO] PASS 3: Vision Analysis (Chain-of-Thought + Reference Verification)")
             try:
                 vision_result = self._vision_analysis_with_references(
                     images_base64, reference_data, layout_info.get('layout_context_str', '')
                 )
             except Exception as e:
-                print(f"[ERROR] PASS 3 failed: {str(e)}")
+                logger.debug(f"[ERROR] PASS 3 failed: {str(e)}")
                 vision_result = {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
             
             # PASS 4: Cross-Validation
-            print(f"[INFO] PASS 4: Cross-Validation & Consistency Checks")
+            logger.debug(f"[INFO] PASS 4: Cross-Validation & Consistency Checks")
             try:
                 consistency_issues = self._cross_validation_pass(vision_result)
             except Exception as e:
-                print(f"[ERROR] PASS 3 failed: {str(e)}")
+                logger.debug(f"[ERROR] PASS 3 failed: {str(e)}")
                 consistency_issues = []
             
             # PASS 5: Second Review Pass — ALWAYS run to catch missed elements.
@@ -963,14 +962,14 @@ class PIDAnalysisService:
             # The second pass is given the first-pass findings and told not to duplicate them.
             second_pass_issues = []
             issues_found = vision_result.get('total_issues', 0)
-            print(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues from Pass 3 — scanning for missed elements)")
+            logger.debug(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues from Pass 3 — scanning for missed elements)")
             try:
                 second_pass_issues = self._second_review_pass(
                     images_base64, vision_result, consistency_issues,
                     layout_info.get('layout_context_str', '')
                 )
             except Exception as e:
-                print(f"[WARNING] PASS 5 failed (non-critical): {str(e)}")
+                logger.debug(f"[WARNING] PASS 5 failed (non-critical): {str(e)}")
                 second_pass_issues = []
 
             # PASS 6: Engineering Compliance Deep-Scan — dedicated AI call for standards compliance.
@@ -980,21 +979,21 @@ class PIDAnalysisService:
             # industry standards which are NOT project-specific and produce false positives.
             engineering_issues = []
             if getattr(self, 'pass6_enabled', False):
-                print(f"[INFO] PASS 6: Engineering Compliance Deep-Scan (API/ASME/NACE/Tie-in specialist)")
+                logger.debug(f"[INFO] PASS 6: Engineering Compliance Deep-Scan (API/ASME/NACE/Tie-in specialist)")
                 try:
                     engineering_issues = self._engineering_compliance_pass(
                         images_base64, vision_result, second_pass_issues
                     )
                 except Exception as e:
-                    print(f"[WARNING] PASS 6 failed (non-critical): {str(e)}")
+                    logger.debug(f"[WARNING] PASS 6 failed (non-critical): {str(e)}")
                     engineering_issues = []
             else:
-                print(f"[INFO] PASS 6: Skipped (pass_6.enabled=false in config — consistency-only mode)")
+                logger.debug(f"[INFO] PASS 6: Skipped (pass_6.enabled=false in config — consistency-only mode)")
 
             # PASS 7: Line Size Validation & AI Recommendation Engine
             # Detects line size anomalies (nozzle mismatches, unjustified size jumps,
             # velocity-based outliers) and produces structured recommendations.
-            print(f"[INFO] PASS 7: Line Size Validation & AI Recommendations")
+            logger.debug(f"[INFO] PASS 7: Line Size Validation & AI Recommendations")
             line_size_result = {"issues": [], "line_size_recommendations": []}
             try:
                 # Pass the confirmed drawing number so Pass 7 never mistakes it for a line size
@@ -1007,7 +1006,7 @@ class PIDAnalysisService:
                     images_base64, reference_data, confirmed_drawing_number=_confirmed_drw_num
                 )
             except Exception as e:
-                print(f"[WARNING] PASS 7 failed (non-critical): {str(e)}")
+                logger.debug(f"[WARNING] PASS 7 failed (non-critical): {str(e)}")
 
             # PASS 8: Smart QC Enhancement — four targeted specialist checks:
             #   1. Duplicate / near-duplicate line number detection (programmatic + AI confirm)
@@ -1015,7 +1014,7 @@ class PIDAnalysisService:
             #   3. Deep NOTES & HOLDS cross-verification (full-stack process engineer view)
             #   4. Equipment TYPE designation validation (e.g. TYPE 01A vs TYPE 09A)
             # Purely additive — does NOT modify any previous pass logic.
-            print(f"[INFO] PASS 8: Smart QC Enhancement (Dup Lines + Valve Size + Notes/Holds + TYPE Designations)")
+            logger.debug(f"[INFO] PASS 8: Smart QC Enhancement (Dup Lines + Valve Size + Notes/Holds + TYPE Designations)")
             smart_qc_result = {"issues": [], "total_issues": 0}
             try:
                 _merged_for_pass8 = (
@@ -1029,7 +1028,7 @@ class PIDAnalysisService:
                     images_base64, reference_data, _merged_for_pass8
                 )
             except Exception as e:
-                print(f"[WARNING] PASS 8 failed (non-critical): {str(e)}")
+                logger.debug(f"[WARNING] PASS 8 failed (non-critical): {str(e)}")
 
             # Merge all findings from all passes (including line size and smart QC issues)
             all_issues = self._merge_and_deduplicate(
@@ -1045,14 +1044,14 @@ class PIDAnalysisService:
                 before_cag = len(all_issues)
                 all_issues = self._cag_post_filter(all_issues)
                 if len(all_issues) < before_cag:
-                    print(f"[CAG] Post-filter: removed/demoted {before_cag - len(all_issues)} hallucinated finding(s)")
+                    logger.debug(f"[CAG] Post-filter: removed/demoted {before_cag - len(all_issues)} hallucinated finding(s)")
             except Exception as _cag_ex:
-                print(f"[WARNING] CAG post-filter failed (non-critical): {_cag_ex}")
+                logger.debug(f"[WARNING] CAG post-filter failed (non-critical): {_cag_ex}")
 
             # If NO issues found at all, log a warning but do NOT fabricate a placeholder finding.
             # A clean drawing with genuinely zero findings should return an empty list.
             if len(all_issues) == 0:
-                print("[WARNING] No issues found in any pass — returning empty findings list (no placeholder injected)")
+                logger.debug("[WARNING] No issues found in any pass — returning empty findings list (no placeholder injected)")
 
             # Supplement with individual note/hold compliance items when below threshold
             # Each extracted note/hold reference is a legitimate QC check item
@@ -1081,7 +1080,7 @@ class PIDAnalysisService:
                         })
                         already_refs.add(nr_upper)
                 if len(all_issues) > 0:
-                    print(f"[INFO] Supplemented with note/hold compliance items. Total issues: {len(all_issues)}")
+                    logger.debug(f"[INFO] Supplemented with note/hold compliance items. Total issues: {len(all_issues)}")
 
             # Re-number serial numbers sequentially after any additions
             for idx, iss in enumerate(all_issues, start=1):
@@ -1141,11 +1140,11 @@ class PIDAnalysisService:
                 }
             }
             
-            print(f"[INFO] ========== ANALYSIS COMPLETE ==========")
-            print(f"[INFO] Total Issues: {len(all_issues)}")
-            print(f"[INFO] Critical: {len(categorized['critical'])}, Major: {len(categorized['major'])}, Minor: {len(categorized['minor'])}")
-            print(f"[INFO] Line Size Anomalies: {len(line_size_result.get('line_size_recommendations', []))}")
-            print(f"[INFO] Smart QC Enhancement (Pass 8): {len(smart_qc_result.get('issues', []))} issues")
+            logger.debug(f"[INFO] ========== ANALYSIS COMPLETE ==========")
+            logger.debug(f"[INFO] Total Issues: {len(all_issues)}")
+            logger.debug(f"[INFO] Critical: {len(categorized['critical'])}, Major: {len(categorized['major'])}, Minor: {len(categorized['minor'])}")
+            logger.debug(f"[INFO] Line Size Anomalies: {len(line_size_result.get('line_size_recommendations', []))}")
+            logger.debug(f"[INFO] Smart QC Enhancement (Pass 8): {len(smart_qc_result.get('issues', []))} issues")
 
             # ── Store result in S3 cache ─────────────────────────────────────────────
             self._cache_put(_cache_key, final_result)
@@ -1153,7 +1152,7 @@ class PIDAnalysisService:
             return final_result
             
         except Exception as e:
-            print(f"[ERROR] Analysis failed: {str(e)}")
+            logger.debug(f"[ERROR] Analysis failed: {str(e)}")
             import traceback
             traceback.print_exc()
             raise
@@ -1164,12 +1163,12 @@ class PIDAnalysisService:
             # Soft-coded approach: Handle both file paths and file objects (S3/Django FileField)
             if isinstance(pdf_file, str):
                 # Local file path
-                doc = fitz.open(pdf_file)
+                doc = pymupdf.open(pdf_file)
             else:
                 # File object (from S3 or Django FileField) - read content into memory
                 pdf_file.seek(0)  # Ensure we're at the start
                 pdf_bytes = pdf_file.read()
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             text_parts = []
             
@@ -1186,19 +1185,19 @@ class PIDAnalysisService:
             # SOFT-CODED: controlled by ocr_tesseract_fallback_enabled in pid_analysis_config.json
             _tess_enabled = getattr(self, 'ocr_tesseract_fallback', True)
             if _tess_enabled and len(self.extracted_text.strip()) < 200:
-                print(f'[INFO] Embedded text sparse ({len(self.extracted_text.strip())} chars) — attempting Tesseract OCR fallback')
+                logger.debug(f'[INFO] Embedded text sparse ({len(self.extracted_text.strip())} chars) — attempting Tesseract OCR fallback')
                 try:
                     import pytesseract
                     from PIL import Image as _PILImage
                     _tess_texts = []
                     if isinstance(pdf_file, str):
-                        _doc2 = fitz.open(pdf_file)
+                        _doc2 = pymupdf.open(pdf_file)
                     else:
                         pdf_file.seek(0)
-                        _doc2 = fitz.open(stream=pdf_file.read(), filetype="pdf")
+                        _doc2 = pymupdf.open(stream=pdf_file.read(), filetype="pdf")
                     for _pnum in range(len(_doc2)):
                         _pg = _doc2.load_page(_pnum)
-                        _mat = fitz.Matrix(2.0, 2.0)  # 144 DPI — fast yet readable for Tesseract
+                        _mat = pymupdf.Matrix(2.0, 2.0)  # 144 DPI — fast yet readable for Tesseract
                         _pix = _pg.get_pixmap(matrix=_mat)
                         _img = _PILImage.frombytes("RGB", [_pix.width, _pix.height], _pix.samples)
                         _tess_texts.append(pytesseract.image_to_string(_img, config='--psm 11 -l eng'))
@@ -1206,12 +1205,12 @@ class PIDAnalysisService:
                     _tess_combined = "\n".join(_tess_texts)
                     if len(_tess_combined.strip()) > len(self.extracted_text.strip()):
                         self.extracted_text = _tess_combined
-                        print(f'[INFO] Tesseract OCR extracted {len(_tess_combined)} chars')
+                        logger.debug(f'[INFO] Tesseract OCR extracted {len(_tess_combined)} chars')
                 except Exception as _tess_ex:
-                    print(f'[WARNING] Tesseract OCR fallback failed: {_tess_ex}')
+                    logger.debug(f'[WARNING] Tesseract OCR fallback failed: {_tess_ex}')
 
         except Exception as e:
-            print(f"[WARNING] OCR extraction failed: {str(e)}")
+            logger.debug(f"[WARNING] OCR extraction failed: {str(e)}")
             self.extracted_text = ""
     
     def _parse_extracted_data(self):
@@ -1228,7 +1227,7 @@ class PIDAnalysisService:
         if not self.extracted_text:
             return
             
-        print(f"[PARSE] Session {self.session_id[:8]}: Starting deterministic classification")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Starting deterministic classification")
         
         # Valid instrument prefixes (ISA-5.1 standard)
         valid_instrument_prefixes = {
@@ -1283,7 +1282,7 @@ class PIDAnalysisService:
                 if is_valid_instrument and not is_line_number:
                     self.instrument_tags.add(tag.upper())
         
-        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.instrument_tags)} instrument tags")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.instrument_tags)} instrument tags")
         
         # ═══════════════════════════════════════════════════════════════════
         # LINE NUMBERS (using deterministic classifier)
@@ -1295,7 +1294,7 @@ class PIDAnalysisService:
         pid_connector_pattern = re.compile(r'^\d+[-]PP[-]\d+[-]\d+', re.IGNORECASE)
         self.line_numbers = {ln for ln in self.line_numbers if not pid_connector_pattern.match(ln)}
         
-        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.line_numbers)} line numbers")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.line_numbers)} line numbers")
         
         # ═══════════════════════════════════════════════════════════════════
         # EQUIPMENT TAGS (using deterministic classifier)
@@ -1303,7 +1302,7 @@ class PIDAnalysisService:
         # Use classifier to extract ONLY equipment (never include line fragments)
         self.equipment_tags = self.classifier.extract_equipment_tags_only(self.extracted_text)
         
-        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.equipment_tags)} equipment tags")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.equipment_tags)} equipment tags")
 
         # ── Drawing-number extraction (soft-coded) ────────────────────────────
         # Drawing numbers use DOT separators: NN.NN.NN.NNNN or NN.NN.NNNN etc.
@@ -1315,7 +1314,7 @@ class PIDAnalysisService:
         )
         self.drawing_number_candidates = set(re.findall(drw_num_pattern, self.extracted_text))
         
-        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.drawing_number_candidates)} drawing numbers")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.drawing_number_candidates)} drawing numbers")
         
         # ═══════════════════════════════════════════════════════════════════
         # NOTE REFERENCES (with DELETED filtering)
@@ -1330,9 +1329,9 @@ class PIDAnalysisService:
         
         deleted_count = len(all_notes) - len(active_notes)
         if deleted_count > 0:
-            print(f"[PARSE] Session {self.session_id[:8]}: Filtered out {deleted_count} DELETED notes")
+            logger.debug(f"[PARSE] Session {self.session_id[:8]}: Filtered out {deleted_count} DELETED notes")
         
-        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.notes_references)} active notes/holds")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.notes_references)} active notes/holds")
         
         # ═══════════════════════════════════════════════════════════════════
         # VALIDATION: Ensure no cross-contamination
@@ -1340,12 +1339,12 @@ class PIDAnalysisService:
         # Verify line numbers don't overlap with equipment tags
         overlap = self.line_numbers.intersection(self.equipment_tags)
         if overlap:
-            print(f"[WARNING] Session {self.session_id[:8]}: Found {len(overlap)} overlapping tags - reclassifying")
+            logger.debug(f"[WARNING] Session {self.session_id[:8]}: Found {len(overlap)} overlapping tags - reclassifying")
             for item in overlap:
                 # Line numbers take priority (they contain size prefix)
                 self.equipment_tags.discard(item)
         
-        print(f"[PARSE] Session {self.session_id[:8]}: Classification complete - context isolated")
+        logger.debug(f"[PARSE] Session {self.session_id[:8]}: Classification complete - context isolated")
 
     def _build_cag_context(self) -> str:
         """
@@ -1370,7 +1369,7 @@ class PIDAnalysisService:
             with open(rules_path, 'r', encoding='utf-8') as f:
                 strict_rules = f.read().strip()
         except Exception as e:
-            print(f"[WARNING] Could not load strict validation rules: {e}")
+            logger.debug(f"[WARNING] Could not load strict validation rules: {e}")
         
         sep = '═' * 68
         lines = [
@@ -1603,7 +1602,7 @@ class PIDAnalysisService:
             kept.append(issue)
 
         if removed:
-            print(f'[CAG] Post-filter removed {len(removed)} hallucinated note/hold issues: {removed[:5]}')
+            logger.debug(f'[CAG] Post-filter removed {len(removed)} hallucinated note/hold issues: {removed[:5]}')
         return kept
 
     def _build_per_instrument_instructions(self) -> str:
@@ -2174,7 +2173,7 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
                 }
             ]
             
-            print("[INFO] Calling AI Vision API (Pass 3: Chain-of-Thought)...")
+            logger.debug("[INFO] Calling AI Vision API (Pass 3: Chain-of-Thought)...")
             _p3_provider = getattr(self, 'pass3_provider', 'openai')
             response_text = self._call_ai_vision(
                 messages=messages,
@@ -2186,16 +2185,16 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
             )
 
             if not response_text:
-                print("[ERROR] AI provider returned empty response for Pass 3")
+                logger.debug("[ERROR] AI provider returned empty response for Pass 3")
                 return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
 
             response_text = response_text.strip()
-            print(f"[INFO] Pass 3 complete. Response length: {len(response_text)} chars")
+            logger.debug(f"[INFO] Pass 3 complete. Response length: {len(response_text)} chars")
 
             return self._parse_analysis_response(response_text, 0)
             
         except Exception as e:
-            print(f"[ERROR] Vision analysis failed: {str(e)}")
+            logger.debug(f"[ERROR] Vision analysis failed: {str(e)}")
             return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
     
     def _cross_validation_pass(self, vision_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2275,7 +2274,7 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
                 }
             })
         
-        print(f"[INFO] Cross-validation found {len(consistency_issues)} consistency observations (smart filtered)")
+        logger.debug(f"[INFO] Cross-validation found {len(consistency_issues)} consistency observations (smart filtered)")
         return consistency_issues
     
     def _second_review_pass(self, images_base64: List[str], first_pass: Dict, consistency: List, layout_context_str: str = '') -> List[Dict[str, Any]]:
@@ -2429,7 +2428,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             ]
 
             _p5_provider = getattr(self, 'pass5_provider', 'openai')
-            print(f"[INFO] Calling AI Vision API (Pass 5) — provider={_p5_provider}...")
+            logger.debug(f"[INFO] Calling AI Vision API (Pass 5) — provider={_p5_provider}...")
             response_text = self._call_ai_vision(
                 messages=messages,
                 pass_label="PASS 5",
@@ -2440,18 +2439,18 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             )
 
             if not response_text:
-                print("[WARNING] Pass 5: AI provider returned empty response")
+                logger.debug("[WARNING] Pass 5: AI provider returned empty response")
                 return []
 
             response_text = response_text.strip()
-            print(f"[DEBUG RAW SECOND PASS] len={len(response_text)}")
+            logger.debug(f"[DEBUG RAW SECOND PASS] len={len(response_text)}")
             result = self._parse_analysis_response(response_text, 0)
 
-            print(f"[INFO] Second pass found {len(result.get('issues', []))} additional issues")
+            logger.debug(f"[INFO] Second pass found {len(result.get('issues', []))} additional issues")
             return result.get('issues', [])
 
         except Exception as e:
-            print(f"[WARNING] Second review pass failed: {str(e)}")
+            logger.debug(f"[WARNING] Second review pass failed: {str(e)}")
             return []
     
     def _engineering_compliance_pass(
@@ -2683,15 +2682,15 @@ Return ONLY valid JSON with ALL findings from ALL nine domains above."""
                 temperature=self.pass6_temperature,
             )
             if not response_text:
-                print("[INFO] Pass 6 (engineering compliance) found 0 additional issues")
+                logger.debug("[INFO] Pass 6 (engineering compliance) found 0 additional issues")
                 return []
             result = self._parse_analysis_response(response_text, 0)
             issues = result.get('issues', [])
-            print(f"[INFO] Pass 6 (engineering compliance) found {len(issues)} additional issues")
+            logger.debug(f"[INFO] Pass 6 (engineering compliance) found {len(issues)} additional issues")
             return issues
 
         except Exception as e:
-            print(f"[WARNING] Engineering compliance pass failed: {str(e)}")
+            logger.debug(f"[WARNING] Engineering compliance pass failed: {str(e)}")
             return []
 
     def _line_size_validation_pass(
@@ -2883,7 +2882,7 @@ Focus especially on:
                 }
             ]
 
-            print("[INFO] Calling OpenAI for line size validation (Pass 7)...")
+            logger.debug("[INFO] Calling OpenAI for line size validation (Pass 7)...")
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
@@ -2894,11 +2893,11 @@ Focus especially on:
             )
 
             if not response or not response.choices:
-                print("[WARNING] Pass 7: OpenAI returned empty response")
+                logger.debug("[WARNING] Pass 7: OpenAI returned empty response")
                 return {"issues": [], "line_size_recommendations": []}
 
             response_text = (response.choices[0].message.content or "").strip()
-            print(f"[DEBUG PASS 7] len={len(response_text)}")
+            logger.debug(f"[DEBUG PASS 7] len={len(response_text)}")
 
             # Parse the JSON response
             result = self._parse_analysis_response(response_text, 0)
@@ -2936,11 +2935,11 @@ Focus especially on:
                     'location_on_drawing': loc,
                 })
 
-            print(f"[INFO] Pass 7 (line size validation) found {len(recommendations)} anomalies")
+            logger.debug(f"[INFO] Pass 7 (line size validation) found {len(recommendations)} anomalies")
             return {"issues": issues, "line_size_recommendations": recommendations}
 
         except Exception as e:
-            print(f"[WARNING] Line size validation pass failed: {str(e)}")
+            logger.debug(f"[WARNING] Line size validation pass failed: {str(e)}")
             return {"issues": [], "line_size_recommendations": []}
 
     # =========================================================================
@@ -3255,7 +3254,7 @@ Focus especially on:
             # ── Enhancement A: programmatic near-duplicate line detection ─────────
             dup_issues = self._detect_near_duplicate_lines()
             if dup_issues:
-                print(f"[INFO] Pass 8 — programmatic near-dup scan: {len(dup_issues)} pair(s) flagged")
+                logger.debug(f"[INFO] Pass 8 — programmatic near-dup scan: {len(dup_issues)} pair(s) flagged")
 
             # ── Context: issues already reported (dedup guard for AI) ─────────────
             already_str = '\n'.join(
@@ -3748,14 +3747,12 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
 
             # Merge: programmatic near-dup findings (authoritative) + AI findings
             all_enhancement_issues = dup_issues + ai_issues
-            print(
-                f"[INFO] Pass 8 found {len(all_enhancement_issues)} issues "
-                f"({len(dup_issues)} programmatic + {len(ai_issues)} AI)"
-            )
+            logger.debug(f"[INFO] Pass 8 found {len(all_enhancement_issues)} issues "
+                f"({len(dup_issues)} programmatic + {len(ai_issues)} AI)")
             return {"issues": all_enhancement_issues, "total_issues": len(all_enhancement_issues)}
 
         except Exception as e:
-            print(f"[WARNING] Pass 8 (Smart QC Enhancement) failed (non-critical): {str(e)}")
+            logger.debug(f"[WARNING] Pass 8 (Smart QC Enhancement) failed (non-critical): {str(e)}")
             # Graceful fallback: return programmatic near-dup findings even if AI call fails
             try:
                 fallback_dups = self._detect_near_duplicate_lines()
@@ -3834,7 +3831,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             if not _drw_num_re.match(iss.get('pid_reference', '') or '')
         ]
         if len(all_issues) < before_drw:
-            print(f'[INFO] Dropped {before_drw - len(all_issues)} finding(s) with drawing numbers as pid_reference')
+            logger.debug(f'[INFO] Dropped {before_drw - len(all_issues)} finding(s) with drawing numbers as pid_reference')
 
         # Fourth-pass filter: suppressed categories (soft-coded via pid_analysis_config.json)
         # Any category whose name contains a suppressed token is dropped entirely.
@@ -3847,13 +3844,13 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             ]
             dropped = before - len(all_issues)
             if dropped:
-                print(f'[INFO] Suppressed {dropped} finding(s) from categories: {_suppressed}')
+                logger.debug(f'[INFO] Suppressed {dropped} finding(s) from categories: {_suppressed}')
 
         # Renumber serially
         for idx, issue in enumerate(all_issues, 1):
             issue['serial_number'] = idx
 
-        print(f"[INFO] Merged {len(all_issues)} unique issues from all passes")
+        logger.debug(f"[INFO] Merged {len(all_issues)} unique issues from all passes")
         return all_issues
     
     def _categorize_by_severity(self, issues: List[Dict]) -> Dict[str, List]:
@@ -3929,7 +3926,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
 
             # Strategy 3: Response is plain-text analysis — extract key findings as issues
             # This handles cases where AI returned prose instead of JSON
-            print(f"[WARNING] Could not parse JSON from AI response (len={len(response_text)}), extracting from text")
+            logger.debug(f"[WARNING] Could not parse JSON from AI response (len={len(response_text)}), extracting from text")
             extracted_issues = self._extract_issues_from_text(response_text)
             return {
                 'issues': extracted_issues,
@@ -3941,7 +3938,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             }
                 
         except Exception as e:
-            print(f"[ERROR] Response parsing failed: {str(e)}")
+            logger.debug(f"[ERROR] Response parsing failed: {str(e)}")
             return {
                 'issues': [],
                 'total_issues': 0,
@@ -4033,19 +4030,19 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             # Soft-coded approach: Handle both file paths and file objects (S3/Django FileField)
             if isinstance(pdf_file, str):
                 # Local file path
-                doc = fitz.open(pdf_file)
+                doc = pymupdf.open(pdf_file)
             else:
                 # File object (from S3 or Django FileField) - read content into memory
                 pdf_file.seek(0)  # Ensure we're at the start
                 pdf_bytes = pdf_file.read()
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             # Convert each page
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
                 
                 # Render to image
-                mat = fitz.Matrix(dpi/72, dpi/72)
+                mat = pymupdf.Matrix(dpi/72, dpi/72)
                 pix = page.get_pixmap(matrix=mat)
                 
                 # Convert to PIL Image
@@ -4061,7 +4058,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             return images_base64
             
         except Exception as e:
-            print(f"[ERROR] PDF conversion failed: {str(e)}")
+            logger.debug(f"[ERROR] PDF conversion failed: {str(e)}")
             raise
 
     def generate_report_summary(self, issues: List[Dict[str, Any]]) -> Dict[str, Any]:

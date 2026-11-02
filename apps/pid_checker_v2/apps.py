@@ -2,8 +2,8 @@ import logging
 
 from django.apps import AppConfig
 from django.db.models.signals import post_migrate
-
 logger = logging.getLogger(__name__)
+
 
 
 def _seed_default_symbols(sender, **kwargs):
@@ -20,6 +20,10 @@ def _seed_default_symbols(sender, **kwargs):
     `manage.py migrate` itself into a failure; the command remains
     available to retry by hand.
     """
+    from apps.core.test_runtime import is_test_runtime
+    if is_test_runtime():
+        logger.debug('[PidCheckerV2] skipping default-symbol seeding during tests')
+        return
     try:
         from .services.seed_default_symbols import seed_pid_default_symbols
         seed_pid_default_symbols()

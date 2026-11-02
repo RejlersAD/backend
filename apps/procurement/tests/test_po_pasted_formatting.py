@@ -3,7 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest import TestCase
 
-import fitz
+import pymupdf
 from docx import Document
 from docx.oxml.ns import qn
 from reportlab.lib.units import mm
@@ -23,7 +23,7 @@ class PurchaseOrderPastedFormattingTests(TestCase):
         order.description = description
         content, warnings = build_purchase_order_pdf(order)
         self.assertFalse(warnings)
-        return fitz.open(stream=content, filetype='pdf'), Document(BytesIO(build_purchase_order_docx(order)))
+        return pymupdf.open(stream=content, filetype='pdf'), Document(BytesIO(build_purchase_order_docx(order)))
 
     def test_word_pasted_tabs_use_same_label_value_stops_in_pdf_and_editable_word(self):
         pdf, word = self.render(self.fixture())

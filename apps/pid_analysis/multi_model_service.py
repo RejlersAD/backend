@@ -2,11 +2,15 @@
 Multi-Model AI Service - Supports OpenAI and Google Gemini
 Provides unified interface for both models with automatic fallback
 """
+
+import logging
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 from typing import List, Dict, Any, Optional
 from django.conf import settings
 from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
+logger = logging.getLogger(__name__)
+
 try:
     from google import genai as google_genai
     from google.genai import types as genai_types
@@ -33,7 +37,7 @@ class MultiModelAIService:
         openai_key = provider_api_key('openai', fallback=(lambda: (os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None))))
         if openai_key and self.provider in ['openai', 'both']:
             self.openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (openai_key), timeout=180.0, max_retries=2)
-            print("[AI SERVICE] ✅ OpenAI client initialized")
+            logger.debug("[AI SERVICE] ✅ OpenAI client initialized")
         
         # Initialize Gemini
         self.gemini_client = None
@@ -43,16 +47,16 @@ class MultiModelAIService:
             try:
                 self.gemini_client = observed_google(lazy_provider_client('gemini', google_genai.Client, api_key=lambda: gemini_key))
                 self.gemini_api_key = gemini_key
-                print(f"[AI SERVICE] ✅ Gemini client initialized (SDK: {GENAI_SDK}, using stable 2.0-flash)")
+                logger.debug(f"[AI SERVICE] ✅ Gemini client initialized (SDK: {GENAI_SDK}, using stable 2.0-flash)")
             except Exception as e:
-                print(f"[AI SERVICE] ⚠️  Gemini initialization failed: {e}")
+                logger.debug(f"[AI SERVICE] ⚠️  Gemini initialization failed: {e}")
                 if self.provider == 'gemini':
                     raise
         
         if not self.openai_client and not self.gemini_client:
             raise ValueError("No AI API keys configured. Set OPENAI_API_KEY or GEMINI_API_KEY")
         
-        print(f"[AI SERVICE] Provider mode: {self.provider}")
+        logger.debug(f"[AI SERVICE] Provider mode: {self.provider}")
     
     def chat_completion(
         self,
@@ -86,13 +90,13 @@ class MultiModelAIService:
         # Route to appropriate provider
         if model.startswith("gpt") or model == "openai":
             if not self.openai_client:
-                print("[AI SERVICE] OpenAI not available, falling back to Gemini")
+                logger.debug("[AI SERVICE] OpenAI not available, falling back to Gemini")
                 return self._gemini_completion(messages, max_tokens, temperature, use_vision)
             return self._openai_completion(messages, model, max_tokens, temperature, use_vision)
         
         elif model.startswith("gemini") or model == "gemini":
             if not self.gemini_client:
-                print("[AI SERVICE] Gemini not available, falling back to OpenAI")
+                logger.debug("[AI SERVICE] Gemini not available, falling back to OpenAI")
                 return self._openai_completion(messages, "gpt-4o-mini", max_tokens, temperature, use_vision)
             return self._gemini_completion(messages, max_tokens, temperature, use_vision)
         
@@ -116,7 +120,7 @@ class MultiModelAIService:
             if model == "openai" or model == "auto":
                 model = "gpt-4o" if use_vision else "gpt-4o-mini"
             
-            print(f"[OPENAI] Using model: {model}")
+            logger.debug(f"[OPENAI] Using model: {model}")
             
             # DETERMINISM: Use seed=42 for reproducible outputs
             response = self.openai_client.chat.completions.create(
@@ -129,7 +133,7 @@ class MultiModelAIService:
             )
             
             result = response.choices[0].message.content or ""
-            print(f"[OPENAI] Response length: {len(result)} chars")
+            logger.debug(f"[OPENAI] Response length: {len(result)} chars")
             return result.strip()
             
         except Exception as e:
@@ -137,26 +141,26 @@ class MultiModelAIService:
             
             # Check for 429 quota exceeded error
             if "429" in error_str or "quota" in error_str.lower() or "insufficient_quota" in error_str.lower():
-                print(f"[OPENAI ERROR] ❌ 429 - QUOTA EXCEEDED")
-                print(f"[OPENAI ERROR] Full error: {error_str}")
-                print(f"[OPENAI ERROR] ⚠️ OpenAI API key has exceeded quota or billing limit")
-                print(f"[OPENAI ERROR] 💡 Please add credits or update API key in .env file")
+                logger.debug(f"[OPENAI ERROR] ❌ 429 - QUOTA EXCEEDED")
+                logger.debug(f"[OPENAI ERROR] Full error: {error_str}")
+                logger.debug(f"[OPENAI ERROR] ⚠️ OpenAI API key has exceeded quota or billing limit")
+                logger.debug(f"[OPENAI ERROR] 💡 Please add credits or update API key in .env file")
                 
                 # Attempt Gemini fallback if available
                 if self.gemini_client:
-                    print("[OPENAI] 🔄 Attempting fallback to Gemini (one-time)...")
+                    logger.debug("[OPENAI] 🔄 Attempting fallback to Gemini (one-time)...")
                     try:
                         result = self._gemini_completion(messages, max_tokens, temperature, use_vision)
-                        print("[OPENAI] ✅ Gemini fallback successful")
+                        logger.debug("[OPENAI] ✅ Gemini fallback successful")
                         return result
                     except Exception as gemini_error:
-                        print(f"[GEMINI ERROR] ❌ Fallback failed: {gemini_error}")
+                        logger.debug(f"[GEMINI ERROR] ❌ Fallback failed: {gemini_error}")
                         raise Exception(f"Both models failed. OpenAI quota exceeded, Gemini error: {str(gemini_error)}")
                 else:
                     raise Exception(f"OpenAI quota exceeded (429) and no Gemini fallback available")
             
             # Other OpenAI errors (not quota-related)
-            print(f"[OPENAI ERROR] {e}")
+            logger.debug(f"[OPENAI ERROR] {e}")
             raise Exception(f"OpenAI API error: {str(e)}")
     
     def _gemini_completion(
@@ -170,7 +174,7 @@ class MultiModelAIService:
         try:
             # Use stable Gemini 2.0-flash (fast, supports vision, widely available)
             model_name = "gemini-3.8-flash"
-            print(f"[GEMINI] Using model: {model_name} (SDK: {GENAI_SDK})")
+            logger.debug(f"[GEMINI] Using model: {model_name} (SDK: {GENAI_SDK})")
             
             # Collect all text parts and image parts
             prompt_parts = []
@@ -209,7 +213,7 @@ class MultiModelAIService:
             )
             result = response.text or ""
 
-            print(f"[GEMINI] Response length: {len(result)} chars")
+            logger.debug(f"[GEMINI] Response length: {len(result)} chars")
             return result.strip()
             
         except Exception as e:
@@ -217,16 +221,16 @@ class MultiModelAIService:
             
             # Check for model not found (404) error
             if "404" in error_str or "not found" in error_str.lower():
-                print(f"[GEMINI ERROR] ❌ 404 - MODEL NOT FOUND")
-                print(f"[GEMINI ERROR] Full error: {error_str}")
-                print(f"[GEMINI ERROR] ⚠️ The requested Gemini model is unavailable")
-                print(f"[GEMINI ERROR] 💡 Using stable models: gemini-1.5-pro / gemini-1.5-flash")
+                logger.debug(f"[GEMINI ERROR] ❌ 404 - MODEL NOT FOUND")
+                logger.debug(f"[GEMINI ERROR] Full error: {error_str}")
+                logger.debug(f"[GEMINI ERROR] ⚠️ The requested Gemini model is unavailable")
+                logger.debug(f"[GEMINI ERROR] 💡 Using stable models: gemini-1.5-pro / gemini-1.5-flash")
             elif "429" in error_str or "quota" in error_str.lower():
-                print(f"[GEMINI ERROR] ❌ 429 - QUOTA EXCEEDED")
-                print(f"[GEMINI ERROR] Full error: {error_str}")
-                print(f"[GEMINI ERROR] ⚠️ Gemini API quota or rate limit exceeded")
+                logger.debug(f"[GEMINI ERROR] ❌ 429 - QUOTA EXCEEDED")
+                logger.debug(f"[GEMINI ERROR] Full error: {error_str}")
+                logger.debug(f"[GEMINI ERROR] ⚠️ Gemini API quota or rate limit exceeded")
             else:
-                print(f"[GEMINI ERROR] ❌ {error_str}")
+                logger.debug(f"[GEMINI ERROR] ❌ {error_str}")
             
             # NO FALLBACK back to OpenAI — prevents infinite loops
             raise Exception(f"Gemini API error: {str(e)}")

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 
 # A drawing-number token like A1-285-E-0193 (allow OCR'd spacing).
 DRAWING_NO_RE = re.compile(r'\bA1[\s-]?285[\s-]?E[\s-]?(\d{4}[A-Z]?)\b')
@@ -38,7 +38,7 @@ def detect_pdf_type(doc) -> str:
             return 'vector-text'
         for img in page.get_images(full=True):
             xref = img[0]
-            pix = fitz.Pixmap(doc, xref)
+            pix = pymupdf.Pixmap(doc, xref)
             covers = pix.width >= page.rect.width * 0.7 and pix.height >= page.rect.height * 0.7
             pix = None
             if covers:
@@ -57,7 +57,7 @@ def norm_tag(value: str) -> str:
 
 def read_drawing_summary(pdf_bytes: bytes) -> dict:
     """Stage-1 read summary for the SLD slot (spec §3.1)."""
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     pdf_type = detect_pdf_type(doc)
     summary = {
         'page_count': doc.page_count,
@@ -102,9 +102,9 @@ def _title_block_via_ocr(doc) -> dict:
         # segments unreliably — measured on A1-285-E-0193.
         texts = []
         for fx, fy in ((0.55, 0.80), (0.45, 0.72)):
-            clip = fitz.Rect(page.rect.width * fx, page.rect.height * fy,
+            clip = pymupdf.Rect(page.rect.width * fx, page.rect.height * fy,
                              page.rect.width, page.rect.height)
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip)
             import numpy as np
             img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3]
             texts.append(pytesseract.image_to_string(_preprocess(img), config='--psm 6'))

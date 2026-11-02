@@ -9,8 +9,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
-
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -69,10 +69,10 @@ def segment_document(document_id: str, file_path: str) -> List[SegmentedDrawing]
 
 
 def _segment_pdf(document_id: str, file_path: str) -> List[SegmentedDrawing]:
-    """One SegmentedDrawing per PDF page using PyMuPDF (fitz) or fallback."""
+    """One SegmentedDrawing per PDF page using PyMuPDF (pymupdf) or fallback."""
     try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(file_path)
+        import pymupdf  # PyMuPDF
+        doc = pymupdf.open(file_path)
         results = []
         for i, page in enumerate(doc):
             title_info = _extract_title_block(page)

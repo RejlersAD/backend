@@ -27,7 +27,10 @@ Why this was needed:
   RoleModule assignments were last applied.  The fix seeds the missing modules
   then links them to every role that should have them per ROLE_MODULE_POLICY.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 
 # ── Pull config from rbac_config at migration time (not at import time) ──────
@@ -69,7 +72,7 @@ def sync_modules_and_policy(apps, schema_editor):
         )
         if created:
             created_count += 1
-            print(f'  [0011] ✓ Created module: {entry["code"]}')
+            logger.debug(f'  [0011] ✓ Created module: {entry["code"]}')
         else:
             # Keep name/order in sync with the config without overwriting custom overrides
             changed = False
@@ -85,7 +88,7 @@ def sync_modules_and_policy(apps, schema_editor):
 
         modules_map[entry['code']] = obj
 
-    print(f'  [0011] Modules: {created_count} created, {updated_count} updated, '
+    logger.debug(f'  [0011] Modules: {created_count} created, {updated_count} updated, '
           f'{len(modules_map) - created_count - updated_count} already current.')
 
     # ── Step 2: Apply ROLE_MODULE_POLICY to all roles that exist in the DB ───
@@ -103,7 +106,7 @@ def sync_modules_and_policy(apps, schema_editor):
             mod = modules_map.get(mod_code)
             if not mod:
                 # Should not happen after Step 1, but guard defensively
-                print(f'  [0011] ⚠ Module not in catalogue: {mod_code} (for role {role_code})')
+                logger.debug(f'  [0011] ⚠ Module not in catalogue: {mod_code} (for role {role_code})')
                 continue
 
             _, created = RoleModule.objects.using(db_alias).get_or_create(
@@ -112,9 +115,9 @@ def sync_modules_and_policy(apps, schema_editor):
             if created:
                 linked_count += 1
 
-    print(f'  [0011] Role-module links: {linked_count} new assignments applied.')
+    logger.debug(f'  [0011] Role-module links: {linked_count} new assignments applied.')
     if skipped_roles:
-        print(f'  [0011] Roles not yet in DB (skipped): {skipped_roles}')
+        logger.debug(f'  [0011] Roles not yet in DB (skipped): {skipped_roles}')
 
     # ── Step 3: Assign ALL modules to super_admin role (belt-and-braces) ─────
     super_admin_extra = 0
@@ -127,11 +130,11 @@ def sync_modules_and_policy(apps, schema_editor):
             if c:
                 super_admin_extra += 1
         if super_admin_extra:
-            print(f'  [0011] super_admin: {super_admin_extra} new module links added.')
+            logger.debug(f'  [0011] super_admin: {super_admin_extra} new module links added.')
     except Role.DoesNotExist:
-        print('  [0011] super_admin role not found — skipping super_admin step.')
+        logger.debug('  [0011] super_admin role not found — skipping super_admin step.')
 
-    print('  [0011] Done — all modules and role policies are now in sync.')
+    logger.debug('  [0011] Done — all modules and role policies are now in sync.')
 
 
 def reverse_sync(apps, schema_editor):
@@ -140,7 +143,7 @@ def reverse_sync(apps, schema_editor):
     because other data (user assignments, audit logs) may reference them.
     The migration is safe to re-run forward at any time.
     """
-    print('  [0011] Reverse: no destructive changes — migration is a no-op on reverse.')
+    logger.debug('  [0011] Reverse: no destructive changes — migration is a no-op on reverse.')
 
 
 class Migration(migrations.Migration):

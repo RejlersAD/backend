@@ -12,8 +12,8 @@ from django.conf import settings
 from apps.users.serializers import UserSerializer, UserRegistrationSerializer
 import os
 import logging
-
 logger = logging.getLogger(__name__)
+
 
 User = get_user_model()
 
@@ -256,7 +256,7 @@ def dashboard_metrics(request):
         feature_utilization = (users_using_features / total_users * 100) if total_users > 0 else 0
         
     except Exception as e:
-        print(f"Feature usage tracking not available: {e}")
+        logger.debug(f"Feature usage tracking not available: {e}")
         total_feature_runs = 0
         feature_runs_today = 0
         most_used = None
@@ -443,7 +443,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching P&ID activities: {e}")
+        logger.debug(f"Error fetching P&ID activities: {e}")
     
     # =======================================================================
     # PFD DOCUMENTS - Document Uploads
@@ -471,7 +471,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching PFD activities: {e}")
+        logger.debug(f"Error fetching PFD activities: {e}")
     
     # =======================================================================
     # PID CONVERSIONS - AI Analysis
@@ -499,7 +499,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching conversion activities: {e}")
+        logger.debug(f"Error fetching conversion activities: {e}")
     
     # =======================================================================
     # QHSE PROJECTS - Project Activities
@@ -527,7 +527,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching QHSE activities: {e}")
+        logger.debug(f"Error fetching QHSE activities: {e}")
     
     # =======================================================================
     # FEATURE USAGE - MLflow Tracking
@@ -567,7 +567,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching feature usage: {e}")
+        logger.debug(f"Error fetching feature usage: {e}")
     
     # =======================================================================
     # USER REGISTRATIONS - New Users
@@ -595,7 +595,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching user activities: {e}")
+        logger.debug(f"Error fetching user activities: {e}")
     
     # =======================================================================
     # PROJECTS - DesignIQ Projects
@@ -624,7 +624,7 @@ def recent_activity(request):
                 }
             })
     except Exception as e:
-        print(f"Error fetching project activities: {e}")
+        logger.debug(f"Error fetching project activities: {e}")
     
     # =======================================================================
     # SORT AND LIMIT ACTIVITIES
@@ -712,7 +712,7 @@ def predictive_analytics(request):
         historical_data['document_uploads'] = document_uploads
         
     except Exception as e:
-        print(f"Error aggregating document uploads: {e}")
+        logger.debug(f"Error aggregating document uploads: {e}")
         historical_data['document_uploads'] = [0] * days_back
     
     # =======================================================================
@@ -737,7 +737,7 @@ def predictive_analytics(request):
         historical_data['user_activity'] = user_activity
         
     except Exception as e:
-        print(f"Error aggregating user activity: {e}")
+        logger.debug(f"Error aggregating user activity: {e}")
         historical_data['user_activity'] = [0] * days_back
     
     # =======================================================================
@@ -764,7 +764,7 @@ def predictive_analytics(request):
         historical_data['ai_analysis_usage'] = ai_usage
         
     except Exception as e:
-        print(f"Error aggregating AI usage: {e}")
+        logger.debug(f"Error aggregating AI usage: {e}")
         historical_data['ai_analysis_usage'] = [0] * days_back
     
     # =======================================================================
@@ -792,7 +792,7 @@ def predictive_analytics(request):
         historical_data['project_completion'] = project_completion
         
     except Exception as e:
-        print(f"Error aggregating project completion: {e}")
+        logger.debug(f"Error aggregating project completion: {e}")
         historical_data['project_completion'] = [0] * days_back
     
     # =======================================================================
@@ -818,7 +818,7 @@ def predictive_analytics(request):
         historical_data['system_load'] = total_activity_by_day
         
     except Exception as e:
-        print(f"Error calculating system load: {e}")
+        logger.debug(f"Error calculating system load: {e}")
         historical_data['system_load'] = [50] * days_back  # Default 50% load
     
     # =======================================================================
@@ -898,7 +898,7 @@ def projects_stats(request):
             'data_sources': ['QHSE', 'PID', 'Core']
         })
     except Exception as e:
-        print(f"[STATS ERROR] projects_stats: {e}")
+        logger.debug(f"[STATS ERROR] projects_stats: {e}")
         import traceback
         traceback.print_exc()
         # Return safe fallback data
@@ -956,7 +956,7 @@ def pid_stats(request):
             'data_accuracy': 'real-time'
         })
     except Exception as e:
-        print(f"[STATS ERROR] pid_stats: {e}")
+        logger.debug(f"[STATS ERROR] pid_stats: {e}")
         import traceback
         traceback.print_exc()
         # Return safe fallback data
@@ -1089,7 +1089,7 @@ def usage_daily(request):
         })
 
     except Exception as e:
-        print(f"[STATS ERROR] usage_daily: {e}")
+        logger.debug(f"[STATS ERROR] usage_daily: {e}")
         import traceback
         traceback.print_exc()
         return Response({
@@ -1228,7 +1228,7 @@ def aws_status(request):
 @permission_classes([IsAuthenticated])
 def aws_report(request):
     """GET /api/v1/dashboard/aws-report/?format=xlsx|csv|pdf"""
-    print(f'[AWS_REPORT] START - user={request.user.email}, format={request.GET.get("format")}')
+    logger.debug(f'[AWS_REPORT] START - user={request.user.email}, format={request.GET.get("format")}')
     import io
     from django.http import HttpResponse
     from apps.rbac.models import UserProfile

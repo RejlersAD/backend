@@ -71,8 +71,8 @@ from .serializers import (
     EmployeeSalaryStructureSerializer,
     SalaryHistorySerializer,
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

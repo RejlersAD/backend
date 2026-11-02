@@ -2,11 +2,14 @@
 OCR Parser - Text Extraction from P&ID Images
 NO LLM - Pure OCR extraction
 """
+
+import logging
 import re
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from typing import List, Dict, Set, Any
 from PIL import Image
 import io
+logger = logging.getLogger(__name__)
 
 
 class OCRParser:
@@ -38,7 +41,7 @@ class OCRParser:
                 with open(pdf_file, 'rb') as f:
                     pdf_bytes = f.read()
             
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             all_text = []
             text_blocks = []
             
@@ -71,7 +74,7 @@ class OCRParser:
             }
             
         except Exception as e:
-            print(f"[ERROR] OCR extraction failed: {e}")
+            logger.debug(f"[ERROR] OCR extraction failed: {e}")
             return {
                 'raw_text': '',
                 'text_blocks': [],

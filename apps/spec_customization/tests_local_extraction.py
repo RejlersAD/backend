@@ -23,8 +23,8 @@ TABLE = ('PIPING CLASS: CS150\n'
 
 
 def native_pdf(path):
-    import fitz
-    with fitz.open() as document:
+    import pymupdf
+    with pymupdf.open() as document:
         page = document.new_page()
         page.insert_text((36, 40), 'PIPING CLASS: CS150', fontsize=11)
         for y, values in [(70, ['Component', 'Size', 'Material', 'Schedule', 'Ends']),
@@ -93,14 +93,14 @@ class LocalTableTests(SimpleTestCase):
         self.assertEqual(result['local_report']['issues'], [])
 
     def test_image_dominated_page_with_native_footer_still_routes_to_ocr(self):
-        import fitz
+        import pymupdf
         import io
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'mixed.pdf'
             stream = io.BytesIO()
             Image.new('RGB', (500, 500), 'white').save(stream, format='PNG')
-            with fitz.open() as document:
+            with pymupdf.open() as document:
                 page = document.new_page()
                 page.insert_image(page.rect, stream=stream.getvalue())
                 page.insert_text((36, 40), 'Readable source footer ' * 8, fontsize=8)

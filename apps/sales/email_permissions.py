@@ -27,7 +27,7 @@ def visible_mailbox_connections(user):
     if not user or not user.is_authenticated or not user.is_active:
         return queryset.none()
     if IsAdmin().has_permission(SimpleNamespace(user=user), None):
-        return queryset
+        return queryset.filter(Q(auth_mode='application') | Q(auth_mode='delegated', created_by=user))
     return queryset.filter(created_by=user)
 
 

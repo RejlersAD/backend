@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.rbac.models import AuditLog, Module, Organization, Permission, Role, RolePermission, UserProfile, UserRole
@@ -34,6 +36,64 @@ class IndividualPermissionTests(TestCase):
     def payload(self, effect='deny', action='delete'):
         return {'snapshot': self.request().data['snapshot'], 'reason': 'Limit this user to review duties',
                 'changes': [{'permission_id': str(self.permissions[action].pk), 'effect': effect}]}
+
+    def assign_super_admin(self, **assignment_dates):
+        role, _ = Role.objects.get_or_create(
+            code='super_admin', defaults={'name': 'Super Administrator', 'level': 1},
+        )
+        return UserRole.objects.create(user_profile=self.people[1], role=role, **assignment_dates)
+
+    def test_active_role_admin_can_read_and_save_another_users_permissions(self):
+        self.assign_super_admin()
+        actor = self.people[1].user
+        self.assertFalse(actor.is_superuser)
+        for mfa_enabled in (False, True):
+            with self.subTest(mfa_enabled=mfa_enabled):
+                UserProfile.objects.filter(pk=self.people[1].pk).update(is_mfa_enabled=mfa_enabled)
+                actor = get_user_model().objects.get(pk=actor.pk)
+                self.assertEqual(self.request(actor=actor).status_code, 200)
+        self.assertEqual(self.request('patch', self.payload(), actor=actor).status_code, 200)
+        self.assertFalse(self.people[0].has_permission(self.permissions['delete'].code))
+        self.assertTrue(AuditLog.objects.filter(
+            user=actor, action='super_admin_access', metadata__source='rbac_role',
+        ).exists())
+
+    def test_role_admin_cannot_change_their_own_permissions(self):
+        self.assign_super_admin()
+        actor = self.people[1].user
+        response = self.request(actor=actor, target=self.people[1])
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['locked'])
+        payload = {'snapshot': response.data['snapshot'], 'reason': 'Attempt self change',
+                   'changes': [{'permission_id': str(self.permissions['delete'].pk), 'effect': 'deny'}]}
+        self.assertEqual(self.request('patch', payload, actor=actor, target=self.people[1]).status_code, 403)
+
+    def test_disabled_super_admin_role_is_denied(self):
+        assignment = self.assign_super_admin()
+        Role.objects.filter(pk=assignment.role_id).update(is_active=False)
+        self.assertEqual(self.request(actor=self.people[1].user).status_code, 403)
+
+    def test_expired_or_future_super_admin_assignment_is_denied(self):
+        now = timezone.now()
+        for dates in ({'expires_at': now - timedelta(seconds=1)},
+                      {'effective_from': now + timedelta(days=1)}):
+            with self.subTest(dates=dates):
+                assignment = self.assign_super_admin(**dates)
+                self.assertEqual(self.request(actor=self.people[1].user).status_code, 403)
+                assignment.delete()
+
+    def test_revoking_super_admin_takes_effect_without_reload(self):
+        assignment = self.assign_super_admin()
+        actor = self.people[1].user
+        self.assertEqual(self.request(actor=actor).status_code, 200)
+        assignment.delete()
+        self.assertEqual(self.request(actor=actor).status_code, 403)
+
+    def test_staff_flag_does_not_grant_super_admin_access(self):
+        actor = self.people[1].user
+        actor.is_staff = True
+        actor.save(update_fields=['is_staff'])
+        self.assertEqual(self.request(actor=actor).status_code, 403)
 
     def test_deny_only_selected_user_and_restore_inheritance(self):
         memberships = list(UserRole.objects.filter(role=self.role).values())

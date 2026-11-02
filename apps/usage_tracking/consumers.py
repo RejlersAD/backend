@@ -28,13 +28,14 @@ from .realtime import (
     build_snapshot,
 )
 
-logger = logging.getLogger(__name__)
 
 # Soft-coded auth toggle — set USAGE_WS_REQUIRE_AUTH=1 in production once a
 # JWT-aware Channels middleware is wired up. Defaults to OFF to match the
 # existing `ActivityStreamConsumer` pattern (frontend route is already
 # auth-gated and the payload is non-sensitive aggregate metrics).
 import os as _os
+logger = logging.getLogger(__name__)
+
 USAGE_WS_REQUIRE_AUTH = _os.getenv('USAGE_WS_REQUIRE_AUTH', '0') == '1'
 
 

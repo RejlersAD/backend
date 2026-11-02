@@ -60,7 +60,7 @@ class SignedPOBoundedExtractionTests(SimpleTestCase):
     def test_followup_last_resort_reader_obeys_start_and_count(self):
         with (
             patch('pdf2image.pdfinfo_from_bytes', side_effect=RuntimeError('renderer unavailable')),
-            patch('fitz.open', side_effect=RuntimeError('native reader unavailable')),
+            patch('pymupdf.open', side_effect=RuntimeError('native reader unavailable')),
         ):
             text = extract_text_from_pdf_tesseract(document_bytes(), first_page=5, max_pages=2)
         self.assertIn('Contract page 5', text)
@@ -143,7 +143,7 @@ class SignedPOBoundedExtractionTests(SimpleTestCase):
     def test_last_resort_reader_also_obeys_page_limit(self):
         with (
             patch('pdf2image.pdfinfo_from_bytes', side_effect=RuntimeError('renderer unavailable')),
-            patch('fitz.open', side_effect=RuntimeError('native reader unavailable')),
+            patch('pymupdf.open', side_effect=RuntimeError('native reader unavailable')),
         ):
             text = extract_text_from_pdf_tesseract(document_bytes(), max_pages=4)
         self.assertIn('Contract page 4', text)

@@ -19,11 +19,11 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-logger = logging.getLogger(__name__)
 
 
 # Import size expansion and component detection configs
 from .config import SIZE_EXPANSION_CONFIG, COMPONENT_TYPE_DETECTION_CONFIG, COMPONENT_TYPE_DETECTION_CONFIG
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -186,8 +186,18 @@ def self_organization_changes(profile, data):
     """Self-service cannot alter facts used to decide business authority."""
     current = {'department': profile.department, 'job_title': profile.job_title,
                'manager_id': profile.manager_id, 'manager': profile.manager_id}
-    return [key for key, value in current.items() if key in data
-            and str(data[key] or '') != str(value or '')]
+    changed = []
+    for key, value in current.items():
+        if key not in data:
+            continue
+        submitted = data[key]
+        if key in ('manager_id', 'manager') and hasattr(submitted, 'pk'):
+            submitted = submitted.pk
+        submitted_value = str(submitted or '').strip()
+        current_value = str(value or '').strip()
+        if submitted_value != current_value:
+            changed.append(key)
+    return changed
 
 
 def configured_approval_routes():
@@ -201,7 +211,7 @@ def configured_approval_routes():
     return routes if isinstance(routes, dict) else None
 
 
-def require_configured_approval(user, module, obj, operation):
+def require_configured_approval(user, module, obj, operation, *, accepted_states=None):
     """Older single-step modules need an explicit business route before use.
 
     Routes are deployment-controlled policy, never accepted from request data.
@@ -230,8 +240,17 @@ def require_configured_approval(user, module, obj, operation):
         target = str(getattr(obj, department_field, '') or '').strip().casefold()
         assigned = bool(assigned and employee and target
                         and target == employee.department.strip().casefold())
-    require_approval(user, module, assigned=assigned,
-                     current=getattr(obj, route.get('state_field', 'status'), None) in states)
+    current_state = getattr(obj, route.get('state_field', 'status'), None)
+    current = current_state in states
+    # Some governed commands may allow a documented reversal from a later
+    # state while retaining the same configured approver group. The original
+    # pending state must still be present in policy.
+    if not current and accepted_states:
+        current = any(
+            configured_state in states and current_state in reversal_states
+            for configured_state, reversal_states in accepted_states.items()
+        )
+    require_approval(user, module, assigned=assigned, current=current)
     if route.get('submitter_field') and str(getattr(obj, route['submitter_field'], '')) == str(user.pk):
         raise PermissionDenied('The submitter cannot approve their own request.')
 

@@ -2,6 +2,8 @@
 QHSE API Views - Soft-coded RESTful API endpoints
 Maintains backward compatibility with existing frontend
 """
+
+import logging
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -10,6 +12,8 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Sum, Avg, Count, Q, Max
 from django.db.models.functions import TruncMonth
 from datetime import datetime, timedelta
+logger = logging.getLogger(__name__)
+
 try:
     import pandas as pd
     PANDAS_AVAILABLE = True
@@ -92,13 +96,13 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         """
         Override perform_create to add logging and ensure data is saved
         """
-        print(f"[QHSE ViewSet] Creating new project")
-        print(f"[QHSE ViewSet] Request data keys: {list(self.request.data.keys())}")
-        print(f"[QHSE ViewSet] User: {self.request.user.email if self.request.user.is_authenticated else 'Anonymous'}")
+        logger.debug(f"[QHSE ViewSet] Creating new project")
+        logger.debug(f"[QHSE ViewSet] Request data keys: {list(self.request.data.keys())}")
+        logger.debug(f"[QHSE ViewSet] User: {self.request.user.email if self.request.user.is_authenticated else 'Anonymous'}")
 
         instance = serializer.save()
 
-        print(f"[QHSE ViewSet] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
+        logger.debug(f"[QHSE ViewSet] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
         return instance
     
     def update(self, request, *args, **kwargs):
@@ -109,29 +113,29 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         
-        print(f"\n{'='*80}")
-        print(f"[QHSE ViewSet] UPDATE REQUEST DETAILS")
-        print(f"{'='*80}")
-        print(f"Project ID: {instance.id}")
-        print(f"Project No: {instance.project_no}")
-        print(f"Method: {request.method}")
-        print(f"Partial: {partial}")
-        print(f"User: {request.user.email if request.user.is_authenticated else 'Anonymous'}")
-        print(f"Request Data Keys: {list(request.data.keys())}")
-        print(f"Request Data: {request.data}")
+        logger.debug(f"\n{'='*80}")
+        logger.debug(f"[QHSE ViewSet] UPDATE REQUEST DETAILS")
+        logger.debug(f"{'='*80}")
+        logger.debug(f"Project ID: {instance.id}")
+        logger.debug(f"Project No: {instance.project_no}")
+        logger.debug(f"Method: {request.method}")
+        logger.debug(f"Partial: {partial}")
+        logger.debug(f"User: {request.user.email if request.user.is_authenticated else 'Anonymous'}")
+        logger.debug(f"Request Data Keys: {list(request.data.keys())}")
+        logger.debug(f"Request Data: {request.data}")
         
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         
         try:
             serializer.is_valid(raise_exception=True)
-            print(f"[QHSE ViewSet] ✅ Validation passed")
+            logger.debug(f"[QHSE ViewSet] ✅ Validation passed")
         except Exception as e:
-            print(f"[QHSE ViewSet] ❌ Validation failed")
-            print(f"[QHSE ViewSet] Error type: {type(e).__name__}")
-            print(f"[QHSE ViewSet] Error message: {str(e)}")
+            logger.debug(f"[QHSE ViewSet] ❌ Validation failed")
+            logger.debug(f"[QHSE ViewSet] Error type: {type(e).__name__}")
+            logger.debug(f"[QHSE ViewSet] Error message: {str(e)}")
             if hasattr(serializer, 'errors'):
-                print(f"[QHSE ViewSet] Serializer errors: {serializer.errors}")
-            print(f"{'='*80}\n")
+                logger.debug(f"[QHSE ViewSet] Serializer errors: {serializer.errors}")
+            logger.debug(f"{'='*80}\n")
             raise
         
         self.perform_update(serializer)
@@ -139,8 +143,8 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         if getattr(instance, '_prefetched_objects_cache', None):
             instance._prefetched_objects_cache = {}
         
-        print(f"[QHSE ViewSet] ✅ Update successful")
-        print(f"{'='*80}\n")
+        logger.debug(f"[QHSE ViewSet] ✅ Update successful")
+        logger.debug(f"{'='*80}\n")
         
         return Response(serializer.data)
     
@@ -148,7 +152,7 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         """
         Override perform_update to add logging and ensure data is saved to database
         """
-        print(f"[QHSE ViewSet] Saving updated data...")
+        logger.debug(f"[QHSE ViewSet] Saving updated data...")
         
         # Save the instance
         instance = serializer.save()
@@ -156,7 +160,7 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         # Verify the save by refreshing from database
         instance.refresh_from_db()
         
-        print(f"[QHSE ViewSet] Successfully saved - sr_no: {instance.sr_no}, updated_at: {instance.updated_at}")
+        logger.debug(f"[QHSE ViewSet] Successfully saved - sr_no: {instance.sr_no}, updated_at: {instance.updated_at}")
         
         return instance
     

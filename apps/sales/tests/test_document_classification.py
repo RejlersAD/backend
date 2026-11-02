@@ -95,8 +95,8 @@ class DocumentExtractionTests(SimpleTestCase):
         self.assertEqual(source.tell(), 2)
 
     def test_real_pdf_extraction_and_unsupported_bytes(self):
-        import fitz
-        with fitz.open() as pdf:
+        import pymupdf
+        with pymupdf.open() as pdf:
             pdf.new_page().insert_text((72, 72), 'Letter of Award')
             value = pdf.tobytes()
         text, error = extract_document_text(BytesIO(value), 'award.pdf', len(value))

@@ -36,12 +36,12 @@ import logging
 import re
 from typing import Optional
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 
 from .config import IO_LIST_CANONICAL_COLUMNS
-
 logger = logging.getLogger(__name__)
+
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -620,9 +620,9 @@ tags, never because the scan stopped early.
 
 
 def _render_page(pdf_bytes: bytes, page_index: int) -> Image.Image:
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
-        mat = fitz.Matrix(VISION_RENDER_DPI / 72, VISION_RENDER_DPI / 72)
+        mat = pymupdf.Matrix(VISION_RENDER_DPI / 72, VISION_RENDER_DPI / 72)
         pix = doc[page_index].get_pixmap(matrix=mat, alpha=False)
         img = Image.open(io.BytesIO(pix.tobytes('png')))
         logger.info(
@@ -2093,7 +2093,7 @@ def extract_pid_tags_via_vision(
     warnings list, so a bad key is never silent again.
     """
     api_key = provider_api_key(provider, fallback=lambda: (api_key)) if provider else api_key
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     page_count = doc.page_count
     doc.close()
 

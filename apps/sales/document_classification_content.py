@@ -230,7 +230,7 @@ def extract_document_text(source, name, size):
             text = _xml_text(source, suffix)
             return text, '' if text else 'no_readable_text'
         if suffix == '.pdf':
-            import fitz
+            import pymupdf
             # PyMuPDF reads from a filesystem path without a complete in-memory copy.
             with TemporaryDirectory(prefix='radai-classify-') as directory:
                 from pathlib import Path
@@ -244,7 +244,7 @@ def extract_document_text(source, name, size):
                 with path.open('rb') as signature:
                     if signature.read(5) != b'%PDF-':
                         return '', 'invalid_document'
-                with fitz.open(path) as document:
+                with pymupdf.open(path) as document:
                     if document.needs_pass or document.is_repaired or document.page_count > 500:
                         return '', 'unsupported_pdf'
                     pieces = []

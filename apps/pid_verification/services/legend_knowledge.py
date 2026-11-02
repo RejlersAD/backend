@@ -10,8 +10,8 @@ import os
 import re
 from pathlib import Path
 from typing import Iterable
-
 logger = logging.getLogger(__name__)
+
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 LEGEND_KNOWLEDGE_PATH = BASE_DIR / "domain_knowledge" / "pid_verification" / "legend_knowledge.json"
@@ -29,9 +29,9 @@ DEFAULT_VALVE_PREFIXES = {
 def extract_text_from_pdf(file_path: str) -> str:
     """Extract plain text from a legend PDF."""
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         chunks = []
         for page in doc:
             chunks.append(page.get_text("text"))

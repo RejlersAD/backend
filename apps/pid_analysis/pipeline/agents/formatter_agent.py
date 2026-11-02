@@ -1,8 +1,11 @@
 """
 Formatter Agent - Converts issues to exact output format
 """
+
+import logging
 from typing import Dict, List, Any
 import re
+logger = logging.getLogger(__name__)
 
 
 class FormatterAgent:
@@ -34,7 +37,7 @@ class FormatterAgent:
         Returns:
             Formatted issues matching existing system output
         """
-        print(f"[FORMATTER] Formatting {len(issues)} issue(s) for output...")
+        logger.debug(f"[FORMATTER] Formatting {len(issues)} issue(s) for output...")
         
         formatted = []
         
@@ -49,7 +52,7 @@ class FormatterAgent:
         # NORMALIZE TEXT
         formatted_normalized = self._normalize_text(formatted_sorted)
         
-        print(f"[FORMATTER] Formatted {len(formatted_normalized)} issue(s)")
+        logger.debug(f"[FORMATTER] Formatted {len(formatted_normalized)} issue(s)")
         return formatted_normalized
     
     def _format_single_issue(self, issue: Dict[str, Any]) -> Dict[str, Any]:

@@ -17,6 +17,7 @@ from rest_framework import status as drf_status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded async-result cache constants ───────────────────────────────────
 # Results are stored in Redis (same broker as Celery) so all gunicorn workers
@@ -139,7 +140,6 @@ def _get_equipment_models():
     from apps.pid_analysis.models import PIDEquipmentType, PIDEquipmentItem  # noqa
     return PIDEquipmentType, PIDEquipmentItem
 
-logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), 'config', 'equipment_type_config.json'
@@ -220,17 +220,17 @@ def _ocr_render_page_image(page, scale: float, ext_cfg: dict):
     numpy is unavailable — behaviour then is identical to the original code.
     """
     import io
-    import fitz
+    import pymupdf
     from PIL import Image
 
-    mat = fitz.Matrix(scale, scale)
+    mat = pymupdf.Matrix(scale, scale)
     if not bool(ext_cfg.get('ocr_remove_markup_enabled', True)):
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+        pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY)
         return Image.open(io.BytesIO(pix.tobytes('png')))
     try:
         import numpy as np
     except ImportError:
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+        pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY)
         return Image.open(io.BytesIO(pix.tobytes('png')))
 
     pix = page.get_pixmap(matrix=mat)  # RGB so markup colours are detectable
@@ -319,9 +319,9 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
     file_bytes = None
 
     try:
-        import fitz
+        import pymupdf
         file_bytes = file_obj.read()
-        doc = fitz.open(stream=file_bytes, filetype='pdf')
+        doc = pymupdf.open(stream=file_bytes, filetype='pdf')
 
         for _pg_idx, page in enumerate(doc):
             if _page_index is not None and _pg_idx != _page_index:
@@ -406,12 +406,12 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
         logger.debug('[EquipmentList] PyMuPDF issue: %s', exc)
 
     full_text = '\n'.join(text_parts).strip()
-    print(f'[EQ-DIAG] Vector text len={len(full_text)}  preview={repr(full_text[:200])}', flush=True)
+    logger.debug(f'[EQ-DIAG] Vector text len={len(full_text)}  preview={repr(full_text[:200])}')
 
     if _ALWAYS_OCR or len(full_text) < _MIN_VECTOR:
         # ── OCR fallback ─────────────────────────────────────────────────
         try:
-            import fitz
+            import pymupdf
             import pytesseract
             from PIL import Image, ImageEnhance, ImageFilter
             import io
@@ -419,7 +419,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
             if file_bytes is None:
                 file_obj.seek(0)
                 file_bytes = file_obj.read()
-            doc = fitz.open(stream=file_bytes, filetype='pdf')
+            doc = pymupdf.open(stream=file_bytes, filetype='pdf')
             ocr_parts: list = []
             for _pg_idx, page in enumerate(doc):
                 if _page_index is not None and _pg_idx != _page_index:
@@ -440,7 +440,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
 
                 seen_snippets: set = set()
                 for _run_scale in _scales_to_run:
-                    print(f'[EQ-DIAG] OCR page min_dim={_page_min_dim:.0f}  scale={_run_scale}', flush=True)
+                    logger.debug(f'[EQ-DIAG] OCR page min_dim={_page_min_dim:.0f}  scale={_run_scale}')
                     base_img = _ocr_render_page_image(page, _run_scale, ext_cfg)
                     _effective_dpi = int(72 * _run_scale)
                     base_img = ImageEnhance.Contrast(base_img).enhance(1.8)
@@ -466,7 +466,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                 # catches equipment tags in dense areas of the drawing that the
                 # full-page pass misses.
                 if _is_large and _TILE_ROWS > 0 and _TILE_COLS > 0:
-                    print(f'[EQ-DIAG] Tiling {_TILE_ROWS}x{_TILE_COLS} scale={_TILE_SCALE} psm={_TILE_PSM}', flush=True)
+                    logger.debug(f'[EQ-DIAG] Tiling {_TILE_ROWS}x{_TILE_COLS} scale={_TILE_SCALE} psm={_TILE_PSM}')
                     _tile_dpi = int(72 * _TILE_SCALE)
                     _tfull = _ocr_render_page_image(page, _TILE_SCALE, ext_cfg)
                     _tfull = ImageEnhance.Contrast(_tfull).enhance(2.0)
@@ -490,7 +490,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                                 ocr_parts.append(_normalize_text(_tile_text))
             doc.close()
             ocr_combined = '\n'.join(ocr_parts)
-            print(f'[EQ-DIAG] OCR text len={len(ocr_combined)}  preview={repr(ocr_combined[:200])}', flush=True)
+            logger.debug(f'[EQ-DIAG] OCR text len={len(ocr_combined)}  preview={repr(ocr_combined[:200])}')
             # When always_include_ocr=true, APPEND to existing vector text.
             # When it's a pure OCR fallback (vector text was too short), REPLACE.
             if _ALWAYS_OCR and full_text:
@@ -499,7 +499,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                 full_text = ocr_combined
         except Exception as exc:
             logger.debug('[EquipmentList] Tesseract fallback issue: %s', exc)
-            print(f'[EQ-DIAG] Tesseract fallback error: {exc}', flush=True)
+            logger.debug(f'[EQ-DIAG] Tesseract fallback error: {exc}')
 
     return full_text
 
@@ -555,9 +555,9 @@ def _extract_words_with_coords(file_obj, config: dict) -> tuple:
     word_list: list = []
 
     try:
-        import fitz
+        import pymupdf
         file_bytes = file_obj.read()
-        doc = fitz.open(stream=file_bytes, filetype='pdf')
+        doc = pymupdf.open(stream=file_bytes, filetype='pdf')
         for page_num, page in enumerate(doc):
             for entry in page.get_text('words'):
                 x0, y0, x1, y1, word = entry[0], entry[1], entry[2], entry[3], entry[4]
@@ -573,17 +573,17 @@ def _extract_words_with_coords(file_obj, config: dict) -> tuple:
 
     # ------- OCR fallback -------
     try:
-        import fitz, pytesseract, io
+        import pymupdf, pytesseract, io
         from PIL import Image, ImageEnhance, ImageFilter
 
         file_obj.seek(0)
         file_bytes = file_obj.read()
-        doc = fitz.open(stream=file_bytes, filetype='pdf')
+        doc = pymupdf.open(stream=file_bytes, filetype='pdf')
         ocr_words: list = []
 
         for page_num, page in enumerate(doc):
-            mat = fitz.Matrix(ocr_scale, ocr_scale)
-            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+            mat = pymupdf.Matrix(ocr_scale, ocr_scale)
+            pix = page.get_pixmap(matrix=mat, colorspace=pymupdf.csGRAY)
             img = Image.open(io.BytesIO(pix.tobytes('png')))
             img = ImageEnhance.Contrast(img).enhance(2.0)
             img = img.filter(ImageFilter.SHARPEN)
@@ -929,8 +929,8 @@ def _extract_titleblock_dwg_no_by_coords(file_bytes: bytes) -> str:
         _TITLEBLOCK_LABEL_GAP_PT, _TITLEBLOCK_DWG_NO_RE.
     """
     try:
-        import fitz as _fitz
-        doc = _fitz.open(stream=file_bytes, filetype='pdf')
+        import pymupdf as _pymupdf
+        doc = _pymupdf.open(stream=file_bytes, filetype='pdf')
         # Title block is on the LAST page of multi-page drawings; try all pages
         pages_to_check = list(range(len(doc) - 1, -1, -1))  # last page first
         for pg_idx in pages_to_check:
@@ -940,7 +940,7 @@ def _extract_titleblock_dwg_no_by_coords(file_bytes: bytes) -> str:
 
             words = pg.get_text('words')  # (x0, y0, x1, y1, word, block, line, span)
             strip_words = [w for w in words if (w[1] + w[3]) / 2 >= strip_top]
-            print(f'[EQ-DIAG][DwgNo] Coord: page={pg_idx} height={pg_height:.0f} strip_top={strip_top:.0f} strip_words={len(strip_words)}', flush=True)
+            logger.debug(f'[EQ-DIAG][DwgNo] Coord: page={pg_idx} height={pg_height:.0f} strip_top={strip_top:.0f} strip_words={len(strip_words)}')
             if not strip_words:
                 continue
 
@@ -981,7 +981,7 @@ def _extract_titleblock_dwg_no_by_coords(file_bytes: bytes) -> str:
                     cand = nw[4].strip().upper()
                     if _TITLEBLOCK_DWG_NO_RE.fullmatch(cand) and re.search(r'-[0-9]{4,6}$', cand):
                         doc.close()
-                        print(f'[EQ-DIAG][DwgNo] Coord (right) page={pg_idx} y={trigger_y_mid:.0f} trigger={token!r}: {cand!r}', flush=True)
+                        logger.debug(f'[EQ-DIAG][DwgNo] Coord (right) page={pg_idx} y={trigger_y_mid:.0f} trigger={token!r}: {cand!r}')
                         return cand
 
                 # ── Scan BELOW the trigger (vertically-stacked title block layout) ──
@@ -1001,7 +1001,7 @@ def _extract_titleblock_dwg_no_by_coords(file_bytes: bytes) -> str:
                     cand = nw[4].strip().upper()
                     if _TITLEBLOCK_DWG_NO_RE.fullmatch(cand) and re.search(r'-[0-9]{4,6}$', cand):
                         doc.close()
-                        print(f'[EQ-DIAG][DwgNo] Coord (below) page={pg_idx} y={trigger_y_mid:.0f}→{nw_y_mid:.0f} trigger={token!r}: {cand!r}', flush=True)
+                        logger.debug(f'[EQ-DIAG][DwgNo] Coord (below) page={pg_idx} y={trigger_y_mid:.0f}→{nw_y_mid:.0f} trigger={token!r}: {cand!r}')
                         return cand
         doc.close()
     except Exception as _e:
@@ -1045,7 +1045,7 @@ def _extract_titleblock_dwg_no(text: str) -> str:
     if _label_candidates:
         # Prefer the last match (title block is at the bottom of the sheet)
         best = _label_candidates[-1]
-        print(f'[EQ-DIAG][DwgNo] Found via label strategy (last of {len(_label_candidates)}): {best!r}', flush=True)
+        logger.debug(f'[EQ-DIAG][DwgNo] Found via label strategy (last of {len(_label_candidates)}): {best!r}')
         return best
 
     # Strategy 2: for each 'DWG NO.' label, find the nearest doc-number after it.
@@ -1065,12 +1065,12 @@ def _extract_titleblock_dwg_no(text: str) -> str:
             for lbl_end in reversed(_lbl_positions):
                 for cpos, cval in sorted(_s2_all, key=lambda x: x[0]):
                     if cpos >= lbl_end:
-                        print(f'[EQ-DIAG][DwgNo] Strategy2 last-label nearest: {cval!r}', flush=True)
+                        logger.debug(f'[EQ-DIAG][DwgNo] Strategy2 last-label nearest: {cval!r}')
                         return cval
         # Fallback: most common candidate
         from collections import Counter as _Counter
         freq_best = _Counter(c for _, c in _s2_all).most_common(1)[0][0]
-        print(f'[EQ-DIAG][DwgNo] Strategy2 frequency fallback: {freq_best!r}', flush=True)
+        logger.debug(f'[EQ-DIAG][DwgNo] Strategy2 frequency fallback: {freq_best!r}')
         return freq_best
 
     return ''
@@ -1131,11 +1131,8 @@ def _extract_titleblock_revision(text: str) -> str:
                 best_date = rev_date
                 best_mark = cleaned
         if best_mark:
-            print(
-                f'[EQ-DIAG][TitleBlock] Rev found via table-row strategy: {best_mark!r} '
-                f'(date {best_date[2]:02d}/{best_date[1]:02d}/{best_date[0]})',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG][TitleBlock] Rev found via table-row strategy: {best_mark!r} '
+                f'(date {best_date[2]:02d}/{best_date[1]:02d}/{best_date[0]})')
             return best_mark
 
     # Strategy 1: explicit "REV: value" label (strict colon required)
@@ -1145,7 +1142,7 @@ def _extract_titleblock_revision(text: str) -> str:
         for raw in reversed(matches):
             cleaned = _clean_revision(raw)
             if cleaned:
-                print(f'[EQ-DIAG][TitleBlock] Rev found via label strategy: {cleaned!r}', flush=True)
+                logger.debug(f'[EQ-DIAG][TitleBlock] Rev found via label strategy: {cleaned!r}')
                 return cleaned
 
     # Strategy 2: drawn/checked/approved context rows
@@ -1160,7 +1157,7 @@ def _extract_titleblock_revision(text: str) -> str:
                     last_rev_from_ctx = cleaned
                     break
     if last_rev_from_ctx:
-        print(f'[EQ-DIAG][TitleBlock] Rev found via DR/CH/AP context: {last_rev_from_ctx!r}', flush=True)
+        logger.debug(f'[EQ-DIAG][TitleBlock] Rev found via DR/CH/AP context: {last_rev_from_ctx!r}')
         return last_rev_from_ctx
 
     # Strategy 3: isolated short token near project document number
@@ -1175,10 +1172,10 @@ def _extract_titleblock_revision(text: str) -> str:
             if re.match(r'^[A-Z0-9]{1,3}$', stripped, re.IGNORECASE):
                 cleaned = _clean_revision(stripped)
                 if cleaned:
-                    print(f'[EQ-DIAG][TitleBlock] Rev found via DWG-no proximity: {cleaned!r}', flush=True)
+                    logger.debug(f'[EQ-DIAG][TitleBlock] Rev found via DWG-no proximity: {cleaned!r}')
                     return cleaned
 
-    print('[EQ-DIAG][TitleBlock] No document revision found in title block', flush=True)
+    logger.debug('[EQ-DIAG][TitleBlock] No document revision found in title block')
     return ''
 
 
@@ -1258,8 +1255,8 @@ def _find_header_range(rows: list, field_variants: dict, min_cols: int) -> tuple
     # Use the stricter _REGISTER_HEADER_MIN_SCORE threshold so that a CRS table
     # whose header only matches "Rev" + "Description" (score ≤ 3) is rejected.
     required_score = max(min_cols, _REGISTER_HEADER_MIN_SCORE)
-    print(f'[EQ-DIAG][Register] header scan: total_rows={len(rows)} scan_limit={scan_limit}'
-          f'  best_score={best_score}  best_range={best_range}  required={required_score}', flush=True)
+    logger.debug(f'[EQ-DIAG][Register] header scan: total_rows={len(rows)} scan_limit={scan_limit}'
+          f'  best_score={best_score}  best_range={best_range}  required={required_score}')
     if best_score < required_score:
         return None
     return best_range
@@ -1479,16 +1476,16 @@ def _extract_equipment_register_rows(file_obj, config: dict):
     # equipment data boxes (DIAMETER, LENGTH, OPERATING PRESS, etc.).
     # Skip register mode when the smallest page dimension exceeds the threshold.
     try:
-        import fitz as _fitz
+        import pymupdf as _pymupdf
         _fb = file_obj.read()
-        _doc = _fitz.open(stream=_fb, filetype='pdf')
+        _doc = _pymupdf.open(stream=_fb, filetype='pdf')
         if _doc.page_count > 0:
             _r = _doc[0].rect
             _min_dim = min(abs(_r.width), abs(_r.height))
-            print(f'[EQ-DIAG][Register] page_min_dim={_min_dim:.0f}pts  threshold={max_drawing_min_dim}', flush=True)
+            logger.debug(f'[EQ-DIAG][Register] page_min_dim={_min_dim:.0f}pts  threshold={max_drawing_min_dim}')
             if _min_dim > max_drawing_min_dim:
                 _doc.close()
-                print('[EQ-DIAG][Register] Large-format drawing -> skipping register mode', flush=True)
+                logger.debug('[EQ-DIAG][Register] Large-format drawing -> skipping register mode')
                 return None
         _doc.close()
         file_obj.seek(0)
@@ -1584,8 +1581,8 @@ def _extract_equipment_register_rows(file_obj, config: dict):
                 if re.match(r'^[0-9A-Za-z]{0,2}$', _cleaned_rev):
                     tag_val = _rv_tag.group(1)
                     values['revision'] = _cleaned_rev
-                    print(f'[EQ-DIAG][Register] rev-rescue: extracted tag {tag_val!r} '
-                          f'from rev col; rev cleaned to {values["revision"]!r}', flush=True)
+                    logger.debug(f'[EQ-DIAG][Register] rev-rescue: extracted tag {tag_val!r} '
+                          f'from rev col; rev cleaned to {values["revision"]!r}')
 
         if not _REGISTER_TAG_FILTER_RE.search(tag_val):
             # Tag column didn't yield a valid tag — scan the full row text (all
@@ -1597,7 +1594,7 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             )
             if _rescue:
                 tag_val = _rescue.group(1)
-                print(f'[EQ-DIAG][Register] tag-rescue: row "{_row_plain[:50]}" → {tag_val}', flush=True)
+                logger.debug(f'[EQ-DIAG][Register] tag-rescue: row "{_row_plain[:50]}" → {tag_val}')
         # ── End tag clean + rescue ────────────────────────────────────────────
 
         # Count non-empty fields; skip blank/near-blank rows regardless of tag presence.
@@ -1674,8 +1671,8 @@ def _extract_equipment_register_rows(file_obj, config: dict):
         ]
         removed = before_filter - len(equipment)
         if removed:
-            print(f'[EQ-DIAG][Register] Tag-filter removed {removed} non-equipment rows '
-                  f'(footnotes/notes/separators), {len(equipment)} rows kept', flush=True)
+            logger.debug(f'[EQ-DIAG][Register] Tag-filter removed {removed} non-equipment rows '
+                  f'(footnotes/notes/separators), {len(equipment)} rows kept')
 
     # Confirm enough populated rows to treat this as a real register
     well_populated = sum(
@@ -1706,7 +1703,7 @@ def _extract_equipment_register_rows(file_obj, config: dict):
         if topmost_rev:
             for item in equipment:
                 item['revision'] = topmost_rev
-            print(f'[EQ-DIAG][Register] Topmost-revision applied: "{topmost_rev}" → all {len(equipment)} rows', flush=True)
+            logger.debug(f'[EQ-DIAG][Register] Topmost-revision applied: "{topmost_rev}" → all {len(equipment)} rows')
 
     logger.info('[EquipRegister] Extracted %d register rows (OCR=%s)', len(equipment), used_ocr)
     return equipment
@@ -2074,11 +2071,8 @@ def _build_databox_index(text: str, config: dict) -> dict:
             if tag not in index:
                 index[tag] = {}
 
-            print(
-                f'[EQ-DIAG][PressTemp] {tag!r} Pass-B alias_matched={label_variant!r} '
-                f'-> field_or_pair={field_or_pair!r} raw_value={raw_value!r}',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-B alias_matched={label_variant!r} '
+                f'-> field_or_pair={field_or_pair!r} raw_value={raw_value!r}')
 
             if isinstance(field_or_pair, list) and len(field_or_pair) in (2, 3):
                 # BUG FIX (explicit request): every list-valued alias used to
@@ -2101,10 +2095,7 @@ def _build_databox_index(text: str, config: dict) -> dict:
                     parts = re.split(_split_pat, raw_value, maxsplit=1)
                 except re.error:
                     parts = re.split(r'\s*/\s*', raw_value, maxsplit=1)
-                print(
-                    f'[EQ-DIAG][PressTemp] {tag!r} Pass-B separator={_split_sep!r} parts={parts!r}',
-                    flush=True,
-                )
+                logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-B separator={_split_sep!r} parts={parts!r}')
                 # BUG FIX (explicit request, found via live trace): a
                 # custom-separator alias (3-element list) is a DELIBERATE,
                 # specific config entry for a combined label — e.g.
@@ -2130,10 +2121,7 @@ def _build_databox_index(text: str, config: dict) -> dict:
                     # see _clean_databox_value's own docstring/comment.
                     v0 = _clean_databox_value(parts[0], keep_double_slash=_is_custom_sep)
                     v1 = _clean_databox_value(parts[1], keep_double_slash=_is_custom_sep)
-                    print(
-                        f'[EQ-DIAG][PressTemp] {tag!r} Pass-B split -> {field_or_pair[0]}={v0!r}  {field_or_pair[1]}={v1!r}',
-                        flush=True,
-                    )
+                    logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-B split -> {field_or_pair[0]}={v0!r}  {field_or_pair[1]}={v1!r}')
                     # ── Design-pressure // temp special case ─────────────────
                     # BUG FIX (explicit request, found via live trace): this
                     # alias's two target fields are design_pressure_max and
@@ -2154,11 +2142,8 @@ def _build_databox_index(text: str, config: dict) -> dict:
                             if _override_fields is not None:
                                 _override_fields.add(_f0)
                         _t_min, _t_max = _split_temp_min_max(v1)
-                        print(
-                            f'[EQ-DIAG][PressTemp] {tag!r} Pass-B design-temp sub-split '
-                            f'{v1!r} -> min={_t_min!r} max={_t_max!r}',
-                            flush=True,
-                        )
+                        logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-B design-temp sub-split '
+                            f'{v1!r} -> min={_t_min!r} max={_t_max!r}')
                         if _t_max and 'design_temp_max' not in index[tag]:
                             index[tag]['design_temp_max'] = _t_max
                             if _override_fields is not None:
@@ -2288,11 +2273,8 @@ def _build_databox_index(text: str, config: dict) -> dict:
                 index[_t][_field] = _val
 
     if index:
-        print(
-            f'[EQ-DIAG][DataBox] Indexed {len(index)} equipment: '
-            + str({k: list(v.keys()) for k, v in index.items()}),
-            flush=True,
-        )
+        logger.debug(f'[EQ-DIAG][DataBox] Indexed {len(index)} equipment: '
+            + str({k: list(v.keys()) for k, v in index.items()}))
     return index
 
 
@@ -2508,7 +2490,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _slash_expanded.append(f'{_base}{_v}' + (f'-{_sfx}' if _sfx else ''))
     if _slash_expanded:
         text = text + '\n' + '\n'.join(_slash_expanded)
-        print(f'[EQ-DIAG] Slash expansion added: {_slash_expanded}', flush=True)
+        logger.debug(f'[EQ-DIAG] Slash expansion added: {_slash_expanded}')
 
     # ── Propagate databox index to slash-expanded sibling tags ────────────
     # When a data box is labelled "P-851A/B/C-TF", the databox scanner indexes
@@ -2557,7 +2539,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # 'exclude_tag_patterns') — e.g. ADNOC drawing numbers [UNIT-]D-NNNNN.
         _excl_tag_pats = ext_cfg.get('exclude_tag_patterns', [])
         if _excl_tag_pats and any(re.search(_xp, tag) for _xp in _excl_tag_pats):
-            print(f'[EQ-DIAG] exclude_tag_patterns skipped: {tag!r}', flush=True)
+            logger.debug(f'[EQ-DIAG] exclude_tag_patterns skipped: {tag!r}')
             continue
 
         # ── Gate 0: tag-context annotation reject ────────────────────
@@ -2571,7 +2553,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _ctx_reject_pats:
             _surrounding = text[max(0, m.start() - 80): min(len(text), m.end() + 80)]
             if any(re.search(_crpat, _surrounding) for _crpat in _ctx_reject_pats):
-                print(f'[EQ-DIAG] Gate0-ctx-reject skipped: {tag!r}', flush=True)
+                logger.debug(f'[EQ-DIAG] Gate0-ctx-reject skipped: {tag!r}')
                 continue
 
         # ── Gate 1: connector-arrow context check ────────────────────────
@@ -2599,11 +2581,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _conn_after  = text[m.end(): min(len(text), m.end() + _conn_lookahead)]
             if (re.search(_conn_kws_pat, _conn_before, re.IGNORECASE)
                     and _TITLEBLOCK_DWG_NO_RE.search(_conn_after)):
-                print(
-                    f'[EQ-DIAG] Gate1-connector-ref skipped: {tag!r} '
-                    f'(keyword in lookback + dwg-no in lookahead)',
-                    flush=True,
-                )
+                logger.debug(f'[EQ-DIAG] Gate1-connector-ref skipped: {tag!r} '
+                    f'(keyword in lookback + dwg-no in lookahead)')
                 # Do NOT add to seen — allow a data-box occurrence of the
                 # same tag later in the text to be processed normally.
                 continue
@@ -2819,7 +2798,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 material_class, re.IGNORECASE,
             )
             if (not _shape_ok) or _garbage_kw or (_had_lowercase and not _shape_ok):
-                print(f'[EQ-DIAG][MOC] rejected OCR-garbage MOC for {tag}: {material_class!r}', flush=True)
+                logger.debug(f'[EQ-DIAG][MOC] rejected OCR-garbage MOC for {tag}: {material_class!r}')
                 material_class = ''
 
         # ── Process note references — wider context scan ──────────────────
@@ -2873,11 +2852,11 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             else r'(?:' + _op_press_lbl_cfg + r'|DISCHARGE\s*PRESS(?:URE)?\.?\s*[-:=/(])'
         )
         # TEMPORARY DEBUG (explicit request) — do not remove yet.
-        print(f"[DEBUG-DISCHARGE] tag = {tag!r}")
-        print(f"[DEBUG-DISCHARGE] _op_press_lbl_cfg = {_op_press_lbl_cfg}")
-        print(f"[DEBUG-DISCHARGE] final _op_press_lbl = {_op_press_lbl}")
-        print(f"[DEBUG-DISCHARGE] context window = {_pp_ctx[:200]}")
-        print(f"[DEBUG-DISCHARGE] oper_pressure match = {bool(re.search(_op_press_lbl, _pp_ctx, re.IGNORECASE))}")
+        logger.debug(f"[DEBUG-DISCHARGE] tag = {tag!r}")
+        logger.debug(f"[DEBUG-DISCHARGE] _op_press_lbl_cfg = {_op_press_lbl_cfg}")
+        logger.debug(f"[DEBUG-DISCHARGE] final _op_press_lbl = {_op_press_lbl}")
+        logger.debug(f"[DEBUG-DISCHARGE] context window = {_pp_ctx[:200]}")
+        logger.debug(f"[DEBUG-DISCHARGE] oper_pressure match = {bool(re.search(_op_press_lbl, _pp_ctx, re.IGNORECASE))}")
         _des_press_lbl  = ext_cfg.get('design_pressure_label_pattern',
                            r'(?:DES(?:IGN)?\.?(?:\s*/\s*SET)?|SET)\s*PRESS(?:URE)?\.?\s*[-:=/(]')
         _op_temp_lbl    = ext_cfg.get('oper_temp_label_pattern',
@@ -2919,7 +2898,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     _pv2 = re.search(_press_val_pat, _after_colon.group(1), re.IGNORECASE)
                     if _pv2:
                         oper_pressure = f'{_pv2.group(1)} {_pv2.group(2)}'
-        print(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A oper_pressure_label_match={bool(_op_lbl_m)} -> oper_pressure={oper_pressure!r}', flush=True)
+        logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A oper_pressure_label_match={bool(_op_lbl_m)} -> oper_pressure={oper_pressure!r}')
 
         # ── Design Pressure min / max ─────────────────────────────────────
         design_pressure_min = ''
@@ -2983,12 +2962,9 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             if _bare_pv:
                 design_pressure_max = f'{_bare_pv.group(1)} {_bare_pv.group(2)}'
                 design_pressure_is_fallback = True
-        print(
-            f'[EQ-DIAG][PressTemp] {tag!r} Pass-A design_press_label_matches={len(_dp_lbl_ms)} '
+        logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A design_press_label_matches={len(_dp_lbl_ms)} '
             f'-> design_pressure_min={design_pressure_min!r} design_pressure_max={design_pressure_max!r} '
-            f'is_fallback={design_pressure_is_fallback}',
-            flush=True,
-        )
+            f'is_fallback={design_pressure_is_fallback}')
 
         # ── Oper. Temperature ─────────────────────────────────────────────
         oper_temperature = ''
@@ -3021,7 +2997,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                         oper_temperature = f'{_bare_t.group(1)} °{_ot_unit}'
         # Normalise dual-temperature values e.g. "105/60 °F" → "60 – 105 °F"
         oper_temperature = _normalize_oper_temp(oper_temperature)
-        print(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A oper_temp_label_match={bool(_ot_lbl_m)} -> oper_temperature={oper_temperature!r} (no bare-value fallback exists for temperature)', flush=True)
+        logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A oper_temp_label_match={bool(_ot_lbl_m)} -> oper_temperature={oper_temperature!r} (no bare-value fallback exists for temperature)')
 
         # ── Design Temp min / max ─────────────────────────────────────────
         design_temp_min = ''
@@ -3047,11 +3023,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             else:
                 design_temp_min = f'{min(_dt_vals)} °F'
                 design_temp_max = f'{max(_dt_vals)} °F'
-        print(
-            f'[EQ-DIAG][PressTemp] {tag!r} Pass-A design_temp_label_matches={len(_dt_lbl_ms)} '
-            f'-> design_temp_min={design_temp_min!r} design_temp_max={design_temp_max!r}',
-            flush=True,
-        )
+        logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A design_temp_label_matches={len(_dt_lbl_ms)} '
+            f'-> design_temp_min={design_temp_min!r} design_temp_max={design_temp_max!r}')
 
         # ── Design Flowrate ───────────────────────────────────────────────
         # Use a wider context window than the general _pp_ctx (soft-coded via
@@ -3172,11 +3145,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _combined_dia_len_m:
             dimension_diameter = _combined_dia_len_m.group(1).strip()
             dimension_length   = _combined_dia_len_m.group(2).strip()
-            print(
-                f'[EQ-DIAG][PressTemp] {tag!r} Pass-A combined diameter&length box matched '
-                f'-> dimension_diameter={dimension_diameter!r} dimension_length={dimension_length!r}',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-A combined diameter&length box matched '
+                f'-> dimension_diameter={dimension_diameter!r} dimension_length={dimension_length!r}')
 
         # ── Length / Height ──────────────────────────────────────────────
         # OCR artefact: P&ID pipe annotations such as  2"-FL-ACIN-xxxx  are
@@ -3385,11 +3355,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # it never leaks into the item actually returned to the caller,
         # regardless of whether a databox match exists below.
         _dp_was_fallback = _last.pop('_design_pressure_is_fallback', False)
-        print(
-            f'[EQ-DIAG][PressTemp] {tag!r} Pass-B databox_vals={_db_vals!r} '
-            f'design_pressure_was_fallback={_dp_was_fallback}',
-            flush=True,
-        )
+        logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} Pass-B databox_vals={_db_vals!r} '
+            f'design_pressure_was_fallback={_dp_was_fallback}')
         if _dp_was_fallback and _db_vals.get('oper_pressure'):
             # FIX: a design_pressure_max value with zero label confirmation
             # (the Pass-A bare-value fallback) is strictly lower-confidence
@@ -3401,11 +3368,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             # Oper. Pressure — the per-field merge loop below still runs
             # normally afterward, so a genuine databox design_pressure_max
             # for this tag (if any) is applied as usual.
-            print(
-                f'[EQ-DIAG][PressTemp] {tag!r} clearing stale fallback design_pressure_max={_last.get("design_pressure_max")!r} '
-                f'(databox confirmed oper_pressure={_db_vals.get("oper_pressure")!r})',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} clearing stale fallback design_pressure_max={_last.get("design_pressure_max")!r} '
+                f'(databox confirmed oper_pressure={_db_vals.get("oper_pressure")!r})')
             _last['design_pressure_max'] = ''
         if _db_vals:
             # Soft-coded: 'description_databox_override_pattern' — when the
@@ -3440,11 +3404,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     if _fk.endswith(('_min', '_max')) or _fk in _override_fields:
                         if _fv:  # only write a non-empty databox value
                             if _fk in _override_fields and _last[_fk] and _last[_fk] != _fv:
-                                print(
-                                    f'[EQ-DIAG][PressTemp] {tag!r} custom-sep override: '
-                                    f'{_fk} Pass-A={_last[_fk]!r} -> databox={_fv!r}',
-                                    flush=True,
-                                )
+                                logger.debug(f'[EQ-DIAG][PressTemp] {tag!r} custom-sep override: '
+                                    f'{_fk} Pass-A={_last[_fk]!r} -> databox={_fv!r}')
                             _last[_fk] = _fv
                     elif _fk == 'description' and _fv and _desc_ovr and \
                             re.match(_desc_ovr, str(_last.get('description', '')), re.IGNORECASE):
@@ -3492,11 +3453,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                                 _last[_single_fk] = _smaller
                                 if _counterpart in _last and not _last[_counterpart]:
                                     _last[_counterpart] = _larger
-            print(
-                f'[EQ-DIAG][DataBox] Merged into {tag}: '
-                + str({k: v for k, v in _db_vals.items() if _last.get(k)}),
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG][DataBox] Merged into {tag}: '
+                + str({k: v for k, v in _db_vals.items() if _last.get(k)}))
 
     results.sort(key=lambda x: x['tag'])
 
@@ -3554,11 +3512,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     _kept.append(_item)
                 else:
                     _dropped.append(_item['tag'])
-            print(
-                f'[EQ-DIAG] Gate2-TierA: kept {len(_kept)} databox-indexed tag(s), '
-                f'removed {len(_dropped)} referenced tag(s): {_dropped}',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG] Gate2-TierA: kept {len(_kept)} databox-indexed tag(s), '
+                f'removed {len(_dropped)} referenced tag(s): {_dropped}')
         else:
             # ── Tier B: context-window param check (fallback) ────────────
             for _item in results:
@@ -3568,11 +3523,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 else:
                     _dropped.append(_item['tag'])
             if _dropped:
-                print(
-                    f'[EQ-DIAG] Gate2-TierB: removed {len(_dropped)} no-param '
-                    f'referenced tag(s): {_dropped}',
-                    flush=True,
-                )
+                logger.debug(f'[EQ-DIAG] Gate2-TierB: removed {len(_dropped)} no-param '
+                    f'referenced tag(s): {_dropped}')
 
         # Soft-coded: 'gate2_fallback_keep_all_when_empty' (default true
         # preserves legacy behaviour).  When false, a page where the data-box
@@ -3601,10 +3553,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         ]
         _removed_dr = _pre_dr - len(results)
         if _removed_dr:
-            print(
-                f'[EQ-DIAG] Description-reject filter removed {_removed_dr} item(s)',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG] Description-reject filter removed {_removed_dr} item(s)')
 
     # ── Description CLEAR filter (keeps the row, blanks the description) ──
     # Soft-coded via 'description_clear_patterns'. Matches cases where the
@@ -3625,11 +3574,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 _item['description'] = ''
                 _cleared += 1
         if _cleared:
-            print(
-                f'[EQ-DIAG] Description-clear filter blanked {_cleared} description(s)'
-                ' for AI re-extraction',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG] Description-clear filter blanked {_cleared} description(s)'
+                ' for AI re-extraction')
     # ── Dedup-by-description gate ──────────────────────────────────────
     # Soft-coded via 'dedup_by_description_enabled' in equipment_type_config.json.
     # When multiple extracted items share the same description (case-insensitive),
@@ -3652,10 +3598,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         ]
         _removed_dd = _before_dedup - len(results)
         if _removed_dd:
-            print(
-                f'[EQ-DIAG] Dedup-by-description removed {_removed_dd} duplicate(s)',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG] Dedup-by-description removed {_removed_dd} duplicate(s)')
 
     # ── Uppercase normalization for material/abbreviation fields ────────────
     # Soft-coded via 'uppercase_fields' in equipment_type_config.json. Material
@@ -3763,11 +3706,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             }
             for _idx, _ in _members[1:]:
                 _to_remove.add(_idx)
-            print(
-                f'[EQ-DIAG] Sibling-merge: {[results[i]["tag"] for i, _ in _members]} '
-                f'→ {_merged_tag!r} (qty={len(_variants_seen)})',
-                flush=True,
-            )
+            logger.debug(f'[EQ-DIAG] Sibling-merge: {[results[i]["tag"] for i, _ in _members]} '
+                f'→ {_merged_tag!r} (qty={len(_variants_seen)})')
 
         if _to_remove or _merged_updates:
             _new_results = []
@@ -3843,7 +3783,7 @@ def _dedup_equipment_by_tag(items: list) -> list:
                 winner['equipment_master'] = equipment_master_view(winner['metadata'])
             by_tag[key] = winner
     result = list(by_tag.values())
-    print(f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out', flush=True)
+    logger.debug(f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out')
 
     # ── Cross-page sibling-unit merge (soft-coded) ──────────────────────────
     # After multi-page dedup, sibling variants (P-851A / P-851B / P-851C)
@@ -3900,11 +3840,8 @@ def _dedup_equipment_by_tag(items: list) -> list:
                 for _i, _ in _members:
                     if _i != _best:
                         _drop.add(_i)
-                print(
-                    f'[EQ-DIAG] Cross-page sibling-merge: '
-                    f'{[result[i]["tag"] for i, _ in _members]} → {_merged_tag!r}',
-                    flush=True,
-                )
+                logger.debug(f'[EQ-DIAG] Cross-page sibling-merge: '
+                    f'{[result[i]["tag"] for i, _ in _members]} → {_merged_tag!r}')
             if _drop or _upd:
                 _new: list = []
                 for _i, _it in enumerate(result):
@@ -3916,7 +3853,7 @@ def _dedup_equipment_by_tag(items: list) -> list:
                     _new.append(_it)
                 result = _new
     except Exception as _e:
-        print(f'[EQ-DIAG] Cross-page sibling-merge skipped: {_e}', flush=True)
+        logger.debug(f'[EQ-DIAG] Cross-page sibling-merge skipped: {_e}')
 
     return result
 
@@ -4033,7 +3970,7 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
             # fallback from still reaching Gemini.
             ai.gemini_client = None
         except Exception as _e:
-            print(f'[EQ-DIAG][AI-FILL] Service init failed: {_e}', flush=True)
+            logger.debug(f'[EQ-DIAG][AI-FILL] Service init failed: {_e}')
 
         if ai is not None:
             text_upper = text.upper()
@@ -4094,7 +4031,7 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                         temperature=temperature,
                     )
                 except Exception as _e:
-                    print(f'[EQ-DIAG][AI-FILL] call error ({model_hint}): {_e}', flush=True)
+                    logger.debug(f'[EQ-DIAG][AI-FILL] call error ({model_hint}): {_e}')
                     return {}, True
                 try:
                     # Strip markdown code fences if present
@@ -4104,7 +4041,7 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                     if isinstance(parsed, dict):
                         return parsed, False
                 except Exception as _e:
-                    print(f'[EQ-DIAG][AI-FILL] parse error ({model_hint}): {_e}', flush=True)
+                    logger.debug(f'[EQ-DIAG][AI-FILL] parse error ({model_hint}): {_e}')
                 return {}, False
 
             # ── Per-item gap fill ────────────────────────────────────────────────────
@@ -4113,20 +4050,14 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                 # once per item (not per AI call) so a single slow/failing call
                 # can't still blow past the time budget before the next check.
                 if _time.monotonic() >= ai_deadline:
-                    print(
-                        f'[EQ-DIAG][AI-FILL] time budget ({ext_cfg.get("ai_gap_fill_max_seconds", 120)}s) '
-                        f'exceeded — skipping AI gap-fill for remaining items (regex results kept).',
-                        flush=True,
-                    )
+                    logger.debug(f'[EQ-DIAG][AI-FILL] time budget ({ext_cfg.get("ai_gap_fill_max_seconds", 120)}s) '
+                        f'exceeded — skipping AI gap-fill for remaining items (regex results kept).')
                     ai_gap_fill_aborted = True
                     break
                 if consecutive_failures >= max_consec_failures:
-                    print(
-                        f'[EQ-DIAG][AI-FILL] {consecutive_failures} consecutive call failures — '
+                    logger.debug(f'[EQ-DIAG][AI-FILL] {consecutive_failures} consecutive call failures — '
                         f'AI provider looks unavailable, skipping AI gap-fill for remaining items '
-                        f'(regex results kept).',
-                        flush=True,
-                    )
+                        f'(regex results kept).')
                     ai_gap_fill_aborted = True
                     break
 
@@ -4192,15 +4123,12 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
                     filled.append(f)
 
                 if filled:
-                    print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
+                    logger.debug(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}')
 
             if ai_gap_fill_aborted:
-                print(
-                    '[EQ-DIAG][AI-FILL] Gap-fill pass ended early via a circuit '
+                logger.debug('[EQ-DIAG][AI-FILL] Gap-fill pass ended early via a circuit '
                     'breaker — remaining items kept their regex-only values; '
-                    'extraction itself still completes normally.',
-                    flush=True,
-                )
+                    'extraction itself still completes normally.')
 
             # ── Uppercase normalization for material/abbreviation fields ─────────
             # Applied again here so AI-filled MOC / insulation values also render in

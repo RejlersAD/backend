@@ -12,7 +12,6 @@ from django_filters.rest_framework import DjangoFilterBackend
 import os
 import logging
 
-logger = logging.getLogger(__name__)
 
 # Import Data Visibility for Row-Level Security
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
@@ -27,6 +26,7 @@ from .services import PFDToPIDConverter
 from .services_advanced_pipeline import AdvancedPFDToPIDPipeline
 from apps.rbac.permissions import HasModuleAccess
 from . import artifacts
+logger = logging.getLogger(__name__)
 
 
 class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):

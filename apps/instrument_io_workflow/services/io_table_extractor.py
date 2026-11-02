@@ -18,7 +18,7 @@ import logging
 import re
 from typing import List, Dict, Optional, Tuple
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 
 from .config import (
     IO_LIST_CANONICAL_COLUMNS,
@@ -29,8 +29,8 @@ from .config import (
     LOCAL_OCR_RENDER_DPI,
     LOCAL_OCR_THRESHOLD,
 )
-
 logger = logging.getLogger(__name__)
+
 
 _OCR_TAG_RE = re.compile(
     r'\b(\d{2,4})\s*[-\u2010-\u2015]\s*([A-Z]{1,4})\s*[-\u2010-\u2015]\s*(\d{2,5}[A-Z]?)\b',
@@ -103,7 +103,7 @@ def _extract_drawing_rows_with_local_ocr(page, page_number: int) -> List[Dict]:
         from PIL import Image, ImageOps
 
         scale = LOCAL_OCR_RENDER_DPI / 72
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
         image = Image.frombytes('RGB', [pixmap.width, pixmap.height], pixmap.samples)
         grayscale = ImageOps.grayscale(image)
         thresholded = grayscale.point(
@@ -129,7 +129,7 @@ def extract_pid_drawing_row_for_page_via_local_ocr(
     """
     if not ENABLE_LOCAL_OCR:
         return []
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         if page_index < 0 or page_index >= len(doc):
             return []
@@ -526,7 +526,7 @@ def _extract_rows_with_pymupdf(
     if not page_indices:
         return rows, empty_pages
 
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         for pidx in page_indices:
             if pidx < 0 or pidx >= len(doc):

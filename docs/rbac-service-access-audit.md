@@ -2,6 +2,17 @@
 
 Date: 2026-09-10. Scope: the local RADAI module catalogue, service assignment, frontend route gates, and enquiry operations authorization.
 
+## Super Administrator access correction — 30 October 2026
+
+The user approved restoring access based on an active direct `super_admin` role.
+`IsSuperAdmin` now uses the existing `UserProfile.is_super_admin()` check, which
+honors disabled roles and assignment start/expiry dates. The previous check
+required an MFA verification argument that the caller never supplied, despite
+the app having no MFA verification flow, and denied every role-based administrator.
+Django superuser fallback, access auditing, module/action restrictions, explicit
+permission denials and self-permission edit protection remain in place. This
+correction changes no role assignments, account flags or database schema.
+
 ## Findings and changes
 
 | Area | Finding | Change |

@@ -1,7 +1,7 @@
 """
 Valve MTO — P&ID PDF parsing (Stage 1) and vector symbol candidates.
 
-Built on PyMuPDF (fitz). Everything here is TEXT-LAYER / VECTOR parsing —
+Built on PyMuPDF (pymupdf). Everything here is TEXT-LAYER / VECTOR parsing —
 no OCR, no vision calls. The extraction pipeline (engine.py) consumes
 these structures; detection heuristics are deliberately isolated in this
 module so they can be tuned against the reference P&ID
@@ -28,9 +28,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-import fitz  # PyMuPDF
-
+import pymupdf  # PyMuPDF
 logger = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Line-number pattern presets (§3). Each preset is a compiled regex with
@@ -257,7 +257,7 @@ def detect_clouds(doc) -> dict:
                 continue
             # Heuristic kind: clouds near a pure-number text (rev tag) are
             # revision clouds — v1 simplification, TUNABLE.
-            nearby = page.get_text('text', clip=fitz.Rect(
+            nearby = page.get_text('text', clip=pymupdf.Rect(
                 rect.x0 - 20, rect.y0 - 20, rect.x1 + 20, rect.y1 + 20,
             )) or ''
             kind = 'revision' if re.search(r'\b[A-Z]?\d{1,2}\b', nearby) else 'scope'
@@ -266,7 +266,7 @@ def detect_clouds(doc) -> dict:
             else:
                 scope += 1
             try:
-                pix = page.get_pixmap(clip=rect, matrix=fitz.Matrix(0.5, 0.5))
+                pix = page.get_pixmap(clip=rect, matrix=pymupdf.Matrix(0.5, 0.5))
                 thumbnails.append({
                     'page': i + 1,
                     'kind': kind,
@@ -339,10 +339,10 @@ def detect_valve_symbol_candidates(doc) -> list[dict]:
 def render_evidence_crop(doc, page_no: int, rect, zoom: float = 3.0) -> bytes:
     """PNG crop around a symbol bbox (padded) for the evidence drawer."""
     page = doc.load_page(page_no - 1)
-    r = fitz.Rect(rect)
+    r = pymupdf.Rect(rect)
     r.x0 -= 30; r.y0 -= 30; r.x1 += 30; r.y1 += 30
     r &= page.rect
-    pix = page.get_pixmap(clip=r, matrix=fitz.Matrix(zoom, zoom))
+    pix = page.get_pixmap(clip=r, matrix=pymupdf.Matrix(zoom, zoom))
     return pix.tobytes('png')
 
 
@@ -350,7 +350,7 @@ def parse_drawing(pdf_bytes: bytes, filename: str = '') -> dict:
     """Full Stage-1 parse. Never raises on a bad PDF — returns
     {'error': ...} instead so the view can 400 cleanly."""
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     except Exception as exc:
         return {'error': f'Could not open PDF: {exc}'}
     try:

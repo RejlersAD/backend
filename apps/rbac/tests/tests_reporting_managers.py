@@ -48,6 +48,16 @@ class ReportingManagerProfileTests(TestCase):
         self.assertIn(self.client.get('/api/v1/rbac/users/reporting-managers/').status_code, (401, 403))
 
     def test_organizational_changes_require_another_authorized_editor(self):
+        # Saving unrelated profile fields must not trip the self-edit guard
+        # when the payload repeats the employee's current assignments.
+        unchanged_response = self.client.patch('/api/v1/rbac/users/me/?view=profile', {
+            'first_name': 'Updated name',
+            'department': self.profile.department,
+            'job_title': self.profile.job_title,
+            'manager_id': '',
+        }, format='json')
+        self.assertEqual(unchanged_response.status_code, 200, unchanged_response.data)
+
         response = self.client.patch('/api/v1/rbac/users/me/?view=profile', {
             'department': 'sales', 'manager_id': str(self.manager.pk),
         }, format='json')

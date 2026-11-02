@@ -13,7 +13,10 @@ Modules created (if not already present):
 SOFT-CODED: edit ENGINEERING_MODULES below to add/remove modules
 without changing the migration itself.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SOFT-CODED catalogue — single source of truth for this migration
@@ -63,7 +66,7 @@ def seed_engineering_modules(apps, schema_editor):
         module_objects[m['code']] = obj
         if created:
             created_count += 1
-    print(f'\n  [0008] Seeded {created_count} new engineering modules.')
+    logger.debug(f'\n  [0008] Seeded {created_count} new engineering modules.')
 
     # ── 2. Assign all modules to super_admin role (if it exists) ──────
     try:
@@ -75,9 +78,9 @@ def seed_engineering_modules(apps, schema_editor):
             )
             if c:
                 assigned += 1
-        print(f'  [0008] Assigned {assigned} modules to super_admin role.')
+        logger.debug(f'  [0008] Assigned {assigned} modules to super_admin role.')
     except Role.DoesNotExist:
-        print('  [0008] super_admin role not found — skipping role assignment.')
+        logger.debug('  [0008] super_admin role not found — skipping role assignment.')
 
     # ── 3. Assign process_datasheet to process_engineer role ──────────
     ROLE_MODULE_MAP = {

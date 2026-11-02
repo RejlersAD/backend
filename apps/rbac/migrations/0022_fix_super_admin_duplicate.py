@@ -21,7 +21,10 @@ ISSUE 2 — Level choice label
 
 All operations are idempotent — safe to re-run.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded constants ───────────────────────────────────────────────────────
 CANONICAL_CODE  = 'super_admin'
@@ -42,16 +45,16 @@ def fix_super_admin_duplicates(apps, schema_editor):
     try:
         canonical = Role.objects.using(db_alias).get(code=CANONICAL_CODE)
     except Role.DoesNotExist:
-        print(f'  [0022] ⚠ Canonical role code={CANONICAL_CODE} not found — skipping')
+        logger.debug(f'  [0022] ⚠ Canonical role code={CANONICAL_CODE} not found — skipping')
         return
 
     if canonical.name != CANONICAL_NAME:
         old_name      = canonical.name
         canonical.name = CANONICAL_NAME
         canonical.save(using=db_alias, update_fields=['name'])
-        print(f'  [0022] ✓ Renamed canonical role: "{old_name}" → "{CANONICAL_NAME}"')
+        logger.debug(f'  [0022] ✓ Renamed canonical role: "{old_name}" → "{CANONICAL_NAME}"')
     else:
-        print(f'  [0022] ✓ Canonical role name is already correct: "{CANONICAL_NAME}"')
+        logger.debug(f'  [0022] ✓ Canonical role name is already correct: "{CANONICAL_NAME}"')
 
     # ── Step 2: Find duplicate level-1 roles (different code, not custom_) ───
     duplicates = Role.objects.using(db_alias).filter(
@@ -64,7 +67,7 @@ def fix_super_admin_duplicates(apps, schema_editor):
     )
 
     for dup in duplicates:
-        print(f'  [0022] Found duplicate level-1 role: "{dup.name}" (code={dup.code})')
+        logger.debug(f'  [0022] Found duplicate level-1 role: "{dup.name}" (code={dup.code})')
 
         # Re-assign all users from duplicate → canonical role
         user_roles = UserRole.objects.using(db_alias).filter(role=dup)
@@ -78,7 +81,7 @@ def fix_super_admin_duplicates(apps, schema_editor):
             if created:
                 moved += 1
         if moved:
-            print(f'  [0022]   ✓ Moved {moved} user assignment(s) to canonical role')
+            logger.debug(f'  [0022]   ✓ Moved {moved} user assignment(s) to canonical role')
 
         # Copy any modules that canonical role is missing
         dup_modules = RoleModule.objects.using(db_alias).filter(role=dup)
@@ -90,10 +93,10 @@ def fix_super_admin_duplicates(apps, schema_editor):
         # Deactivate (not delete) the duplicate to preserve FK integrity
         dup.is_active = False
         dup.save(using=db_alias, update_fields=['is_active'])
-        print(f'  [0022]   ✓ Deactivated duplicate role: "{dup.name}" (code={dup.code})')
+        logger.debug(f'  [0022]   ✓ Deactivated duplicate role: "{dup.name}" (code={dup.code})')
 
     if not duplicates.exists():
-        print('  [0022] ✓ No duplicate level-1 roles found — nothing to merge')
+        logger.debug('  [0022] ✓ No duplicate level-1 roles found — nothing to merge')
 
 
 def noop(apps, schema_editor):

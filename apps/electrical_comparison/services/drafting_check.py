@@ -28,8 +28,8 @@ from .tag_extractor import (
     _classify_page,
     PAGE_TYPE_DRAWING,
 )
-
 logger = logging.getLogger(__name__)
+
 
 # Table 11.4 DRAWING SIZES (mm, width x height, portrait or landscape).
 _ISO_A_SIZES = {
@@ -148,13 +148,13 @@ def run_drafting_check(pdf_bytes, api_key, provider='claude', model=None):
     'review' entries, and a total failure returns an empty summary so a
     drafting-check hiccup can never fail the comparison job.
     """
-    import fitz
+    import pymupdf
 
     rule_text_by_id = dict(DRAFTING_VISION_RULES)
     pages_out = []
     totals = {'pass': 0, 'fail': 0, 'review': 0}
 
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         page_dims = [(p.rect.width, p.rect.height) for p in doc]
     finally:

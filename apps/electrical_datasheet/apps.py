@@ -17,6 +17,9 @@ class ElectricalDatasheetConfig(AppConfig):
     @staticmethod
     def _seed_equipment_types_signal(sender, **kwargs):
         """Seed ElectricalEquipmentType records after migrations (safe DB access)."""
+        from apps.core.test_runtime import is_test_runtime
+        if is_test_runtime():
+            return
         try:
             from .equipment_types_config import EQUIPMENT_TYPES_CONFIG
             from .models import ElectricalEquipmentType

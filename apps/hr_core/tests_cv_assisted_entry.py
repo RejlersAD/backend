@@ -134,11 +134,11 @@ class CVAssistedEntryTests(TestCase):
         self.assertFalse(extracted['acknowledgement']['accurate'])
 
     def test_scanned_pdf_runs_local_ocr(self):
-        import fitz
+        import pymupdf
         from PIL import Image
         image = Image.new('RGB', (600, 800), 'white')
         stream = io.BytesIO(); image.save(stream, format='PNG')
-        document = fitz.open(); page = document.new_page()
+        document = pymupdf.open(); page = document.new_page()
         page.insert_image(page.rect, stream=stream.getvalue())
         attachment = SimpleNamespace(content=document.tobytes(), name='scan.pdf')
         document.close()
@@ -183,8 +183,8 @@ class CVAssistedEntryTests(TestCase):
             parse_cv_text('Name: RASHID\nCurrent Position: SENIOR XYZ\nYear of Birth: 19XX\nEducation:\nBSc XXXX')
 
     def test_pdf_text_and_template_order(self):
-        import fitz
-        document = fitz.open(); page = document.new_page(); page.insert_text((40, 50), 'CV Candidate Example - Engineer')
+        import pymupdf
+        document = pymupdf.open(); page = document.new_page(); page.insert_text((40, 50), 'CV Candidate Example - Engineer')
         content = document.tobytes(); document.close()
         text, images, content_type = cv_source(content, 'example.pdf', True)
         self.assertIn('Engineer', text); self.assertEqual(images, []); self.assertEqual(content_type, 'application/pdf')

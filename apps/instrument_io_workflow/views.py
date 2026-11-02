@@ -71,8 +71,8 @@ from .services.orchestrator import sha256_of
 from .services.results_cache import load_results_cache
 from .services.revision_diff import diff_revisions
 from .excel_export import export_document_to_xlsx
-
 logger = logging.getLogger(__name__)
+
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -100,8 +100,8 @@ def config_view(request):
 
 
 def _page_count(pdf_bytes: bytes) -> int:
-    import fitz
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    import pymupdf
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         return doc.page_count
     finally:
@@ -829,13 +829,13 @@ def vision_test_key_view(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def pdf_page_count_view(request):
-    import fitz
+    import pymupdf
 
     pdf = request.FILES.get('pdf_file') or request.FILES.get('file')
     if not pdf:
         return Response({'error': 'pdf_file is required'}, status=status.HTTP_400_BAD_REQUEST)
     try:
-        doc = fitz.open(stream=pdf.read(), filetype='pdf')
+        doc = pymupdf.open(stream=pdf.read(), filetype='pdf')
         page_count = doc.page_count
         doc.close()
     except Exception as exc:  # noqa: BLE001

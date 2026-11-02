@@ -9,14 +9,14 @@ import os
 import base64
 from pathlib import Path
 from typing import Dict, List
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 import io
 from openai import OpenAI
 from datetime import datetime
 import pytesseract
-
 logger = logging.getLogger(__name__)
+
 
 
 class RealPIDExtractor:
@@ -80,7 +80,7 @@ class RealPIDExtractor:
         logger.info("📝 [OCR] Extracting text from ALL pages using multi-engine OCR...")
 
         try:
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             num_pages = len(doc)
             logger.info(f"📄 [OCR] PDF has {num_pages} page(s)")
 
@@ -91,7 +91,7 @@ class RealPIDExtractor:
 
                 # High resolution for OCR (3.0x for better text detection in circles)
                 zoom = 3.0
-                mat = fitz.Matrix(zoom, zoom)
+                mat = pymupdf.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat)
 
                 # Convert to PIL Image
@@ -188,7 +188,7 @@ class RealPIDExtractor:
             # STEP 2: Process each page with Vision API
             logger.info("🖼️ [RealPIDExtractor] STEP 2: Processing all pages with Vision AI...")
 
-            doc = fitz.open(pdf_path)
+            doc = pymupdf.open(pdf_path)
             num_pages = len(doc)
             logger.info(f"📄 [RealPIDExtractor] PDF has {num_pages} page(s)")
 
@@ -208,7 +208,7 @@ class RealPIDExtractor:
                 logger.info(f"🔍 [RealPIDExtractor] Processing page {page_num + 1}/{num_pages}...")
 
                 # High-resolution rendering (3.0x to read small text inside circles)
-                pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(3.0, 3.0))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
 
                 # Trim image size to stay within API token limits (~4000x4000 max)

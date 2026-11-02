@@ -39,8 +39,8 @@ from __future__ import annotations
 import logging
 import re
 from typing import Dict, List, Optional, Tuple
-
 logger = logging.getLogger(__name__)
+
 
 
 # ---------------------------------------------------------------------------
@@ -288,12 +288,12 @@ def infer_breakers_for_lines(line_items: List[Dict], pdf_path: str) -> int:
     if not line_items or not pdf_path:
         return 0
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
     except ImportError:
         logger.warning('[breaker] PyMuPDF not installed; skipping inference')
         return 0
     try:
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
     except Exception as e:
         logger.warning(f'[breaker] cannot open PDF: {e}')
         return 0

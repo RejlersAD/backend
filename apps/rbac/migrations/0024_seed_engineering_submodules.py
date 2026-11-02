@@ -26,7 +26,10 @@ Backward-compatibility strategy:
 
 All operations are idempotent — safe to re-run.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── New module definitions ────────────────────────────────────────────────────
 NEW_MODULES = [
@@ -106,7 +109,7 @@ def seed_engineering_submodules(apps, schema_editor):
             obj.order       = m['order']
             obj.is_active   = True
             obj.save(using=db_alias, update_fields=['name', 'description', 'order', 'is_active'])
-        print(f'  [0024] ✓ Module {"created" if created else "updated"}: {m["code"]}')
+        logger.debug(f'  [0024] ✓ Module {"created" if created else "updated"}: {m["code"]}')
 
         # 2. Grant to always-grant roles
         granted_codes = set()
@@ -117,7 +120,7 @@ def seed_engineering_submodules(apps, schema_editor):
                 continue
             _, c = RoleModule.objects.using(db_alias).get_or_create(role=role, module=obj)
             if c:
-                print(f'  [0024]   ✓ Granted {m["code"]} → {role_code}')
+                logger.debug(f'  [0024]   ✓ Granted {m["code"]} → {role_code}')
             granted_codes.add(role_code)
 
         # 3. Auto-grant to any role that already has the parent module code
@@ -125,7 +128,7 @@ def seed_engineering_submodules(apps, schema_editor):
         try:
             parent = Module.objects.using(db_alias).get(code=m['parent_code'])
         except Module.DoesNotExist:
-            print(f'  [0024]   ⚠ Parent module "{m["parent_code"]}" not found — skipping auto-grant')
+            logger.debug(f'  [0024]   ⚠ Parent module "{m["parent_code"]}" not found — skipping auto-grant')
             continue
 
         roles_with_parent = Role.objects.using(db_alias).filter(
@@ -138,7 +141,7 @@ def seed_engineering_submodules(apps, schema_editor):
                 continue
             _, c = RoleModule.objects.using(db_alias).get_or_create(role=role, module=obj)
             if c:
-                print(f'  [0024]   ✓ Auto-granted {m["code"]} → {role.code} (inherited from {m["parent_code"]})')
+                logger.debug(f'  [0024]   ✓ Auto-granted {m["code"]} → {role.code} (inherited from {m["parent_code"]})')
 
 
 def noop(apps, schema_editor):

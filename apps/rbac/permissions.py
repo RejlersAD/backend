@@ -7,14 +7,14 @@ from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied
 from .models import UserProfile
 from .utils import create_audit_log
-
 logger = logging.getLogger(__name__)
+
 
 
 class IsSuperAdmin(permissions.BasePermission):
     """
     Permission class to check if user is super admin.
-    Requires MFA for super admin role activation (step-up auth).
+    Uses active direct super_admin assignments, including their time bounds.
     All super admin access is audit logged.
     """
     message = "You must be a super admin to perform this action."
@@ -28,13 +28,15 @@ class IsSuperAdmin(permissions.BasePermission):
             self._audit_super_admin_access(request, view, source='django_superuser')
             return True
 
-        # Check RBAC super_admin role with MFA requirement
+        # Use the same active role definition as the rest of RBAC. The app has
+        # no MFA verification flow, so requiring an unset request flag here
+        # permanently denied all role-based Super Administrators.
         try:
             profile = request.user.rbac_profile
         except UserProfile.DoesNotExist:
             return False
 
-        is_sa = profile.is_super_admin_active()
+        is_sa = profile.is_super_admin()
         if is_sa:
             self._audit_super_admin_access(request, view, source='rbac_role')
         return is_sa
@@ -205,7 +207,7 @@ class CanManageUsers(permissions.BasePermission):
             if profile.roles.filter(
                 code__in=[
                     'super_admin', 'admin', 'ict_admin',
-                    'hr_admin', 'hr_manager', 'human_resource',
+                    'hr_admin', 'hr_manager',
                 ],
                 is_active=True
             ).exists():

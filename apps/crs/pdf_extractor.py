@@ -3,11 +3,14 @@ PDF Comment Extraction Service for CRS
 Extracts red text comments and yellow box callouts from PDF documents
 """
 
-import fitz
+import logging
+
+import pymupdf
 import os
 import re
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
+logger = logging.getLogger(__name__)
 
 
 class PDFCommentExtractor:
@@ -226,13 +229,13 @@ class PDFCommentExtractor:
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
         
         pdf_path = os.path.abspath(pdf_path)
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         comments = []
         seen_texts = set()
         
-        print(f"📄 Processing PDF: {pdf_path}")
-        print(f"📑 Total pages: {len(doc)}")
-        print("🔍 Extracting comments...")
+        logger.debug(f"📄 Processing PDF: {pdf_path}")
+        logger.debug(f"📑 Total pages: {len(doc)}")
+        logger.debug("🔍 Extracting comments...")
         
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -341,13 +344,13 @@ class PDFCommentExtractor:
                                             page_count += 1
                                             type_label = "🟡 Yellow box" if is_yellow_box else "🔴 Red comment" if is_red_annot else f"📌 {annot_type.lower()}" if is_shape_annotation else "💬 Annotation"
                                             if self.debug_mode:
-                                                print(f"  {type_label} on page {page_num + 1}: {display_text[:80] if display_text else f'[{annot_type}]'}...")
+                                                logger.debug(f"  {type_label} on page {page_num + 1}: {display_text[:80] if display_text else f'[{annot_type}]'}...")
                         except Exception as e:
                             if self.debug_mode:
-                                print(f"  ⚠️ Annotation error: {e}")
+                                logger.debug(f"  ⚠️ Annotation error: {e}")
             except Exception as e:
                 if self.debug_mode:
-                    print(f"  ⚠️ Error processing annotations on page {page_num + 1}: {e}")
+                    logger.debug(f"  ⚠️ Error processing annotations on page {page_num + 1}: {e}")
             
             # Process red text spans
             try:
@@ -414,21 +417,21 @@ class PDFCommentExtractor:
                                             })
                                             page_count += 1
                                             if self.debug_mode:
-                                                print(f"  🔴 Red text on page {page_num + 1}: {text[:80]}...")
+                                                logger.debug(f"  🔴 Red text on page {page_num + 1}: {text[:80]}...")
             except Exception as e:
                 if self.debug_mode:
-                    print(f"  ⚠️ Error processing text spans on page {page_num + 1}: {e}")
+                    logger.debug(f"  ⚠️ Error processing text spans on page {page_num + 1}: {e}")
             
             if page_count > 0:
-                print(f"  ✅ Page {page_num + 1}: Found {page_count} comment(s)")
+                logger.debug(f"  ✅ Page {page_num + 1}: Found {page_count} comment(s)")
         
         doc.close()
         
-        print(f"\n📊 Extraction Summary:")
-        print(f"  Total comments: {len(comments)}")
-        print(f"  🔴 Red comments: {sum(1 for c in comments if c['type'] == 'red_comment')}")
-        print(f"  🟡 Yellow boxes: {sum(1 for c in comments if c['type'] == 'yellow_box')}")
-        print(f"  📌 Other annotations: {sum(1 for c in comments if c['type'] not in ['red_comment', 'yellow_box'])}")
+        logger.debug(f"\n📊 Extraction Summary:")
+        logger.debug(f"  Total comments: {len(comments)}")
+        logger.debug(f"  🔴 Red comments: {sum(1 for c in comments if c['type'] == 'red_comment')}")
+        logger.debug(f"  🟡 Yellow boxes: {sum(1 for c in comments if c['type'] == 'yellow_box')}")
+        logger.debug(f"  📌 Other annotations: {sum(1 for c in comments if c['type'] not in ['red_comment', 'yellow_box'])}")
         
         return comments
     

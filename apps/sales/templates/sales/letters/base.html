@@ -8,18 +8,24 @@
     <style>
       @page {
         size: A4;
-        margin: 18mm 18mm 25mm 18mm;
-      }
-      @page :first {
-        margin: 18mm 18mm 25mm 18mm;
+        margin: 14mm 18mm 16mm 18mm;
+        @bottom-right {
+          content: counter(page) " (" counter(pages) ")";
+          font-size: 7pt;
+          color: #26354e;
+          width: 16mm;
+          white-space: nowrap;
+          margin-right: 7mm;
+          padding-bottom: 4mm;
+        }
       }
       * {
         box-sizing: border-box;
       }
       body {
         font-family: "Liberation Sans", Arial, Helvetica, sans-serif;
-        font-size: 10pt;
-        line-height: 1.35;
+        font-size: 9pt;
+        line-height: 1.2;
         color: #111;
         background: #fff;
         margin: 0;
@@ -27,29 +33,28 @@
       }
       .letter {
         width: 100%;
-        min-height: 100%;
-        display: flex;
-        flex-direction: column;
       }
       /* Header: response line + logo */
       .letter-header {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
-        margin-bottom: 12px;
+        margin-bottom: 20px;
       }
       .letter-header .header-left {
-        font-size: 10pt;
+        font-size: 9pt;
       }
+      .header-left > div + div { margin-top: 8px; }
       .header-label {
-        font-weight: bold;
         display: inline-block;
-        min-width: 110px;
+        width: 155px;
       }
+      .header-left > div:first-child .header-label { font-weight: bold; }
       .logo {
-        height: 25px;
+        height: 20px;
         width: auto;
-        max-width: 170px;
+        max-width: 100px;
+        margin-right: -16px;
       }
       .logo-text {
         font-size: 24pt;
@@ -61,33 +66,32 @@
       .meta-table {
         width: 100%;
         border-collapse: collapse;
-        margin-bottom: 12px;
+        margin-bottom: 5px;
       }
       .meta-table td {
         vertical-align: top;
-        padding: 3px 0;
-        font-size: 10pt;
+        padding: 2px 0;
+        font-size: 9pt;
       }
       .meta-label {
         width: 155px;
-        font-weight: bold;
         padding-right: 8px;
       }
+      .meta-table .meta-group td { padding-top: 28px; }
+      .meta-table .meta-recipient td { padding-top: 40px; }
+      .meta-table .meta-reference td { padding-top: 30px; }
+      .meta-table .meta-late-group td { padding-top: 29px; }
       .meta-sub {
         color: #333;
       }
 
       /* Subject block */
       .subject-block {
-        margin: 8px 0 12px 0;
+        margin: 0 0 21px 0;
       }
-      .subject-line {
-        font-weight: bold;
-      }
-      .subject-suffix {
-        font-weight: bold;
-        margin-top: 1px;
-      }
+      .subject-block td { padding: 0 0 6px 0; }
+      .subject-value { font-weight: bold; }
+      .subject-suffix { margin-top: 4px; }
 
       /* Salutation */
       .salutation {
@@ -96,50 +100,58 @@
 
       /* Body */
       .letter-body {
-        flex: 1 1 auto;
-        min-height: 0;
+        display: block;
       }
       .letter-body p {
         margin: 0 0 12px 0;
-        text-align: justify;
+        text-align: left;
+        font-size: 9.4pt;
+        line-height: 1.25;
       }
 
       /* Signature */
       .signature {
-        margin-top: 30px;
-        margin-bottom: 3%;
-      }
-      .signature .sig-name {
-        font-weight: bold;
+        margin-top: 20px;
+        break-inside: avoid;
+        page-break-inside: avoid;
       }
       .signature .sig-title {
-        margin: 2;
+        margin: 0;
+      }
+      .signature-closing {
+        margin-bottom: 24px;
       }
 
       /* Footer - fixed at page bottom using running element */
       .letter-footer {
         position: running(footer);
+        width: 187mm;
+        margin-left: -2mm;
+        border-top: 1px solid #b7b7b7;
+        padding-top: 2mm;
+        font-size: 7pt;
+        line-height: 1.15;
+        text-align: left;
       }
       @page {
         @bottom-center {
           content: element(footer);
-          margin-bottom: 6mm;
-          font-size: 6.5pt;
-          color: #474747;
-          line-height: 1.3;
-          text-align: center;
-          border-top: 1px solid #666;
-          padding-top: 3mm;
-          width: 100%;
+          margin-bottom: 16mm;
+          width: 174mm;
         }
       }
       .letter-content {
-        flex: 1 1 auto;
+        display: block;
       }
     </style>
   </head>
   <body>
     <div class="letter">
+      <div class="letter-footer">
+        {{ letterhead.footer_company }}<br />
+        {{ letterhead.footer_address }}<br />
+        {{ letterhead.footer_contact }}
+      </div>
       <div class="letter-header">
         <div class="header-left">
           <div>
@@ -147,8 +159,8 @@
             <span class="hl">{{ letterhead.response_code }}</span>
           </div>
           <div>
-            <span class="header-label">Confidential: </span>
-            <span class="hl">{{ letterhead.confidential }}</span>
+            <span class="header-label">Confidential</span>
+            <span class="hl">{{ letterhead.confidential_date }}</span>
           </div>
         </div>
         <div class="header-right">
@@ -162,14 +174,14 @@
         <tr>
           <td class="meta-label">From:</td>
           <td>
-            <strong>{{ letterhead.sender_name }}</strong><br /><span
+            {{ letterhead.sender_name }}<br /><span
               class="meta-sub"
               >{{ letterhead.sender_company }}</span
             >
           </td>
         </tr>
-        <tr>
-          <td class="meta-label">Go Focal Contact:</td>
+        <tr class="meta-group">
+          <td class="meta-label">Bid Focal Contact</td>
           <td>{{ letterhead.focal_contact }}</td>
         </tr>
         <tr>
@@ -183,6 +195,7 @@
         <tr>
           <td class="meta-label">Email:</td>
           <td>
+            E:
             <a
               href="mailto:{{ letterhead.email }}"
               style="color: #0066cc; text-decoration: underline"
@@ -190,10 +203,10 @@
             >
           </td>
         </tr>
-        <tr>
+        <tr class="meta-recipient">
           <td class="meta-label">To:</td>
           <td>
-            <strong>{{ letterhead.recipient_name }}</strong><br />
+            {{ letterhead.recipient_name }}<br />
             {% if letterhead.recipient_title %}{{ letterhead.recipient_title }}<br />{% endif %}
             {{ letterhead.recipient_company }}<br />
             {% if letterhead.recipient_address %}{{ letterhead.recipient_address }}<br />{% endif %}
@@ -205,30 +218,27 @@
             >{% endif %}
           </td>
         </tr>
-        <tr>
+        <tr class="meta-reference">
           <td class="meta-label">Your Ref. No.:</td>
           <td>{{ letterhead.your_ref|default:"—" }}</td>
         </tr>
-        <tr>
+        <tr class="meta-late-group">
           <td class="meta-label">Our Ref. No.:</td>
           <td>{{ letterhead.our_ref }}</td>
         </tr>
-        <tr>
-          <td class="meta-label">Our ADNOC Unified Code:</td>
+        <tr class="meta-late-group">
+          <td class="meta-label">Our ADNOC Unified<br />Code:</td>
           <td>{{ letterhead.adnoc_unified_code }}</td>
         </tr>
       </table>
 
-      <div class="subject-block">
-        <div class="subject-line">Subject: <span>{{ subject }}</span></div>
-        {% if subject_suffix %}
-        <div class="subject-suffix" align="center">{{ subject_suffix }}</div>
-        {% endif %}
-      </div>
+      <table class="meta-table subject-block">
+        <tr><td class="meta-label">Subject:</td><td class="subject-value">{{ subject }}
+          {% if subject_suffix %}<div class="subject-suffix">{{ subject_suffix }}</div>{% endif %}
+        </td></tr>
+      </table>
 
-      <div class="salutation">
-            Dear Sir,
-        </div>
+      <div class="salutation">{{ salutation }}</div>
       
       <div class="letter-content">
         <div class="letter-body">
@@ -239,7 +249,7 @@
 
        
         <div class="signature">   
-            <div style="margin-bottom: 15px;">Sincerely yours,</div>        
+            <div class="signature-closing">Sincerely yours,</div>
           <div class="sig-name">{{ letterhead.signature_name }}</div>
           {% for title in letterhead.signature_titles %}
           <div class="sig-title">{{ title }}</div>
@@ -247,11 +257,6 @@
         </div>
       </div>
 
-      <div class="letter-footer">
-        {{ letterhead.footer_company }}<br />
-        {{ letterhead.footer_address }}<br />
-        {{ letterhead.footer_contact }}
-      </div>
     </div>
   </body>
 </html>

@@ -25,10 +25,10 @@ from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 import logging
 from io import BytesIO
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from collections import Counter, defaultdict
-
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -223,7 +223,7 @@ class S3ReferenceLoader:
             pdf_bytes = response['Body'].read()
             
             # Open PDF with PyMuPDF
-            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            pdf_document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             # Extract text from all pages
             text_content = ""

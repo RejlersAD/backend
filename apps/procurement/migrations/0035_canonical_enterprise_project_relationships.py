@@ -1,7 +1,10 @@
+import logging
+
 from collections import defaultdict
 
 from django.db import migrations, models
 import django.db.models.deletion
+logger = logging.getLogger(__name__)
 
 
 def ensure_enterprise_project_id_uniqueness(apps, schema_editor):
@@ -51,10 +54,8 @@ def ensure_enterprise_project_id_uniqueness(apps, schema_editor):
         )
         repaired_rows = cursor.rowcount
         if repaired_rows:
-            print(
-                f'[procurement.0035] Re-keyed {repaired_rows} duplicate/null '
-                'core_project row(s); original ids remain on canonical rows.'
-            )
+            logger.debug(f'[procurement.0035] Re-keyed {repaired_rows} duplicate/null '
+                'core_project row(s); original ids remain on canonical rows.')
 
         constraints = connection.introspection.get_constraints(cursor, table_name)
         id_is_unique = any(

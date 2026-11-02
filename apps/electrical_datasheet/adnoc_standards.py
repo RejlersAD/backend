@@ -8,11 +8,14 @@ Storage: AWS S3 (rejlers-engineering-data/adnoc_standards/)
 Soft-coded approach: Load from S3 or fallback to embedded defaults
 """
 
+import logging
+
 import json
 import os
 from typing import Dict, List, Any, Optional
 from django.conf import settings
 from decimal import Decimal
+logger = logging.getLogger(__name__)
 
 
 class ADNOCStandardsManager:
@@ -92,7 +95,7 @@ class ADNOCStandardsManager:
             if content:
                 return json.loads(content)
         except Exception as e:
-            print(f"[ADNOC Standards] Failed to load from S3: {e}")
+            logger.debug(f"[ADNOC Standards] Failed to load from S3: {e}")
         
         return None
     

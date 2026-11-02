@@ -1,7 +1,10 @@
+import logging
+
 # Generated migration for password expiry feature
 
 from django.db import migrations
 from django.utils import timezone
+logger = logging.getLogger(__name__)
 
 
 def set_default_password_change_date(apps, schema_editor):
@@ -18,7 +21,7 @@ def set_default_password_change_date(apps, schema_editor):
     
     User.objects.bulk_update(users_to_update, ['last_password_change'])
     
-    print(f"Updated {count} users with default last_password_change dates")
+    logger.debug(f"Updated {count} users with default last_password_change dates")
 
 
 class Migration(migrations.Migration):

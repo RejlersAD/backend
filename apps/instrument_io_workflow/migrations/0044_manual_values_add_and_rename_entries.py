@@ -10,7 +10,10 @@ Updates 'valve_types' ("Manual Values" tab) lookup content:
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'valve_types'
 NAME = 'Manual Values — Valve Type (default)'
@@ -38,7 +41,7 @@ def apply_forward(apps, schema_editor):
             lookup.update(NEW_ENTRIES)
     row.definition = definition
     row.save(update_fields=['definition'])
-    print(f'[instrument_io_workflow] Updated {SECTION!r} lookup: renamed CHECK VALVE, added {len(NEW_ENTRIES)} entries.')
+    logger.debug(f'[instrument_io_workflow] Updated {SECTION!r} lookup: renamed CHECK VALVE, added {len(NEW_ENTRIES)} entries.')
 
 
 def apply_backward(apps, schema_editor):

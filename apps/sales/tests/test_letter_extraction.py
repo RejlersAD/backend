@@ -15,6 +15,10 @@ from apps.sales.workspace_models import OpportunityWorkspace, OpportunityWorkspa
 
 
 class ContactParsingTests(SimpleTestCase):
+    def test_explicit_client_reference_is_extracted_for_outgoing_letter(self):
+        fields = extract_letter_fields('Contact Name: Aisha Ali\nClient Reference: ADG-47\nEmail: aisha@client.test')
+        self.assertEqual(fields['client_reference'], 'ADG-47')
+
     def test_internal_forward_uses_original_client_body_date_and_message_id(self):
         data = (b'From: Internal Sales <sales@rejlers.ae>\nDate: Fri, 16 Oct 2026 10:00:00 +0000\n'
                 b'Message-ID: <forward@rejlers.ae>\n\nPlease prepare a response.\n'
@@ -240,6 +244,33 @@ class LetterExtractionWorkflowTests(TestCase):
                 patch('apps.sales.letter_docx.generate_letter_docx', return_value=b'PK-test'):
             return prepare_letter(self.deal, self.actor, kind, custom_data)
 
+    def test_letter_preparation_context_uses_client_reference_and_requires_authentication(self):
+        from rest_framework.test import APIClient
+        url = f'/api/v1/sales/deals/{self.deal.pk}/letter-preparation-context/'
+        api = APIClient()
+        self.assertIn(api.get(url).status_code, (401, 403))
+        self.deal.client_reference = 'CLIENT-REF-47'
+        self.deal.save(update_fields=['client_reference'])
+        api.force_authenticate(self.actor)
+        response = api.get(url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['deal_code'], self.deal.deal_code)
+        self.assertEqual(response.data['letterhead']['your_ref'], 'CLIENT-REF-47')
+        self.assertEqual(response.data['letterhead']['recipient_name'], 'Aisha Ali')
+        self.assertIn('confidential_date', response.data['missing_fields'])
+
+    def test_letter_preparation_context_prefills_detected_email_reference(self):
+        from rest_framework.test import APIClient
+        api = APIClient()
+        api.force_authenticate(self.actor)
+        response = api.get(f'/api/v1/sales/deals/{self.deal.pk}/letter-preparation-context/')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            response.data['letterhead']['your_ref'],
+            'SAP Ariba email notifications dated: 14,10,2026 ,Message ID :<mail@ariba.com>',
+        )
+        self.assertNotIn('your_ref', response.data['missing_fields'])
+
     def test_intake_fields_are_snapshotted_and_edits_win(self):
         letter = self.prepare(custom_data={'letterhead': {'recipient_title': 'Reviewed title'}})
         head = letter.custom_data['letterhead']
@@ -358,7 +389,7 @@ class LetterExtractionWorkflowTests(TestCase):
         self.assertEqual(pdf.call_count, 1)
 
     def test_updated_source_fields_appear_in_real_pdf_and_word_output(self):
-        import fitz
+        import pymupdf
         from docx import Document
         from apps.sales.letter_pdf import generate_letter_pdf
         from apps.sales.letter_docx import generate_letter_docx
@@ -368,7 +399,7 @@ class LetterExtractionWorkflowTests(TestCase):
         self.intake.internet_message_id = '<current-source@ariba.com>'
         self.intake.save()
         letter = self.prepare()
-        with fitz.open(stream=generate_letter_pdf(letter), filetype='pdf') as pdf:
+        with pymupdf.open(stream=generate_letter_pdf(letter), filetype='pdf') as pdf:
             pdf_text = '\n'.join(page.get_text() for page in pdf)
         word = Document(BytesIO(generate_letter_docx(letter)))
         word_text = '\n'.join(
@@ -586,11 +617,11 @@ class LetterExtractionWorkflowTests(TestCase):
         download.assert_called_once_with(self.deal, self.actor, 'tender', 'remote-file-id')
 
     def test_readable_pdf_docx_and_html_uploads(self):
-        import fitz
+        import pymupdf
         from docx import Document
         upload = self.upload()
         text = 'Contact Name: Document Buyer\nPosition: Procurement Manager\nCompany: Example Ltd\nEmail: buyer@example.test\nAddress: PO Box 123'
-        pdf = fitz.open()
+        pdf = pymupdf.open()
         page = pdf.new_page()
         page.insert_text((72, 72), text)
         pdf_data = pdf.tobytes()
@@ -611,13 +642,13 @@ class LetterExtractionWorkflowTests(TestCase):
                 self.assertEqual(letter.custom_data['letterhead']['recipient_email'], 'buyer@example.test')
 
     def test_vertical_upload_fields_populate_all_letter_types_and_reopen_without_render(self):
-        import fitz
+        import pymupdf
         from docx import Document
         from apps.sales.models import SalesLetterTemplate
         text = ('Contact Name:\nDocument Buyer\nPosition:\nProcurement Manager\n'
                 'Company:\nExample Ltd\nEmail:\nbuyer@example.test\n'
                 'Address:\nTower 7\nAbu Dhabi, UAE')
-        pdf = fitz.open()
+        pdf = pymupdf.open()
         pdf.new_page().insert_text((72, 72), text)
         pdf_data = pdf.tobytes()
         pdf.close()

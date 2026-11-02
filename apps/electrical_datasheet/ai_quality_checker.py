@@ -11,6 +11,8 @@ Features:
 - Universal equipment type support
 - Rule-based fallback when AI is unavailable
 """
+
+import logging
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
 import json
@@ -31,6 +33,7 @@ from .equipment_types_config import (
 )
 from .ai_config import AI_CONFIG, should_use_fallback
 from .rule_based_checker import RuleBasedQualityChecker
+logger = logging.getLogger(__name__)
 
 
 class UnifiedAIQualityChecker:
@@ -52,10 +55,10 @@ class UnifiedAIQualityChecker:
                 self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4-turbo-preview')
                 self.ai_available = True
             except Exception as e:
-                print(f"⚠️ OpenAI initialization failed: {str(e)}")
+                logger.debug(f"⚠️ OpenAI initialization failed: {str(e)}")
                 self.ai_available = False
         else:
-            print("⚠️ OPENAI_API_KEY not configured - using rule-based fallback")
+            logger.debug("⚠️ OPENAI_API_KEY not configured - using rule-based fallback")
         
         # Initialize rule-based checker for fallback
         self.rule_checker = RuleBasedQualityChecker()
@@ -171,7 +174,7 @@ class UnifiedAIQualityChecker:
         """
         # Check if AI is available
         if not self.ai_available or not AI_CONFIG['enabled']:
-            print("ℹ️ AI not available - using rule-based fallback")
+            logger.debug("ℹ️ AI not available - using rule-based fallback")
             return self._use_fallback(datasheet, equipment_type, "AI not configured")
         
         # Prepare datasheet context
@@ -180,21 +183,21 @@ class UnifiedAIQualityChecker:
         standards = self._get_equipment_standards(equipment_type.id)
         
         # Debug logging
-        print(f"DEBUG: sections type: {type(sections)}")
-        print(f"DEBUG: sections content: {sections}")
-        print(f"DEBUG: form_data type: {type(form_data)}")
+        logger.debug(f"DEBUG: sections type: {type(sections)}")
+        logger.debug(f"DEBUG: sections content: {sections}")
+        logger.debug(f"DEBUG: form_data type: {type(form_data)}")
         
         # Ensure sections is a list
         if isinstance(sections, str):
             try:
                 sections = json.loads(sections)
-                print(f"DEBUG: Parsed sections from JSON string")
+                logger.debug(f"DEBUG: Parsed sections from JSON string")
             except json.JSONDecodeError as e:
-                print(f"DEBUG: Failed to parse sections JSON: {e}")
+                logger.debug(f"DEBUG: Failed to parse sections JSON: {e}")
                 sections = []
         
         if not isinstance(sections, list):
-            print(f"DEBUG: sections is not a list, converting to empty list")
+            logger.debug(f"DEBUG: sections is not a list, converting to empty list")
             sections = []
         
         # Build comprehensive prompt
@@ -227,15 +230,15 @@ class UnifiedAIQualityChecker:
             
             # Parse AI response
             ai_response = response.choices[0].message.content
-            print(f"DEBUG: AI response type: {type(ai_response)}")
-            print(f"DEBUG: AI response content: {ai_response[:500]}...")
+            logger.debug(f"DEBUG: AI response type: {type(ai_response)}")
+            logger.debug(f"DEBUG: AI response content: {ai_response[:500]}...")
             
             analysis = json.loads(ai_response)
-            print(f"DEBUG: After JSON parsing, type: {type(analysis)}")
+            logger.debug(f"DEBUG: After JSON parsing, type: {type(analysis)}")
             
             # Ensure we have a dictionary
             if not isinstance(analysis, dict):
-                print(f"WARNING: Expected dict but got {type(analysis)}, converting...")
+                logger.debug(f"WARNING: Expected dict but got {type(analysis)}, converting...")
                 analysis = {
                     'error': f'Unexpected response type: {type(analysis)}',
                     'original_response': str(analysis)[:200],
@@ -270,8 +273,8 @@ class UnifiedAIQualityChecker:
             
             # Determine if fallback should be used
             if should_use_fallback(error_code, error_str):
-                print(f"⚠️ OpenAI error ({error_code}): {error_str}")
-                print("ℹ️ Using rule-based fallback...")
+                logger.debug(f"⚠️ OpenAI error ({error_code}): {error_str}")
+                logger.debug("ℹ️ Using rule-based fallback...")
                 return self._use_fallback(datasheet, equipment_type, error_str)
             else:
                 # Re-raise if fallback not appropriate
@@ -452,7 +455,7 @@ class UnifiedAIQualityChecker:
             
         except Exception as e:
             # Last resort: return minimal analysis
-            print(f"❌ Fallback also failed: {str(e)}")
+            logger.debug(f"❌ Fallback also failed: {str(e)}")
             return {
                 'overall_score': 50,
                 'completeness': {'score': 50, 'status': 'unknown'},
@@ -977,9 +980,9 @@ class AIQualityCheckerMixin:
             checker = UnifiedAIQualityChecker()
             
             # Log the quality check attempt
-            print(f"🔍 Starting quality check for datasheet {datasheet.id} ({datasheet.tag_number})")
-            print(f"📊 Equipment type: {equipment_type.name} ({equipment_type.code})")
-            print(f"🤖 AI available: {checker.ai_available}")
+            logger.debug(f"🔍 Starting quality check for datasheet {datasheet.id} ({datasheet.tag_number})")
+            logger.debug(f"📊 Equipment type: {equipment_type.name} ({equipment_type.code})")
+            logger.debug(f"🤖 AI available: {checker.ai_available}")
             
             # Perform quality check with enhanced error handling
             report = checker.perform_quality_check(datasheet, equipment_type)
@@ -990,16 +993,16 @@ class AIQualityCheckerMixin:
                 from django.utils import timezone
                 datasheet.last_quality_check = timezone.now()
                 datasheet.save(update_fields=['compliance_score', 'last_quality_check'])
-                print(f"✅ Updated datasheet with score: {report['overall_score']}")
+                logger.debug(f"✅ Updated datasheet with score: {report['overall_score']}")
             
             # Log completion
-            print(f"✨ Quality check completed with status: {report.get('status', 'unknown')}")
+            logger.debug(f"✨ Quality check completed with status: {report.get('status', 'unknown')}")
             
             return Response(report, status=status.HTTP_200_OK)
             
         except Exception as e:
             error_message = str(e)
-            print(f"❌ Quality check failed: {error_message}")
+            logger.debug(f"❌ Quality check failed: {error_message}")
             
             return Response(
                 {

@@ -43,8 +43,8 @@ from apps.pid_checker_v2.services.token_accounting import (
     read_claude_usage, read_claude_thinking_tokens, read_openai_usage,
 )
 from apps.pid_checker_v2.legend_defaults import DEFAULT_TEMPLATES, SECTION_ELECTRICAL
-
 logger = logging.getLogger(__name__)
+
 
 # Get electrical legend fields — the ONE source of truth for this
 # section's shape. Read once at import time (a plain in-memory Python
@@ -234,9 +234,9 @@ def resolve_equipment_type(tag: str) -> str:
 
 
 def _get_page_count(pdf_bytes: bytes) -> int:
-    import fitz  # PyMuPDF — same bytes-stream pattern as
+    import pymupdf  # PyMuPDF — same bytes-stream pattern as
     # apps.pid_checker_v2.services.vision_extractor's own page rendering.
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         return doc.page_count
     finally:
@@ -629,8 +629,8 @@ def _classify_page(pdf_bytes: bytes, page_index: int):
     Only once no real tag is found do the legend-keyword / skip-keyword /
     length checks get a chance to classify the page as legend or skip.
     """
-    import fitz
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    import pymupdf
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         text = doc[page_index].get_text() or ''
     finally:
@@ -1228,14 +1228,14 @@ def locate_tags_on_drawing(pdf_bytes, tags, api_key, provider='claude', model=No
     annotated-pages endpoint. Tags never found are simply absent from
     the dict.
     """
-    import fitz
+    import pymupdf
 
     located = {}
     tags = [t.strip().upper() for t in tags if t and t.strip()]
     if not tags or not (api_key and api_key.strip()):
         return located
 
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         page_dims = [(p.rect.width, p.rect.height) for p in doc]
     finally:

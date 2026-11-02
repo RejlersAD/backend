@@ -9,6 +9,8 @@ Bucket Structure:
 - validation_reports/   - AI validation reports and analysis
 """
 
+import logging
+
 import io
 import os
 import json
@@ -20,6 +22,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import PyPDF2
 import pandas as pd
+logger = logging.getLogger(__name__)
 
 
 class ElectricalDatasheetS3Service:
@@ -106,7 +109,7 @@ class ElectricalDatasheetS3Service:
             
             return '\n'.join(text_content)
         except Exception as e:
-            print(f"[PDF Extraction] Error: {e}")
+            logger.debug(f"[PDF Extraction] Error: {e}")
             return ""
     
     def extract_data_from_excel(self, file_obj) -> Dict[str, Any]:
@@ -135,7 +138,7 @@ class ElectricalDatasheetS3Service:
             
             return extracted_data
         except Exception as e:
-            print(f"[Excel Extraction] Error: {e}")
+            logger.debug(f"[Excel Extraction] Error: {e}")
             return {}
     
     def save_validation_report(self, 
@@ -282,7 +285,7 @@ class ElectricalDatasheetS3Service:
             response = self.s3_client.get_object(Bucket=self.bucket_name, Key=s3_key)
             return response['Body'].read()
         except ClientError as e:
-            print(f"[S3 Download] Error: {e}")
+            logger.debug(f"[S3 Download] Error: {e}")
             return None
     
     def _download_from_local(self, path: str) -> Optional[bytes]:
@@ -293,7 +296,7 @@ class ElectricalDatasheetS3Service:
                 with open(local_path, 'rb') as f:
                     return f.read()
         except Exception as e:
-            print(f"[Local Download] Error: {e}")
+            logger.debug(f"[Local Download] Error: {e}")
         return None
     
     def _list_s3_objects(self, prefix: str) -> List[Dict]:
@@ -315,7 +318,7 @@ class ElectricalDatasheetS3Service:
             
             return objects
         except ClientError as e:
-            print(f"[S3 List] Error: {e}")
+            logger.debug(f"[S3 List] Error: {e}")
             return []
     
     def _list_local_files(self, prefix: str) -> List[Dict]:
@@ -339,7 +342,7 @@ class ElectricalDatasheetS3Service:
             
             return files
         except Exception as e:
-            print(f"[Local List] Error: {e}")
+            logger.debug(f"[Local List] Error: {e}")
             return []
     
     @staticmethod

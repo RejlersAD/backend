@@ -168,12 +168,26 @@ def submit_qualification(opportunity, actor, special_note=''):
 
 
 @transaction.atomic
-def record_bid_decision(opportunity, actor, decision, reason=''):
+def record_bid_decision(opportunity, actor, decision, reason='', expected_decision=None):
     opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
     from .bid_decision_access import require_bid_decision_access
     decision_authority = require_bid_decision_access(actor, opportunity)
-    if opportunity.stage != 'qualified':
-        raise ValidationError({'stage': 'Go decision is available only for a qualified opportunity.'})
+    current_decision = opportunity.bid_decision
+    if expected_decision is not None and expected_decision != current_decision:
+        raise ValidationError({'decision': 'The recorded decision changed. Refresh the opportunity and try again.'})
+    is_initial_decision = opportunity.stage == 'qualified' and current_decision == 'pending'
+    is_reversal = (
+        (opportunity.stage == 'proposal' and current_decision in {'bid', 'conditional_bid'})
+        or (opportunity.stage == 'no_bid' and current_decision == 'no_bid')
+    )
+    if not (is_initial_decision or is_reversal):
+        raise ValidationError({
+            'stage': 'A Go/No-Go decision can be recorded for a qualified opportunity or reversed before the opportunity advances.',
+        })
+    if is_reversal and expected_decision is None:
+        raise ValidationError({
+            'expected_decision': 'Refresh the opportunity before reversing its recorded decision.',
+        })
     if decision not in {'bid', 'conditional_bid', 'no_bid'}:
         raise ValidationError({'decision': 'Select Go, Conditional Go or No-Go.'})
     if decision in {'conditional_bid', 'no_bid'} and not reason:
@@ -192,17 +206,25 @@ def record_bid_decision(opportunity, actor, decision, reason=''):
         raise ValidationError({
             'approver': 'A high-risk or high-value Go decision requires independent management approval.',
         })
+    if decision == current_decision:
+        raise ValidationError({'decision': 'The opportunity already has this decision.'})
     old = opportunity.stage
     opportunity.bid_decision = decision
     opportunity.bid_decision_reason = reason
     opportunity.bid_decided_by = actor
     opportunity.bid_decided_at = timezone.now()
     opportunity.stage = 'no_bid' if decision == 'no_bid' else 'proposal'
+    if opportunity.stage != 'no_bid':
+        opportunity.actual_close_date = None
     opportunity.stage_entered_at = timezone.now()
     opportunity.save()
     _audit(
         opportunity, actor, 'bid_decision', from_stage=old, to_stage=opportunity.stage,
-        reason=reason, data={'decision': decision, 'decision_authority': decision_authority},
+        reason=reason, data={
+            'decision': decision,
+            'previous_decision': current_decision,
+            'decision_authority': decision_authority,
+        },
     )
     return opportunity
 

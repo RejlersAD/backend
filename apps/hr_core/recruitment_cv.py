@@ -64,9 +64,9 @@ def photo_bytes(content):
 def cv_source(content, name, include_images=False):
     """No macros, remote fetches, scripts, embedded files or unlimited expansion."""
     if name.lower().endswith('.pdf') and content.startswith(b'%PDF-'):
-        import fitz
+        import pymupdf
         try:
-            with fitz.open(stream=content, filetype='pdf') as document:
+            with pymupdf.open(stream=content, filetype='pdf') as document:
                 if document.is_encrypted or not 1 <= document.page_count <= 20 or document.embfile_count():
                     raise ValueError()
                 text, images, scanned_pages = [], [], 0
@@ -81,7 +81,7 @@ def cv_source(content, name, include_images=False):
                         if len(images) >= 10:
                             raise ValueError()
                         scale = min(2.5, 2000 / max(page.rect.width, page.rect.height, 1))
-                        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
                         if pixmap.width * pixmap.height > 5000000:
                             raise ValueError()
                         images.append(base64.b64encode(pixmap.tobytes('jpeg')).decode())

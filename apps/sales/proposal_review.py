@@ -195,7 +195,7 @@ def review_content(quote_id, actor, document_id):
 
 
 def _pdf_pages(content):
-    import fitz
+    import pymupdf
     position = content.tell()
     try:
         content.seek(0)
@@ -211,7 +211,7 @@ def _pdf_pages(content):
                 while chunk := content.read(64 * 1024):
                     target.write(chunk)
             try:
-                with fitz.open(str(path), filetype='pdf') as pdf:
+                with pymupdf.open(str(path), filetype='pdf') as pdf:
                     if not (pdf.is_encrypted or pdf.needs_pass or pdf.is_repaired) and 1 <= pdf.page_count <= 500:
                         page_count = pdf.page_count
             except OSError:

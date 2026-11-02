@@ -23,10 +23,10 @@ from .serializers import (
 )
 from .services import NotificationService
 
-logger = logging.getLogger(__name__)
 
 # Import Data Visibility for Row-Level Security
 from apps.rbac.data_visibility_mixin import PersonalDataMixin
+logger = logging.getLogger(__name__)
 
 
 class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,

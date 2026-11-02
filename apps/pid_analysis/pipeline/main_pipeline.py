@@ -2,10 +2,13 @@
 P&ID Validation Pipeline - Main Orchestrator
 Hybrid: Discriminative Extraction + Deterministic Rules + Controlled AI
 """
+
+import logging
 from typing import Dict, List, Any
 from .extractor import PIDExtractor
 from .rules import RuleEngine
 from .agents import AgentOrchestrator
+logger = logging.getLogger(__name__)
 
 
 class PIDValidationPipeline:
@@ -21,17 +24,17 @@ class PIDValidationPipeline:
     """
     
     def __init__(self, pdf_dpi: int = 300):
-        print("[PIPELINE] Initializing P&ID Validation Pipeline...")
+        logger.debug("[PIPELINE] Initializing P&ID Validation Pipeline...")
         
         # Initialize components
         self.extractor = PIDExtractor(pdf_dpi=pdf_dpi)
         self.rule_engine = RuleEngine()
         self.agent_orchestrator = AgentOrchestrator()
         
-        print("[PIPELINE] Pipeline initialized with 3 layers:")
-        print("  1. Discriminative Extraction (OCR + Regex)")
-        print("  2. Deterministic Rule Engine")
-        print("  3. Controlled Agentic LLM")
+        logger.debug("[PIPELINE] Pipeline initialized with 3 layers:")
+        logger.debug("  1. Discriminative Extraction (OCR + Regex)")
+        logger.debug("  2. Deterministic Rule Engine")
+        logger.debug("  3. Controlled Agentic LLM")
     
     def validate(
         self, 
@@ -61,36 +64,36 @@ class PIDValidationPipeline:
                 }
             }
         """
-        print(f"\n{'='*80}")
-        print(f"[PIPELINE] STARTING VALIDATION - Drawing: {drawing_number or 'Unknown'}")
-        print(f"{'='*80}\n")
+        logger.debug(f"\n{'='*80}")
+        logger.debug(f"[PIPELINE] STARTING VALIDATION - Drawing: {drawing_number or 'Unknown'}")
+        logger.debug(f"{'='*80}\n")
         
         # ═══════════════════════════════════════════════════════════════════
         # STEP 1: DISCRIMINATIVE EXTRACTION (Source of Truth)
         # ═══════════════════════════════════════════════════════════════════
-        print("[PIPELINE] STEP 1: Discriminative Extraction...")
+        logger.debug("[PIPELINE] STEP 1: Discriminative Extraction...")
         extracted_data = self.extractor.extract(pdf_file, drawing_number)
         
         document_id = extracted_data['document_id']
-        print(f"[PIPELINE] Context isolated - Document ID: {document_id}")
-        print(f"[PIPELINE] Extracted:")
-        print(f"  - Lines: {len(extracted_data['lines'])}")
-        print(f"  - Equipment: {len(extracted_data['equipment'])}")
-        print(f"  - Instruments: {len(extracted_data['instruments'])}")
-        print(f"  - Active Notes: {len(extracted_data['notes'])}")
-        print(f"  - Deleted Notes: {len(extracted_data['deleted_notes'])}")
+        logger.debug(f"[PIPELINE] Context isolated - Document ID: {document_id}")
+        logger.debug(f"[PIPELINE] Extracted:")
+        logger.debug(f"  - Lines: {len(extracted_data['lines'])}")
+        logger.debug(f"  - Equipment: {len(extracted_data['equipment'])}")
+        logger.debug(f"  - Instruments: {len(extracted_data['instruments'])}")
+        logger.debug(f"  - Active Notes: {len(extracted_data['notes'])}")
+        logger.debug(f"  - Deleted Notes: {len(extracted_data['deleted_notes'])}")
         
         # ═══════════════════════════════════════════════════════════════════
         # STEP 2: DETERMINISTIC RULE ENGINE
         # ═══════════════════════════════════════════════════════════════════
-        print(f"\n[PIPELINE] STEP 2: Deterministic Rule Validation...")
+        logger.debug(f"\n[PIPELINE] STEP 2: Deterministic Rule Validation...")
         rule_issues = self.rule_engine.validate(extracted_data)
-        print(f"[PIPELINE] Deterministic rules found {len(rule_issues)} issue(s)")
+        logger.debug(f"[PIPELINE] Deterministic rules found {len(rule_issues)} issue(s)")
         
         # ═══════════════════════════════════════════════════════════════════
         # STEP 3: CONTROLLED AGENTIC LLM VALIDATION
         # ═══════════════════════════════════════════════════════════════════
-        print(f"\n[PIPELINE] STEP 3: Controlled Agentic Validation...")
+        logger.debug(f"\n[PIPELINE] STEP 3: Controlled Agentic Validation...")
         
         if images_base64 is None:
             # Generate images if not provided
@@ -121,20 +124,20 @@ class PIDValidationPipeline:
             }
         }
         
-        print(f"\n{'='*80}")
-        print(f"[PIPELINE] VALIDATION COMPLETE")
-        print(f"  - Total Issues: {len(final_issues)}")
-        print(f"  - Deterministic: {len(rule_issues)}")
-        print(f"  - LLM Additional: {len(final_issues) - len(rule_issues)}")
-        print(f"  - Document ID: {document_id}")
-        print(f"{'='*80}\n")
+        logger.debug(f"\n{'='*80}")
+        logger.debug(f"[PIPELINE] VALIDATION COMPLETE")
+        logger.debug(f"  - Total Issues: {len(final_issues)}")
+        logger.debug(f"  - Deterministic: {len(rule_issues)}")
+        logger.debug(f"  - LLM Additional: {len(final_issues) - len(rule_issues)}")
+        logger.debug(f"  - Document ID: {document_id}")
+        logger.debug(f"{'='*80}\n")
         
         return result
     
     def _generate_images(self, pdf_file) -> List[str]:
         """Generate base64 images from PDF (for LLM)"""
         import base64
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
         from PIL import Image
         import io
         
@@ -150,7 +153,7 @@ class PIDValidationPipeline:
                 with open(pdf_file, 'rb') as f:
                     pdf_bytes = f.read()
             
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             for page_num in range(min(len(doc), 2)):  # Max 2 pages for token economy
                 page = doc[page_num]
@@ -167,6 +170,6 @@ class PIDValidationPipeline:
             doc.close()
             
         except Exception as e:
-            print(f"[PIPELINE ERROR] Image generation failed: {e}")
+            logger.debug(f"[PIPELINE ERROR] Image generation failed: {e}")
         
         return images_base64

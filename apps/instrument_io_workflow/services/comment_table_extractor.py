@@ -6,11 +6,11 @@ import logging
 import re
 from typing import Dict, List, Optional
 
-import fitz
+import pymupdf
 
 from .config import COMMENT_HEADER_ALIASES, COMMENT_SHEET_COLUMNS, STATUS_CODE_MEANING
-
 logger = logging.getLogger(__name__)
+
 
 _SERIAL_RE = re.compile(r'^\s*(\d+)\s*[.)]?\s*$')
 _DOC_STATUS_RE = re.compile(r'document\s+status\s+code\s*:?\s*([1-4])', re.I)
@@ -163,7 +163,7 @@ def extract_comments_from_pages(pdf_bytes: bytes, page_indices: List[int]) -> Li
         return []
 
     state = {'records': [], 'current': None, 'status_code': '', 'page_number': None}
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
     try:
         for pidx in sorted(page_indices):
             if pidx < 0 or pidx >= len(doc):

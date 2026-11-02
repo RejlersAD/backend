@@ -2,12 +2,15 @@
 Simplified RAG Service using OpenAI Embeddings
 Stores vectors in PostgreSQL for persistence
 """
+
+import logging
 from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 import os
 import json
 from typing import List, Dict, Any, Optional
 from apps.rbac.ai_telemetry import observed_openai as OpenAI, observed_google
 import numpy as np
+logger = logging.getLogger(__name__)
 
 
 class RAGService:
@@ -42,7 +45,7 @@ class RAGService:
             )
             return response.data[0].embedding
         except Exception as e:
-            print(f"[ERROR] Failed to generate embedding: {str(e)}")
+            logger.debug(f"[ERROR] Failed to generate embedding: {str(e)}")
             raise
     
     def add_reference_document(
@@ -68,7 +71,7 @@ class RAGService:
         processor = DocumentProcessor()
         chunks = processor.chunk_text(content, metadata=metadata)
         
-        print(f"[INFO] Processing {len(chunks)} chunks for document {document_id}")
+        logger.debug(f"[INFO] Processing {len(chunks)} chunks for document {document_id}")
         
         # Generate embeddings for each chunk
         chunk_data = []
@@ -93,7 +96,7 @@ class RAGService:
                 })
                 
             except Exception as e:
-                print(f"[WARNING] Failed to embed chunk {i}: {str(e)}")
+                logger.debug(f"[WARNING] Failed to embed chunk {i}: {str(e)}")
                 continue
         
         # Store chunk data in the document's vector_db_ids field as JSON
@@ -134,7 +137,7 @@ class RAGService:
             )
             
             if not documents.exists():
-                print("[INFO] No active reference documents found")
+                logger.debug("[INFO] No active reference documents found")
                 return ""
             
             # Calculate similarities
@@ -167,11 +170,11 @@ class RAGService:
                                 })
                 
                 except Exception as e:
-                    print(f"[WARNING] Failed to process document {doc.id}: {str(e)}")
+                    logger.debug(f"[WARNING] Failed to process document {doc.id}: {str(e)}")
                     continue
             
             if not all_chunks:
-                print(f"[INFO] No relevant chunks found (threshold: {similarity_threshold})")
+                logger.debug(f"[INFO] No relevant chunks found (threshold: {similarity_threshold})")
                 return ""
             
             # Sort by similarity and take top_k
@@ -191,11 +194,11 @@ class RAGService:
             
             context = "\n---\n".join(context_parts)
             
-            print(f"[INFO] Retrieved {len(top_chunks)} relevant chunks")
+            logger.debug(f"[INFO] Retrieved {len(top_chunks)} relevant chunks")
             return context
             
         except Exception as e:
-            print(f"[ERROR] Context retrieval failed: {str(e)}")
+            logger.debug(f"[ERROR] Context retrieval failed: {str(e)}")
             import traceback
             traceback.print_exc()
             return ""
@@ -247,5 +250,5 @@ class RAGService:
             return float(similarity)
             
         except Exception as e:
-            print(f"[ERROR] Similarity calculation failed: {str(e)}")
+            logger.debug(f"[ERROR] Similarity calculation failed: {str(e)}")
             return 0.0

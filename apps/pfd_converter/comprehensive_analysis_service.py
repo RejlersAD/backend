@@ -18,14 +18,14 @@ from apps.rbac.ai_telemetry import observed_openai as OpenAI
 from decouple import config
 import json
 import base64
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image
 import io
 import os
 import logging
 from typing import Dict, List, Optional
-
 logger = logging.getLogger(__name__)
+
 
 # Initialize OpenAI
 openai_client = lazy_provider_client('openai', OpenAI, api_key=lambda: (config('OPENAI_API_KEY', default='')))
@@ -174,7 +174,7 @@ class ComprehensivePFDAnalyzer:
     def _convert_pdf_to_images(self, pdf_path: str) -> List[Image.Image]:
         """Convert PDF pages to PIL Images using PyMuPDF"""
         try:
-            pdf_document = fitz.open(pdf_path)
+            pdf_document = pymupdf.open(pdf_path)
             images = []
             
             dpi = self.config["gpt4_vision_settings"]["dpi"]
@@ -182,7 +182,7 @@ class ComprehensivePFDAnalyzer:
             
             for page_num in range(pdf_document.page_count):
                 page = pdf_document[page_num]
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 images.append(img)
             

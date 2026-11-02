@@ -17,8 +17,8 @@ import json
 import logging
 import os
 from django.conf import settings
-
 logger = logging.getLogger(__name__)
+
 
 
 # ==============================================================================
@@ -173,10 +173,10 @@ def _extract_text_pdfplumber(pdf_bytes: bytes) -> str:
 
 
 def _extract_text_pymupdf(pdf_bytes: bytes) -> str:
-    """Fallback text extraction using PyMuPDF (fitz)."""
+    """Fallback text extraction using PyMuPDF (pymupdf)."""
     try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        import pymupdf  # PyMuPDF
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         pages = [doc[i].get_text() for i in range(len(doc))]
         doc.close()
         return "\n\n".join(pages).strip()

@@ -12,8 +12,8 @@ from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 logger = logging.getLogger(__name__)
+
 
 User = get_user_model()
 
@@ -441,7 +441,7 @@ class PersonalDashboardView(APIView):
 
             if role_code == 'super_admin':
                 feature_qs = UsageLog.objects.filter(timestamp__gte=cutoff_30d)
-            elif role_code in ('manager', 'project_manager', 'human_resource',
+            elif role_code in ('manager', 'project_manager', 'hr_admin', 'hr_manager',
                                'admin', 'project_control', 'procurement_manager'):
                 # Manager sees combined team usage
                 try:

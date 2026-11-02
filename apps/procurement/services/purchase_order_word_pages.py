@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from io import BytesIO
 
-import fitz
+import pymupdf
 from docx.enum.section import WD_ORIENT, WD_SECTION_START
 from docx.enum.text import WD_LINE_SPACING
 from docx.oxml import OxmlElement
@@ -136,7 +136,7 @@ def append_pdf_pages(document, pdf_bytes: bytes, start_page: int = 0) -> int:
     """
     if isinstance(start_page, bool) or not isinstance(start_page, int) or start_page < 0:
         raise ValueError('start_page must be a non-negative integer.')
-    with fitz.open(stream=pdf_bytes, filetype='pdf') as source:
+    with pymupdf.open(stream=pdf_bytes, filetype='pdf') as source:
         if source.needs_pass:
             raise ValueError('The supporting PDF requires a password.')
         if start_page > len(source):
@@ -147,7 +147,7 @@ def append_pdf_pages(document, pdf_bytes: bytes, start_page: int = 0) -> int:
             page = source[page_index]
             width, height = page.rect.width, page.rect.height
             scale = min(PDF_PAGE_DPI / 72, MAX_PAGE_IMAGE_EDGE / max(width, height))
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             content = pixmap.tobytes('png')
             del pixmap
             section = _page_section(document, width, height, reuse_empty=reuse_empty)

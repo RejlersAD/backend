@@ -14,8 +14,8 @@ import logging
 from typing import Dict, List, Tuple, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-
 logger = logging.getLogger(__name__)
+
 
 
 class NodeType(Enum):
@@ -815,14 +815,14 @@ if __name__ == "__main__":
     converter.export_to_neo4j_cypher(pid_graph, "pid_neo4j_import.cypher")
     
     # Print summary
-    print("\n" + "="*70)
-    print("P&ID CONVERSION SUMMARY")
-    print("="*70)
-    print(f"Total Nodes: {pid_graph['metadata']['total_nodes']}")
-    print(f"  - Equipment: {pid_graph['statistics']['equipment']}")
-    print(f"  - Valves: {pid_graph['statistics']['valves']}")
-    print(f"  - Instruments: {pid_graph['statistics']['instruments']}")
-    print(f"  - Nozzles: {pid_graph['statistics']['nozzles']}")
-    print(f"Total Edges: {pid_graph['metadata']['total_edges']}")
-    print(f"Control Loops: {pid_graph['metadata']['control_loops']}")
-    print("="*70)
+    logger.debug("\n" + "="*70)
+    logger.debug("P&ID CONVERSION SUMMARY")
+    logger.debug("="*70)
+    logger.debug(f"Total Nodes: {pid_graph['metadata']['total_nodes']}")
+    logger.debug(f"  - Equipment: {pid_graph['statistics']['equipment']}")
+    logger.debug(f"  - Valves: {pid_graph['statistics']['valves']}")
+    logger.debug(f"  - Instruments: {pid_graph['statistics']['instruments']}")
+    logger.debug(f"  - Nozzles: {pid_graph['statistics']['nozzles']}")
+    logger.debug(f"Total Edges: {pid_graph['metadata']['total_edges']}")
+    logger.debug(f"Control Loops: {pid_graph['metadata']['control_loops']}")
+    logger.debug("="*70)

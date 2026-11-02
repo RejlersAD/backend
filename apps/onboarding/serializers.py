@@ -2,6 +2,8 @@
 Onboarding & Offboarding Serializers
 Transforms model data to/from JSON for API responses
 """
+
+import logging
 from rest_framework import serializers
 from django.db.models import Q
 from .models import (
@@ -10,6 +12,7 @@ from .models import (
     ProbationPerformanceReport,
 )
 from .project_assignments import get_active_project_assignments
+logger = logging.getLogger(__name__)
 
 
 class ProbationPerformanceReportSerializer(serializers.ModelSerializer):
@@ -261,7 +264,7 @@ class OnboardingRecordSerializer(LifecycleCaseSerializer):
                 if employee and employee.engineer_profile:
                     return employee.engineer_profile
             except Exception as e:
-                print(f"[WARNING] Failed to fetch engineer_profile: {str(e)}")
+                logger.debug(f"[WARNING] Failed to fetch engineer_profile: {str(e)}")
         return {}
 
     def get_checklist_stage_permissions(self, obj):

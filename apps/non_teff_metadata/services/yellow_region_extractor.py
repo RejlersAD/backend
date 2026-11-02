@@ -31,8 +31,8 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
-
 logger = logging.getLogger(__name__)
+
 
 
 # ---------------------------------------------------------------------------
@@ -118,18 +118,18 @@ YELLOW_CONFIG: Dict[str, Any] = {
 def _render_page_pil(file_path: str, page_no_zero_based: int, dpi: int):
     """Return a PIL.Image for a PDF page, or None on failure."""
     try:
-        import fitz
+        import pymupdf
         from PIL import Image
     except ImportError:
         return None
     try:
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         if page_no_zero_based >= doc.page_count:
             doc.close()
             return None
         page = doc.load_page(page_no_zero_based)
         zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
         doc.close()

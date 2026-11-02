@@ -324,7 +324,35 @@ class SalesMailboxBrowsingServiceTests(SimpleTestCase):
         self.network.return_value.json.side_effect = ValueError('sensitive-provider-text')
         self.assert_read_error(502, lambda: self.service.list_messages(user_id=17))
 
-    def test_delegated_and_non_graph_configuration_rejected_before_token(self):
+    def test_delegated_reads_only_signed_in_mailbox_and_rejects_other_user_continuations(self):
+        self.connection.auth_mode = 'delegated'
+        self.connection.encrypted_refresh_token = 'synthetic-encrypted-token'
+        self.connection.delegated_account_id = 'synthetic-account-id'
+        self.network.side_effect = [
+            graph_response({'value': [MESSAGE], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/messages?$skip=50'}),
+            graph_response({'value': [MESSAGE]}),
+        ]
+        first = self.service.list_messages(user_id=17)
+        self.assertEqual(self.network.call_args.args, ('GET', 'https://graph.microsoft.com/v1.0/me/messages'))
+        self.assertTrue(first['next_cursor'])
+        self.assert_read_error(400, lambda: self.service.list_messages(user_id=18, cursor=first['next_cursor']))
+        self.assertEqual(self.network.call_count, 1)
+        self.service.list_messages(user_id=17, cursor=first['next_cursor'])
+        self.assertEqual(self.network.call_args.args, ('GET', 'https://graph.microsoft.com/v1.0/me/messages?$skip=50'))
+        self.assert_read_error(502, lambda: self.service._validate_mailbox_next_link(
+            'https://graph.microsoft.com/v1.0/users/other@example.test/messages?$skip=50'
+        ))
+        self.network.side_effect = None
+        self.network.return_value = graph_response({
+            **MESSAGE, 'body': {'contentType': 'text', 'content': 'Synthetic personal email'},
+        })
+        detail = self.service.get_message(MESSAGE['id'])
+        self.assertEqual(detail['body_text'], 'Synthetic personal email')
+        self.assertEqual(self.network.call_args.args, (
+            'GET', 'https://graph.microsoft.com/v1.0/me/messages/AAMk-message-1%3D',
+        ))
+
+    def test_pending_delegated_and_non_graph_configuration_rejected_before_token(self):
         self.connection.auth_mode = 'delegated'
         self.assert_read_error(400, lambda: self.service.list_messages(user_id=17))
         self.assert_read_error(400, lambda: self.service.get_message(MESSAGE['id']))
@@ -631,7 +659,7 @@ class SalesMailboxBrowsingAPITests(TestCase):
         self.assert_private(response)
         self.network.assert_not_called()
 
-    def test_invalid_queries_and_delegated_connection_do_not_call_graph(self):
+    def test_invalid_queries_and_pending_delegated_connection_do_not_call_graph(self):
         for endpoint, params in [
             (self.list_url, {'nextLink': 'https://example.test/'}),
             (self.list_url, {'mailbox': 'other@example.test'}),
@@ -646,6 +674,34 @@ class SalesMailboxBrowsingAPITests(TestCase):
         self.connection.save(update_fields=['auth_mode'])
         response = self.client.get(self.list_url)
         self.assertEqual(response.status_code, 400)
+        self.network.assert_not_called()
+
+    def test_connected_delegated_mailbox_is_private_to_owner_including_from_admin(self):
+        self.connection.auth_mode = 'delegated'
+        self.connection.mailbox_address = self.owner.email
+        self.connection.encrypted_refresh_token = 'synthetic-encrypted-token'
+        self.connection.delegated_account_id = 'synthetic-account-id'
+        self.connection.save(update_fields=[
+            'auth_mode', 'mailbox_address', 'encrypted_refresh_token', 'delegated_account_id',
+        ])
+        self.network.return_value = graph_response({'value': [MESSAGE]})
+        owner_response = self.client.get(self.list_url)
+        self.assertEqual(owner_response.status_code, 200)
+        self.assertEqual(self.network.call_args.args, ('GET', 'https://graph.microsoft.com/v1.0/me/messages'))
+        self.network.reset_mock()
+        for user in (self.other, self.admin):
+            self.client.force_authenticate(user)
+            listed_connections = self.client.get('/api/v1/sales/mailbox-connections/')
+            self.assertEqual(listed_connections.status_code, 200)
+            rows = listed_connections.data.get('results', listed_connections.data)
+            self.assertNotIn(str(self.connection.pk), {str(row['id']) for row in rows})
+            for endpoint, params in (
+                (self.list_url, {}),
+                (self.detail_url, {'message_id': MESSAGE['id']}),
+            ):
+                denied = self.client.get(endpoint, params)
+                self.assertEqual(denied.status_code, 404)
+                self.assert_private(denied)
         self.network.assert_not_called()
 
     def test_provider_error_and_unexpected_failure_do_not_leak_content(self):

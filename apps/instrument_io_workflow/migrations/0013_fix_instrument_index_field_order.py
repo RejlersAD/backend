@@ -24,7 +24,10 @@ builds its regex purely from whatever `fields` list a definition provides
 no code changes are needed there for the new field order or the new
 optional trailing field to work correctly.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 SECTION = 'instrument_index'
 
@@ -172,7 +175,7 @@ def fix_forward(apps, schema_editor):
         description=NEW_DESCRIPTION,
         definition=NEW_DEFINITION,
     )
-    print(f'[instrument_io_workflow] Fixed field order on {updated} '
+    logger.debug(f'[instrument_io_workflow] Fixed field order on {updated} '
           f'{SECTION!r} legend row(s).')
 
 

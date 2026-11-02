@@ -4,6 +4,8 @@ Handles listing active employees and updating profile fields
 
 ⚠️ MIGRATION IN PROGRESS: Migrating from UserProfile to EmployeeMaster
 """
+
+import logging
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -20,6 +22,7 @@ from .serializers import UserProfileSerializer
 # New employee management
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.services import EmployeeService
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -465,8 +468,8 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         
         except Exception as e:
             import traceback
-            print(f"[ERROR] update_profile_field: {str(e)}")
-            print(traceback.format_exc())
+            logger.debug(f"[ERROR] update_profile_field: {str(e)}")
+            logger.debug(traceback.format_exc())
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -675,10 +678,10 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                         for field, value in onboarding_sync_fields.items():
                             setattr(onboarding_record, field, value)
                         onboarding_record.save(update_fields=list(onboarding_sync_fields.keys()))
-                        print(f"[SYNC] Updated OnboardingRecord fields: {list(onboarding_sync_fields.keys())}")
+                        logger.debug(f"[SYNC] Updated OnboardingRecord fields: {list(onboarding_sync_fields.keys())}")
             except Exception as sync_error:
                 # Log but don't fail the update
-                print(f"[WARNING] Failed to sync to OnboardingRecord: {str(sync_error)}")
+                logger.debug(f"[WARNING] Failed to sync to OnboardingRecord: {str(sync_error)}")
             
             return Response({
                 'success': True,
@@ -774,7 +777,7 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                     ])
             except Exception as sync_error:
                 # Log but don't fail - sync is optional
-                print(f"[WARNING] Failed to sync photo to OnboardingRecord: {str(sync_error)}")
+                logger.debug(f"[WARNING] Failed to sync photo to OnboardingRecord: {str(sync_error)}")
             
             return Response({
                 'success': True,
@@ -788,8 +791,8 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             )
         except Exception as e:
             import traceback
-            print(f"[ERROR] upload_my_profile_photo: {str(e)}")
-            print(traceback.format_exc())
+            logger.debug(f"[ERROR] upload_my_profile_photo: {str(e)}")
+            logger.debug(traceback.format_exc())
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

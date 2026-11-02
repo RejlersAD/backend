@@ -121,7 +121,9 @@ def monthly_report(year, month, user_ids=None, can_publish=False, request=None, 
         'canonical_employee', 'user__employee_master')
     photo_context = SimpleNamespace(context={'request': request})
     photos = {str(profile.user_id): _profile_photo_url(photo_context, profile) for profile in profiles}
-    return {**preview, 'shortlist': preview['candidates'], 'candidates': all_candidates, 'profile_photos': photos, 'period': {'start': start, 'end': end, 'closed': end <= timezone.now()},
+    photo_profile_ids = {str(profile.user_id): str(profile.id) for profile in profiles}
+    return {**preview, 'shortlist': preview['candidates'], 'candidates': all_candidates, 'profile_photos': photos,
+            'profile_photo_profile_ids': photo_profile_ids, 'period': {'start': start, 'end': end, 'closed': end <= timezone.now()},
             'publication': visible_publication,
             'period_published': publication is not None,
             'history': [p for p in history if p], 'can_publish': can_publish,

@@ -43,8 +43,8 @@ from .serializers import (
     UploadSerializer,
 )
 from .services.consistency import compute_file_hash, check_cache
-
 logger = logging.getLogger(__name__)
+
 
 # SOFT-CODED: Worker availability cache TTL (seconds).
 _WORKER_CHECK_TTL = int(getattr(settings, 'SLDV_WORKER_CHECK_TTL', 60))
@@ -462,13 +462,13 @@ def drawing_image(request, document_id, page_index):
 
     if ext == "pdf":
         try:
-            import fitz  # PyMuPDF
-            pdf_doc = fitz.open(file_path)
+            import pymupdf  # PyMuPDF
+            pdf_doc = pymupdf.open(file_path)
             if page_index >= len(pdf_doc):
                 pdf_doc.close()
                 return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
             page = pdf_doc[page_index]
-            mat = fitz.Matrix(2.0, 2.0)
+            mat = pymupdf.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             png_data = pix.tobytes("png")
             pdf_doc.close()

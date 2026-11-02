@@ -28,7 +28,10 @@ What this migration does (all idempotent — safe to re-run):
 SOFT-CODED: To extend coverage, add keywords to ENGINEERING_ROLE_KEYWORDS
 or add new role codes to ROLE_MODULE_POLICY in rbac_config.py.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded keyword list — any role whose code OR name contains one of
 # these strings (case-insensitive) will receive ENGINEERING_SECTION_MODULES
@@ -83,7 +86,7 @@ def fix_org_role_access(apps, schema_editor):
     custom_count   = 0
 
     # ── Step 1: Apply updated ROLE_MODULE_POLICY (now includes engineering_common_access) ──
-    print('\n  [0012] Step 1 — Apply updated ROLE_MODULE_POLICY to all known roles…')
+    logger.debug('\n  [0012] Step 1 — Apply updated ROLE_MODULE_POLICY to all known roles…')
     for role_code, module_codes in ROLE_MODULE_POLICY.items():
         try:
             role = Role.objects.using(db_alias).get(code=role_code)
@@ -98,12 +101,12 @@ def fix_org_role_access(apps, schema_editor):
             )
             if created:
                 linked_count += 1
-                print(f'    ✓ linked: {role_code} → {mod_code}')
+                logger.debug(f'    ✓ linked: {role_code} → {mod_code}')
 
-    print(f'  [0012] Step 1 done: {linked_count} new policy links applied.')
+    logger.debug(f'  [0012] Step 1 done: {linked_count} new policy links applied.')
 
     # ── Step 2: Catch-all — any "engineering-flavoured" role not in policy ──
-    print('\n  [0012] Step 2 — Catch-all sweep for unlisted engineering-flavoured roles…')
+    logger.debug('\n  [0012] Step 2 — Catch-all sweep for unlisted engineering-flavoured roles…')
     policy_codes = set(ROLE_MODULE_POLICY.keys())
     all_roles = Role.objects.using(db_alias).all()
 
@@ -132,12 +135,12 @@ def fix_org_role_access(apps, schema_editor):
             if created:
                 catchall_count += 1
 
-        print(f'    ✓ catch-all applied to role: {role.code!r} (matched keyword: {matched_keyword!r})')
+        logger.debug(f'    ✓ catch-all applied to role: {role.code!r} (matched keyword: {matched_keyword!r})')
 
-    print(f'  [0012] Step 2 done: {catchall_count} new links from catch-all sweep.')
+    logger.debug(f'  [0012] Step 2 done: {catchall_count} new links from catch-all sweep.')
 
     # ── Step 3: Custom per-user roles — inherit modules from the user's primary roles ──
-    print('\n  [0012] Step 3 — Custom per-user role inheritance sweep…')
+    logger.debug('\n  [0012] Step 3 — Custom per-user role inheritance sweep…')
     custom_roles = Role.objects.using(db_alias).filter(code__startswith='custom_')
 
     for custom_role in custom_roles:
@@ -170,16 +173,16 @@ def fix_org_role_access(apps, schema_editor):
                 if created:
                     custom_count += 1
 
-    print(f'  [0012] Step 3 done: {custom_count} new links from custom-role inheritance.')
+    logger.debug(f'  [0012] Step 3 done: {custom_count} new links from custom-role inheritance.')
 
     total = linked_count + catchall_count + custom_count
-    print(f'\n  [0012] ✅ Complete — {total} total new role-module links created.')
-    print('  [0012]    All users with engineering/common roles now have full module access.')
+    logger.debug(f'\n  [0012] ✅ Complete — {total} total new role-module links created.')
+    logger.debug('  [0012]    All users with engineering/common roles now have full module access.')
 
 
 def reverse_noop(apps, schema_editor):
     """No-op reverse — never delete role-module links as other data may depend on them."""
-    print('  [0012] Reverse: no-op (role-module links are not deleted on reverse).')
+    logger.debug('  [0012] Reverse: no-op (role-module links are not deleted on reverse).')
 
 
 class Migration(migrations.Migration):

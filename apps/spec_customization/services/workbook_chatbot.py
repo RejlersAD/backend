@@ -214,9 +214,9 @@ def _extract_document_pages_text(job) -> list[dict[str, Any]]:
         return []
 
     try:
-        import fitz
+        import pymupdf
 
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc_pdf:
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc_pdf:
             total = min(doc_pdf.page_count, max_pages)
             for i in range(total):
                 txt = doc_pdf.load_page(i).get_text("text") or ""

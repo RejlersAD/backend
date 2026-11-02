@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -8,6 +10,7 @@ from datetime import datetime, timedelta
 import boto3
 from django.conf import settings
 from botocore.exceptions import ClientError
+logger = logging.getLogger(__name__)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -72,7 +75,7 @@ def user_dashboard_stats(request):
                     s3_files_count = len(response['Contents'])
                     s3_total_size = sum(obj['Size'] for obj in response['Contents'])
         except Exception as e:
-            print(f"Error fetching S3 files: {e}")
+            logger.debug(f"Error fetching S3 files: {e}")
         
         # Module-specific stats (can be extended based on modules)
         module_stats = {}

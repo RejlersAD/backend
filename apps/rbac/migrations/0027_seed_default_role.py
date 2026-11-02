@@ -18,8 +18,11 @@ The module list is the authoritative definition from rbac_config.py at the
 time this migration is written.  If you change DEFAULT_ROLE_MODULES later,
 run a new data migration to sync the DB.
 """
+
+import logging
 import uuid
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 # ── Soft-coded constants (mirrors rbac_config.DEFAULT_ROLE_MODULES) ───────────
 DEFAULT_ROLE_CODE        = 'default'
@@ -136,10 +139,8 @@ def seed_default_role(apps, schema_editor):
             assigned_count += 1
 
     # Print summary (visible in migrate --verbosity 2)
-    print(
-        f"\n[0027] Default role {'created' if created else 'already existed'}. "
-        f"Assigned to {assigned_count} previously role-less user(s)."
-    )
+    logger.debug(f"\n[0027] Default role {'created' if created else 'already existed'}. "
+        f"Assigned to {assigned_count} previously role-less user(s).")
 
 
 def reverse_seed_default_role(apps, schema_editor):

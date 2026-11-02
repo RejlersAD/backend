@@ -14,7 +14,7 @@ DEFAULT_LETTERHEAD = {
     'sender_name': 'Mr. Jarmo Suominen',
     'sender_company': 'Rejlers International Engineering Solutions AB',
     'focal_contact': 'Ms. Anam Abbas',
-    'contact_number': '02 639 7449 / 0564153910',
+    'contact_number': '02 639 7449',
     'fax': '02 639 7448',
     'email': 'uae.sales@rejlers.ae',
     'adnoc_unified_code': '0010001089',

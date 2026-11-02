@@ -5,7 +5,10 @@ field, identity name->name lookup, same pattern as 'main_equipment' (0032).
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 LOOKUP = {
     'HOSE CONNECTION': 'HOSE CONNECTION',
@@ -86,7 +89,7 @@ def seed_forward(apps, schema_editor):
         definition=DEFINITION,
         is_active=True,
     )
-    print(f'[instrument_io_workflow] Seeded 1 legend for section={SECTION!r}.')
+    logger.debug(f'[instrument_io_workflow] Seeded 1 legend for section={SECTION!r}.')
 
 
 class Migration(migrations.Migration):

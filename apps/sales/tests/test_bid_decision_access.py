@@ -106,7 +106,40 @@ class BidDecisionAccessTests(TestCase):
         self.assertEqual(event.actor_id, self.actor.pk)
         self.assertEqual(event.from_stage, 'qualified')
         self.assertEqual(event.to_stage, stage)
-        self.assertEqual(event.data, {'decision': decision, 'decision_authority': authority})
+        self.assertEqual(event.data, {
+            'decision': decision, 'previous_decision': 'pending',
+            'decision_authority': authority,
+        })
+
+    def test_authorized_user_can_reverse_both_decision_directions(self):
+        response = self.api.post(self.url, {
+            'decision': 'bid', 'reason': 'Initial pursuit approval.', 'expected_decision': 'pending',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        response = self.api.post(self.url, {
+            'decision': 'no_bid', 'reason': 'Delivery circumstances changed.', 'expected_decision': 'bid',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.deal.refresh_from_db()
+        self.assertEqual((self.deal.stage, self.deal.bid_decision), ('no_bid', 'no_bid'))
+        response = self.api.post(self.url, {
+            'decision': 'bid', 'reason': 'Capacity is now confirmed.', 'expected_decision': 'no_bid',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.deal.refresh_from_db()
+        self.assertEqual((self.deal.stage, self.deal.bid_decision), ('proposal', 'bid'))
+
+    def test_reversal_requires_expected_current_decision(self):
+        response = self.api.post(self.url, {
+            'decision': 'bid', 'reason': 'Initial pursuit approval.',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        response = self.api.post(self.url, {
+            'decision': 'no_bid', 'reason': 'Delivery circumstances changed.',
+        }, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.deal.refresh_from_db()
+        self.assertEqual((self.deal.stage, self.deal.bid_decision), ('proposal', 'bid'))
 
     def test_module_reader_can_decide_without_write_approval_or_hr_position(self):
         for action in ('create', 'update', 'approve'):
@@ -303,7 +336,9 @@ class BidDecisionAccessTests(TestCase):
     def test_repeated_decision_is_stale_and_cannot_add_another_audit(self):
         first = self.decide()
         self.assertEqual(first.status_code, 200, first.data)
-        second = self.decide(decision='no_bid', reason='Late browser decision')
+        second = self.api.post(self.url, {
+            'decision': 'no_bid', 'reason': 'Late browser decision', 'expected_decision': 'pending',
+        }, format='json')
         self.assertEqual(second.status_code, 400, second.data)
         self.assert_decided('bid', 'proposal')
         self.assertEqual(OpportunityAuditEvent.objects.filter(opportunity=self.deal).count(), 1)

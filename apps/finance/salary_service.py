@@ -17,8 +17,8 @@ from .salary_models import (
     SalaryStatus,
     SalarySlipAuditLog,
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 class SalaryCalculationService:

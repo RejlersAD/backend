@@ -14,7 +14,10 @@ This migration:
 I/O List only — apps.pid_checker_v2 is not touched by, and does not read,
 this migration.
 """
+
+import logging
 from django.db import migrations
+logger = logging.getLogger(__name__)
 
 VALVE_TYPES_SECTION = 'valve_types'
 VALVE_TYPES_NAME = 'Control Values — Valve Type (default)'
@@ -60,7 +63,7 @@ def move_forward(apps, schema_editor):
                     field.get('lookup', {}).pop(key, None)
         vt_row.definition = definition
         vt_row.save(update_fields=['definition'])
-        print(f'[instrument_io_workflow] Removed {len(MOVED_ENTRIES)} entries from {VALVE_TYPES_SECTION!r}.')
+        logger.debug(f'[instrument_io_workflow] Removed {len(MOVED_ENTRIES)} entries from {VALVE_TYPES_SECTION!r}.')
 
     cv_row = IOListLegendSheet.objects.filter(section=CONTROL_VALVES_SECTION, name=CONTROL_VALVES_NAME).first()
     if cv_row:
@@ -70,7 +73,7 @@ def move_forward(apps, schema_editor):
                 field.setdefault('lookup', {}).update(MOVED_ENTRIES)
         cv_row.definition = definition
         cv_row.save(update_fields=['definition'])
-        print(f'[instrument_io_workflow] Added {len(MOVED_ENTRIES)} entries to {CONTROL_VALVES_SECTION!r}.')
+        logger.debug(f'[instrument_io_workflow] Added {len(MOVED_ENTRIES)} entries to {CONTROL_VALVES_SECTION!r}.')
 
 
 def move_backward(apps, schema_editor):
