@@ -152,6 +152,31 @@ class SheetImageView(APIView):
         return FileResponse(fh, content_type='image/png')
 
 
+class SheetPatchView(APIView):
+    """PATCH sheets/<id>/ — engineer-confirmed sheet metadata (drawing no.,
+    rev, title) for sheets the OCR read incompletely, e.g. an empty
+    drawing_no. Only these three fields are editable; core data untouched."""
+
+    permission_classes = [IsAuthenticated]
+    EDITABLE = ('drawing_no', 'rev', 'title')
+
+    def patch(self, request, sheet_id):
+        sheet = get_object_or_404(SldSheet, id=sheet_id)
+        _analysis(request, sheet.analysis_id)
+        updates = {k: str(request.data[k]).strip() for k in self.EDITABLE if k in request.data}
+        if not updates:
+            return Response({'error': f'Nothing to update — provide one of {sorted(self.EDITABLE)}.'}, status=400)
+        if 'drawing_no' in updates and not updates['drawing_no']:
+            return Response({'error': 'drawing_no cannot be empty.'}, status=400)
+        for k, v in updates.items():
+            setattr(sheet, k, v)
+        sheet.save(update_fields=list(updates))
+        return Response({
+            'id': str(sheet.id), 'page_index': sheet.page_index,
+            'drawing_no': sheet.drawing_no, 'rev': sheet.rev, 'title': sheet.title,
+        })
+
+
 class ExtractionView(APIView):
     """GET analyses/<id>/extraction/?tab=sources|boards|feeders|loads|
     subpanels|cables|interfaces"""

@@ -3,7 +3,7 @@ from django.urls import path
 from .views import (
     ChecklistReportView, ChecklistView, ConfigView, ExtractionView,
     FindingPatchView, FindingsView, NodePatchView, ReviewView,
-    RunAnalysisView, SheetImageView, TopologyView, WorkspaceView,
+    RunAnalysisView, SheetImageView, SheetPatchView, TopologyView, WorkspaceView,
 )
 
 urlpatterns = [
@@ -11,6 +11,7 @@ urlpatterns = [
     path('projects/<uuid:project_id>/documents/<uuid:file_id>/workspace/',
          WorkspaceView.as_view()),
     path('sheets/<uuid:sheet_id>/image/', SheetImageView.as_view()),
+    path('sheets/<uuid:sheet_id>/', SheetPatchView.as_view()),
     path('analyses/<uuid:analysis_id>/extraction/', ExtractionView.as_view()),
     path('nodes/<uuid:node_id>/', NodePatchView.as_view()),
     path('analyses/<uuid:analysis_id>/topology/', TopologyView.as_view()),
