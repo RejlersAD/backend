@@ -12,7 +12,7 @@ Endpoints (mounted under /api/v1/electrical-comparison/sld/):
     POST   <project>/analyse/                    start analysis -> {analysisId}
     GET    <project>/analyses/                   previous analyses
     GET    <project>/analyses/<id>/              ?tab=equipment|load|drafting|interfaces|cables
-    GET    <project>/analyses/<id>/export/       ?format=workbook|drafting
+    GET    <project>/analyses/<id>/export/       ?fmt=workbook|drafting
 
 Security notes: the BYOK key is stored encrypted (apps.core.ai_credentials),
 never returned by any endpoint (only key_last4), never logged.
@@ -303,7 +303,7 @@ class SldAnalysisExportView(APIView):
     def get(self, request, project_id, analysis_id):
         project = _project(request, project_id)
         a = get_object_or_404(SldAnalysis, id=analysis_id, project=project)
-        fmt = request.query_params.get('format', 'workbook')
+        fmt = request.query_params.get('fmt', 'workbook')  # 'format' is DRF's format_query_param — using it breaks content negotiation with a 404
         from .services.sld_export import build_export
         content, filename = build_export(a, fmt)
         from django.http import HttpResponse
