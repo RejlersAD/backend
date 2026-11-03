@@ -192,8 +192,14 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             return 'Non-Conformance'
         return 'Query'
 
+    # Checklist-serial labels for findings (shared scheme with the results
+    # serializer): '9.1', '9.1-2'… per sheet — never the bare F1/F2.
+    from .display_ids import assign_display_ids as _assign_display_ids
+    _display_ids = _assign_display_ids(findings)
+
     def fid_list(fs):
-        return [f.id for f in fs]
+        # 'id' (PK) for navigation, 'n' (sl_no) legacy, 'label' = display id.
+        return [{'id': f.id, 'n': f.sl_no, 'label': _display_ids.get(f.id) or f'F{f.sl_no}'} for f in fs]
 
     # ── applicability: NA when the object type is not on the sheet ───────
     def is_na(item) -> bool:
@@ -292,7 +298,7 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             applicability, applicability_by = ('NA' if is_na(item) else 'Y'), 'ai'
 
         ai_result = evidence = None
-        finding_ids: list = []
+        finding_refs: list = []
         missing: list = []
         if applicability != 'Y':
             ai_result = None  # I stays empty when H is NA or N
@@ -306,7 +312,7 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             else:
                 got = handle(item)
                 if got:
-                    ai_result, evidence, finding_ids = got
+                    ai_result, evidence, finding_refs = got
                 elif item.mode == 'Automated':
                     ai_result = 'OK'
                     evidence = 'Checked by the related automated rules — no issues found'
@@ -332,7 +338,9 @@ def evaluate_sheet(doc, page: int, template=None) -> Optional[dict]:
             'applicability_by': applicability_by,
             'ai_result': ai_result,
             'evidence': evidence,
-            'finding_ids': finding_ids,
+            'finding_ids': [r['id'] for r in finding_refs],   # PKs — navigation
+            'finding_nos': [r['n'] for r in finding_refs],    # sl_no — legacy
+            'finding_labels': [r['label'] for r in finding_refs],  # checklist serials — display
             'missing_inputs': missing,
             'engineer_verification': st.engineer_verification if st else None,
             'remarks': st.remarks if st else '',

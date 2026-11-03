@@ -231,6 +231,10 @@ if is_app_installed('apps.sld_verification'):
     urlpatterns.append(path('api/v1/sld-verification/', include('apps.sld_verification.urls')))
     logger.debug("[URL] ✅ SLD Verification URLs registered")
 
+# SLD Checker backend retired (design-only direction, 02 Nov 2026): the
+# /api/v1/sld-checker/ URLs are no longer served. The app folder, models and
+# migrations stay in place — see docs/sld-checker-removal.md.
+
 # PFD Quality Checker — deterministic rule engine
 if is_app_installed('apps.pfd_quality'):
     urlpatterns.append(path('api/v1/pfd-quality/', include('apps.pfd_quality.urls')))

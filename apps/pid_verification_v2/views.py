@@ -783,6 +783,25 @@ def _inject_finding_locations(data: dict, doc) -> None:
             issue['locations'] = locs
 
 
+def _inject_display_ids(data: dict, doc) -> None:
+    """Add `display_id` (checklist-serial label: '9.1', '9.1-2'…) and
+    `in_checklist` to every issue in a serialized payload — used on the
+    cache fast path, whose snapshot may predate these fields (2 Nov 2026)."""
+    from .models import PIDVFinding
+    from .services.display_ids import assign_display_ids, checklist_serials
+    qs = PIDVFinding.objects.filter(drawing__document=doc)
+    labels = assign_display_ids(qs)
+    serials = checklist_serials(qs)
+    for d in data.get('drawings', []):
+        for issue in d.get('issues', []) or []:
+            if 'in_checklist' not in issue:
+                issue['in_checklist'] = serials.get(issue.get('id')) is not None
+            if not issue.get('display_id'):
+                lbl = labels.get(issue.get('id'))
+                if lbl:
+                    issue['display_id'] = lbl
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_results(request, document_id):
@@ -825,6 +844,7 @@ def get_results(request, document_id):
                     for i in (d.get('issues') or [])
                 ):
                     _inject_finding_locations(data, doc)
+                _inject_display_ids(data, doc)
                 return Response(data)
             data = dict(cached['full_data'])
             data['drawings'] = [
@@ -832,6 +852,7 @@ def get_results(request, document_id):
                 for d in data.get('drawings', [])
             ]
             _inject_finding_locations(data, doc)
+            _inject_display_ids(data, doc)
             return Response(data)
 
     # Soft-upgrade: backfill tag_positions for drawings that were processed
@@ -1167,7 +1188,8 @@ _EXTRACTION_ITEM_FIELDS = (
 from django.utils import timezone as _dj_timezone
 
 
-def _serialize_extraction_item(item, sheet_ids=None) -> dict:
+def _serialize_extraction_item(item, sheet_ids=None, finding_nos=None) -> dict:
+    fids = item.finding_ids or []
     return {
         'id': item.id,
         'kind': item.kind,
@@ -1178,7 +1200,10 @@ def _serialize_extraction_item(item, sheet_ids=None) -> dict:
         'bbox': item.bbox,
         'labels': item.labels,
         'flag': item.flag,
-        'finding_ids': item.finding_ids,
+        'finding_ids': fids,
+        # sl_no per linked finding — the F-number the Findings list shows;
+        # the raw PKs in finding_ids are for navigation only.
+        'finding_nos': [(finding_nos or {}).get(fid) for fid in fids] if fids else [],
         'source': item.source,
         'confidence': item.confidence,
         'confirmed': item.confirmed,
@@ -1222,6 +1247,13 @@ def document_extraction(request, document_id):
         (s.document_id, s.page_index): s.pk
         for s in PIDVSheet.objects.filter(document=doc)
     }
+    # id → checklist-serial label for this document's findings (the same
+    # display ids the Findings list and drawing markers show)
+    from .models import PIDVFinding as _PIDVFinding
+    from .services.display_ids import assign_display_ids as _assign_display_ids
+    finding_nos = _assign_display_ids(
+        _PIDVFinding.objects.filter(drawing__document=doc).select_related('drawing')
+    )
     if kind:
         if kind not in PIDVExtractionItem.Kind.values:
             return Response(
@@ -1233,12 +1265,12 @@ def document_extraction(request, document_id):
             'document_id': str(doc.document_id),
             'kind': kind,
             'count': qs.count(),
-            'items': [_serialize_extraction_item(i, sheet_ids) for i in qs],
+            'items': [_serialize_extraction_item(i, sheet_ids, finding_nos) for i in qs],
         })
 
     grouped = {k: [] for k in PIDVExtractionItem.Kind.values}
     for item in qs:
-        grouped[item.kind].append(_serialize_extraction_item(item, sheet_ids))
+        grouped[item.kind].append(_serialize_extraction_item(item, sheet_ids, finding_nos))
     return Response({
         'document_id': str(doc.document_id),
         'counts': {k: len(v) for k, v in grouped.items()},
@@ -1333,13 +1365,20 @@ def document_scene3d(request, document_id):
             logger.debug('[Scene3D] ghost-equipment scan failed (non-fatal)', exc_info=True)
 
     from .services.scene3d import clean_finding_text
+    from .services.display_ids import assign_display_ids as _assign_display_ids, checklist_serials as _checklist_serials
+    _scene_findings = list(PIDVFinding.objects.filter(drawing=drawing).select_related('drawing'))
+    _scene_labels = _assign_display_ids(_scene_findings)
+    _scene_serials = _checklist_serials(_scene_findings)
     findings = [
         {
             'id': f.id, 'number': f.sl_no, 'severity': f.severity,
             'rule_id': f.rule_id, 'title': clean_finding_text(f.issue_observed),
             'bbox': f.bbox, 'entity_id': f.entity_id,
+            # label present only for checklist-mapped findings — the 3D view
+            # hides unmapped ones from the canvas (2 Nov 2026 alignment)
+            'display_id': _scene_labels.get(f.id) if _scene_serials.get(f.id) else None,
         }
-        for f in PIDVFinding.objects.filter(drawing=drawing)
+        for f in _scene_findings
     ]
 
     # Legend decode per field (LD-04 class split / LD-08 system /
