@@ -539,8 +539,12 @@ def _complete_deadline(accepted):
             'deadline_timezone': zone}
 
 
-def enhance_email_analysis(result, messages, *, scope_key='', allow_provider=True):
+def enhance_email_analysis(result, messages, *, scope_key='', allow_provider=False):
     """Return existing response shape with validated AI fields or honest fallback."""
+    # Routine intake must neither spend credits nor reuse earlier AI proposals.
+    # Explicit assistant requests use their separate, source-authorized service.
+    if not allow_provider:
+        return result
     configuration = email_ai_configuration()
     if not configuration.get('enabled'):
         return result
@@ -560,8 +564,6 @@ def enhance_email_analysis(result, messages, *, scope_key='', allow_provider=Tru
         if isinstance(cached, dict):
             # Return detached results; caller adds actor-scoped client matching.
             return copy.deepcopy(cached)
-        if not allow_provider:
-            return _fallback(result, 'unavailable', 'analysis_not_cached')
         if not cache.add(lock_key, lock_value, timeout=45):
             return _fallback(result, 'in_progress')
     except Exception:

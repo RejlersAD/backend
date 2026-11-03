@@ -254,7 +254,8 @@ def add_email_intelligence(result, analysis, segments, *, original_request, sele
     info['entities'] = entities
     confidence = {}
     partial = analysis['coverage']['status'] == 'partial'
-    for key in ('title', 'customer_name', 'organization_name', 'submission_date', 'project_name', 'request_type_code', 'due_date', 'estimated_value'):
+    for key in ('title', 'customer_name', 'organization_name', 'submission_date', 'project_name', 'request_type_code',
+                'due_date', 'estimated_value', 'organization_reference', 'document_reference'):
         level = 'medium' if result.get(key) and evidence.get(key) and refs.get(key) else 'unresolved'
         reason = 'Supported by cited source evidence; review the interpretation.' if level != 'unresolved' else 'Missing or conflicting source evidence requires verification.'
         if key == 'submission_date' and info['submission_date'].get('basis') == 'sent_timestamp':

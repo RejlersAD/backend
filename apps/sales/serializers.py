@@ -107,7 +107,6 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
         key = str(obj.pk)
         if key not in analyses:
             view = self.context.get('view')
-            self.context['email_ai_allow_provider'] = getattr(view, 'action', None) == 'retrieve'
             self.context['email_ai_skip'] = getattr(view, 'action', None) == 'list'
             analyses[key] = analyze_saved_email(obj, request=self.context.get('request'), context=self.context)
         return analyses[key]

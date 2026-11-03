@@ -20,6 +20,7 @@ SNAPSHOT_FIELDS = (
     'procurement_reference', 'pr_reference', 'purchase_requisition_reference', 'package_description',
     'estimated_value', 'currency', 'expected_award_date', 'scope_type', 'project_name',
     'source_portal', 'scope_summary', 'agreement_reference', 'correspondence_reference', 'action_deadlines',
+    'organization_reference', 'document_reference',
     'due_date', 'due_date_text', 'deadline_at',
     'deadline_time', 'deadline_timezone', 'deadline_utc', 'deadline', 'tender_status',
     'evidence', 'field_sources', 'warnings', 'ai_review',

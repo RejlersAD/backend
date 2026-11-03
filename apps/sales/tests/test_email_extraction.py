@@ -4,6 +4,24 @@ from apps.sales.email_extraction import _extract_email_fields
 
 
 class EmailExtractionTests(SimpleTestCase):
+    def test_explicit_client_company_label_variants_have_source_evidence(self):
+        for label in ('Client Company', 'Client Company Name', 'Customer Company',
+                      'Customer Company Name', 'Client Organisation', 'Customer Organization Name'):
+            with self.subTest(label=label):
+                data = self.extract(f'{label}: Example Engineering LLC')
+                self.assertEqual(data['customer_name'], 'Example Engineering LLC')
+                self.assertIn(f'{label}: Example Engineering LLC', data['evidence']['customer_name'])
+
+    def test_conflicting_compound_labels_remain_unresolved(self):
+        data = self.extract('Client Company: First Buyer LLC\nCompany Name: Second Buyer LLC')
+        self.assertEqual(data['customer_name'], '')
+        self.assertTrue(any('Conflicting customer name' in item for item in data['warnings']))
+
+    def test_company_codes_and_contact_labels_do_not_become_customer_names(self):
+        data = self.extract('Client Company Code: ABC123\nClient Contact Name: Someone Else\n'
+                            'Client Company Email: other@example.test')
+        self.assertEqual(data['customer_name'], '')
+
     def extract(self, body="", subject="New enquiry", sender="contact@example.test"):
         # Flat field rules retain organization/date labels; public v2 semantics
         # (customer domain and original sent date) have separate API tests.

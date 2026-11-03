@@ -214,6 +214,21 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
         ])
         return Response(self.get_serializer(intake).data)
 
+    @action(detail=True, methods=['get'], url_path='opportunity-matches')
+    def opportunity_matches(self, request, pk=None):
+        from .email_archive_matching import exact_matches
+        matches, _ = exact_matches(self.get_object(), request)
+        return Response({
+            'state': 'unique_match' if len(matches) == 1 else 'requires_review',
+            'matches': [{'id': str(row.pk), 'code': row.deal_code, 'title': row.deal_name} for row in matches],
+        })
+
+    @action(detail=True, methods=['post'], url_path='link-opportunity')
+    def link_opportunity(self, request, pk=None):
+        from .email_archive_matching import link_reviewed_match
+        intake = link_reviewed_match(self.get_object(), request)
+        return Response(self.get_serializer(intake).data)
+
     @action(detail=True, methods=['post'], url_path='review-assistant')
     def review_assistant(self, request, pk=None):
         from .email_review_assistant import (

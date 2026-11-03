@@ -115,6 +115,6 @@ def analyze_saved_email(obj, *, request=None, context=None):
         result = enhance_email_analysis(
             result, messages,
             scope_key=f'saved:{user.pk}:{obj.mailbox_connection_id}:{obj.source_tenant_id}:{own}:{obj.pk}',
-            allow_provider=bool(context.get('email_ai_allow_provider')),
+            allow_provider=False,
         )
     return {**result['extracted_information'], 'analysis': result['analysis']}

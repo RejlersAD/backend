@@ -3,6 +3,7 @@
 import hashlib
 import re
 from datetime import datetime
+from decimal import Decimal
 from email.utils import parseaddr, parsedate_to_datetime
 
 from .email_extraction import DATE_TOKEN, MAX_CONTENT, UNCERTAIN_STATEMENT, _date_value, _extract_email_fields, email_text_units
@@ -484,7 +485,8 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
                    if segment['fields'].get(key) or segment['fields']['evidence'].get(key)]
         if not sourced:
             return
-        values = {value.casefold() for _, value in sourced}
+        values = {Decimal(value) if key == 'estimated_value' and value else value.casefold()
+                  for _, value in sourced}
         result['field_sources'][key] = [segment['id'] for segment, _ in sourced]
         result['evidence'][key] = ' | '.join(dict.fromkeys(
             segment['fields']['evidence'].get(key, value) for segment, value in sourced
@@ -498,13 +500,16 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
     for key in (
         'customer_name', 'declared_client_domain', 'contact_name', 'contact_email', 'contact_phone',
         'location', 'industry', 'scope_summary', 'scope_type', 'project_name', 'tender_reference', 'estimated_value',
-        'currency', 'submission_date', 'expected_award_date',
+        'currency', 'submission_date', 'expected_award_date', 'organization_reference', 'document_reference',
     ):
         # Customer identity belongs to the original request.  Names mentioned
         # in later replies, internal coordination, or bulletin text must not
         # replace or conflict with the organization that sent the solicitation.
         candidates = ([original_request] if original_request else customer_segments) if key == 'customer_name' else factual_segments
         resolve(key, candidates)
+    if result['estimated_value'] and result['evidence'].get('currency') and not result['currency']:
+        result['estimated_value'] = ''
+        result['warnings'].append('Conflicting currency evidence prevents using the estimated value. Review the source.')
 
     request_candidates = customer_segments
     if original_request and original_request['fields'].get('request_type_basis') == 'explicit':
@@ -603,6 +608,7 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
     key_points = []
     for key, label in (
         ('customer_name', 'Customer'), ('request_type', 'Underlying request'), ('tender_reference', 'Reference'),
+        ('organization_reference', 'Organization reference'), ('document_reference', 'Document reference'),
         ('scope_summary', 'Scope'), ('submission_date', 'Stated submission date'), ('due_date', 'Current due date'),
         ('expected_award_date', 'Expected award date'), ('estimated_value', 'Estimated value'),
     ):

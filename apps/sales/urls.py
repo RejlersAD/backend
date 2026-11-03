@@ -16,6 +16,7 @@ from .analytics_views import (
     SalesActivitiesView,
 )
 from .intake_views import SalesEmailIntakeViewSet, sales_email_intake
+from .email_archive_files import sales_test_archive_files
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -43,6 +44,7 @@ analytics_urlpatterns = [
 # URL patterns
 urlpatterns = analytics_urlpatterns + [
     path('email-intake/', sales_email_intake, name='sales-email-intake'),
+    path('email-intake/archive-files/', sales_test_archive_files, name='sales-test-archive-files'),
     path('', include(router.urls)),
 ]
 
