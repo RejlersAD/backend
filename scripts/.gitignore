@@ -2,3 +2,4 @@ timesheet_mirror.state.json
 timesheet_mirror.state.json.tmp
 timesheet_mirror_agent.log
 timesheet_mirror_agent.log.1
+!tests/test_import_sales_test_archive.py

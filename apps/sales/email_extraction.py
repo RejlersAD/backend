@@ -2,14 +2,19 @@
 
 import re
 from datetime import date, datetime
+from decimal import Decimal
 
 
 MAX_CONTENT = 250_000
 DATE_TOKEN = (
-    r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{4}|"
+    r"(?:\d{4}[/-]\d{2}[/-]\d{2}|\d{1,2}[/.-]\d{1,2}[/.-]\d{4}|"
     r"\d{1,2}(?:st|nd|rd|th)?[\s-]+[A-Za-z]{3,9}[\s,-]+\d{4}|"
-    r"[A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})"
+    r"\d{1,2}[A-Za-z]{3}\d{4}|"
+    r"[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})"
 )
+COMPANY_NAMES = r'(?:ADNOC|(?:Saudi\s+)?Aramco|TAQA|Borouge|ENOC|Technip\s+Energies|NMDC)'
+REFERENCE_LABEL = r'(?:Ref(?:erence)?\.?(?:\s*(?:No\.?|Number|ID))?|No\.?|Number|ID|Code|#)'
+REFERENCE_VALUE = r'(?P<value>(?=[A-Z0-9._/-]{0,119}\d)[A-Z0-9][A-Z0-9._/-]{1,118}[A-Z0-9])(?=$|[\s,;:)\]>]|[.!?](?:\s|$))'
 UNCERTAIN_STATEMENT = re.compile(
     r'\b(?:if|unless|could|might|hypothetical|proposed|propose|proposing|'
     r'not|never|cancelled|canceled|withdrawn)\b|'
@@ -78,6 +83,8 @@ def _date_context_allowed(content, start, end):
     context = before + content[start:end] + after
     if UNCERTAIN_STATEMENT.search(context) or '?' in content[end:end + 2]:
         return False
+    if re.search(r'\bagreement\s+(?:return|signature|execution)\b', context, re.I):
+        return False
     if re.search(r'\b(?:payment|invoice|registration\s+fee|tender\s+fee|bid\s+bond)\b', before, re.I):
         return bool(re.search(r'\b(?:proposal|quotation|tender|bid)\s+(?:submission\s+)?(?:deadline|due)', content[start:end], re.I))
     return True
@@ -86,8 +93,8 @@ def _date_context_allowed(content, start, end):
 def _date_value(value):
     """Normalize date-only values; do not choose a locale for ambiguous dates."""
     value = re.sub(r"(?<=\d)(st|nd|rd|th)\b", "", value, flags=re.I)
-    if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", value):
-        first, second, year = map(int, re.split(r"[/-]", value))
+    if re.fullmatch(r"\d{1,2}[/.-]\d{1,2}[/.-]\d{4}", value):
+        first, second, year = map(int, re.split(r"[/.-]", value))
         if first <= 12 and second <= 12 and first != second:
             return ""
         day, month = (second, first) if second > 12 else (first, second)
@@ -95,13 +102,64 @@ def _date_value(value):
             return date(year, month, day).isoformat()
         except ValueError:
             return ""
-    for pattern in ("%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d %Y", "%b %d %Y"):
+    value = re.sub(r'(?<=[A-Za-z])\.(?=\s)', '', value)
+    if re.fullmatch(r'\d{1,2}[A-Za-z]{3}\d{4}', value):
+        value = re.sub(r'(\d)([A-Za-z])|([A-Za-z])(\d)', lambda match: ' '.join(filter(None, match.groups())), value)
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%d %B %Y", "%d %b %Y", "%B %d %Y", "%b %d %Y"):
         try:
             normalized = value if pattern == "%Y-%m-%d" else re.sub(r"[\s,-]+", " ", value).strip()
             return datetime.strptime(normalized, pattern).date().isoformat()
         except ValueError:
             continue
     return ""
+
+
+def _reference_candidates(content):
+    """Keep labelled source identities separate; company names are context only."""
+    candidates = {'tender_reference': [], 'organization_reference': [], 'document_reference': []}
+    kinds = r'(?:EOI|EIO|RFT|RFQ|RFP|ITT|Tender|Client|Enquiry|Inquiry|Request\s+for\s+Quotation)'
+    labelled = (
+        rf'\b{kinds}(?:[ \t]*{REFERENCE_LABEL}[ \t]*[:#=\-]?[ \t]*'
+        rf'|[ \t]*[:#=][ \t]*|[ \t]+){REFERENCE_VALUE}'
+    )
+    compact = (
+        rf'(?<![A-Z0-9._/-])(?P<value>(?:{COMPANY_NAMES}[-_/])?'
+        r'(?:EOI|EIO|RFT|RFQ|RFP|ITT)[-_/][A-Z0-9][A-Z0-9._/-]{1,110}[A-Z0-9])'
+        r'(?=$|[\s,;:)\]>]|[.!?](?:\s|$))'
+    )
+    company_context = bool(re.search(rf'\b{COMPANY_NAMES}\b', content, re.I))
+    for line in content.splitlines():
+        qualified = re.sub(r'\bNo\.(?=[ \t]*[:#=]?[ \t]*[A-Z0-9])|\bNo(?=[ \t]*[:#=])',
+                           'Number', line, flags=re.I)
+        if UNCERTAIN_STATEMENT.search(qualified):
+            continue
+        document = re.search(
+            rf'^[ \t]*(?:{COMPANY_NAMES}[ \t]+)?(?:Document|Doc\.?|Drawing)[ \t]+'
+            rf'{REFERENCE_LABEL}[ \t]*[:#=]?[ \t]*{REFERENCE_VALUE}', line, re.I,
+        ) if company_context else None
+        if document:
+            candidates['document_reference'].append((document['value'], document.group(0)))
+            continue
+        if re.match(r'^[ \t]*(?:Document|Doc\.?|Drawing|Invoice|Purchase\s+Order|PO)\b', line, re.I):
+            continue
+        if company_context:
+            company = re.search(
+                rf'^[ \t]*(?:{COMPANY_NAMES}[ \t]+)?Ref(?:erence)?\.?'
+                rf'(?:[ \t]+(?:No\.?|Number|ID))?[ \t]*[:#=][ \t]*{REFERENCE_VALUE}', line, re.I,
+            )
+            if company:
+                candidates['organization_reference'].append((company['value'], company.group(0)))
+                continue
+        for pattern in (labelled, compact):
+            for match in re.finditer(pattern, line, re.I):
+                if len(match['value']) <= 120 and not re.fullmatch(r'(?:19|20)\d{2}', match['value']):
+                    candidates['tender_reference'].append((match['value'], match.group(0)))
+        for match in re.finditer(
+            r'\bEvent[ \t]*(?:(?:ID|Reference|Number|No\.?)[ \t]*)?[:#=]?[ \t]*'
+            + REFERENCE_VALUE, line, re.I,
+        ):
+            candidates['tender_reference'].append((match['value'], match.group(0)))
+    return candidates
 
 
 def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_name=""):
@@ -127,6 +185,7 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
         "title", "customer_name", "company_name", "submission_date", "submission_date_text",
         "due_date", "due_date_text", "request_type_code", "request_type", "tender_reference",
         "deadline_text", "deadline_date", "expected_award_date", "estimated_value", "currency",
+        "organization_reference", "document_reference",
         "declared_client_domain", "contact_name", "contact_email", "contact_phone", "location",
         "industry", "scope_summary", "scope_type", "project_name", "request_type_basis", "request_match_strength",
     )}
@@ -137,7 +196,7 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
 
     def unique_value(key, matches):
         candidates = [(value.strip(), source.strip()) for value, source in matches if value.strip()]
-        distinct = {value.casefold() for value, _ in candidates}
+        distinct = {Decimal(value) if key == 'estimated_value' else value.casefold() for value, _ in candidates}
         if len(distinct) == 1:
             result[key] = candidates[0][0]
             evidence[key] = candidates[0][1][:300]
@@ -152,7 +211,10 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
             and isinstance(sender_email, str) and re.fullmatch(r'[^<>\s@]{1,100}@[^<>\s@]{1,150}', sender_email)):
         metadata_entities = _leading_sender_entities(f'From: {sender_name} <{sender_email}>')
     labels = {
-        "customer_name": r"(?:Company|Client|Customer|Organisation|Organization)(?:\s+name)?",
+        "customer_name": (
+            r"(?:(?:Client|Customer)\s+(?:Company|Organisation|Organization)(?:\s+name)?"
+            r"|(?:Company|Client|Customer|Organisation|Organization)(?:\s+name)?)"
+        ),
         "declared_client_domain": r"(?:Client|Customer)\s+(?:domain|website)",
         "contact_name": r"Contact\s+(?:person|name)",
         "contact_email": r"Contact\s+email",
@@ -160,11 +222,16 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
         "location": r"Project\s+location",
         "industry": r"Industry",
         "scope_summary": r"(?:Scope\s+summary|Project\s+scope|Scope\s+of\s+work)",
-        "project_name": r"Project(?:\s+name)?",
+        "project_name": r"(?:Project(?:\s+(?:name|title))?|Name\s+of\s+(?:the\s+)?Project)",
     }
     for key, label in labels.items():
-        pattern = rf"^[ \t]*(?:{label})[ \t]*(?::[ \t]*|\t+)([^\n]+)"
+        pattern = rf"^[ \t]*(?:{label})[ \t]*(?:[:=][ \t]*|\t+)([^\n]+)"
         candidates = [(match.group(1), match.group(0)) for match in re.finditer(pattern, content, re.I | re.M)]
+        if key == 'project_name':
+            candidates += [(match.group(1).strip(), match.group(0)) for match in re.finditer(
+                rf'(?:^|[|;])[ \t]*(?:{label})[ \t]*[:=][ \t]*([^|;\n]{{2,300}})',
+                subject[:1000], re.I,
+            )]
         if key in sender_entities:
             candidates.append(sender_entities[key])
         if key in metadata_entities:
@@ -214,7 +281,7 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
 
     date_labels = {
         "submission_date": r"(?<!required )(?<!required\s)submission\s+date|date\s+of\s+submission",
-        "due_date": r"proposal\s+deadline|submission\s+deadline|submission\s+due\s+date|tender\s+closing\s+date|closing\s+date|proposal\s+required\s+by|required\s+submission\s+date|required\s+by|due\s+date|deadline|(?:tenders?|proposals?|bids?|quotations?)\s+(?:are\s+)?(?:due|close[sd]?)(?:\s+(?:on|by|at))?|(?:submit|send|return|provide)\s+(?:(?:your|the|a)\s+)?(?:(?:technical|commercial|budgetary)\s+)?(?:proposal|tender|bid|quotation)(?:\s+(?:by|before|on\s+or\s+before|no\s+later\s+than))",
+        "due_date": r"(?:bid|tender|quotation|proposal|RFQ)\s+submission\s+(?:date|deadline)|last\s+date\s+for\s+(?:(?:bid|tender|quotation|proposal)\s+)?submission|proposal\s+deadline|submission\s+deadline|submission\s+due\s+date|tender\s+closing\s+date|closing\s+date|proposal\s+required\s+by|required\s+submission\s+date|required\s+by|due\s+date|deadline|(?:tenders?|proposals?|bids?|quotations?)\s+(?:are\s+)?(?:due|close[sd]?)(?:\s+(?:on|by|at))?|(?:submit|send|return|provide)\s+(?:(?:your|the|a)\s+)?(?:(?:technical|commercial|budgetary)\s+)?(?:proposal|tender|bid|quotation)(?:\s+(?:by|before|on\s+or\s+before|no\s+later\s+than))",
         "expected_award_date": r"expected\s+award\s+date|anticipated\s+award\s+date|contract\s+award\s+date|award\s+expected\s+by",
     }
     for key, label in date_labels.items():
@@ -225,13 +292,16 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
                 r'\s*(?:for\s+(?:the\s+)?(?:submission|receipt|return)'
                 r'(?:\s+of\s+(?:the\s+|your\s+)?(?:(?:budgetary|technical|commercial)\s+)?'
                 r'(?:quotations?|proposals?|tenders?|bids?))?)?'
-                r'\s*(?:(?:is|will\s+be|shall\s+be|falls\s+on)\s*)?(?:on\s+)?[:\-]?\s*'
+                r'\s*(?:(?:and|&)\s*time\s*)?'
+                r'\s*(?:(?:is|will\s+be|shall\s+be|falls\s+on)\s*)?(?:on\s+)?[:=\-]?\s*'
             )
         matches = [match for match in re.finditer(
             rf"\b(?:{label}){bridge}{weekday}(?P<date>{DATE_TOKEN})(?!\d)", content, re.I,
         ) if len(match.group(0)) <= 500 and match.group(0).count('\n') <= 4
             and not re.search(r'\n[ \t]*\n', match.group(0))
             and _date_context_allowed(content, match.start(), match.end())
+            and (key != 'submission_date' or not re.search(
+                r'\b(?:bid|tender|quotation|proposal|RFQ)[ \t]+$', content[max(0, match.start() - 30):match.start()], re.I))
             and (key != 'due_date' or not is_agreement_deadline_evidence(
                 match.group(0), content, source_span=(match.start(), match.end())))]
         normalized = [(_date_value(match.group("date")), match) for match in matches]
@@ -296,17 +366,27 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
                         if not UNCERTAIN_STATEMENT.search(unit))), "General client email",
             )
 
-    references = list(re.finditer(r"\b((?:EOI|EIO|RFT|RFQ|RFP|ITT)[-_/][A-Z0-9][A-Z0-9._/-]{2,})\b", content, re.I))
-    labelled_refs = list(re.finditer(r"\b(?:EOI|EIO|RFT|RFQ|RFP|ITT|Tender|Client)\s*(?:No\.?|Number|Ref(?:erence)?|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]{2,})", content, re.I))
-    labelled_refs += list(re.finditer(r"\bEvent\s*(?:(?:ID|Reference|Number|No\.?)\s*)?[:#-]?\s*((?=[A-Z0-9._/-]*\d)[A-Z][A-Z0-9._/-]{2,})\b", content, re.I))
-    unique_value("tender_reference", [(match.group(1), match.group(0)) for match in references + labelled_refs])
+    for key, candidates in _reference_candidates(content).items():
+        unique_value(key, candidates)
 
-    money_pattern = r"^[ \t]*(?:Estimated\s+contract\s+value|Estimated\s+value|Contract\s+value|Budget)[ \t]*:[ \t]*(?:([A-Z]{3})[ \t]+)?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)(?:[ \t]+([A-Z]{3}))?[ \t]*$"
+    currency_token = r'(?:US\$|Dhs?\.?|[A-Z]{3})'
+    money_label = r'(?:Estimated\s+(?:(?:contract|project|tender|bid|total)\s+)?value|(?:Contract|Project|Tender|Bid|Total)\s+value|Budget(?:\s+amount)?)'
+    money_pattern = (
+        rf'^[ \t]*(?:The\s+)?{money_label}[ \t]*(?::|=|\bis\b)[ \t]*'
+        rf'(?:(?P<prefix>{currency_token})[ \t]*)?'
+        r'(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)'
+        rf'(?:[ \t]+(?P<suffix>{currency_token}))?[ \t]*'
+        r'(?:\(?excluding\s+VAT\)?)?[ \t]*\.?[ \t]*$'
+    )
     money_matches = list(re.finditer(money_pattern, content, re.I | re.M))
-    unique_value("estimated_value", [(match.group(2).replace(",", ""), match.group(0)) for match in money_matches])
-    currencies = [(match.group(1) or match.group(3) or "", match.group(0)) for match in money_matches]
+    unique_value("estimated_value", [(match['amount'].replace(",", ""), match.group(0)) for match in money_matches])
+    currencies = [(value, match.group(0)) for match in money_matches
+                  for value in (match['prefix'], match['suffix']) if value]
     currencies += [(match.group(1), match.group(0)) for match in re.finditer(r"^[ \t]*Currency[ \t]*:[ \t]*([A-Z]{3})[ \t]*$", content, re.I | re.M)]
-    unique_value("currency", [(value.upper(), source) for value, source in currencies])
+    unique_value("currency", [({'US$': 'USD', 'DH': 'AED', 'DHS': 'AED'}.get(value.upper().rstrip('.'), value.upper()), source)
+                             for value, source in currencies])
+    if currencies and not result['currency']:
+        result['estimated_value'] = ''
 
     scope_types = (
         (r"\bpre[ -]feed\b", "pre_feed"), (r"(?<!pre-)(?<!pre )\bfeed\b", "feed"),

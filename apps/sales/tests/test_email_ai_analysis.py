@@ -98,12 +98,12 @@ class EmailAIAnalysisTests(SimpleTestCase):
         proposal = oq_proposal()
         proposal['fields'] = [fact('tender_reference', 'Tender_99999', 'Tender Code Tender_38669')]
         info = self.validate(proposal)['extracted_information']
-        self.assertEqual(info['tender_reference'], '')
+        self.assertEqual(info['tender_reference'], 'Tender_38669')
 
     def test_partial_identifier_cannot_be_promoted(self):
         proposal = oq_proposal()
         proposal['fields'] = [fact('tender_reference', '38669', 'Tender Code Tender_38669')]
-        self.assertEqual(self.validate(proposal)['extracted_information']['tender_reference'], '')
+        self.assertEqual(self.validate(proposal)['extracted_information']['tender_reference'], 'Tender_38669')
 
     def test_unknown_source_cannot_support_classification(self):
         proposal = oq_proposal()
@@ -497,7 +497,18 @@ class EmailAIAnalysisTests(SimpleTestCase):
     @patch('apps.sales.email_ai_analysis.analyze_email_sources')
     def test_conversion_cache_only_path_never_calls_provider(self, provider):
         result = self.run_enhancer(allow_provider=False)
-        self.assertEqual(result['extracted_information']['ai_review']['error_code'], 'analysis_not_cached')
+        self.assertEqual(result, baseline())
+        provider.assert_not_called()
+
+    def test_rules_only_default_ignores_ai_configuration_cache_and_provider(self):
+        result = baseline()
+        with patch('apps.sales.email_ai_analysis.email_ai_configuration') as configuration, \
+             patch('apps.sales.email_ai_analysis.cache.get', return_value={'cached': 'AI result'}) as cached, \
+             patch('apps.sales.email_ai_analysis.analyze_email_sources') as provider:
+            output = enhance_email_analysis(result, [email()], scope_key='actor:1:mailbox:1')
+        self.assertEqual(output, result)
+        configuration.assert_not_called()
+        cached.assert_not_called()
         provider.assert_not_called()
 
     @patch('apps.sales.email_ai_analysis.analyze_email_sources')
@@ -558,8 +569,8 @@ class EmailAIAnalysisTests(SimpleTestCase):
                 )
                 with patch('apps.sales.email_ai_provider._anthropic_client', return_value=client), \
                      patch('apps.sales.email_ai_provider._openai_client') as openai_client:
-                    output = enhance_email_analysis(baseline(), [email()], scope_key='actor:1:mailbox:1')
-                    again = enhance_email_analysis(baseline(), [email()], scope_key='actor:1:mailbox:1')
+                    output = enhance_email_analysis(baseline(), [email()], scope_key='actor:1:mailbox:1', allow_provider=True)
+                    again = enhance_email_analysis(baseline(), [email()], scope_key='actor:1:mailbox:1', allow_provider=True)
                 openai_client.assert_not_called()
                 self.assertEqual(len(requests), 1)
                 self.assertEqual(str(requests[0].url), 'https://api.anthropic.com/v1/messages')

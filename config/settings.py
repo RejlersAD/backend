@@ -704,6 +704,8 @@ SALES_EMAIL_INTAKE_WEBHOOK_KEY = config(
 # Automatic readers require both deployment opt-in and a separately authorized
 # application mailbox. No scheduled source import is enabled by a migration.
 SALES_MAILBOX_SYNC_ENABLED = config('SALES_MAILBOX_SYNC_ENABLED', default=False, cast=bool)
+# Local synthetic archive pilot only; no production machine file-writer grant.
+SALES_TEST_ARCHIVE_FILES_ENABLED = config('SALES_TEST_ARCHIVE_FILES_ENABLED', default=False, cast=bool)
 
 # Temporary, user-authorized bid decisions by Opportunity module readers when
 # no business route exists. A configured route always takes precedence.

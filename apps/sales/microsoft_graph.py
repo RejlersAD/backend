@@ -715,6 +715,7 @@ class SalesMicrosoftGraphService:
         return result
 
     def get_message(self, message_id, *, allow_ai=False, ai_scope_key='', review_context=None):
+        """Read and analyze locally; legacy allow_ai cannot enable paid extraction."""
         url = self._mailbox_messages_url()
         if (
             not isinstance(message_id, str) or len(message_id) > 2048
@@ -742,7 +743,7 @@ class SalesMicrosoftGraphService:
         if ai_scope_key:
             from .email_ai_analysis import enhance_email_analysis
             reviewed = enhance_email_analysis(
-                reviewed, messages, scope_key=ai_scope_key, allow_provider=allow_ai,
+                reviewed, messages, scope_key=ai_scope_key, allow_provider=False,
             )
         result['extracted_information'] = {
             **reviewed['extracted_information'], 'analysis': reviewed['analysis'],

@@ -120,7 +120,6 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
         try:
             result = SalesMicrosoftGraphService(connection).get_message(
                 request.query_params.get('message_id'),
-                allow_ai=True,
                 ai_scope_key=f'live:{request.user.pk}:{connection.pk}:{connection.tenant_id}:{connection.mailbox_address}',
             )
         except SalesMailboxReadError as exc:

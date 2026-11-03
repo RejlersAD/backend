@@ -32,19 +32,19 @@ class EmailClientResolutionTests(TestCase):
     post = fixtures.MailboxOpportunityAPITests.post
     deny = fixtures.MailboxOpportunityAPITests.deny
 
-    def named_payload(self, name='New Customer LLC'):
-        self.message['body'] = {'contentType': 'text', 'content': f'Company name: {name}\nDue date: 21 November 2026'}
+    def named_payload(self, name='New Customer LLC', label='Company name'):
+        self.message['body'] = {'contentType': 'text', 'content': f'{label}: {name}\nDue date: 21 November 2026'}
         self.network.return_value = graph_response(self.message)
         detail = self.review().data
         payload = {key: value for key, value in self.fields.items() if key != 'client'}
         payload.update(source_token=detail['source_token'], new_client={'company_name': name})
         return payload
 
-    def saved_payload(self, name='Saved Customer LLC'):
+    def saved_payload(self, name='Saved Customer LLC', label='Company name'):
         intake = SalesEmailIntake.objects.create(
             source_message_id='new-customer-saved', subject='RFQ for engineering study',
             sender_email='portal@example.test', received_at='2026-09-29T08:00:00Z',
-            body_preview=f'Company name: {name}\nDue date: 21 November 2026',
+            body_preview=f'{label}: {name}\nDue date: 21 November 2026',
         )
         url = f'/api/v1/sales/email-intakes/{intake.pk}/'
         detail = self.client.get(url)
@@ -57,6 +57,40 @@ class EmailClientResolutionTests(TestCase):
         self.assertEqual(Client.objects.count(), clients)
         self.assertFalse(Deal.objects.exists())
         self.assertFalse(OpportunityAuditEvent.objects.exists())
+
+    def test_saved_compound_client_label_creates_directory_client_and_retry_reuses_it(self):
+        name = 'RADAI Test Client'
+        intake, url, payload = self.saved_payload(name, label='Client Company')
+        detail = self.client.get(f'/api/v1/sales/email-intakes/{intake.pk}/').data
+        self.assertTrue(detail['can_create_client'])
+        self.assertEqual(detail['extracted_information']['customer_match']['status'], 'no_match')
+        self.assertEqual(detail['extracted_information']['customer_match']['detected_name'], name)
+        first = self.client.post(url, payload, format='json')
+        self.assertEqual(first.status_code, 201, first.data)
+        customer = Client.objects.get(company_name=name)
+        self.assertEqual(Deal.objects.get().client_id, customer.pk)
+        self.assertEqual(customer.status, 'prospect')
+        repeated = self.client.post(url, payload, format='json')
+        self.assertEqual(repeated.status_code, 200, repeated.data)
+        self.assertEqual(Client.objects.filter(company_name=name).count(), 1)
+        self.assertEqual(Deal.objects.count(), 1)
+
+    def test_live_compound_label_reuses_existing_client_without_create_permission(self):
+        self.account.legal_name = 'Existing Buyer Engineering LLC'
+        self.account.save(update_fields=['legal_name'])
+        payload = self.named_payload(self.account.legal_name, label='Customer Company Name')
+        self.deny('sales_clients', 'create')
+        response = self.post(payload)
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Deal.objects.get().client_id, self.account.pk)
+        self.assertEqual(Client.objects.count(), 2)
+
+    def test_saved_compound_label_does_not_bypass_client_creation_permission(self):
+        _, url, payload = self.saved_payload('Unauthorized Buyer LLC', label='Client Company Name')
+        self.deny('sales_clients', 'create')
+        response = self.client.post(url, payload, format='json')
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assert_no_new_records()
 
     def test_live_creates_minimal_client_and_retry_never_recreates_after_rename(self):
         payload = self.named_payload()
@@ -254,16 +288,19 @@ class EmailClientResolutionTests(TestCase):
 
     @override_settings(SALES_EMAIL_AI_ENABLED=True, SALES_EMAIL_AI_PROVIDER='anthropic',
                        SALES_EMAIL_AI_MODEL='claude-sonnet-5-5', SALES_EMAIL_AI_API_KEY='synthetic-only')
-    def test_all_source_fields_real_validator_create_missing_customer_and_directory_visibility(self):
+    def test_explicit_source_fields_rules_only_create_missing_customer_and_directory_visibility(self):
         Client.objects.all().delete()
         value = 'Estimated contract value: AED 125,000.50'
         award = 'Expected award date: 10 November 2026'
         project = 'Project name: Laboratory Reagents Procurement'
-        scope = 'Scope type: Other'
+        scope = 'Scope type: FEED'
         self.message.update({
-            'subject': SUBJECT,
-            'from': {'emailAddress': {'name': 'OQ Tawreed', 'address': 'tawreed@oq.com'}},
-            'body': {'contentType': 'text', 'content': '\n'.join((BODY, value, award, project, scope))},
+            'subject': 'RFQ Tender_38669 for engineering',
+            'from': {'emailAddress': {'name': 'Synthetic Buyer', 'address': 'buyer@example.test'}},
+            'body': {'contentType': 'text', 'content': '\n'.join((
+                'Client Company: OQ', 'RFQ Reference: Tender_38669',
+                'Submission deadline: 2 October 2026', value, award, project, scope,
+            ))},
             'toRecipients': [{'emailAddress': {'address': self.connection.mailbox_address}}],
         })
         self.network.return_value = graph_response(self.message)
@@ -276,11 +313,11 @@ class EmailClientResolutionTests(TestCase):
         }) as provider:
             detail = self.review().data
             info = detail['extracted_information']
-            self.assertEqual(info['ai_review']['status'], 'validated')
+            self.assertNotIn('ai_review', info)
             self.assertEqual(info['customer_match']['status'], 'no_match')
             expected = {'organization_name': 'OQ', 'tender_reference': 'Tender_38669',
                         'estimated_value': '125000.50', 'currency': 'AED', 'expected_award_date': '2026-11-10',
-                        'due_date': '2026-10-02', 'scope_type': 'other', 'project_name': 'Laboratory Reagents Procurement'}
+                        'due_date': '2026-10-02', 'scope_type': 'feed', 'project_name': 'Laboratory Reagents Procurement'}
             for field, value in expected.items():
                 self.assertEqual(info[field], value, field)
             payload = {
@@ -295,7 +332,7 @@ class EmailClientResolutionTests(TestCase):
             first = self.post(payload)
             self.assertEqual(first.status_code, 201, first.data)
             self.assertEqual(self.post(payload).status_code, 200)
-            provider.assert_called_once()
+            provider.assert_not_called()
         deal = Deal.objects.get()
         customer = Client.objects.get()
         self.assertEqual(deal.client_id, customer.pk)
@@ -306,7 +343,8 @@ class EmailClientResolutionTests(TestCase):
         self.assertEqual(deal.client_reference, expected['tender_reference'])
         self.assertEqual(deal.description, info['scope_summary'])
         event = OpportunityAuditEvent.objects.get()
-        self.assertEqual(event.data['reviewed_email_analysis']['ai_review']['proposal']['deadline_at'], '2026-10-02T01:59:00+04:00')
+        self.assertNotIn('ai_review', event.data['reviewed_email_analysis'])
+        self.assertEqual(event.data['reviewed_email_analysis']['due_date'], '2026-10-02')
         listed = self.client.get('/api/v1/sales/clients/')
         self.assertEqual(listed.status_code, 200, listed.data)
         rows = listed.data['results'] if isinstance(listed.data, dict) else listed.data

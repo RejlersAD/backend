@@ -437,6 +437,34 @@ class EmailAssistantAPITests(TestCase):
         extraction.assert_not_called()
         self.assertEqual(response.data['kind'], 'reply_draft')
 
+    def test_routine_live_and_saved_reads_never_call_provider_but_explicit_ask_still_can(self):
+        before = self.rows()
+        with patch('apps.sales.email_ai_analysis.analyze_email_sources') as extraction_provider, \
+             patch('apps.sales.email_ai_analysis.cache.get', return_value={'stale': 'AI result'}) as extraction_cache:
+            for _ in range(2):
+                for url, params in (
+                    (self.detail_url, {'message_id': MESSAGE['id']}),
+                    (f'/api/v1/sales/email-intakes/{self.intake.pk}/', {}),
+                    ('/api/v1/sales/email-intakes/', {}),
+                ):
+                    response = self.client.get(url, params)
+                    self.assertEqual(response.status_code, 200, response.data)
+            extraction_provider.assert_not_called()
+            extraction_cache.assert_not_called()
+            self.provider.assert_not_called()
+            from apps.sales.microsoft_graph import SalesMicrosoftGraphService
+            legacy = SalesMicrosoftGraphService(self.connection).get_message(
+                MESSAGE['id'], allow_ai=True, ai_scope_key='legacy-explicit-flag',
+            )
+            self.assertNotIn('ai_review', legacy['extracted_information'])
+            extraction_provider.assert_not_called()
+            extraction_cache.assert_not_called()
+        for saved in (False, True):
+            response = self.request(saved=saved)
+            self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.provider.call_count, 2)
+        self.assertEqual(self.rows(), before)
+
     def test_no_access_explicit_deny_and_foreign_connection_do_not_reach_provider(self):
         for user in (self.other, self.outsider):
             self.client.force_authenticate(user)

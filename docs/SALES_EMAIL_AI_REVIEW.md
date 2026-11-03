@@ -1,5 +1,60 @@
 # AI email review and reviewed opportunity creation
 
+## Rules-only intake and local archive pilot - 3 November 2026
+
+This supersedes automatic AI detail interpretation described below. Routine
+live/saved list/detail/refresh, unread analysis and conversion are rules-only:
+they neither call a provider nor reuse cached AI interpretation, regardless of
+provider configuration or legacy `allow_ai` arguments. Only explicit Ask RADAI
+questions/actions can use the configured paid provider. Unknown/conflicting
+facts remain for manual review; no central credentials or other modules change.
+
+Deterministic labelled patterns cover ADNOC, Aramco/Saudi Aramco, TAQA, Borouge,
+ENOC, Technip Energies and NMDC context. This is synthetic format coverage, not
+certification against actual company templates. Explicit RFQ/tender/enquiry
+labels retain complete references. Plain company references and document
+numbers use additive `organization_reference` and `document_reference`, with
+source evidence, confidence and signed audit retention; they never become
+automatic tender-reference defaults. Dates support bid/quotation submission and
+closing labels, unambiguous numeric/compact/month-name formats. Estimated-value
+and budget labels support AED/USD, US$/Dhs., grouping and decimals. Conflicting
+currencies suppress the amount, including across messages; fee/invoice values,
+ranges, rates and ambiguous dates are not guessed. Project Name/Title/Name of
+Project labels and explicit subject markers retain source evidence.
+
+The existing local OneDrive RADAI-TEST importer now supports reviewed file
+handoff without a schema change. It remains preview-only unless `--apply` is
+selected; `--apply --watch --archive-files` polls locally for pending sources and
+uploads after a reviewed link. Original MIME must match captured bytes and
+receiving mailbox. The webhook-key-authenticated
+`POST /api/v1/sales/email-intake/archive-files/` additionally requires
+`SALES_TEST_ARCHIVE_FILES_ENABLED=true` and a local/development/test environment.
+It is unavailable in production. Limits: 32 MiB MIME and 20 direct attachments;
+nested attachments are retained in the original, not expanded.
+
+Original email goes to Correspondence. A single supported document type with
+content evidence routes to its existing six-folder category; uncertain files
+stay in Tender. Retries preserve recorded destinations and completed uploads.
+No historical handoff is moved. Every write rechecks the reviewed actor's
+current intake, opportunity and client access.
+
+Authenticated GET `email-intakes/{id}/opportunity-matches/` returns
+`{state:unique_match|requires_review, matches:[{id,code,title}]}`.
+POST `email-intakes/{id}/link-opportunity/` accepts an existing `opportunity`,
+fresh `source_token`, `classification_code` and `classification_confirmed:true`.
+It revalidates unique exact sourced company/reference matching and permissions,
+then links/audits atomically without creating or changing an opportunity.
+Ambiguity/stale/conflicting links return 409. Both actions are local-pilot-only.
+There is no autonomous linking or business qualification.
+
+Verification before upstream alignment: 342 scoped backend tests passed and one
+PostgreSQL-only race was skipped in SQLite (343 discovered); the archive/link
+tests and a competing-confirmation race separately passed on disposable
+PostgreSQL. Eighteen importer/watcher tests passed. Frontend synthetic browser,
+lint and production builds passed. These checks do not certify production
+configuration, applied production migrations, actual supplier templates or
+arbitrary email interpretation. Final release checks are recorded in the PR.
+
 The existing Email Intake detail and Create opportunity paths can use bounded,
 source-validated AI proposals. The original detection integration added no UI
 controls or automatic business decisions. The approved workspace follow-up below

@@ -104,6 +104,9 @@ INDEPENDENT_WORKFLOWS = {
     ('apps.timesheet.mirror_views', 'heartbeat'),
     ('apps.timesheet.mirror_views', 'ingest_users'),
     ('apps.sales.intake_views', 'sales_email_intake'),
+    # Disabled outside the opt-in local test pilot; validates the intake key,
+    # exact source bytes and the current reviewed actor's record/action scope.
+    ('apps.sales.email_archive_files', 'sales_test_archive_files'),
     *{('apps.core.views_enquiry', name) for name in (
         'submit_enquiry', 'enquiry_options', 'public_enquiry_feedback',
         'my_enquiries', 'my_enquiry_detail', 'my_enquiry_response',
@@ -195,7 +198,7 @@ CREATE_OPERATIONS = {
     'generate_smart_datasheet', 'generate_switchgear_datasheet', 'generate_transformer_datasheet',
     'generate_upload_url', 'governance_comments', 'governance_items', 'import_boq', 'import_excel',
     'import_full_xlsx', 'import_reviewed', 'import_signed_pdf', 'import_xlsx', 'intelligent_generate',
-    'library_watch_start', 'materialize', 'my_signature', 'my_digital_stamp', 'output_drawings', 'process',
+    'library_watch_start', 'link_opportunity', 'materialize', 'my_signature', 'my_digital_stamp', 'output_drawings', 'process',
     'force_fresh_extract', 'quality_check', 're_extract', 'recommend_vendors', 'reserve_number',
     'resolve_compare_choice', 'run_assurance',
     'run_three_way_match', 'save_output', 'score_lead', 'send_email', 'send_test_mail',

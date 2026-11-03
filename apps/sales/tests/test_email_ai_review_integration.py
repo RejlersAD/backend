@@ -49,10 +49,10 @@ class EmailAIReviewIntegrationTests(TestCase):
             body_preview='Tender Code Tender_38669\nDate: 2 Oct, 2026',
         )
 
-    def test_live_detail_opts_in_but_conversion_never_invokes_analysis_provider(self):
+    def test_live_detail_disables_provider_and_conversion_retains_signed_evidence(self):
         with patch('apps.sales.email_ai_analysis.enhance_email_analysis', side_effect=self.proposal) as enhance:
             payload = self.payload()
-            self.assertTrue(enhance.call_args.kwargs['allow_provider'])
+            self.assertFalse(enhance.call_args.kwargs['allow_provider'])
             self.assertIn(str(self.user.pk), enhance.call_args.kwargs['scope_key'])
             enhance.reset_mock()
             response = self.post(payload)
@@ -65,7 +65,7 @@ class EmailAIReviewIntegrationTests(TestCase):
 
     @override_settings(SALES_EMAIL_AI_ENABLED=True, SALES_EMAIL_AI_PROVIDER='openai',
                        SALES_EMAIL_AI_MODEL='gpt-4o-mini', SALES_EMAIL_AI_API_KEY='synthetic-only')
-    def test_real_validator_oq_detail_match_create_retry_preserves_full_evidence(self):
+    def test_rules_only_oq_detail_keeps_unsupported_facts_for_manual_review(self):
         self.account.company_name = 'OQ'
         self.account.save(update_fields=['company_name'])
         self.message.update({
@@ -80,35 +80,29 @@ class EmailAIReviewIntegrationTests(TestCase):
         }) as provider:
             detail = self.review().data
             info = detail['extracted_information']
-            self.assertEqual(info['ai_review']['status'], 'validated')
-            self.assertEqual(info['customer_name'], 'OQ')
-            self.assertEqual(info['classification']['code'], 'tender_opportunity')
-            self.assertEqual(info['due_date'], '2026-10-02')
+            self.assertNotIn('ai_review', info)
+            self.assertEqual(info['organization_name'], '')
+            self.assertEqual(info['classification']['code'], '')
+            self.assertEqual(info['due_date'], '')
             self.assertEqual(info['tender_reference'], 'Tender_38669')
-            self.assertEqual(info['procurement_reference'], '6000062192')
-            self.assertEqual(info['pr_reference'], '70059386')
-            self.assertEqual(info['customer_match']['status'], 'matched')
-            self.assertEqual(info['customer_match']['candidates'][0]['id'], str(self.account.pk))
+            self.assertEqual(info['customer_match']['candidates'], [])
             self.assertFalse(Deal.objects.exists())
             payload = {
                 **self.fields, 'source_token': detail['source_token'],
                 'classification_code': 'tender_opportunity',
-                'client_reference': info['tender_reference'],
-                'submission_due_date': info['due_date'], 'description': info['scope_summary'],
             }
             first = self.post(payload)
             self.assertEqual(first.status_code, 201, first.data)
             retry = self.post(payload)
             self.assertEqual(retry.status_code, 200, retry.data)
-            provider.assert_called_once()
+            provider.assert_not_called()
         self.assertEqual(Deal.objects.count(), 1)
         self.assertEqual(OpportunityAuditEvent.objects.count(), 1)
         snapshot = OpportunityAuditEvent.objects.get().data['reviewed_email_analysis']
-        self.assertEqual(snapshot['pr_reference'], '70059386')
-        self.assertEqual(snapshot['ai_review']['proposal']['deadline_at'], '2026-10-02T01:59:00+04:00')
-        self.assertEqual(snapshot['ai_review']['model'], 'gpt-4o-mini')
-        self.assertTrue(snapshot['ai_review']['analysis_id'])
-        self.assertEqual(str(Deal.objects.get().submission_due_date), '2026-10-02')
+        self.assertNotIn('ai_review', snapshot)
+        self.assertEqual(snapshot['due_date'], '')
+        self.assertEqual(snapshot['tender_reference'], 'Tender_38669')
+        self.assertEqual(str(Deal.objects.get().submission_due_date), self.fields['submission_due_date'])
 
     def test_source_digest_excludes_model_output_but_token_binds_reviewed_proposal(self):
         with patch('apps.sales.email_ai_analysis.enhance_email_analysis', side_effect=self.proposal):
@@ -119,7 +113,7 @@ class EmailAIReviewIntegrationTests(TestCase):
         review = signing.loads(detail['source_token'], salt=REVIEW_SALT)
         self.assertEqual(review['analysis']['deadline_at'], '2026-10-02T01:59:00+04:00')
 
-    def test_saved_list_defers_provider_detail_enables_it_and_posts_snapshot(self):
+    def test_saved_list_and_detail_disable_provider_and_post_signed_snapshot(self):
         intake = self.saved()
         url = f'/api/v1/sales/email-intakes/{intake.pk}/'
         with patch('apps.sales.email_ai_analysis.enhance_email_analysis', side_effect=self.proposal) as enhance:
@@ -129,7 +123,7 @@ class EmailAIReviewIntegrationTests(TestCase):
             enhance.reset_mock()
             detail = self.client.get(url)
             self.assertEqual(detail.status_code, 200)
-            self.assertTrue(enhance.call_args.kwargs['allow_provider'])
+            self.assertFalse(enhance.call_args.kwargs['allow_provider'])
             self.assertTrue(detail.data['source_token'])
             enhance.reset_mock()
             response = self.client.post(url + 'convert-to-opportunity/', {
