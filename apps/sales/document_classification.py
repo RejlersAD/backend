@@ -19,6 +19,7 @@ from .classification_models import (OpportunityDocumentClassification as Classif
 from .document_classification_content import (COLORS, LABELS, SOURCE_BYTES, extract_document_text,
                                                intelligence_tags, rule_suggestion, type_catalog)
 from .email_ai_provider import analyze_document_sources, email_ai_cache_identity, email_ai_configuration
+from .evidence.evidence_engine import build_unified_evidence, document_evidence_records
 from .opportunity_workspace import _actor, require_access, workspace_allowed
 from .workflow import _audit
 
@@ -93,6 +94,7 @@ def classification_projection(upload, actor=None):
         'status': run.status if run else 'not_requested', 'revision': state.revision if state else 0,
         'suggested_type': run.suggested_type if run else 'unclassified',
         'evidence': run.evidence if run and readable else [],
+        'unified_evidence': run.unified_evidence if run and readable else {},
         'error_code': run.error_code if run else '', 'ai_status': run.ai_status if run else 'not_needed',
         'provider': run.provider if run else '', 'model': run.model if run else '',
         'extraction_code': run.extraction_code if run else '',
@@ -334,21 +336,27 @@ def run_document_classification(run_id):
     run, upload, actor, opportunity = claimed
     result = {'suggested_type': 'unclassified', 'origin': 'unclassified', 'evidence': [], 'error_code': '',
               'ai_status': 'not_needed', 'provider': '', 'model': '', 'extraction_code': '', 'tags': [],
-              'confidence': 0, 'recommended_folder': '', 'reasoning': '', 'search_keywords': []}
+              'confidence': 0, 'recommended_folder': '', 'reasoning': '', 'search_keywords': [],
+              'unified_evidence': {}}
     provider_identity = None
     try:
         from .private_attachments import download_private_file
-        text = ''
+        text, document_chunks = '', []
         if upload.size <= SOURCE_BYTES:
             stream, _ = download_private_file(opportunity, actor, upload.folder_key, 'radai-' + str(upload.pk))
             try:
                 text, result['extraction_code'] = extract_document_text(stream, upload.name, upload.size)
+                from .analysis_content import extract_analysis_chunks
+                document_chunks, _ = extract_analysis_chunks(stream, upload.name, upload.size)
             finally:
                 stream.close()
         else:
             result['extraction_code'] = 'source_too_large'
         kind, evidence = rule_suggestion(upload.name, text)
         result.update(suggested_type=kind, origin='rule' if kind != 'unclassified' else 'unclassified', evidence=evidence)
+        result['unified_evidence'] = build_unified_evidence(document_evidence_records(
+            upload.name, document_chunks, 'upload:' + str(upload.pk),
+        ))
         # Automatic document tagging is deliberately deterministic. Folder,
         # filename and extracted content are sufficient for the supported tag
         # vocabulary; ambiguous files remain reviewable instead of waiting for

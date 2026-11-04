@@ -58,6 +58,7 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
     source_token = serializers.SerializerMethodField()
     can_create_opportunity = serializers.SerializerMethodField()
     can_create_client = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesEmailIntake
@@ -69,6 +70,7 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             'reviewed_at', 'resolution_note', 'duplicate_of',
             'duplicate_of_subject', 'created_at', 'updated_at',
             'extracted_information', 'source_token', 'can_create_opportunity', 'can_create_client',
+            'attachments',
             'mailbox_connection', 'source_mailbox_address', 'source_tenant_id',
             'conversation_id', 'captured_by',
         ]
@@ -101,6 +103,10 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
     def get_extracted_information(self, obj):
         information = self._email_information(obj)
         return enrich_customer_match(information, request=self.context.get('request'))
+
+    def get_attachments(self, obj):
+        from .evidence.attachment_store import attachment_projection
+        return [attachment_projection(row) for row in obj.source_attachments.all()]
 
     def _email_information(self, obj):
         analyses = self.context.setdefault('_saved_email_analyses', {})

@@ -114,8 +114,42 @@ def require_assistant_configuration():
 
 
 def assistant_sources(result, messages):
-    """Only the server's authorized, retained incoming/current quote segments."""
-    return _sources(result, messages)
+    """Only the server's resolved evidence records; never raw body text."""
+    import hashlib
+    information = result.get('extracted_information', {}) if isinstance(result, dict) else {}
+    unified = information.get('unified_evidence', {}) if isinstance(information, dict) else {}
+    from .evidence.evidence_engine import build_unified_evidence
+    unified = build_unified_evidence(unified.get('records', []))
+    sources = []
+    for field, selected in (unified.get('selected') or {}).items():
+        if not isinstance(selected, dict):
+            continue
+        for candidate in selected.get('sources') or []:
+            if not isinstance(candidate, dict):
+                continue
+            material = '\0'.join(str(candidate.get(key, '')) for key in ('field', 'value', 'source_id', 'source_location'))
+            source_id = 'evidence-' + hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]
+            value = selected.get('value') or candidate.get('value', '')
+            body = '\n'.join((
+                f'Field: {field.replace("_", " ")}', f'Selected value: {value or "Needs review"}',
+                f'Source file: {candidate.get("source_name", "Unknown source")}',
+                f'Source location: {candidate.get("source_location", "Unspecified location")}',
+                f'Confidence: {selected.get("confidence", candidate.get("confidence", 0))}%',
+                f'Status: {selected.get("status", "manual_review_required")}',
+                f'Evidence value: {candidate.get("value", "")}',
+                f'Reason: {selected.get("reason", candidate.get("reason", ""))}',
+            ))
+            sources.append({'id': source_id, 'subject': f'Unified evidence: {field}', 'body': body,
+                            'direction': 'incoming', 'origin': 'document', 'sent_at': '',
+                            'thread_role': 'source_evidence', 'source_name': candidate.get('source_name', ''),
+                            'source_location': candidate.get('source_location', ''),
+                            'source_type': candidate.get('source_type', ''),
+                            'confidence': selected.get('confidence', candidate.get('confidence', 0)),
+                            'status': selected.get('status', 'manual_review_required'),
+                            'selected_value': selected.get('value', '')})
+    return {'selected_source_id': sources[0]['id'] if sources else None,
+            'coverage': result.get('analysis', {}).get('coverage', {}),
+            'partial': bool(result.get('analysis', {}).get('limitations')), 'sources': sources}
 
 
 def _checked_citations(proposal, payload):
@@ -151,6 +185,9 @@ def _checked_citations(proposal, payload):
             cursor = block_end + 1
         first, last = max(0, selected[0] - 1), min(len(normalized_blocks), selected[-1] + 2)
         checked['excerpt'] = '\n\n'.join(normalized_blocks[first:last])
+        checked.update({key: source[key] for key in (
+            'source_name', 'source_location', 'source_type', 'confidence', 'status', 'selected_value',
+        ) if key in source})
         if len(checked['excerpt']) > 1800:
             return None
         length += len(checked['excerpt'])

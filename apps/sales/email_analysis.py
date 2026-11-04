@@ -10,6 +10,7 @@ from .email_extraction import DATE_TOKEN, MAX_CONTENT, UNCERTAIN_STATEMENT, _dat
 from .email_classification import COMPILED_RULES, classify_email_segment
 from .email_intelligence import add_email_intelligence
 from .email_agreement_actions import add_agreement_actions
+from .evidence.evidence_engine import build_unified_evidence, resolved_value, source_records
 
 
 MAX_MESSAGES = 100
@@ -601,6 +602,56 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
         result['field_sources']['request_type'] = result['field_sources'].get('request_type_code', [])
     elif original and result['request_type'] not in {'', 'General client email'}:
         result['field_sources']['request_type'] = [original['id']]
+
+    # The specialist email parser contributes candidates only. The shared
+    # resolver is the authority for business values used by downstream views.
+    evidence_records = []
+    for index, segment in enumerate(factual_segments):
+        fields = segment['fields']
+        source_type = 'email' if segment is selected_segment else 'thread'
+        source_name = segment['subject'] or 'Email message'
+        source_text = segment['body']
+        records = source_records(
+            fields, source_type=source_type, source_name=source_name,
+            source_id=segment['id'], source_location='Email body', source_text=source_text,
+        )
+        # Only explicitly numbered revisions may supersede other evidence.
+        # Chronological order by itself cannot establish addendum authority.
+        evidence_records.extend(records)
+    unified_evidence = build_unified_evidence(evidence_records)
+    selected_fields = {
+        'customer_name': 'customer_name', 'organization_name': 'company_name',
+        'project_name': 'project_name', 'tender_reference': 'tender_reference',
+        'scope_summary': 'scope_summary', 'scope_type': 'scope_type',
+        'estimated_value': 'estimated_value', 'currency': 'currency',
+        'due_date': 'due_date', 'expected_award_date': 'expected_award_date',
+    }
+    for evidence_field, result_field in selected_fields.items():
+        selected = unified_evidence['selected'].get(evidence_field)
+        result[result_field] = resolved_value(unified_evidence, evidence_field)
+        if selected and selected['status'] == 'manual_review_required':
+            result['warnings'].append(f"Conflicting {evidence_field.replace('_', ' ')} evidence requires review.")
+        if selected and selected.get('selected_source_id'):
+            result['field_sources'][result_field] = [selected['selected_source_id']]
+            result['evidence'][result_field] = selected['reason']
+    organization = unified_evidence['selected'].get('organization_name')
+    if organization and organization['status'] == 'manual_review_required':
+        result['organization_name'] = ''
+        result['customer_name'] = ''
+        result['company_name'] = ''
+        result['field_sources']['customer_name'] = list(dict.fromkeys(
+            row.get('source_id', '') for row in organization['sources'] if row.get('source_id')
+        ))
+        result['evidence']['customer_name'] = organization['reason']
+    result['organization_name'] = resolved_value(unified_evidence, 'organization_name')
+    result['company_name'] = result['organization_name'] or result['customer_name']
+    result['deadline_date'] = result['due_date']
+    result['warnings'] = list(dict.fromkeys(result['warnings']))
+    due_selection = unified_evidence['selected'].get('due_date')
+    result['due_date_text'] = ' / '.join(dict.fromkeys(
+        row.get('value', '') for row in (due_selection or {}).get('sources', []) if row.get('value')
+    ))[:300]
+    result['deadline_text'] = result['due_date_text']
     if original:
         result['industry_type'] = original['fields']['industry_type']
     result['warnings'] = list(dict.fromkeys(result['warnings']))
@@ -713,6 +764,7 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
         'first_incoming_source_id': first_incoming['id'] if first_incoming else None,
         'original_request_source_id': original_request['id'] if original_request else None,
         'key_points': key_points, 'requested_actions': requested, 'suggested_actions': suggestions,
+        'unified_evidence': unified_evidence,
         'limitations': list(dict.fromkeys(value for value in limitations if value)), 'sources': sources,
         'coverage': {
             'status': status, 'messages_reviewed': reviewed_messages, 'segments_reviewed': len(segments),
@@ -726,4 +778,5 @@ def analyze_email_conversation(messages, *, selected_message_id=None, coverage=N
                                     selected=selected_segment if selected_available else None,
                                     mailbox_address=mailbox_address)
     result = add_agreement_actions(result, analysis, segments)
+    result['unified_evidence'] = unified_evidence
     return {'extracted_information': result, 'analysis': analysis}

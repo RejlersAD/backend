@@ -16,18 +16,22 @@ from rest_framework.exceptions import PermissionDenied
 from apps.rbac.action_policy import module_action_allowed
 from .analysis_content import CHUNK_CHARS, document_references, extract_analysis_chunks
 from .analysis_models import OpportunityAnalysis as Report, OpportunityAnalysisSource as Source, OpportunityAnalysisChunk as Chunk
-from .email_ai_provider import analyze_opportunity_sources, email_ai_cache_identity, email_ai_configuration
 from .email_permissions import visible_email_intakes
+from .evidence.evidence_engine import (build_unified_evidence, document_evidence_records,
+                                       email_evidence_records, resolved_value)
+from .evidence.revision_detector import revision_metadata
+from .evidence.opportunity_evidence import extract_opportunity_evidence
+from .evidence.tender_evaluator import build_tender_evaluation
 from .models import Deal, OpportunityWorkspaceUpload
 from .opportunity_workspace import _actor, require_access, download_workspace_file
 
-VERSION = 'opportunity_sales_review_v1'
-REVIEW_VERSION = 'opportunity_business_risks_v2'
+VERSION = 'opportunity_sales_review_v5_management_briefing'
+REVIEW_VERSION = 'opportunity_sow_evidence_v4'
 
 
 class ProviderUnavailable(Exception):
     pass
-KINDS = ('brief', 'client_need', 'submission', 'risk', 'action', 'deadline', 'next_step',
+KINDS = ('brief', 'client_need', 'submission', 'risk', 'action', 'milestone', 'deadline', 'next_step',
          'capability_fit', 'strategic_fit', 'resources', 'commercial', 'schedule', 'clarification')
 REVIEW_DIMENSIONS = ('capability_fit', 'strategic_fit', 'resources', 'execution_risk', 'commercial', 'schedule')
 REVIEW_SCHEMA = {'type': 'object', 'additionalProperties': False,
@@ -125,6 +129,19 @@ def inventory(deal, actor):
                 'date': intake.sent_at or intake.received_at}), 'metadata': {
                     'name': intake.subject, 'provider': 'email_intake', 'intake_id': str(intake.pk),
                     'size': len(intake.body_preview), 'folder': 'correspondence'}})
+            # Keep existing opportunity analysis available while a rolling
+            # deployment still has workers with the pre-attachment model set.
+            attachment_manager = getattr(intake, 'source_attachments', None)
+            attachments = (attachment_manager.order_by('source_part_index', 'pk')
+                           if attachment_manager is not None else ())
+            for attachment in attachments:
+                metadata = {'name': attachment.name, 'provider': 'email_attachment',
+                            'intake_id': str(intake.pk), 'attachment_id': str(attachment.pk),
+                            'size': attachment.size, 'folder': 'correspondence', 'sha256': attachment.sha256}
+                sources.append({'key': 'email_attachment:' + str(attachment.pk),
+                                'identity': digest({'metadata': metadata, 'sha': attachment.sha256,
+                                                   'storage': attachment.storage_fingerprint}),
+                                'metadata': metadata})
     return sources
 
 
@@ -194,7 +211,7 @@ def snapshot(deal, actor, sources):
         private_identity = 'unavailable'
     remote = workspace_config()
     return digest({'version': VERSION, 'review_version': REVIEW_VERSION,
-                   'provider': email_ai_cache_identity(), 'sources': sources,
+                   'provider': 'rules-only-evidence-v2', 'sources': sources,
                    'storage': private_identity, 'remote': remote.fingerprint if remote else '',
                    'opportunity': {'id': deal.pk, 'name': deal.deal_name, 'client': deal.client_id,
                                    'stage': deal.stage, 'deadline': deal.submission_due_date}})
@@ -232,12 +249,13 @@ def request_analysis(deal, actor, retry=False):
 
 def analysis_projection(deal, actor, offset=None):
     authority(deal, actor)
+    from apps.rbac.data_visibility_config import is_admin_user
+    admin_diagnostics = is_admin_user(actor)
     report = Report.objects.filter(opportunity=deal, requested_by=actor).first()
-    configuration = email_ai_configuration()
-    base = {'opportunity_id': str(deal.pk), 'ai_ready': configuration['ready'],
-            'provider': configuration['provider'], 'model': configuration['model'],
-            'coverage_note': 'Includes current RADAI files, tracked SharePoint uploads and accessible linked emails. '
-                             'Untracked SharePoint changes and embedded email attachments are not automatically imported.'}
+    base = {'opportunity_id': str(deal.pk),
+            'coverage_note': 'Includes current RADAI files, tracked SharePoint uploads, accessible linked emails and '
+                             'their retained direct attachments. Untracked SharePoint changes and nested attachments '
+                             'are not automatically imported.'}
     if not report:
         return {**base, 'status': 'not_started', 'result': {}, 'counts': {}, 'sources': [], 'next_offset': None}
     current_sources = inventory(deal, actor)
@@ -254,17 +272,73 @@ def analysis_projection(deal, actor, offset=None):
     page = []
     if offset is not None and not stale:
         for row in rows[offset:offset + 25].prefetch_related(Prefetch('chunks', queryset=Chunk.objects.defer('text'))):
-            claims = [dict(item, location=chunk.location) for chunk in row.chunks.all()
-                      if chunk.status == 'ready' for item in chunk.claims]
+            claims, rejected = [], []
+            parsed = []
+            for chunk in row.chunks.all():
+                if not chunk.text:
+                    continue
+                diagnostics = extract_opportunity_evidence(
+                    chunk.text, source_id=row.pk, source_name=row.metadata.get('name', 'Unknown source'),
+                    source_location=chunk.location,
+                )
+                claims.extend(diagnostics['extracted'])
+                rejected.extend(diagnostics['rejected'])
+                parsed.extend(diagnostics['sections_identified'])
             failed = any(chunk.status == 'failed' for chunk in row.chunks.all())
             page.append({'id': row.pk, **row.metadata, 'status': row.status, 'diagnostic': row.diagnostic,
                          'analysis_failed': failed, 'analysis_error': next(
                              (chunk.error_code for chunk in row.chunks.all() if chunk.error_code), ''),
                          'references': row.references,
-                         'claims': claims[:100], 'claims_total': len(claims)})
+                         'claims': claims[:100], 'claims_total': len(claims),
+                         'rejected': rejected[:100], 'rejected_total': len(rejected),
+                         'sections_identified': list(dict.fromkeys(parsed)),
+                         'document_discovered': True,
+                         'document_parsed': any(chunk.text for chunk in row.chunks.all()),
+                         'evidence_extracted': len(claims), 'evidence_rejected': len(rejected),
+                         'evidence_unresolved': sum(item.get('status') in {'likely', 'manual_review_required', 'conflict'} for item in claims),
+                         'evidence_verified': sum(item.get('status') == 'verified' for item in claims)})
+    projected_result = {} if stale else report.result
+    if not stale and isinstance(projected_result, dict) and projected_result:
+        # Source facts remain visible independently of internal assessment status.
+        evaluation = build_tender_evaluation(deal, projected_result)
+        cited_ids = {str(fact.get('source_id'))
+                     for facts in evaluation['opportunity_summary']['project_facts'].values()
+                     for fact in facts if fact.get('source_id') is not None}
+        cited_ids.update(str(item.get('source_id'))
+                         for dimension in evaluation['rejlers_review']['dimensions']
+                         for check in dimension['items'] for item in check['evidence']
+                         if item.get('source_id') is not None)
+        evaluation['source_documents'] = {
+            str(source.pk): {
+                'name': source.metadata.get('name', ''),
+                'folder': source.metadata.get('folder', ''),
+                'file_id': source.metadata.get('file_id', ''),
+                'provider': source.metadata.get('provider', ''),
+            }
+            for source in rows if str(source.pk) in cited_ids
+            and source.metadata.get('provider') in {'radai', 'sharepoint'}
+            and source.metadata.get('file_id')
+        }
+        projected_result = {**projected_result, 'manager_review': {
+            **(projected_result.get('manager_review') or {}),
+            'tender_evaluation': evaluation,
+        }}
+    if not admin_diagnostics and isinstance(projected_result, dict):
+        projected_result = {key: value for key, value in projected_result.items()
+                            if key not in {'evidence_debug', 'unified_evidence'}}
+        review = projected_result.get('manager_review')
+        if isinstance(review, dict):
+            review = {key: value for key, value in review.items() if key not in {'coverage', 'review_note'}}
+            projected_result['manager_review'] = review
+        counts = {key: value for key, value in counts.items() if not key.startswith('chunks_')}
+    source_gaps = ([{'name': row.metadata.get('name', ''), 'status': row.status,
+                     'reason': row.diagnostic or 'processing_incomplete'}
+                    for row in rows if row.status in {'partial', 'failed', 'blocked'}]
+                   if not stale else [])
     return {**base, 'id': str(report.pk), 'status': 'queued' if stale else report.status,
             'stale': stale, 'updated_at': report.updated_at.isoformat(), 'counts': counts,
-            'result': {} if stale else report.result, 'error_code': report.error_code,
+            'result': projected_result, 'error_code': report.error_code,
+            'source_gaps': source_gaps,
             'sources': page, 'next_offset': offset + 25 if offset is not None and not stale and rows.count() > offset + 25 else None}
 
 
@@ -328,6 +402,17 @@ def validate_claims(proposal, text):
 
 def _extract_source(source, deal, actor):
     metadata = source.metadata
+    if metadata.get('provider') == 'email_attachment':
+        intake = visible_email_intakes(actor).get(pk=metadata['intake_id'], opportunity=deal)
+        if not module_action_allowed(actor, 'sales_email_intake', 'read'):
+            raise PermissionDenied()
+        from .evidence.attachment_store import read_attachment
+        attachment = intake.source_attachments.get(pk=metadata['attachment_id'])
+        stream = read_attachment(attachment)
+        try:
+            return extract_analysis_chunks(stream, attachment.name, attachment.size)
+        finally:
+            stream.close()
     if metadata['provider'] == 'email_intake':
         intake = visible_email_intakes(actor).get(pk=metadata['intake_id'], opportunity=deal)
         if not module_action_allowed(actor, 'sales_email_intake', 'read'):
@@ -355,30 +440,48 @@ def _compile(report):
     deadline_order = lambda item: (0 if item['date'] and item['date'] >= today else 1 if item['date'] else 2, item['date'])
     sources = report.sources.order_by('id')
     seen = set()
+    source_diagnostics = []
     for source in sources:
         label = {'source_id': source.pk, 'name': source.metadata['name']}
         if source.metadata.get('sha256'):
             identical[source.metadata['sha256']].append(label)
         for ref in source.references:
             refs[ref.upper()].append(label)
-        for chunk in source.chunks.filter(status='ready').defer('text').iterator(chunk_size=100):
-            for claim in chunk.claims:
-                key = digest((claim['kind'], claim['text'], claim['date']))
+        chunks = list(source.chunks.order_by('ordinal'))
+        diagnostics = {'source_id': source.pk, 'source_key': source.source_key,
+                       'source_name': source.metadata.get('name', 'Unknown source'),
+                       'provider': source.metadata.get('provider', 'unknown'), 'document_discovered': True,
+                       'document_parsed': bool(chunks) and any(chunk.text for chunk in chunks),
+                       'sections_identified': [], 'evidence_extracted': 0, 'evidence_rejected': 0,
+                       'evidence_unresolved': 0, 'evidence_verified': 0, 'extracted': [], 'rejected': [],
+                       'parse_status': source.status, 'parse_reason': source.diagnostic or '', 'chunks': []}
+        for chunk in chunks:
+            diagnostics['chunks'].append({'location': chunk.location, 'text': chunk.text})
+            parsed = extract_opportunity_evidence(chunk.text, source_id=source.pk,
+                                                   source_name=source.metadata.get('name', 'Unknown source'),
+                                                   source_location=chunk.location)
+            diagnostics['sections_identified'].extend(parsed['sections_identified'])
+            diagnostics['rejected'].extend(parsed['rejected'])
+            diagnostics['evidence_rejected'] += len(parsed['rejected'])
+            for claim in parsed['extracted']:
+                claim = {**claim, 'excerpt': claim['excerpt'], 'location': chunk.location,
+                         'source_id': source.pk, 'name': source.metadata.get('name', 'Unknown source'),
+                         'file_id': source.metadata.get('file_id'), 'folder': source.metadata.get('folder')}
+                diagnostics['extracted'].append(claim)
+                diagnostics['evidence_extracted'] += 1
+                diagnostics['evidence_unresolved'] += 1
+                key = digest((claim['kind'], claim['text'], claim.get('date', '')))
                 if key in seen:
                     continue
                 seen.add(key)
                 kind = claim['kind']
-                if kind == 'deadline' and claim['date']:
+                if kind == 'deadline' and claim.get('date'):
                     deadline_dates.add(claim['date'])
                 item_counts[kind] += 1
-                item = {**claim, **label, 'location': chunk.location,
-                        'file_id': source.metadata.get('file_id'), 'folder': source.metadata.get('folder')}
-                if len(sections[kind]) < 12:
-                    sections[kind].append(item)
-                elif kind == 'deadline':
-                    sections[kind].append(item)
-                    sections[kind].sort(key=deadline_order)
-                    sections[kind] = sections[kind][:12]
+                if len(sections[kind]) < 12 or kind == 'deadline':
+                    sections[kind].append(claim)
+        diagnostics['sections_identified'] = list(dict.fromkeys(diagnostics['sections_identified']))
+        source_diagnostics.append(diagnostics)
     sections['deadline'].sort(key=deadline_order)
     relationships = [{'kind': 'shared_reference', 'reference': key, 'sources': values}
                      for key, values in refs.items() if len(values) > 1]
@@ -387,18 +490,57 @@ def _compile(report):
     dates = sorted(deadline_dates)
     # Multiple dates are a review signal, never an assertion that all refer to
     # the same milestone or that the latest document overrides earlier evidence.
+    unified_records = []
+    for source in sources:
+        source_chunks = list(source.chunks.order_by('ordinal').values_list('location', 'text'))
+        if source.metadata.get('provider') == 'email_intake':
+            text = '\n'.join(value for _, value in source_chunks)
+            source_records = email_evidence_records(
+                source.metadata.get('name', ''), text, source_id=source.source_key,
+                source_name=source.metadata.get('name', ''),
+            )
+            revision = revision_metadata(source.metadata.get('name', ''), text)
+            for record in source_records:
+                record['revision'] = revision['revision']
+                record['revision_date'] = revision.get('revision_date', '')
+            unified_records.extend(source_records)
+        elif source.metadata.get('provider') == 'email_attachment':
+            intake = visible_email_intakes(report.requested_by).filter(
+                pk=source.metadata['intake_id'], opportunity_id=report.opportunity_id).first()
+            if intake:
+                attachment = intake.source_attachments.filter(pk=source.metadata['attachment_id']).first()
+                if attachment:
+                    attachment_records = document_evidence_records(
+                        attachment.name,
+                        [(item.get('location', 'Document text'), item.get('text', ''))
+                         for item in attachment.text_chunks if isinstance(item, dict)
+                         and isinstance(item.get('text'), str)],
+                        source.source_key,
+                    )
+                    unified_records.extend(attachment_records)
+        else:
+            document_records = document_evidence_records(
+                source.metadata.get('name', ''), source_chunks, source.source_key,
+            )
+            revision = revision_metadata(
+                source.metadata.get('name', ''), '\n'.join(text for _, text in source_chunks),
+            )
+            for record in document_records:
+                record['revision'] = revision['revision']
+                record['revision_date'] = revision.get('revision_date', '')
+            unified_records.extend(document_records)
+    unified_evidence = build_unified_evidence(unified_records)
     return {'sections': {kind: values[:12] for kind, values in sections.items()},
             'item_counts': item_counts,
             'relationships': relationships[:50], 'deadline_dates': dates,
-            'review_note': 'AI findings and recommendations require review. Source excerpts support traceability, '
+            'unified_evidence': unified_evidence,
+            'evidence_debug': source_diagnostics,
+            'review_note': 'Rules-based findings and recommendations require management review. Source excerpts support traceability, '
                            'not legal interpretation or approval. Multiple dates may refer to different milestones.'}
 
 
 def _manager_review(report, deal, compiled):
-    """Synthesize a cited, advisory Sales review from verified extracted claims."""
-    from .email_ai_provider import analyze_opportunity_review_sources
-
-    claims = []
+    """Build a rules-only, source-cited review; never infer an internal go/no-go."""
     evidence = {}
     record_values = {
         'Opportunity reference': deal.deal_code,
@@ -417,147 +559,53 @@ def _manager_review(report, deal, compiled):
             evidence_id = f'record:{field.casefold().replace(" ", "_")}'
             evidence[evidence_id] = {'source_id': 'opportunity', 'name': 'Saved Opportunity record',
                                      'location': field, 'text': str(value), 'excerpt': str(value)}
-            claims.append({'id': evidence_id, 'kind': 'opportunity_record', 'text': str(value)[:300],
-                           'excerpt': str(value)[:300], 'source': 'Saved Opportunity record', 'location': field})
-    claim_limits = {'brief': 3, 'client_need': 3, 'submission': 4, 'risk': 12,
-                    'action': 2, 'deadline': 3, 'next_step': 2, 'capability_fit': 4,
-                    'strategic_fit': 4, 'resources': 5, 'execution_risk': 4,
-                    'commercial': 12, 'schedule': 5, 'clarification': 4}
-    source_claim_count = sum(min(limit, len(compiled['sections'].get(kind, [])))
-                             for kind, limit in claim_limits.items())
-    for kind, limit in claim_limits.items():
-        # Keep the synthesis input bounded. The complete source analysis remains
-        # available in the cited sections and Sources view.
-        for index, item in enumerate(compiled['sections'].get(kind, [])[:limit]):
-            evidence_id = f"{item['source_id']}:{kind}:{index}"
-            evidence[evidence_id] = item
-            claims.append({'id': evidence_id, 'kind': kind, 'text': item['text'][:300],
-                           'excerpt': item['excerpt'][:300], 'source': item['name'][:120],
-                           'location': item['location'][:120]})
+    unified = compiled.get('unified_evidence') or {}
+    source_rows = [item for group in compiled.get('evidence_debug', []) for item in group.get('extracted', [])]
+    source_claim_count = len(source_rows)
+    for index, item in enumerate(source_rows):
+        evidence[f"source:{index}"] = {'source_id': item.get('source_id', ''), 'name': item.get('name', ''),
+            'location': item.get('location', ''), 'text': item.get('text', ''), 'excerpt': item.get('excerpt', ''),
+            'confidence': item.get('confidence', 0), 'status': item.get('status', 'likely')}
     facts = {
         'reference': deal.deal_code, 'title': deal.deal_name, 'opportunity_type': deal.opportunity_type,
-        'client': getattr(deal.client, 'company_name', ''), 'scope_type': deal.scope_type,
+        'client': resolved_value(unified, 'organization_name') or resolved_value(unified, 'customer_name'),
+        'scope_type': resolved_value(unified, 'scope_type'),
         'service_categories': deal.service_categories or [],
-        'estimated_value': str(deal.estimated_value) if deal.estimated_value is not None else '',
-        'currency': deal.currency, 'submission_due_date': str(deal.submission_due_date or ''),
-        'expected_close_date': str(deal.expected_close_date or ''),
+        'estimated_value': resolved_value(unified, 'estimated_value'),
+        'currency': resolved_value(unified, 'currency'),
+        'submission_due_date': resolved_value(unified, 'due_date'),
+        'expected_close_date': resolved_value(unified, 'expected_award_date'),
         'internal_company_information': 'Not provided. Capability inventory, strategic priorities, current resource availability, margin and commercial thresholds are unknown.',
     }
-    if not source_claim_count:
-        return {'status': 'ready', 'recommendation': 'insufficient_evidence',
-                'rationale': 'No verified tender evidence is available for a Go/No-Go recommendation.',
-                'rationale_evidence': [],
-                'dimensions': [{'dimension': key, 'assessment': 'unknown',
-                                'summary': 'No verified evidence available.', 'evidence': []}
-                               for key in REVIEW_DIMENSIONS],
-                'business_risks': [], 'clarifications': [], 'suggested_letter': 'none', 'coverage': {'source_claims_considered': 0,
-                    'opportunity_fields_considered': record_value_count, 'sources': report.sources.count()},
-                'review_note': 'No verified tender evidence is available. This is not a No-Go decision.'}
-    response = analyze_opportunity_review_sources({'opportunity': facts, 'evidence': claims}, REVIEW_SCHEMA)
-    if response['status'] != 'completed':
-        return {'status': 'unavailable', 'error_code': response.get('error_code') or 'provider_unavailable'}
-    proposal = response.get('proposal')
-    if not isinstance(proposal, dict):
-        return {'status': 'unavailable', 'error_code': 'invalid_output'}
-    try:
-        if set(proposal) != {'recommendation', 'rationale', 'rationale_evidence_ids', 'dimensions', 'business_risks', 'clarifications', 'suggested_letter'}:
-            raise ValueError()
-        if proposal['recommendation'] not in {'go', 'conditional_go', 'no_go', 'insufficient_evidence'}:
-            raise ValueError()
-        if proposal['suggested_letter'] not in {'eoi', 'regret_expertise', 'regret_manpower', 'user_choice', 'none'}:
-            raise ValueError()
-        if not isinstance(proposal['rationale'], str):
-            raise ValueError()
-        proposal['rationale'] = proposal['rationale'][:1800]
-        if (not isinstance(proposal['rationale_evidence_ids'], list)
-                or any(key not in evidence for key in proposal['rationale_evidence_ids'])):
-            raise ValueError()
-        proposal['rationale_evidence_ids'] = proposal['rationale_evidence_ids'][:6]
-        if proposal['recommendation'] != 'insufficient_evidence' and not proposal['rationale_evidence_ids']:
-            raise ValueError()
-        dimensions = proposal['dimensions']
-        if not isinstance(dimensions, list) or len(dimensions) != len(REVIEW_DIMENSIONS):
-            raise ValueError()
-        seen = set()
-        for item in dimensions:
-            if (not isinstance(item, dict) or set(item) != {'dimension', 'assessment', 'summary', 'evidence_ids'}
-                    or item['dimension'] not in REVIEW_DIMENSIONS or item['dimension'] in seen
-                    or item['assessment'] not in {'fit', 'gap', 'mixed', 'unknown'}
-                    or not isinstance(item['summary'], str)
-                    or not isinstance(item['evidence_ids'], list)
-                    or any(key not in evidence for key in item['evidence_ids'])):
-                raise ValueError()
-            seen.add(item['dimension'])
-            item['summary'] = item['summary'][:700]
-            # Unknown internal facts cannot be established by tender citations.
-            item['evidence_ids'] = [] if item['assessment'] == 'unknown' else item['evidence_ids'][:4]
-        if seen != set(REVIEW_DIMENSIONS):
-            raise ValueError()
-        if not isinstance(proposal['business_risks'], list):
-            raise ValueError()
-        proposal['business_risks'] = proposal['business_risks'][:5]
-        for item in proposal['business_risks']:
-            if (not isinstance(item, dict)
-                    or set(item) != {'category', 'risk', 'decision_impact', 'evidence_ids'}
-                    or item['category'] not in {'attractiveness', 'profitability', 'winnability', 'commercial_exposure'}
-                    or not isinstance(item['risk'], str) or not isinstance(item['decision_impact'], str)
-                    or not isinstance(item['evidence_ids'], list)
-                    or any(key not in evidence for key in item['evidence_ids'])):
-                raise ValueError()
-            item['risk'] = item['risk'][:500]
-            item['decision_impact'] = item['decision_impact'][:500]
-            item['evidence_ids'] = item['evidence_ids'][:4]
-        proposal['business_risks'] = [item for item in proposal['business_risks'] if item['evidence_ids']
-                                      and item['risk'].strip() and item['decision_impact'].strip()]
-        if not isinstance(proposal['clarifications'], list):
-            raise ValueError()
-        proposal['clarifications'] = proposal['clarifications'][:12]
-        for item in proposal['clarifications']:
-            if (not isinstance(item, dict) or set(item) != {'text', 'evidence_ids'}
-                    or not isinstance(item['text'], str)
-                    or not isinstance(item['evidence_ids'], list)
-                    or any(key not in evidence for key in item['evidence_ids'])):
-                raise ValueError()
-            item['text'] = item['text'][:700]
-            item['evidence_ids'] = item['evidence_ids'][:4]
-        proposal['clarifications'] = [item for item in proposal['clarifications'] if item['evidence_ids']]
-        if proposal['suggested_letter'] == 'eoi' and proposal['recommendation'] not in {'go', 'conditional_go'}:
-            raise ValueError()
-        if proposal['suggested_letter'] in {'regret_expertise', 'regret_manpower'} and proposal['recommendation'] != 'no_go':
-            raise ValueError()
-        if proposal['suggested_letter'] == 'regret_expertise':
-            dimension = next(item for item in dimensions if item['dimension'] == 'capability_fit')
-            if dimension['assessment'] != 'gap' or not dimension['evidence_ids']:
-                proposal['suggested_letter'] = 'user_choice'
-        if proposal['suggested_letter'] == 'regret_manpower':
-            dimension = next(item for item in dimensions if item['dimension'] == 'resources')
-            if dimension['assessment'] != 'gap' or not dimension['evidence_ids']:
-                proposal['suggested_letter'] = 'user_choice'
-        # There is no approved internal source for Rejlers Abu Dhabi capability,
-        # strategy or current resource capacity in this implementation.
-        for item in dimensions:
-            if item['dimension'] in {'capability_fit', 'strategic_fit', 'resources'}:
-                item['assessment'] = 'unknown'
-                item['summary'] = 'No approved Rejlers Abu Dhabi source was supplied for this assessment.'
-                item['evidence_ids'] = []
-        if proposal['suggested_letter'] in {'regret_expertise', 'regret_manpower'}:
-            proposal['suggested_letter'] = 'user_choice'
-        if proposal['recommendation'] == 'no_go' and proposal['suggested_letter'] not in {'regret_expertise', 'regret_manpower'}:
-            proposal['suggested_letter'] = 'user_choice'
-    except (KeyError, TypeError, ValueError):
-        return {'status': 'unavailable', 'error_code': 'invalid_output'}
-    for item in dimensions:
-        item['evidence'] = [dict(evidence[key]) for key in item.pop('evidence_ids')]
-    for item in proposal['business_risks']:
-        item['evidence'] = [dict(evidence[key]) for key in item.pop('evidence_ids')]
-    for item in proposal['clarifications']:
-        item['evidence'] = [dict(evidence[key]) for key in item.pop('evidence_ids')]
-    proposal['rationale_evidence'] = [dict(evidence[key]) for key in proposal.pop('rationale_evidence_ids')]
-    return {'status': 'ready', **proposal,
+    risks = []
+    clarifications = []
+    for index, item in enumerate(source_rows):
+        if item.get('kind') == 'risk':
+            risks.append({'category': 'commercial_exposure', 'risk': item['text'],
+                          'decision_impact': 'Source states this risk; assess its relevance before deciding.',
+                          'evidence': [evidence[f'source:{index}']]})
+        if item.get('kind') == 'clarification':
+            clarifications.append({'text': item['text'], 'evidence': [evidence[f'source:{index}']]})
+    evaluation = build_tender_evaluation(deal, compiled)
+    clarifications = [{
+        'text': item['question'], 'field': item.get('field'),
+        'reason': item['why_material'],
+        'evidence': [{'name': row.get('source_file', ''), 'location': row.get('source_page', ''),
+                      'excerpt': row.get('source_text', row.get('excerpt', ''))}
+                     for row in item.get('evidence', [])],
+    } for item in evaluation['critical_clarifications']]
+    return {'status': 'ready', 'recommendation': 'insufficient_evidence',
+            'rationale': ('Source-stated requirements and risks are available for review. Internal capability, '
+                          'resource, and commercial information is not established by tender documents; clear the listed conditions before the official decision.'),
+            'rationale_evidence': [],
+            'dimensions': [{'dimension': key, 'assessment': 'unknown',
+                            'summary': 'Requires internal opportunity information; source text alone cannot establish this.',
+                            'evidence': []} for key in REVIEW_DIMENSIONS],
+            'business_risks': risks[:12], 'clarifications': clarifications[:12], 'suggested_letter': 'none',
+            'tender_evaluation': evaluation,
             'coverage': {'source_claims_considered': source_claim_count,
                          'opportunity_fields_considered': record_value_count, 'sources': report.sources.count()},
-            'review_note': 'Advisory AI recommendation. Internal capabilities, strategy, resource availability and commercial thresholds were not supplied; review these before deciding.'}
-
+            'review_note': 'Rules-only, evidence-backed preliminary review. Internal capability, resources and commercial terms require approval before a recommendation; record the official decision separately.'}
 
 def run_analysis_step(report_id):
     """One durable extraction/provider unit per task; leases recover worker loss."""
@@ -594,9 +642,9 @@ def run_analysis_step(report_id):
                         row.save()
                 _collapse_existing_duplicates(locked)
                 effective, _ = unique_sources(available, locked.suppressed_sources)
-                # Provider changes invalidate AI claims even for identical files.
+                # Rule changes invalidate extracted claims for identical files.
                 old_provider = locked.provider_identity
-                provider = digest((email_ai_cache_identity(), VERSION))
+                provider = digest(('rules-only-evidence-v2', VERSION))
                 if old_provider and old_provider != provider:
                     locked.sources.all().delete()
                     Source.objects.bulk_create([Source(report=locked, source_key=item['key'], identity=item['identity'], metadata=item['metadata']) for item in effective])
@@ -620,20 +668,8 @@ def run_analysis_step(report_id):
         else:
             chunk = Chunk.objects.filter(source__report=report, status='queued').select_related('source').order_by('id').first()
             if chunk:
-                if not email_ai_configuration()['ready']:
-                    raise ProviderUnavailable()
-                response = analyze_opportunity_sources({'opportunity': deal.deal_name, 'source_name': chunk.source.metadata['name'],
-                                                         'location': chunk.location, 'text': chunk.text}, SCHEMA)
-                if response['status'] != 'completed':
-                    claims = []
-                    code = response.get('error_code')
-                    chunk_error = code if isinstance(code, str) and code in PROVIDER_ERRORS else 'provider_unavailable'
-                else:
-                    try:
-                        claims, rejected = _verified_claims(response['proposal'], chunk.text)
-                        chunk_error = 'invalid_evidence' if rejected else ''
-                    except (ValueError, KeyError, TypeError):
-                        claims, chunk_error = [], 'invalid_output'
+                claims = []
+                chunk_error = ''
             else:
                 final = _compile(report)
                 final['manager_review'] = _manager_review(report, deal, final)
@@ -669,7 +705,7 @@ def run_analysis_step(report_id):
             elif chunk:
                 chunk.claims, chunk.error_code = claims, chunk_error
                 chunk.attempts += 1
-                chunk.status = 'ready' if claims or not chunk_error else 'failed' if chunk.attempts >= 3 else 'queued'
+                chunk.status = 'ready' if not chunk_error else 'failed' if chunk.attempts >= 3 else 'queued'
                 chunk.save()
                 remaining = chunk.source.chunks.exclude(status__in=['ready', 'failed']).exists()
                 if not remaining:
@@ -679,10 +715,9 @@ def run_analysis_step(report_id):
                 locked.error_code = chunk_error
             else:
                 locked.result = final
-                locked.status = 'partial' if (locked.sources.exclude(status='ready').exists()
-                                              or final['manager_review']['status'] != 'ready') else 'ready'
+                locked.status = 'partial' if locked.sources.exclude(status='ready').exists() else 'ready'
                 has_readable = Chunk.objects.filter(source__report=locked, status='ready').exists()
-                locked.error_code = '' if has_readable or not locked.sources.exists() else 'no_verified_source_results'
+                locked.error_code = '' if has_readable or not locked.sources.exists() else 'no_readable_sources'
                 if locked.error_code:
                     locked.status = 'failed'
             locked.lease_token = locked.lease_until = None
@@ -690,7 +725,7 @@ def run_analysis_step(report_id):
             locked.save()
         return True
     except Exception as error:
-        code = 'access_changed' if isinstance(error, PermissionDenied) else 'ai_not_configured' if isinstance(error, ProviderUnavailable) else 'analysis_unavailable'
+        code = 'access_changed' if isinstance(error, PermissionDenied) else 'analysis_unavailable'
         Report.objects.filter(pk=report.pk, lease_token=token).update(
             status='blocked' if code == 'access_changed' else 'failed', error_code=code,
             result={}, lease_token=None, lease_until=None, updated_at=timezone.now())

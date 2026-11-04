@@ -431,6 +431,23 @@ def validate_email_proposal(result, payload, proposal, *, provider='', model='')
         confidence[name] = _confidence(item['source_id'], payload['partial'])
         analysis['key_points'] = [point for point in analysis.get('key_points', []) if point.get('label') != FIELD_LABELS[name]]
         analysis['key_points'].append({'label': FIELD_LABELS[name], 'value': item['value'], 'source_ids': refs[name]})
+    # Optional AI output may enrich classifications, but only the shared
+    # resolver selects canonical business fields exposed to downstream users.
+    from .evidence.evidence_engine import build_unified_evidence, resolved_value
+    unified = build_unified_evidence(info.get('unified_evidence', {}).get('records', []))
+    info['unified_evidence'] = unified
+    analysis['unified_evidence'] = unified
+    canonical_fields = {
+        'customer_name': 'customer_name', 'organization_name': 'organization_name',
+        'project_name': 'project_name', 'tender_reference': 'tender_reference',
+        'scope_summary': 'scope_summary', 'scope_type': 'scope_type',
+        'estimated_value': 'estimated_value', 'currency': 'currency',
+        'due_date': 'due_date', 'expected_award_date': 'expected_award_date',
+    }
+    for evidence_field, result_field in canonical_fields.items():
+        info[result_field] = resolved_value(unified, evidence_field)
+    info['company_name'] = info.get('organization_name') or info.get('customer_name', '')
+    info['deadline_date'] = info.get('due_date', '')
     if 'organization_name' in accepted:
         item = accepted['organization_name']
         for alias in ('customer_name', 'company_name'):

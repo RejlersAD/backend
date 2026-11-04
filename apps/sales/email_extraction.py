@@ -119,7 +119,7 @@ def _reference_candidates(content):
     candidates = {'tender_reference': [], 'organization_reference': [], 'document_reference': []}
     kinds = r'(?:EOI|EIO|RFT|RFQ|RFP|ITT|Tender|Client|Enquiry|Inquiry|Request\s+for\s+Quotation)'
     labelled = (
-        rf'\b{kinds}(?:[ \t]*{REFERENCE_LABEL}[ \t]*[:#=\-]?[ \t]*'
+        rf'\b{kinds}(?:[ \t]*{REFERENCE_LABEL}[ \t]*\*{{0,2}}[:#=\-]?[ \t]*\*{{0,2}}[ \t]*'
         rf'|[ \t]*[:#=][ \t]*|[ \t]+){REFERENCE_VALUE}'
     )
     compact = (
@@ -144,8 +144,8 @@ def _reference_candidates(content):
             continue
         if company_context:
             company = re.search(
-                rf'^[ \t]*(?:{COMPANY_NAMES}[ \t]+)?Ref(?:erence)?\.?'
-                rf'(?:[ \t]+(?:No\.?|Number|ID))?[ \t]*[:#=][ \t]*{REFERENCE_VALUE}', line, re.I,
+                rf'^[ \t]*(?:-[ \t]+)?\*{{0,2}}(?:{COMPANY_NAMES}[ \t]+)?Ref(?:erence)?\.?'
+                rf'(?:[ \t]+(?:No\.?|Number|ID))?[ \t]*\*{{0,2}}[:#=][ \t]*\*{{0,2}}[ \t]*{REFERENCE_VALUE}', line, re.I,
             )
             if company:
                 candidates['organization_reference'].append((company['value'], company.group(0)))
@@ -225,8 +225,8 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
         "project_name": r"(?:Project(?:\s+(?:name|title))?|Name\s+of\s+(?:the\s+)?Project)",
     }
     for key, label in labels.items():
-        pattern = rf"^[ \t]*(?:{label})[ \t]*(?:[:=][ \t]*|\t+)([^\n]+)"
-        candidates = [(match.group(1), match.group(0)) for match in re.finditer(pattern, content, re.I | re.M)]
+        pattern = rf"^[ \t]*(?:-[ \t]+)?\*{{0,2}}(?:{label})\*{{0,2}}[ \t]*(?:[:=]\*{{0,2}}[ \t]*|\t+)([^\n]+)"
+        candidates = [(match.group(1).strip(' *\t'), match.group(0)) for match in re.finditer(pattern, content, re.I | re.M)]
         if key == 'project_name':
             candidates += [(match.group(1).strip(), match.group(0)) for match in re.finditer(
                 rf'(?:^|[|;])[ \t]*(?:{label})[ \t]*[:=][ \t]*([^|;\n]{{2,300}})',
@@ -278,6 +278,14 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
             content, re.I | re.M,
         ))
         unique_value('scope_summary', [(match.group(1), match.group(0)) for match in scope_matches])
+    if not result['scope_summary'] and 'scope_summary' not in evidence:
+        overview_matches = []
+        for heading in re.finditer(r'^[ \t]*\*{0,2}Overview\*{0,2}[ \t]*\n', content, re.I | re.M):
+            excerpt = next(email_text_units(content[heading.end():heading.end() + 700].lstrip()), '')
+            if (30 <= len(excerpt) <= 600 and re.search(r'\b(?:seeking|requesting|inviting)\b', excerpt, re.I)
+                    and re.search(r'\b(?:program|services|scope|workstreams?)\b', excerpt, re.I)):
+                overview_matches.append((' '.join(excerpt.split()), excerpt))
+        unique_value('scope_summary', overview_matches)
 
     date_labels = {
         "submission_date": r"(?<!required )(?<!required\s)submission\s+date|date\s+of\s+submission",
@@ -286,14 +294,14 @@ def _extract_email_fields(*, subject="", body_text="", sender_email="", sender_n
     }
     for key, label in date_labels.items():
         weekday = r"(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
-        bridge = r"[ \t]*[:\-]?[ \t]*"
+        bridge = r"[ \t]*[:\-]?[ \t]*\*{0,2}[ \t]*"
         if key == 'due_date':
             bridge = (
                 r'\s*(?:for\s+(?:the\s+)?(?:submission|receipt|return)'
                 r'(?:\s+of\s+(?:the\s+|your\s+)?(?:(?:budgetary|technical|commercial)\s+)?'
                 r'(?:quotations?|proposals?|tenders?|bids?))?)?'
                 r'\s*(?:(?:and|&)\s*time\s*)?'
-                r'\s*(?:(?:is|will\s+be|shall\s+be|falls\s+on)\s*)?(?:on\s+)?[:=\-]?\s*'
+                r'\s*(?:(?:is|will\s+be|shall\s+be|falls\s+on)\s*)?(?:on\s+)?[:=\-]?\*{0,2}\s*'
             )
         matches = [match for match in re.finditer(
             rf"\b(?:{label}){bridge}{weekday}(?P<date>{DATE_TOKEN})(?!\d)", content, re.I,

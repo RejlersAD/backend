@@ -49,10 +49,22 @@ def read_key(path):
     return key
 
 
-def post_payload(payload, key):
+def post_payload(payload, key, *, mailbox='', data=None):
     opener = build_opener(ProxyHandler({}), NoRedirect())
-    request = Request(ENDPOINT, data=json.dumps(payload).encode('utf-8'), method='POST',
-                      headers={'Content-Type': 'application/json', 'X-RADAI-Webhook-Key': key})
+    headers = {'X-RADAI-Webhook-Key': key}
+    if data is None:
+        body = json.dumps(payload).encode('utf-8')
+        headers['Content-Type'] = 'application/json'
+    else:
+        boundary = uuid4().hex
+        fields = [*payload.items(), ('mailbox', mailbox)]
+        parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode('utf-8')
+                 for name, value in fields]
+        parts.extend([f'--{boundary}\r\nContent-Disposition: form-data; name="original_eml"; filename="source.eml"\r\n'
+                      'Content-Type: message/rfc822\r\n\r\n'.encode(), data, f'\r\n--{boundary}--\r\n'.encode()])
+        body = b''.join(parts)
+        headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
+    request = Request(ENDPOINT, data=body, method='POST', headers=headers)
     try:
         with opener.open(request, timeout=20) as response:
             data = response.read(65537)
@@ -240,7 +252,8 @@ def scan(folder, mailbox, *, apply=False, key='', state=None, checkpoint=None, s
                 if already_accepted:
                     counts['unchanged'] += 1
                 elif apply:
-                    duplicate = send(payload, key)
+                    duplicate = (send(payload, key, mailbox=mailbox, data=data) if send is post_payload
+                                 else send(payload, key))
                     counts['duplicates' if duplicate else 'imported'] += 1
             if apply:
                 state[path.name] = {'signature': signature, 'outcome': outcome}

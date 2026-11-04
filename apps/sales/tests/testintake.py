@@ -191,6 +191,38 @@ class SalesEmailIntakeReviewTests(TestCase):
             str(self.intake.id),
         )
 
+    def test_markdown_eoi_is_reviewable_and_can_create_opportunity(self):
+        self.intake.subject = 'Invitation to Participate in EOI3-3000105709'
+        self.intake.body_preview = (
+            'Example Energy Services invites your organization to participate in this Expression of Interest.\n\n'
+            'Event Details\n\n- *EOI Number:* EOI3-3000105709\n'
+            '- *Project Title:* Example ERP Transformation\n'
+            '- *Client:* Example Energy Services\n'
+            '- *Submission Deadline:* 06 July 2026\n\n'
+            'Interested suppliers should submit their Expression of Interest before the stated deadline.'
+        )
+        self.intake.save(update_fields=['subject', 'body_preview'])
+        detail = self.client.get(f'/api/v1/sales/email-intakes/{self.intake.id}/')
+        self.assertEqual(detail.status_code, 200)
+        extracted = detail.data['extracted_information']
+        self.assertEqual((extracted['classification']['status'], extracted['classification']['code']),
+                         ('classified', 'eoi'))
+        self.assertEqual(extracted['tender_reference'], 'EOI3-3000105709')
+        self.assertEqual(extracted['project_name'], 'Example ERP Transformation')
+        response = self.client.post(
+            f'/api/v1/sales/email-intakes/{self.intake.id}/convert-to-opportunity/',
+            {
+                'client': str(self.account.id),
+                'classification_code': 'eoi', 'classification_confirmed': True,
+                'deal_name': extracted['project_name'],
+                'client_reference': extracted['tender_reference'],
+                'description': extracted['scope_summary'],
+            }, format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['opportunity']['client_reference'], 'EOI3-3000105709')
+        self.assertEqual(response.data['intake']['status'], 'converted')
+
     def test_extracts_email_fields_and_creates_client_with_opportunity(self):
         self.intake.subject = (
             'RFQ-2026-0915 | Grid Stability Study | Proposal Required by 18 Sep 2026'

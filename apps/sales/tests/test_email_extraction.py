@@ -12,6 +12,23 @@ class EmailExtractionTests(SimpleTestCase):
                 self.assertEqual(data['customer_name'], 'Example Engineering LLC')
                 self.assertIn(f'{label}: Example Engineering LLC', data['evidence']['customer_name'])
 
+    def test_markdown_eoi_event_details_keep_tender_and_internal_references_separate(self):
+        body = ('Event Details\n\n'
+                '   - *EOI Number:* EOI3-3000105709\n'
+                '   - *Reference:* Q-101806\n'
+                '   - *Project Title:* Example ERP Transformation\n'
+                '   - *Client:* ADNOC Example Services\n'
+                '   - *Submission Deadline:* 06 July 2026 at 10:00 AM\n\n'
+                'Overview\n\nADNOC Example Services is seeking partners to support an ERP transformation program.\n')
+        data = self.extract(body, subject='Invitation to Participate in EOI3-3000105709')
+        self.assertEqual(data['customer_name'], 'ADNOC Example Services')
+        self.assertEqual(data['project_name'], 'Example ERP Transformation')
+        self.assertEqual(data['tender_reference'], 'EOI3-3000105709')
+        self.assertEqual(data['organization_reference'], 'Q-101806')
+        self.assertEqual(data['due_date'], '2026-07-06')
+        self.assertIn('ERP transformation program', data['scope_summary'])
+        self.assertIn('EOI Number:* EOI3-3000105709', data['evidence']['tender_reference'])
+
     def test_conflicting_compound_labels_remain_unresolved(self):
         data = self.extract('Client Company: First Buyer LLC\nCompany Name: Second Buyer LLC')
         self.assertEqual(data['customer_name'], '')

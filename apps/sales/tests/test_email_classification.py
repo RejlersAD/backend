@@ -69,6 +69,16 @@ class EmailClassificationTests(SimpleTestCase):
                 for item in result['evidence']:
                     self.assertIn(item['excerpt'], subject if item['location'] == 'subject' else body)
 
+    def test_submission_deadline_does_not_make_current_eoi_conditional(self):
+        body = ('Example Energy is pleased to invite your organization to participate in this Expression of Interest (EOI).\n\n'
+                'Interested suppliers should submit their Expression of Interest through the sourcing portal '
+                'before the stated deadline.')
+        result = self.classify('Invitation to Participate in EOI3-3000105709', body)
+        self.assertEqual((result['status'], result['code']), ('classified', 'eoi'))
+        self.assertTrue(result['evidence'])
+        conditional = self.classify('Services', 'If approved before the stated deadline, we will issue an EOI.')
+        self.assertNotEqual(conditional['code'], 'eoi')
+
     def test_folded_qualifier_applies_to_whole_request_clause(self):
         for body in ('If approved, we will issue a\nrequest for budgetary quotation.',
                      'We are not issuing a\nrequest for quotation.',
