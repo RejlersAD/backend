@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from pathlib import PurePosixPath
 import re
 from uuid import uuid4
@@ -27,6 +28,17 @@ from .opportunity_workspace import _actor, require_access, download_workspace_fi
 
 VERSION = 'opportunity_sales_review_v5_management_briefing'
 REVIEW_VERSION = 'opportunity_sow_evidence_v4'
+logger = logging.getLogger(__name__)
+
+
+def enqueue_analysis(report_id):
+    """Wake the worker after commit; SQL intent survives broker outages."""
+    from .tasks import analyze_opportunity_step
+    try:
+        analyze_opportunity_step.apply_async(args=[str(report_id)], retry=False)
+    except Exception:
+        # Do not include broker URLs, credentials or tender text in logs.
+        logger.warning('Opportunity analysis dispatch unavailable; durable intent retained.')
 
 
 class ProviderUnavailable(Exception):
@@ -244,6 +256,11 @@ def request_analysis(deal, actor, retry=False):
             report.status = 'queued'
             report.next_attempt_at, report.error_code = timezone.now(), ''
             report.save()
+        now = timezone.now()
+        if (report.status in {'queued', 'running'}
+                and (not report.lease_until or report.lease_until <= now)
+                and (not report.next_attempt_at or report.next_attempt_at <= now)):
+            transaction.on_commit(lambda report_id=report.pk: enqueue_analysis(report_id))
     return analysis_projection(deal, actor)
 
 
@@ -261,14 +278,16 @@ def analysis_projection(deal, actor, offset=None):
     current_sources = inventory(deal, actor)
     stale = report.dirty or report.snapshot != snapshot(deal, actor, current_sources)
     rows = report.sources.order_by('id')
-    counts = dict(Counter(rows.values_list('status', flat=True)))
+    counts = {key: 0 for key in ('queued', 'extracted', 'ready', 'partial', 'failed')}
+    counts.update(Counter(rows.values_list('status', flat=True)))
     counts['total'] = len(unique_sources(current_sources, report.suppressed_sources)[0])
     counts['chunks_total'] = Chunk.objects.filter(source__report=report).count()
     counts['chunks_done'] = Chunk.objects.filter(source__report=report, status='ready').count()
     counts['chunks_failed'] = Chunk.objects.filter(source__report=report, status='failed').count()
     if stale:
         counts = {'total': len(unique_sources(current_sources, report.suppressed_sources)[0]),
-                  'chunks_total': 0, 'chunks_done': 0}
+                  'queued': 0, 'extracted': 0, 'ready': 0, 'partial': 0, 'failed': 0,
+                  'chunks_total': 0, 'chunks_done': 0, 'chunks_failed': 0}
     page = []
     if offset is not None and not stale:
         for row in rows[offset:offset + 25].prefetch_related(Prefetch('chunks', queryset=Chunk.objects.defer('text'))):

@@ -1,3 +1,4 @@
 !test_email_archive_files.py
 !test_email_company_formats.py
 !test_tender_evaluator.py
+!test_analysis_dispatch.py

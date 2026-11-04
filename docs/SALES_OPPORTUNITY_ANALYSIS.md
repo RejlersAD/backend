@@ -194,3 +194,14 @@ confirmed the analysis suppression and letter fingerprint columns. The full
 application `makemigrations --check --dry-run --skip-checks` found no changes.
 This evidence concerns local PostgreSQL; production migration and deployment
 remain unverified. Apply the migrations before deploying the matching API/workers.
+
+
+## Queue dispatch recovery ? 4 November 2026
+
+Analysis POST now dispatches due work after its database transaction commits,
+including a refresh of an unleased queued job. Active leases and retry backoff
+remain authoritative. Broker errors retain durable intent for the existing
+periodic dispatcher; source text and broker credentials are not logged.
+GET remains read-only. Queued projections provide zero-valued source counters.
+A running Celery worker and reachable broker are still required; this change
+is not a replacement for production worker monitoring.
