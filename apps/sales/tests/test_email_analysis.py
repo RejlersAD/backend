@@ -21,6 +21,22 @@ class EmailConversationAnalysisTests(SimpleTestCase):
             mailbox_address='sales@consultant.test', **kwargs,
         )
 
+    def test_markdown_eoi_invitation_reaches_shared_evidence_and_review(self):
+        body = ('Example Energy Services invites your organization to participate in this Expression of Interest.\n\n'
+                'Event Details\n\n- *EOI Number:* EOI3-3000105709\n'
+                '- *Project Title:* Example ERP Transformation\n'
+                '- *Client:* Example Energy Services\n'
+                '- *Submission Deadline:* 06 July 2026\n\n'
+                'Interested suppliers should submit their Expression of Interest before the stated deadline.')
+        result = self.analyze([message('eoi', 'Invitation to Participate in EOI3-3000105709', body)])
+        info = result['extracted_information']
+        self.assertEqual(info['classification']['code'], 'eoi')
+        self.assertEqual(info['customer_name'], 'Example Energy Services')
+        self.assertEqual(info['project_name'], 'Example ERP Transformation')
+        self.assertEqual(info['tender_reference'], 'EOI3-3000105709')
+        self.assertEqual(info['due_date'], '2026-07-06')
+        self.assertEqual(info['unified_evidence']['selected']['tender_reference']['value'], 'EOI3-3000105709')
+
     def test_thread_role_is_independent_of_selected_business_purpose(self):
         result = self.analyze([
             message('initial', 'RFQ for survey', 'Customer: Orchard Works\nPlease submit a quotation.', sent_at='2026-09-20T08:00:00Z'),

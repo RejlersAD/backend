@@ -11,7 +11,7 @@ from rest_framework import serializers
 from .models import Deal, OpportunityAuditEvent
 
 
-MAX_SNAPSHOT_BYTES = 24_000
+MAX_SNAPSHOT_BYTES = 100_000
 SAVED_REVIEW_SALT = 'sales-saved-email-opportunity-review-v1'
 REVIEW_MAX_AGE = 1800
 SNAPSHOT_FIELDS = (
@@ -24,6 +24,7 @@ SNAPSHOT_FIELDS = (
     'due_date', 'due_date_text', 'deadline_at',
     'deadline_time', 'deadline_timezone', 'deadline_utc', 'deadline', 'tender_status',
     'evidence', 'field_sources', 'warnings', 'ai_review',
+    'unified_evidence',
 )
 
 

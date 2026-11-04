@@ -128,8 +128,19 @@ def _units(text):
     return list(email_text_units(text))
 
 
+def _qualification_text(code, unit):
+    # A submission instruction is current EOI/RFQ evidence. "Before the stated
+    # deadline" qualifies the submission time, not whether the request exists.
+    if code in REQUEST_CODES:
+        return re.sub(
+            r'\bbefore\s+(?:(?:the|a)\s+)?(?:(?:stated|specified|submission|closing|event)\s+)?deadline\b',
+            '', unit, flags=re.I,
+        )
+    return unit
+
+
 def _eligible(code, unit, location, *, commercial_context=False):
-    if CONDITIONAL.search(unit) or QUALIFIED.search(unit) or HISTORICAL.search(unit) or '?' in unit:
+    if CONDITIONAL.search(_qualification_text(code, unit)) or QUALIFIED.search(unit) or HISTORICAL.search(unit) or '?' in unit:
         return False
     negative_text = unit
     if code == 'regret_notification':
@@ -224,7 +235,7 @@ def classify_email_segment(segment, *, truncated=False):
                     topic = _topic(code, unit)
                     # Preserve explicit contradictory/qualified current wording
                     # so a positive-looking old subject cannot override it.
-                    if topic and (NEGATIVE.search(unit) or CONDITIONAL.search(unit) or QUALIFIED.search(unit)
+                    if topic and (NEGATIVE.search(unit) or CONDITIONAL.search(_qualification_text(code, unit)) or QUALIFIED.search(unit)
                                   or '?' in unit or (code in REQUEST_CODES and REQUEST_REFERENCE.search(unit))):
                         evidence = _evidence(source_id, location, unit, topic, code)
                         evidence['rule_id'] = f'{code}.qualified_body.v1'

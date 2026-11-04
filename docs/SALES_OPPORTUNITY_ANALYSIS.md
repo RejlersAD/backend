@@ -1,5 +1,24 @@
 # Opportunity Analysis contract
 
+## Rejlers qualification evidence — 4 November 2026
+
+`result.manager_review.tender_evaluation.rejlers_review` adds nine review areas:
+strategic fit, engineering capability, qualification compliance, resources,
+commercial attractiveness, contract risk, delivery feasibility, win probability
+and strategic value. Each dimension exposes `key`, `title`, nullable `weight`,
+`assessment`, nullable `score`, evidence counts and checklist `items`. Item
+evidence retains exact source text, source ID, filename and page/part.
+
+The weighted dimensions are engineering capability 30, qualification 20,
+commercial 15, resources 15, win probability 10 and strategic value 10.
+`weighted_score` remains null while approved internal inputs are unavailable;
+tender keyword presence is not a capability percentage, compliance result or
+win probability. Strategic fit, contract risk and delivery feasibility are
+unweighted decision gates. The additive projection reuses the existing access
+checks and report JSON; it introduces no new schema, score-entry endpoint,
+approval or recorded bid decision. The existing Analysis layout is retained;
+no new dashboard, source-gap or checklist cards are introduced.
+
 Authorized scope: workspace `docs/features/sales-opportunity-analysis.md`,
 decision SAL-ANALYSIS-01 (15 October 2026). Analysis is advisory and requester
 scoped; it never writes a Deal decision, deadline, approval or task assignment.

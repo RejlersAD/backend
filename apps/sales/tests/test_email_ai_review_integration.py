@@ -147,6 +147,30 @@ class EmailAIReviewIntegrationTests(TestCase):
         self.assertFalse(Deal.objects.exists())
         self.assertFalse(OpportunityAuditEvent.objects.exists())
 
+    def test_saved_selected_client_is_not_combined_with_auto_new_client(self):
+        intake = self.saved()
+        url = f'/api/v1/sales/email-intakes/{intake.pk}/'
+        with patch('apps.sales.email_ai_analysis.enhance_email_analysis', side_effect=self.proposal):
+            detail = self.client.get(url)
+            self.assertEqual(detail.status_code, 200)
+        snapshot = {
+            'detection_version': 2,
+            'organization_name': 'Detected Buyer Name',
+            'unified_evidence': {
+                'selected': {
+                    'organization_name': {'status': 'verified', 'value': 'Detected Buyer Name'},
+                },
+            },
+        }
+        with patch('apps.sales.intake_views.read_saved_email_review', return_value=snapshot):
+            response = self.client.post(
+                url + 'convert-to-opportunity/',
+                {**self.fields, 'source_token': detail.data['source_token']},
+                format='json',
+            )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(str(Deal.objects.get().client_id), self.fields['client'])
+
     def test_saved_legacy_manual_conversion_has_no_invented_ai_provenance(self):
         intake = self.saved()
         with patch('apps.sales.email_ai_analysis.enhance_email_analysis', side_effect=self.proposal) as enhance:

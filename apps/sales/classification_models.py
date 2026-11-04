@@ -31,6 +31,7 @@ class OpportunityDocumentClassificationRun(models.Model):
     suggested_type = models.CharField(max_length=40, default='unclassified')
     origin = models.CharField(max_length=20, default='unclassified')
     evidence = models.JSONField(default=list)
+    unified_evidence = models.JSONField(default=dict, blank=True)
     error_code = models.CharField(max_length=50, blank=True)
     ai_status = models.CharField(max_length=20, default='not_needed')
     provider = models.CharField(max_length=30, blank=True)

@@ -129,7 +129,7 @@ def submit_qualification(opportunity, actor, special_note=''):
     if not opportunity.scope_type:
         warnings.append({
             'field': 'scope_type',
-            'message': 'Scope type has not been provided. You may continue with the submission.',
+            'message': 'Delivery scope category (for example FEED, EPC or PMC) has not been selected. This is separate from the work described in attached documents. You may continue with the submission.',
         })
     has_required_attachment = OpportunityWorkspaceUpload.objects.filter(
         workspace__opportunity=opportunity,

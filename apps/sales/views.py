@@ -737,6 +737,9 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='analysis/sources')
     def opportunity_analysis_sources(self, request, pk=None):
+        from apps.rbac.data_visibility_config import is_admin_user
+        if not is_admin_user(request.user):
+            raise PermissionDenied('Advanced opportunity analysis is restricted to administrators.')
         from .opportunity_analysis import analysis_projection
         if set(request.query_params) - {'offset'}:
             raise ValidationError({'detail': 'Only a source offset is supported.'})

@@ -151,7 +151,14 @@ def sales_email_intake(request):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    serializer = SalesEmailWebhookSerializer(data=request.data)
+    allowed = set(SalesEmailWebhookSerializer().fields) | {'original_eml', 'mailbox'}
+    if set(request.data) - allowed:
+        raise serializers.ValidationError({'detail': 'Only supported email intake fields may be supplied.'})
+    original_eml = request.FILES.get('original_eml')
+    mailbox = str(request.data.get('mailbox', '') or '').strip()
+    serializer = SalesEmailWebhookSerializer(data={
+        key: value for key, value in request.data.items() if key not in {'original_eml', 'mailbox'}
+    })
     serializer.is_valid(raise_exception=True)
     validated = serializer.validated_data
     source_message_id = validated.pop('source_message_id')
@@ -161,6 +168,11 @@ def sales_email_intake(request):
             source_message_id=source_message_id,
             defaults=validated,
         )
+    if original_eml is not None:
+        if original_eml.size > 32 * 1024 * 1024 or not mailbox:
+            raise serializers.ValidationError({'original_eml': 'A bounded original email and receiving mailbox are required.'})
+        from .evidence.attachment_store import ingest_original_eml_attachments
+        ingest_original_eml_attachments(intake, mailbox, original_eml.read(32 * 1024 * 1024 + 1))
     return Response(
         {
             'accepted': True,
@@ -177,7 +189,7 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
 
     queryset = SalesEmailIntake.objects.select_related(
         'opportunity', 'reviewed_by', 'duplicate_of',
-    )
+    ).prefetch_related('source_attachments')
     serializer_class = SalesEmailIntakeDetailSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
@@ -200,6 +212,26 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
         response['Cache-Control'] = 'private, no-store, max-age=0'
         response['Pragma'] = 'no-cache'
         patch_vary_headers(response, ('Authorization', 'Cookie'))
+        return response
+
+    @action(detail=True, methods=['get'], url_path=r'attachments/(?P<attachment_id>[0-9a-fA-F-]{36})')
+    def attachment_download(self, request, pk=None, attachment_id=None):
+        from django.http import FileResponse
+        from django.utils.http import content_disposition_header
+        from .evidence.attachment_store import read_attachment
+        intake = self.get_object()
+        attachment = intake.source_attachments.filter(pk=attachment_id).first()
+        if not attachment:
+            raise NotFound('Email attachment not found.')
+        try:
+            stream = read_attachment(attachment)
+        except OSError:
+            raise APIException('The private email attachment is unavailable.') from None
+        response = FileResponse(stream, as_attachment=True, filename=attachment.name,
+                                content_type='application/octet-stream')
+        response['Content-Disposition'] = content_disposition_header(True, attachment.name)
+        response['Cache-Control'] = 'private, no-store, max-age=0'
+        response['X-Content-Type-Options'] = 'nosniff'
         return response
 
     def _save_resolution(self, intake, *, status_value, note='', duplicate_of=None):
@@ -364,14 +396,52 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                 })
 
             legacy_customer = 'source_token' not in request.data
+            if not legacy_customer:
+                evidence = analysis_snapshot.get('unified_evidence', {})
+                resolved = evidence.get('selected', {}) if isinstance(evidence, dict) else {}
+                blocked = [field for field, key in (
+                    ('deal_name', 'project_name'), ('client_reference', 'tender_reference'),
+                    ('estimated_value', 'estimated_value'), ('currency', 'currency'),
+                    ('submission_due_date', 'due_date'), ('expected_close_date', 'expected_award_date'),
+                    ('scope_type', 'scope_type'), ('description', 'scope_summary'),
+                ) if isinstance(resolved.get(key), dict)
+                    and resolved[key].get('status') == 'manual_review_required']
+                if blocked:
+                    raise serializers.ValidationError({
+                        'source_token': f"Resolve conflicting evidence for: {', '.join(blocked)}. Reload after review.",
+                    })
+                defaults = {
+                    'deal_name': ('project_name',),
+                    'client_reference': ('tender_reference', 'rfq_reference', 'pr_reference', 'opportunity_reference'),
+                    'estimated_value': ('estimated_value',), 'currency': ('currency',),
+                    'submission_due_date': ('due_date',), 'expected_close_date': ('expected_award_date',),
+                    'scope_type': ('scope_type',), 'description': ('scope_summary',),
+                }
+                defaults['new_client'] = ('organization_name', 'customer_name')
+                request_data = request.data.copy()
+                selected_client = request_data.get('client')
+                for target, candidates in defaults.items():
+                    if target == 'new_client' and selected_client:
+                        continue
+                    if request_data.get(target):
+                        continue
+                    for key in candidates:
+                        item = resolved.get(key)
+                        if isinstance(item, dict) and item.get('status') in {'verified', 'likely'} and item.get('value'):
+                            request_data[target] = ({'company_name': item['value']} if target == 'new_client'
+                                                    else item['value'])
+                            break
+                registration_data = request_data
+            else:
+                registration_data = request.data
             opportunity_serializer, customer_intent, fingerprint = _saved_review_payload(
-                request.data, intake, request.user, analysis_snapshot,
+                registration_data, intake, request.user, analysis_snapshot,
             )
             client, customer_resolution = resolve_email_customer(
                 request.user, customer_intent, legacy=legacy_customer,
             )
             prevent_duplicate_tender(
-                client=client, reviewed_reference=request.data.get('client_reference'),
+                client=client, reviewed_reference=registration_data.get('client_reference'),
                 snapshot=analysis_snapshot,
             )
             payload = {
