@@ -36,6 +36,8 @@ from .hmb_extractor_view import (
 
 router = DefaultRouter()
 from .hmb_output_view import hmb_output_template_view, hmb_final_export_view
+from .separator_view import separator_sizing_view
+from .separator_snapshot_view import separator_snapshots_view, reopen_separator_snapshot_view
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
 router.register(r'datasheets', ProcessDatasheetViewSet, basename='datasheet')
 router.register(r'templates', DatasheetTemplateViewSet, basename='datasheet-template')
@@ -45,6 +47,9 @@ router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump
 router.register(r'pump-hydraulic-snapshots', PumpHydraulicSnapshotViewSet, basename='pump-hydraulic-snapshot')
 
 urlpatterns = [
+    path('datasheets/hmb-stream-consolidator/separator-sizing/', separator_sizing_view, name='hmb-separator-sizing'),
+    path('datasheets/hmb-stream-consolidator/separator-snapshots/', separator_snapshots_view, name='hmb-separator-snapshots'),
+    path('datasheets/hmb-stream-consolidator/separator-snapshots/<uuid:upload_id>/', reopen_separator_snapshot_view, name='hmb-separator-snapshot-reopen'),
     path('datasheets/hmb-projects/<uuid:project_id>/output-template/', hmb_output_template_view, name='hmb-output-template'),
     path('datasheets/hmb-projects/<uuid:project_id>/final-export/', hmb_final_export_view, name='hmb-final-export'),
     # Specific paths MUST come before router.urls to avoid conflicts

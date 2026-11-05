@@ -33,6 +33,7 @@ from openpyxl.utils import get_column_letter
 from apps.project_organizer.models import Project
 from .models import HMBMasterTemplateProfile, HMBCaseImportBatch, HMBCaseRecord, HMBSourceUpload
 from .services.hmb_storage import HMBStorageError, delete_hmb_source, read_hmb_source, store_hmb_source
+from .services.separator_snapshots import without_separator_snapshots
 from .hmb_master_template_parser import (
     analyze_hmb_master_template,
     parse_hmb_case_workbook,
@@ -244,7 +245,9 @@ def _build_hmb_stream_comparison(project, template_profile, stream_id: str) -> d
     available_cases = sorted({canonical_hmb_case_name(name) for name in HMBCaseRecord.objects.filter(
         project=project, template_profile=template_profile,
     ).values_list('case_name', flat=True).distinct()})
-    output_template = HMBSourceUpload.objects.filter(project=project, upload_kind='output_template').first()
+    output_template = without_separator_snapshots(
+        HMBSourceUpload.objects.filter(project=project, upload_kind='output_template'),
+    ).first()
     configured_cases = list(dict.fromkeys(
         canonical_hmb_case_name(name) for name in (output_template.metadata.get('case_slots', []) if output_template else [])
     ))

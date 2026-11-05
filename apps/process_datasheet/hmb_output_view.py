@@ -12,6 +12,7 @@ from .hmb_extractor_view import _get_accessible_project, _is_admin, _build_hmb_s
 from .models import HMBCaseRecord, HMBMasterTemplateProfile, HMBSourceUpload
 from .services.hmb_export import inspect_output_template, build_final_workbook
 from .services.hmb_storage import store_hmb_source, read_hmb_source, delete_hmb_source, HMBStorageError
+from .services.separator_snapshots import without_separator_snapshots
 
 
 def _serialize_output(source):
@@ -31,9 +32,9 @@ def hmb_output_template_view(request, project_id):
     if error:
         return error
     if request.method == 'GET':
-        source = HMBSourceUpload.objects.filter(
+        source = without_separator_snapshots(HMBSourceUpload.objects.filter(
             project=project, upload_kind=HMBSourceUpload.KIND_OUTPUT_TEMPLATE,
-        ).first()
+        )).first()
         return Response({'success': True, 'output_template': _serialize_output(source)})
     upload = request.FILES.get('output_template_file')
     if not upload or not upload.name.lower().endswith('.xlsx') or upload.size > 20 * 1024 * 1024:
@@ -76,7 +77,7 @@ def hmb_final_export_view(request, project_id):
         return error
     try:
         profile = HMBMasterTemplateProfile.objects.get(pk=request.data.get('template_profile_id'), is_active=True)
-        source = HMBSourceUpload.objects.get(pk=request.data.get('output_template_id'), project=project,
+        source = without_separator_snapshots(HMBSourceUpload.objects.all()).get(pk=request.data.get('output_template_id'), project=project,
                                              upload_kind='output_template')
     except (HMBMasterTemplateProfile.DoesNotExist, HMBSourceUpload.DoesNotExist, ValueError, TypeError, ValidationError):
         return Response({'error': 'Select a valid master and saved final template.'}, status=400)

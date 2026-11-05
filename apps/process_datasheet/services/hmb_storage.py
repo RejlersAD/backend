@@ -36,10 +36,12 @@ def store_hmb_source(path, *, upload_kind, original_filename, project_id=None, u
         if not settings.DEBUG:
             raise HMBStorageError('Private S3 storage must be enabled for production templates.')
         storage = FileSystemStorage(location=os.path.join(settings.BASE_DIR, 'private_hmb'))
+        extension = '.json' if original_filename.lower().endswith('.json') else '.xlsx'
+        content_type = 'application/json' if extension == '.json' else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         with open(path, 'rb') as source:
-            key = storage.save(f'{project_id}/{uuid.uuid4().hex}.xlsx', File(source))
+            key = storage.save(f'{project_id}/{uuid.uuid4().hex}{extension}', File(source))
         return {'stored': True, 'backend': 'local', 'key': key, 'sha256': checksum,
-                'size': os.path.getsize(path), 'content_type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
+                'size': os.path.getsize(path), 'content_type': content_type}
     if not getattr(settings, 'USE_S3', False):
         if not settings.DEBUG:
             raise HMBStorageError('Private storage is unavailable. Enable S3 before accepting production uploads.')
@@ -112,13 +114,19 @@ def read_hmb_source(source_upload):
     return content
 
 
-def delete_hmb_source(storage_key, backend='s3'):
+def delete_hmb_source(storage_key, backend='s3', *, strict=False):
     if backend == 'local':
         FileSystemStorage(location=os.path.join(settings.BASE_DIR, 'private_hmb')).delete(storage_key)
         return
     if not storage_key or not getattr(settings, 'USE_S3', False):
+        if strict:
+            raise HMBStorageError('Private storage cleanup is unavailable.')
         return
     try:
-        S3Service().delete_file(storage_key)
-    except Exception:
-        pass
+        result = S3Service().delete_file(storage_key)
+    except Exception as exc:
+        if strict:
+            raise HMBStorageError('Private storage cleanup failed.') from exc
+        return
+    if strict and not result.get('success'):
+        raise HMBStorageError('Private storage cleanup failed.')
