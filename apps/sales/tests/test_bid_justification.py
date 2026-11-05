@@ -327,3 +327,14 @@ class BidJustificationTests(TestCase):
         self.assertNotIn('tools', arguments)
         self.assertEqual(response.data['text'], 'Go is proposed for the RFQ; the decision grounds require review.')
         self.assert_no_business_write()
+
+
+    def test_oversized_generated_justification_is_rejected_without_saving(self):
+        self.provider.side_effect = None
+        self.provider.return_value = {'status': 'completed', 'proposal': {
+            'decision': 'bid', 'text': 'Review ' * 61,
+            'evidence': [{'field': 'decision', 'excerpt': 'Go'}],
+        }}
+        response = self.ask()
+        self.assertEqual(response.status_code, 502)
+        self.assert_no_business_write()
