@@ -25,9 +25,10 @@ from .preview_confirmation import apply_confirmed_preview, source_fingerprint
 from .register_rows import extract_legacy_register_rows, register_rows_for_file
 from .extraction_coverage import file_coverage, summarize_coverage, summarize_assertions
 from .planning_fact_extraction import explicit_labeled_assertions, validated_claim
+from .requirement_activities import extract_requirement_activities
 from .intelligence_review_retention import retain_unchanged_reviews
 
-ENGINE_VERSION = '6.2-applicability-registers'
+ENGINE_VERSION = '6.3-explicit-deliverable-lists'
 
 _DOCUMENT_NUMBER_RE = re.compile(
     r'\b(?=[A-Z0-9./_~\-]{6,100}\b)(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,}\b',
@@ -241,6 +242,26 @@ def _extract_file_facts(rows, file_obj, *, include_catalogue_deliverables=False)
     text = file_obj.extracted_text or ''
     lower = text.casefold()
     _extract_register_rows(rows, file_obj, text, register_mode=not include_catalogue_deliverables)
+    register_spans = [(fact.source_locator.get('character_start'), fact.source_locator.get('character_end'))
+                      for fact in rows['facts'] if fact.source_file_id == file_obj.pk
+                      and fact.fact_type == 'deliverable' and isinstance(fact.value, dict)
+                      and fact.value.get('source_register')]
+    for task in extract_requirement_activities([file_obj])['tasks']:
+        locator = task['source_locator']
+        start, end = locator['character_start'], locator['character_end']
+        if any(type(left) is int and type(right) is int and start < right and left < end
+               for left, right in register_spans):
+            continue
+        fact = _add_fact(
+            rows, file_obj, 'deliverable', f"source-list:{start}",
+            {'name': task['title'], 'original_title': task['title'],
+             'discipline': 'not_specified' if task['discipline'] == 'general' else task['discipline'],
+             'source_group': task['source_heading'], 'source_deliverable_list': True,
+             'applicability_status': 'conditional' if 'conditional_scope' in task['review_flags'] else 'marked'},
+            .90, text, start, end,
+        )
+        if fact is not None:
+            fact.source_locator.update(locator)
     for fact_type, key, pattern, group, confidence in _SCALAR_PATTERNS:
         for match in pattern.finditer(text):
             value = match.group(group).strip(' :-|')

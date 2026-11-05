@@ -36,6 +36,7 @@ def generation_fingerprint(project, request_data):
         configuration = ProjectScheduleConfiguration.objects.filter(project=project, is_deleted=False).first()
         from .preview_confirmation import review_fingerprint
         from .planning_package_request import package_preview_selection
+        from .planning_package import VERSION as package_version
         from .register_geometry_cache import cached_register_geometry
         run = DocumentIntelligenceRun.objects.filter(
             pk=options.get('intelligence_run_id'), project=project, is_deleted=False,
@@ -51,7 +52,7 @@ def generation_fingerprint(project, request_data):
                 project__isnull=True, is_system=True, is_default=True, status='active', is_deleted=False,
             ).order_by('-version').values_list('pk', flat=True)[:1])
         package_inputs = {
-            'policy': 'planning-package-proposal/1',
+            'policy': package_version,
             'analysis_run_id': run.pk if run else None,
             'review_fingerprint': review_token,
             'confirmed_preview': package_preview_selection(run, review_token=review_token) if run else None,

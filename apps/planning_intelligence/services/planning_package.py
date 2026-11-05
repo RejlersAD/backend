@@ -21,7 +21,7 @@ from .planning_package_request import PlanningPackageRequestError
 
 
 POLICY = 'planning_package'
-VERSION = 'planning-package-proposal/1'
+VERSION = 'planning-package-proposal/2'
 
 
 def _calendar(project):

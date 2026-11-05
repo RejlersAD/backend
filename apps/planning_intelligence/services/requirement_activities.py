@@ -12,8 +12,8 @@ import re
 from collections import Counter
 
 
-ENGINE_VERSION = 'source-requirement-activities-v2'
-_ROW = re.compile(r'^\s*(?:(?P<item_number>\d{1,4})[.)]?\s+|[-*•]\s+)(?P<title>\S.*)$')
+ENGINE_VERSION = 'source-requirement-activities-v3'
+_ROW = re.compile(r'^\s*(?:(?P<item_number>\d{1,4}|[a-z](?=[.)]))[.)]?\s+|[-*•▪]\s+)(?P<title>\S.*)$')
 _BARE_NUMBER = re.compile(r'^\d{1,4}[.)]?$')
 _BULLET = re.compile(r'^\s*(?:\(cid:\d+\)|[-*•])\s*')
 _SECTION = re.compile(r'^(?:appendix\s+[\w-]+\b|\d+(?:\.\d+)+[.)]?\s+)', re.I)
@@ -28,7 +28,7 @@ _OUTPUT = re.compile(
     r'datasheets?|registers?|plans?|philosoph(?:y|ies)|design basis|'
     r'calculations?|estimates?|MTO|BOQ|scope of work|terms of reference)\b', re.I,
 )
-_CONDITION = re.compile(r'\b(?:if required|if any|as required|if necessary|where applicable|optional)\b', re.I)
+_CONDITION = re.compile(r'\b(?:if required|if any|as required|if necessary|where applicable|optional|not required|excluded|out of scope)\b', re.I)
 _GENERIC_OBLIGATION = re.compile(
     r'\b(?:order of precedence|use of the word|all services|all (?:necessary )?works|'
     r'all documents and drawings|all relevant|all the deliverables|'
@@ -71,6 +71,7 @@ def _source_lines(text):
             (line['page_line'] < 9 and header_counts[value] >= 3)
             or re.match(r'^(?:Page\s*:?\s*\d|Rev\.?\s*\d|All\w*\s+pl?la\b|All parties consent)', value, re.I)
             or (line['page_line'] < 12 and re.search(r'\bDoc(?:ument)?\.?\s+No(?:\.|\b)\s*:?', value, re.I))
+            or re.match(r'^Date\s*:\s*\d|^.*Classification\s*:\s*(?:Internal|Public|Confidential)\s*$', value, re.I)
             or re.match(r'^(?:S\.?\s*No\.?|No\.?|Item)\s+(?:Description|Deliverable|Title)\b', value, re.I)
         )
     return lines
@@ -80,9 +81,10 @@ def _list_heading(value):
     if len(value) > 140 or re.search(r'\.{3,}|\b(?:shall|must|list is|listed|responsib|tentative)\b', value, re.I):
         return False
     return bool(re.fullmatch(
-        r'(?:(?:appendix\s+[\w-]+\s*[-–—:]?\s*|table\s+\d+\s*:\s*|\d+[.)]\s*))?'
+        r'(?:(?:appendix\s+[\w-]+\s*[-–—:]?\s*|table\s+\d+\s*:\s*|\d+(?:\.\d+)*[.)]?\s+))?'
         r'(?:(?:list of|project|engineering|FEED|required|contract|scope)\s+)*'
-        r'deliverables?(?:\s+(?:list|register))?\s*:?', value, re.I,
+        r'(?:(?:consultant|contractor|SI|SPI|SPID|SP-PID)\s+)?'
+        r'(?:final\s+)?deliverables?(?:\s+(?:list|register))?\s*:?', value, re.I,
     ))
 
 
@@ -132,15 +134,20 @@ def _explicit_deliverables(text):
         if _list_heading(value):
             finish()
             active = True
+            heading = value
             continue
         if not active:
             continue
-        if _stop_list(value):
+        row = _ROW.match(value)
+        alphabetic = bool(current and str(current.get('source_item_number') or '').isalpha())
+        if ((not row and not alphabetic and _stop_list(value))
+                or (not row and re.match(r'^(?:notes?\b|please consider\b|terms (?:and|&) conditions\b)', value, re.I))
+                or re.search(r'\b(?:this deliverable list|list is (?:only |a )?tentative)\b', value, re.I)
+                or (alphabetic and re.match(r'^\d+(?:\.\d+)*\s+\S', value))):
             finish()
             active = False
             continue
         following = lines[index + 1]['text'] if index + 1 < len(lines) else ''
-        row = _ROW.match(value)
         if row:
             finish()
             current = {'parts': [row.group('title')], 'start': line['start'], 'end': line['end'],

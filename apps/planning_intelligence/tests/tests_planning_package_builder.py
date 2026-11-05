@@ -82,6 +82,26 @@ class PlanningPackageBuilderTests(TestCase):
         self.assertEqual(ScheduleVersion.objects.count(), 0)
         self.assertEqual(WorkCalendar.objects.count(), 0)
 
+    def test_saved_sow_with_failed_ai_builds_from_quoted_final_deliverables(self):
+        self.run.facts.all().delete()
+        self.source.extracted_text = (
+            '20.1 SI FINAL DELIVERABLES\na) Inspection reports\nb) Approval records\n'
+            '20.2 SPID FINAL DELIVERABLES\na) Approval records\n21 WARRANTY REQUIREMENTS\n'
+        )
+        self.source.save()
+        self.run.summary['base_intelligence']['ai_processing_coverage'] = {
+            'status': 'partial', 'pause_error': {'code': 'invalid_api_key'},
+        }
+        self.run.summary['extraction_source_manifest'] = _extraction_source_manifest([self.source])
+        self.run.save()
+        with patch('apps.planning_intelligence.services.pipeline.analyze_documents', side_effect=AssertionError('AI replay')):
+            result = preview_schedule(self.project, mode='planning_package', intelligence_run=self.run)
+        self.assertEqual(result['deliverable_count'], 3)
+        self.assertEqual(result['activity_count'], 17)
+        self.assertEqual(self.run.facts.count(), 0)
+        self.assertEqual(PlanningGeneration.objects.count(), 0)
+        self.assertEqual(ScheduleVersion.objects.count(), 0)
+
     def test_generation_is_idempotent_and_preserves_unreviewed_source_status(self):
         with patch('apps.planning_intelligence.services.pipeline.analyze_documents', side_effect=AssertionError('AI replay')):
             first = generate_schedule(self.project, mode='planning_package', intelligence_run=self.run, input_fingerprint='same-package')
