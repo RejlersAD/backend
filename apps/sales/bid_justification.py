@@ -47,11 +47,14 @@ SCHEMA = {
     },
 }
 INSTRUCTIONS = """Return the exact selected decision code, a concise plain-text
-justification (at most 4000 characters), and 1-8 exact source excerpts supporting
+justification (one paragraph, at most 60 words and 600 characters), and 1-8 exact source excerpts supporting
 the wording. Each excerpt must be 1-300 characters copied from the named facts
 field. Use Go, Conditional Go and No-Go in justification text; retain the exact
 selected decision code and verbatim evidence. Do not include HTML, Markdown links, code fences or URLs. Do not append
 instructions to the user. Prefer a short natural paragraph, not a report.
+Use two or three concise sentences: the selected decision, its supported reason,
+and any essential condition. Do not repeat the opportunity title or paste email
+headers, tracking links, signatures, portal metadata or long source passages.
 Use the saved Opportunity Type when recognized. 'Not provided' and 'Not recognized'
 are unknown types, not an invitation to infer a type from the title or description.
 For rewrite, retain the author's rationale, caveats and uncertainty while improving
@@ -162,6 +165,7 @@ def _validate(proposal, decision, facts):
         raise _invalid_output()
     text, evidence = proposal.get('text'), proposal.get('evidence')
     if (proposal.get('decision') != decision or not _plain(text) or not 1 <= len(text.strip()) <= MAX_TEXT
+            or len(text.split()) > 60 or len(text.strip()) > 600
             or re.search(r'<[^>]*>|```|https?://|\]\(', text, re.IGNORECASE)):
         raise _invalid_output()
     if not isinstance(evidence, list) or not 1 <= len(evidence) <= 8:
