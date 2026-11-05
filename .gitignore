@@ -179,6 +179,8 @@ test_*.py
 !apps/process_datasheet/tests/test_hmb_template_access.py
 !apps/pid_analysis/test_equipment_register_api.py
 !apps/process_datasheet/tests/test_hmb_storage.py
+!apps/process_datasheet/tests/test_separator_sizing.py
+!apps/process_datasheet/tests/test_separator_snapshots.py
 !apps/process_datasheet/test_hmb_parser.py
 /private_hmb/
 !apps/project_control/tests/test_estimate_control.py
