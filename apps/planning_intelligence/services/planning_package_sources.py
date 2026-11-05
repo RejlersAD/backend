@@ -1,7 +1,8 @@
 """Pure source catalogue for an explicitly requested Planning Package proposal.
 
-Source occurrences remain distinct. This adapter adds quoted AI deliverables to
-register scope; it never supplies workflow, timing, calendar or approval values.
+Source occurrences remain distinct. This adapter merges explicit source lists
+and quoted AI deliverables with register scope; it never supplies workflow,
+timing, calendar or approval values.
 """
 from collections import defaultdict
 from copy import deepcopy
@@ -11,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 from .identity_policy import stable_digest
 from .planning_fact_extraction import validate_fact_value
 from .register_rows import extract_register_rows, normalize_register_discipline, register_row_requires_review
+from .requirement_activities import extract_requirement_activities
 
 
 USABLE = {'detected', 'confirmed'}
@@ -145,6 +147,41 @@ def build_planning_package_sources(files, facts):
             if restricted:
                 excluded.append({**item, 'reason': 'source_review_excluded' if rejected else 'register_requires_review',
                                  'source_inventory': deepcopy(row)})
+            else:
+                deliverables.append(item)
+
+    for source in sources.values():
+        tasks = extract_requirement_activities([{
+            **source, 'extracted_text': source.get('text') or '',
+            'original_filename': source.get('filename', ''),
+        }])['tasks']
+        for task in tasks:
+            locator = task['source_locator']
+            location = (locator['character_start'], locator['character_end'])
+            entries = [entry for entry in register_index[str(source['id'])]
+                       if _register_overlaps(entry['row'], location)]
+            if entries:
+                continue
+            matching = [fact for fact, owner, span in located
+                        if owner['id'] == source['id'] and fact.get('fact_type') == 'deliverable'
+                        and _overlaps(span, location)]
+            rejected = any(fact.get('status') not in USABLE for fact in matching)
+            item = {
+                'id': _identifier(source, locator, task['title']), 'title': task['title'],
+                'discipline': 'not_specified' if task['discipline'] == 'general' else task['discipline'],
+                'discipline_basis': 'source_deliverable_list',
+                'document_number': '', 'source_group': task['source_heading'], 'explicit_dimensions': {},
+                'source_references': [_reference(source, locator, task['source_quote'])],
+                'source_fact_ids': [fact['id'] for fact in matching if fact.get('id') is not None],
+                'source_basis': 'source_deliverable_list', 'review_status': 'requires_review',
+            }
+            restricted = rejected or 'conditional_scope' in task['review_flags']
+            register_index[str(source['id'])].append({
+                'row': {'start': location[0], 'end': location[1]},
+                'item': item, 'restricted': restricted,
+            })
+            if restricted:
+                excluded.append({**item, 'reason': 'source_review_excluded' if rejected else 'conditional_scope'})
             else:
                 deliverables.append(item)
 

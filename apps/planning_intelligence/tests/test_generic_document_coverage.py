@@ -180,6 +180,27 @@ class GenericIntelligenceEvidenceTests(SimpleTestCase):
         self.assertEqual(requirement.source_locator['line'], 1)
         self.assertFalse(any(fact.fact_type in {'deliverable', 'hse_study'} for fact in rows['facts']))
 
+    def test_final_deliverables_are_located_facts_without_ai_or_catalogue_expansion(self):
+        text = ('20.1 SI FINAL DELIVERABLES\na) Custom database export\n'
+                'b) Inspection reports (if required)\n21 WARRANTY REQUIREMENTS\n')
+        source = self.source(text, category='sow')
+        rows = {'run': DocumentIntelligenceRun(id=1), 'facts': [], '_seen': set()}
+        _extract_file_facts(rows, source)
+        facts = [fact for fact in rows['facts'] if fact.fact_type == 'deliverable']
+        self.assertEqual([fact.value['name'] for fact in facts], [
+            'Custom database export', 'Inspection reports (if required)',
+        ])
+        self.assertEqual([fact.value['applicability_status'] for fact in facts], ['marked', 'conditional'])
+        for fact in facts:
+            self.assertEqual(fact.extraction_method, 'deterministic')
+            locator = fact.source_locator
+            self.assertEqual(locator['quote'], text[locator['character_start']:locator['character_end']])
+        preview = analyze_project([source], allow_ai=False)
+        group = preview['disciplines']['not_specified']
+        self.assertEqual(group['deliverables'], ['Custom database export'])
+        self.assertEqual(group['excluded_deliverables'], ['Inspection reports (if required)'])
+        self.assertFalse(preview['ai_augmented'])
+
     def test_explicit_register_scope_is_retained_beside_unstructured_topic_mentions(self):
         register = self.source('Document Number|Document Title|Department\nQA-1|Readiness assessment|Assurance\n', category='mdr')
         topics = self.source('Background: HAZOP, P&ID, Piping Material Specification.', pk=2)

@@ -6,6 +6,31 @@ from ..services.requirement_activities import extract_requirement_activities
 
 
 class RequirementActivityTests(unittest.TestCase):
+    def test_numbered_final_deliverables_keep_alphabetic_rows_and_pdf_continuations(self):
+        text = ('20.1 SI FINAL DELIVERABLES\n'
+                'a) SI Databases native along with all customization,\nLibraries and Catalogues.\n'
+                'b) Extracted Hook-ups shall be submitted in pdf\nformat agreed by the Company.\n'
+                'Document No : XX-001 Revision: 1 Page: 38 of 42\n'
+                'Date: 09/02/2026\fCompany Classification: Internal\n'
+                'c) Approval records\n'
+                '20.2 SPID FINAL DELIVERABLES\n'
+                'a) Approval records\nb) MTO Lists shall be submitted in MS-Excel Format.\n'
+                '21 WARRANTY REQUIREMENTS\nContractor shall provide a warranty.\n')
+        tasks = extract_requirement_activities([self.source(text)])['tasks']
+        self.assertEqual([row['title'] for row in tasks], [
+            'SI Databases native along with all customization, Libraries and Catalogues.',
+            'Extracted Hook-ups shall be submitted in pdf format agreed by the Company.',
+            'Approval records', 'Approval records', 'MTO Lists shall be submitted in MS-Excel Format.',
+        ])
+        self.assertEqual([row['source_heading'] for row in tasks], [
+            '20.1 SI FINAL DELIVERABLES', '20.1 SI FINAL DELIVERABLES', '20.1 SI FINAL DELIVERABLES',
+            '20.2 SPID FINAL DELIVERABLES', '20.2 SPID FINAL DELIVERABLES',
+        ])
+        self.assertEqual(tasks[0]['source_item_number'], 'a')
+        for task in tasks:
+            self.assertEqual(task['source_quote'], text[
+                task['source_locator']['character_start']:task['source_locator']['character_end']])
+
     def source(self, text, file_id=7):
         return {'id': file_id, 'original_filename': 'scope.pdf', 'category': 'sow', 'extracted_text': text}
 
@@ -105,6 +130,14 @@ class RequirementActivityTests(unittest.TestCase):
         self.assertEqual(len(tasks), 2)
         self.assertIn('conditional_scope', tasks[0]['review_flags'])
         self.assertEqual(tasks[1]['title'], 'Custom launch checklist')
+
+    def test_alphabetic_list_stops_at_notes_and_flags_explicit_exclusions(self):
+        text = ('20.1 SI FINAL DELIVERABLES\na) Inspection reports\n'
+                'b) Site survey (not required)\nNotes:\n'
+                'The contractor shall comply with Company standards.\n')
+        tasks = extract_requirement_activities([self.source(text)])['tasks']
+        self.assertEqual([row['title'] for row in tasks], ['Inspection reports', 'Site survey (not required)'])
+        self.assertIn('conditional_scope', tasks[1]['review_flags'])
 
     def test_table_of_contents_and_reference_terms_are_not_deliverables(self):
         text = ('APPENDIX 3 – FEED DELIVERABLES.............58\n1 Existing facility\n'

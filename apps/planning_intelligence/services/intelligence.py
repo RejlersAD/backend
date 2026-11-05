@@ -20,6 +20,7 @@ from ..config import (
 from . import project_ai
 from .deliverable_matching import find_deliverable_match
 from .register_rows import extract_legacy_register_rows, extract_register_rows, register_rows_for_file
+from .requirement_activities import extract_requirement_activities
 from .planning_fact_extraction import (
     ASSERTION_SCHEMA_VERSION, STRUCTURED_FACT_FIELDS, category_guidance, validated_claim,
 )
@@ -536,4 +537,26 @@ def analyze_project(files_qs, project=None, user=None, *, allow_ai=True, resume_
                 group['deliverables'].append(claim['value'])
                 group['mentioned_in_source'].append(claim['value'])
                 group['ai_discovered'].append(claim['value'])
+    for source in files:
+        if source.category == 'output_schedule_sample':
+            continue
+        for task in extract_requirement_activities([source])['tasks']:
+            locator = task['source_locator']
+            if any(row['source_file_id'] == source.pk
+                   and type(row.get('start')) is int and type(row.get('end')) is int
+                   and locator['character_start'] < row['end'] and row['start'] < locator['character_end']
+                   for row in register_rows):
+                continue
+            code = 'not_specified' if task['discipline'] == 'general' else task['discipline']
+            group = intelligence['disciplines'].setdefault(code, {
+                'name': 'Not Specified' if code == 'not_specified' else task['source_heading'],
+                'in_scope': False, 'deliverables': [], 'mentioned_in_source': [], 'ai_discovered': [],
+                'excluded_deliverables': [],
+            })
+            group['mentioned_in_source'].append(task['title'])
+            if 'conditional_scope' in task['review_flags']:
+                group.setdefault('excluded_deliverables', []).append(task['title'])
+            else:
+                group['in_scope'] = True
+                group['deliverables'].append(task['title'])
     return intelligence
