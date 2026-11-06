@@ -214,6 +214,7 @@ def freeze_schedule_inputs(version):
         'schedule_identity': {'id': version.schedule.pk, 'name': version.schedule.name, 'code': version.schedule.code},
         'project_start': proposal['start'] if proposal else version.schedule.planned_start,
         'project_finish': proposal['finish'] if proposal else project.planned_end_date,
+        'planner_adjustments': (version.evidence_input_snapshot or {}).get('planner_adjustments') or {},
         'default_calendar_id': default_calendar_id,
         'calendars': WorkCalendarSerializer(calendars, many=True).data,
         'resources': ScheduleResourceSerializer(project.schedule_resources.filter(is_deleted=False), many=True).data,

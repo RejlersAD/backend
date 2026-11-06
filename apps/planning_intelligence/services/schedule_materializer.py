@@ -174,6 +174,8 @@ def materialize_generation(generation, *, requested_by=None):
             responsible_role=str(item.get('responsible_role') or '')[:120],
             sort_order=index,
             metadata={
+                'original_external_id': item.get('original_external_id') or external_id,
+                'source_generation_activity_id': external_id,
                 'deliverable': item.get('deliverable'),
                 'workflow_status': item.get('workflow_status'),
                 'workflow_stage_code': item.get('workflow_stage_code'),

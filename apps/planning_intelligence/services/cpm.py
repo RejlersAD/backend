@@ -275,12 +275,11 @@ def calculate_schedule_version(version, *, requested_by=None):
                 contractual_finish_index = calendar.index_of(calendar.on_or_before(contractual_finish))
                 contractual_variance = finish_index - contractual_finish_index
 
-            # Use the contractual finish for the backward pass. A network that
-            # cannot meet it now exposes negative float instead of silently
-            # treating its own late forecast as the target finish.
+            from .planner_recovery import planning_target_finish
+            target = planning_target_finish(version, contractual_finish)
             project_finish = (
-                contractual_finish_index
-                if contractual_finish_index is not None
+                calendar.index_of(calendar.on_or_before(target))
+                if target is not None
                 else finish_index
             )
             late, free_floats = calculate_backward_pass(

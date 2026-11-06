@@ -316,7 +316,7 @@ class PlanningPackageBuilderTests(TestCase):
         self.assertEqual(calculation.status, 'succeeded')
         version.refresh_from_db()
         self.assertEqual(version.status, 'calculated')
-        self.assertEqual(version.activities.get(external_id='PKG-START').planned_start, self.project.effective_date)
+        self.assertEqual(version.activities.get(metadata__original_external_id='PKG-START').planned_start, self.project.effective_date)
         for activity in generation.activities:
             saved = version.activities.get(external_id=activity['id'])
             self.assertEqual(saved.planned_start.isoformat(), activity['start_date'])
@@ -378,7 +378,7 @@ class PlanningPackageBuilderTests(TestCase):
         self.assertEqual(package_context(clone)['calendar'].pk, package_context(version)['calendar'].pk)
         calculation = calculate_schedule_version(clone)
         self.assertEqual(calculation.status, 'succeeded')
-        self.assertEqual(clone.activities.get(external_id='PKG-START').planned_start, self.project.effective_date)
+        self.assertEqual(clone.activities.get(metadata__original_external_id='PKG-START').planned_start, self.project.effective_date)
 
     def test_deleted_source_preserves_editable_draft_but_blocks_approval(self):
         from ..services.cpm import calculate_schedule_version

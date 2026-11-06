@@ -101,17 +101,16 @@ class ScheduleLogicReviewTests(TestCase):
         self.project.save(update_fields=['master_schedule_version', 'master_schedule_revision'])
         return self.read()
 
-    def test_get_is_read_only_and_parallel_group_blocks_submission(self):
+    def test_get_is_read_only_and_parallel_group_is_advisory(self):
         before = deepcopy(self.project.simple_planning_state)
         with CaptureQueriesContext(connection) as queries:
             state = self.read()
         self.assertFalse([row for row in queries if row['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
         self.assertEqual(self.quality(state)['summary']['unreviewed_group_count'], 1)
-        self.assertFalse(state['permissions']['can_submit'])
-        blocker = next(row for row in state['blockers'] if row['code'] == 'parallel_workflow_review_required')
-        self.assertEqual(blocker['severity'], 'critical')
+        self.assertTrue(state['permissions']['can_submit'])
+        blocker = next(row for row in state['warnings'] if row['code'] == 'parallel_workflow_review_required')
+        self.assertEqual(blocker['severity'], 'warning')
         self.assertEqual(len(blocker['task_ids']), 6)
-        self.post('submit', {'revision': state['revision']}, 409)
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state, before)
         self.assertFalse(ScheduleLogicReview.objects.exists())
@@ -293,30 +292,22 @@ class ScheduleLogicReviewTests(TestCase):
         self.assertEqual(carry_logic_reviews(self.project, source_tasks, state['deliverables'], version), 0)
         self.assertFalse(ScheduleLogicReview.objects.filter(version=version).exists())
 
-    def test_partial_reviewer_cannot_approve_parallel_work_but_can_request_changes_or_reject(self):
+    def test_assigned_reviewer_can_decide_with_parallel_work_warnings_without_final_approval(self):
         version = self.materialize()
         self.activate(version)
-        for alternative in ['changes_requested', 'rejected']:
+        for alternative in ['approved', 'changes_requested', 'rejected']:
             review = ScheduleReview.objects.create(version=version, title='Legacy review', requested_by=self.owner,
                                                    requested_at=timezone.now())
             vote = ScheduleReviewDecision.objects.create(review=review, reviewer=self.reviewer)
             ScheduleReviewDecision.objects.create(review=review, reviewer=self.owner)
-            with self.assertRaises(ScheduleApprovalError) as raised:
-                decide_schedule_review(version, review.pk, self.reviewer, decision='approved', comment='Ready')
-            self.assertEqual(raised.exception.payload['code'], 'schedule_logic_review_required')
-            vote.refresh_from_db(); review.refresh_from_db()
-            self.assertEqual(vote.status, 'pending')
-            self.assertEqual(vote.comment, '')
-            self.assertIsNone(vote.decided_at)
-            self.assertEqual(review.status, 'pending')
             result = decide_schedule_review(version, review.pk, self.reviewer, decision=alternative,
                                             comment='Resolve the current parallel-work assumptions first.')
-            self.assertEqual(result.status, alternative)
+            self.assertEqual(result.status, 'pending' if alternative == 'approved' else alternative)
             vote.refresh_from_db()
             self.assertEqual(vote.status, alternative)
         self.assertFalse(ScheduleBaseline.objects.exists())
 
-    def test_persisted_ready_assurance_cannot_bypass_unreviewed_parallel_work(self):
+    def test_persisted_ready_assurance_exposes_parallel_work_as_a_warning(self):
         version = self.materialize()
         self.activate(version)
         assurance = run_schedule_assurance(version, requested_by=self.owner)
@@ -328,18 +319,15 @@ class ScheduleLogicReviewTests(TestCase):
         with CaptureQueriesContext(connection) as queries:
             current = current_assurance(version)
         self.assertFalse([row for row in queries if row['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))])
-        self.assertEqual(current.status, 'draft')
-        self.assertIn('parallel_workflow_review_required', [row['code'] for row in current.blockers])
-        self.assertFalse(can_approve_schedule(version, self.owner, allow_unapproved_assurance=True))
-        with self.assertRaisesRegex(ValueError, 'critical Phase 3'):
-            approve_schedule_assurance(version, self.owner)
+        self.assertEqual(current.status, 'ready')
+        self.assertIn('parallel_workflow_review_required', [row['code'] for row in current.warnings])
+        self.assertTrue(can_approve_schedule(version, self.owner, allow_unapproved_assurance=True))
+        approve_schedule_assurance(version, self.owner)
         assurance.refresh_from_db()
-        self.assertEqual(assurance.status, 'ready')
+        self.assertEqual(assurance.status, 'approved')
         self.assertEqual(assurance.blockers, [])
-        version.status = 'approved'
-        version.save(update_fields=['status'])
-        assurance.status = 'approved'
-        assurance.save(update_fields=['status'])
+        self.assertEqual(list(version.activities.order_by('pk').values()), before)
+        self.assertTrue(can_approve_schedule(version, self.owner))
         self.assertFalse(can_baseline_schedule(version, self.owner))
         self.assertFalse(ScheduleBaseline.objects.exists())
         self.assertEqual(list(version.activities.order_by('pk').values()), before)

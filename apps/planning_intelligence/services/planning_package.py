@@ -21,7 +21,7 @@ from .planning_package_request import PlanningPackageRequestError
 
 
 POLICY = 'planning_package'
-VERSION = 'planning-package-proposal/2'
+VERSION = 'planning-package-proposal/3'
 
 
 def _calendar(project):
@@ -331,6 +331,18 @@ def build_planning_package(project, run):
         'warnings': scope.get('warnings', []), 'missing_information': [], 'extraction_reports': [],
         'applied_dependency_rules': [], 'configured_workflow_activity_count': sum(len(chain) for chain in chains.values()),
     }
+    identifiers = {row['id']: str(100 + index * 10) for index, row in enumerate(activities)}
+    for row in activities:
+        row['original_external_id'] = row['id']
+        row['id'] = identifiers[row['id']]
+        for edge in row['predecessors']:
+            edge['id'] = identifiers[edge['id']]
+    for link in logic:
+        for field in ('id', 'predecessor_id', 'successor_id'):
+            link[field] = identifiers[link[field]]
+    for row in eddr:
+        for field in [key for key in row if key.endswith('_activity_id')]:
+            row[field] = identifiers[row[field]]
     return {'intelligence': intelligence, 'wbs': wbs, 'activities': activities, 'logic_matrix': logic,
             'eddr': eddr, 'milestones': [row for row in activities if row.get('is_milestone')], 'manhours': manhours,
             'validation': validation,

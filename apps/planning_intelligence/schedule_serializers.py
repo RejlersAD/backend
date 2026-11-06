@@ -114,6 +114,22 @@ class ScheduleSerializer(serializers.ModelSerializer):
 class ScheduleVersionSerializer(serializers.ModelSerializer):
     can_approve = serializers.SerializerMethodField()
     can_baseline = serializers.SerializerMethodField()
+    can_prepare_approval = serializers.SerializerMethodField()
+    planning_target_finish = serializers.SerializerMethodField()
+
+    def get_can_prepare_approval(self, obj):
+        from .access import can_final_approve_defaults
+        from .services.schedule_approval import current_schedule_version
+        request = self.context.get('request')
+        return bool(request and can_final_approve_defaults(request.user, obj.schedule.project)
+                    and current_schedule_version(obj) and obj.status in {'draft', 'calculated', 'approved'})
+
+    def get_planning_target_finish(self, obj):
+        from .services.planner_recovery import planning_target_finish
+        from .services.planning_package_boundary import package_context
+        context = package_context(obj)
+        result = planning_target_finish(obj, context['finish'] if context else obj.schedule.project.planned_end_date)
+        return result.isoformat() if result else None
 
     def get_can_baseline(self, obj):
         from .services.schedule_approval import can_baseline_schedule
@@ -133,8 +149,14 @@ class ScheduleVersionSerializer(serializers.ModelSerializer):
             'id', 'schedule', 'version', 'status', 'parent_version', 'source_generation',
             'change_summary', 'calculated_at', 'calculated_finish', 'created_by',
             'activity_count', 'relationship_count', 'created_at', 'updated_at', 'can_approve', 'can_baseline',
+            'can_prepare_approval', 'planning_target_finish',
         ]
         read_only_fields = fields
+
+
+class PlannerRecoverySerializer(serializers.Serializer):
+    operation = serializers.ChoiceField(choices=['extend_planning_target', 'renumber_activity_ids'])
+    expected_updated_at = serializers.DateTimeField()
 
 
 class ScheduleWBSNodeSerializer(serializers.ModelSerializer):

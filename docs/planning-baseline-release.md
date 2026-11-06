@@ -21,6 +21,46 @@ Each build is immutable and binds an evidence revision, exact source fingerprint
 - The current CPM adapter supports one explicit working calendar, whole working-day durations/lags and FS/SS/FF/SF links. Mixed calendars, partial working days and dynamic level of effort remain unsupported and are identified before applying/calculating. It does not round unsupported source values.
 - A contractual overrun remains visible as a warning/negative float. RADAI does not extend the registered project finish or silently compress approved durations. A conflicting accepted source date requires review before approval.
 
+## Confirmed draft recovery - 5 November 2026
+
+Recoverable planning-quality findings (timing variance, resource overallocation,
+parallel-work assumptions and supported Start-to-Finish links) are advisory
+warnings. They remain in assurance and approval history without blocking saving,
+calculation or authorized approval. Cycles, invalid inputs, changed source
+evidence, missing permissions and immutable versions remain protected.
+
+The planner's confirmed Approve/Baseline actions prepare missing calculation and
+assurance steps, then use the existing authorized approval commands. A baseline
+is still created only from an approved version. Failed actions retain their
+reason and offer a focused correction or reload action; failures are not hidden
+or reported as successful.
+
+`PATCH schedule-versions/{id}/recover-draft/` accepts `operation` and
+`expected_updated_at`. Supported operations:
+
+- `extend_planning_target`: store the current CPM forecast as this editable
+  version's planning target, invalidate calculation/assurance and recalculate
+  through the existing calculation job. The registered contractual finish and
+  source documents are unchanged. The extension is the actual calendar-date
+  variance, not the number of negative-float activities. Float uses the confirmed
+  planning target; contractual overrun remains visible separately.
+- `renumber_activity_ids`: allocate unique numeric IDs in increments of ten from
+  100, preserving deleted IDs, relational relationships and original/source
+  generation identifiers. Invalidate calculation/assurance, record the mapping
+  in an audit event, and recalculate. Generated-logic reset resolves preserved
+  source-generation IDs after renumbering.
+
+New `planning-package-proposal/3` proposals use numeric IDs by default, retaining
+original generated identities as provenance and remapping every relationship
+and EDDR stage reference. WBS hierarchy codes remain separate from activity IDs.
+The recovery command is limited to the current editable version, requires the
+existing project write permission and rejects stale revision tokens.
+
+Version-scoped adjustments use the existing input snapshot and are included in
+calculation fingerprints and frozen baseline input manifests. Unadjusted
+versions retain their previous calculation fingerprint; historical baselines
+and source identities are not rewritten. No schema migration is introduced.
+
 ## Calendar and export fidelity
 
 Calendars can now record exact daily working intervals and exception shifts. An empty interval map means working times were not specified. Existing calendars are not populated with assumed shifts.
