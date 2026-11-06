@@ -552,6 +552,12 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'You cannot run assurance for this project.'}, status=status.HTTP_403_FORBIDDEN)
         if version.status != 'calculated' or not version.calculated_at:
             return Response({'error': 'Calculate the schedule before running Phase 3 assurance.'}, status=status.HTTP_409_CONFLICT)
+        from .services.planning_boundaries import calculation_inputs_current
+        if not calculation_inputs_current(version):
+            return Response({
+                'error': 'Planning inputs changed after calculation. Recalculate before running Phase 3 assurance.',
+                'code': 'calculation_inputs_stale',
+            }, status=status.HTTP_409_CONFLICT)
         request_data = {
             'schedule_version_id': version.id,
             'calculated_state_at': version.calculated_at.isoformat(),
