@@ -33,6 +33,10 @@ def recover_planner_draft(version, actor, *, operation, expected_updated_at):
         from .planning_boundaries import calculation_inputs_current
         from .planning_package_boundary import package_context
         if version.status != 'calculated' or not version.calculated_finish or not calculation_inputs_current(version):
+            from .cpm import calculate_schedule_version
+            calculate_schedule_version(version, requested_by=actor)
+            version.refresh_from_db()
+        if version.status != 'calculated' or not version.calculated_finish or not calculation_inputs_current(version):
             raise ScheduleApprovalError('Calculate the current draft before adjusting its planning target.', code='planner_calculation_required')
         context = package_context(version)
         contractual = context['finish'] if context else version.schedule.project.planned_end_date
