@@ -10,6 +10,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from .models import get_io_list_document_storage
+
 
 class IOListExtraction(models.Model):
     STATUS_QUEUED = 'queued'
@@ -38,7 +40,9 @@ class IOListExtraction(models.Model):
     legend_rules = models.JSONField(default=dict, blank=True)
     doc_number = models.CharField(max_length=128, blank=True, default='')
     revision = models.CharField(max_length=32, blank=True, default='')
+    contractor_number = models.CharField(max_length=128, blank=True, default='')
     rejlers_number = models.CharField(max_length=128, blank=True, default='')
+    sheet = models.CharField(max_length=32, blank=True, default='')   # e.g. 09/23
     agreement = models.CharField(max_length=255, blank=True, default='')
     use_ai = models.BooleanField(default=False)
 
@@ -106,3 +110,32 @@ class IOListAISuggestion(models.Model):
 
     class Meta:
         unique_together = ('extraction', 'loop_key')
+
+
+class IOListExportTemplate(models.Model):
+    """The instrumentation team's Standard Template workbook (§ export).
+
+    One organisation-level default (project = NULL); a project may override
+    it with its own upload. The file lives in the I/O List storage backend
+    (S3 in production) and is always read via file.open('rb'), never .path.
+    `validation` caches the upload-time check result (sheets / 53 headers /
+    cover cells)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'instrument_io_workflow.IOListProject', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='export_templates')
+    file = models.FileField(
+        upload_to='instrument_io_workflow/export_templates/',
+        storage=get_io_list_document_storage)
+    original_name = models.CharField(max_length=255, blank=True, default='')
+    validation = models.JSONField(default=dict, blank=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        scope = f'project {self.project_id}' if self.project_id else 'organisation'
+        return f'IOListExportTemplate {self.original_name} ({scope})'

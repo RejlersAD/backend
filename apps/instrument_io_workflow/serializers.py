@@ -34,7 +34,7 @@ class IOListProjectSerializer(serializers.ModelSerializer):
         model = IOListProject
         fields = [
             'id', 'project_name', 'project_code', 'description',
-            'category', 'status', 'client', 'location', 'tags',
+            'category', 'status', 'client', 'location', 'tags', 'settings',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
             'document_count',
         ]

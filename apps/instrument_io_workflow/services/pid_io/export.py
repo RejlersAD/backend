@@ -45,6 +45,14 @@ def _iolist_workbook(wb, extraction):
     """Rev 2 single workbook: IO_LIST · LINE_TAGS · ALARM_TRIP · SETPOINTS ·
     SERVICE_CHECK · UNTAGGED · VENDOR_CONFLICTS · NOT_IN_VENDOR · README."""
     _iolist_sheet(wb, extraction)
+    _append_review_sheets(wb, extraction)
+
+
+def _append_review_sheets(wb, extraction, sources=None):
+    """The review sheets shared by the IO-list workbook and the Standard
+    Template export: appended AFTER any existing sheets, in the fixed order
+    LINE_TAGS · ALARM_TRIP · SETPOINTS · SERVICE_CHECK · UNTAGGED ·
+    VENDOR_CONFLICTS · NOT_IN_VENDOR · SOURCES · README."""
     _line_tags_sheet(wb, extraction)
     _alarm_trip_sheet(wb, extraction)
 
@@ -72,13 +80,80 @@ def _iolist_workbook(wb, extraction):
            [[c['tag'], c['field'], c.get('io_list', ''), c['vendor'], c['type']]
             for c in vendor.get('conflicts', [])])
     _sheet('NOT_IN_VENDOR', ['Tag'], [[t] for t in vendor.get('noRecord', [])])
+    if sources is not None:
+        _sheet('SOURCES', ['Tag', 'Column', 'Value', 'Source', 'P&ID sheet · zone', 'Vendor document'],
+               [[s.get('tag', ''), s.get('column', ''), s.get('value', ''),
+                 s.get('source', ''), s.get('sheet', ''), s.get('vendorDoc', '')]
+                for s in sources])
+
+    coverage = (extraction.summary or {}).get('coverage')
+    if coverage:
+        _sheet('COVERAGE',
+               ['P&ID drawing', 'Baseline rows', 'Tags found on P&ID', 'Status'],
+               [[d['drawing'], d['baselineRows'], d['found'],
+                 'Uploaded' if d['found'] == d['baselineRows']
+                 else 'Uploaded — missing: ' + ', '.join(d['missing'])]
+                for d in coverage.get('onUploadedDrawings', [])]
+               + [[d['drawing'], d['baselineRows'], 0, 'Not uploaded']
+                  for d in coverage.get('notUploaded', [])])
 
     ws = wb.create_sheet('README')
     ws.append(['IO List extraction — IO list workbook'])
     ws.append(['Document', extraction.doc_number or ''])
     ws.append(['Revision', extraction.revision or ''])
     for k, v in (extraction.summary or {}).items():
+        if isinstance(v, (dict, list)):
+            import json as _json
+            v = _json.dumps(v)[:30000]
         ws.append([k, v])
+
+
+def build_standard_workbook(extraction, template_bytes, include_review=True,
+                            baseline_rows=None):
+    """The Standard Template export: fill the stored template (never rebuild
+    it) and append the review sheets after the two template sheets.
+    Returns (.xlsx bytes, row_count)."""
+    from . import export_standard
+    import io
+    wb0 = openpyxl.load_workbook(io.BytesIO(template_bytes))
+    headers = [wb0[export_standard.DATA_SHEET].cell(2, c).value
+               for c in range(1, wb0[export_standard.DATA_SHEET].max_column + 1)]
+    wb0.close()
+    rows, sources = export_standard.build_rows(extraction, headers, baseline_rows)
+
+    # Tag padding: the baseline's layout (most common function-part width) is
+    # a project setting; apply it to every tag, export only.
+    project = extraction.project
+    settings = dict(project.settings or {})
+    pad = settings.get('tag_padding')
+    baseline_tags = [r.get('TAG_Number') for r in (baseline_rows or [])
+                     if r.get('TAG_Number')]
+    if not baseline_tags:
+        baseline_tags = [r.get('TAG_Number') for r in
+                         (extraction.vendor_payload or {}).get('baselineRows') or []]
+    detected = export_standard.detect_tag_padding(baseline_tags)
+    if detected != pad:
+        settings['tag_padding'] = detected
+        project.settings = settings
+        project.save(update_fields=['settings', 'updated_at'])
+        pad = detected
+
+    baseline = (extraction.vendor_payload or {}).get('baseline') or {}
+    data_sheet_name = baseline.get('sheet_name') or None   # keep 'Template' without a baseline
+    cover = {
+        'company_doc_no': extraction.doc_number or '',
+        'sheet': extraction.sheet or '',
+        'rev': extraction.revision or '',
+        'contractor_doc_no': extraction.contractor_number or '',
+        'rejlers_doc_no': extraction.rejlers_number or '',
+    }
+    sheet_name = data_sheet_name or export_standard.DATA_SHEET
+    wb = export_standard.fill_template(template_bytes, rows, cover,
+                                       data_sheet_name=data_sheet_name,
+                                       tag_pad_width=pad)
+    if include_review:
+        _append_review_sheets(wb, extraction, sources=sources)
+    return export_standard.save_with_header(wb, cover, sheet_name), len(rows)
 
 
 def _line_tags_sheet(wb, extraction):

@@ -39,7 +39,7 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
     sheets = {}
     for page in pages:
         mark('tags', f'Sheet {page.page_no + 1}: tags and bubbles')
-        t = tags.pair_tags(page)
+        t = tags.pair_tags(page, legend_rules=legend_rules)
         t = tags.attach_bubbles(page, t)
         t = tags.attach_system_letters(page, t)
         t = tags.attach_alarms(page, t)
@@ -125,6 +125,16 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
 
     # ── assemble result (§8 contract) ──────────────────────────────────
     mark('assemble', 'Building the register')
+    # drawing number per sheet — detected from the title block, matched
+    # against the baseline's P&ID vocabulary when one exists (works with any
+    # client numbering scheme); drives the coverage report
+    from . import docrefs
+    baseline_drawings = sorted({
+        docrefs.norm_drawing(r.get('P&ID'))
+        for r in (baseline_info.get('rows') if baseline_info else [])
+        if docrefs.norm_drawing(r.get('P&ID'))})
+    sheet_drawings = {pg.page_no: docrefs.detect_sheet_drawing(pg, baseline_drawings)
+                      for pg in pages}
     pid_tags = [_tag_payload(c) for c in all_classified]
     for d in derived:
         pid_tags.append({
@@ -164,6 +174,43 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
         ],
     }
 
+    # ── P&ID coverage vs baseline ──────────────────────────────────────
+    # Which baseline rows belong to the uploaded drawings, and how many of
+    # those tags the extraction actually found. Baseline rows on drawings
+    # that were never uploaded are listed so the reviewer knows the gap is
+    # missing INPUT, not an extractor miss.
+    coverage = {}
+    if baseline_info:
+        found_norms = {p['norm'].upper() for p in pid_tags}
+        uploaded_drawings = sorted({d for d in sheet_drawings.values() if d})
+
+        def _drawing_key(pid_ref):
+            return docrefs.norm_drawing(pid_ref)
+
+        on_uploaded, not_uploaded = {}, {}
+        for row in baseline_info.get('rows', []):
+            dk = _drawing_key(row.get('P&ID'))
+            tag = row.get('_tag_norm', '')
+            if dk in uploaded_drawings:
+                e = on_uploaded.setdefault(dk, {'rows': 0, 'found': 0, 'missing': []})
+                e['rows'] += 1
+                if tag.upper() in found_norms:
+                    e['found'] += 1
+                else:
+                    e['missing'].append(row.get('TAG_Number'))
+            elif dk:
+                not_uploaded[dk] = not_uploaded.get(dk, 0) + 1
+        coverage = {
+            'uploadedDrawings': uploaded_drawings,
+            'onUploadedDrawings': [
+                {'drawing': k, 'baselineRows': v['rows'], 'found': v['found'],
+                 'missing': sorted(v['missing'])}
+                for k, v in sorted(on_uploaded.items())],
+            'notUploaded': [{'drawing': k, 'baselineRows': v}
+                            for k, v in sorted(not_uploaded.items())],
+            'notUploadedRows': sum(not_uploaded.values()),
+        }
+
     # ── Rev 2: cause notes + alarm & trip register ─────────────────────
     mark('alarmtrip', 'Building the alarm & trip register')
     setpoint_rows = [{'tag': s.tag, 'point': s.point, 'value': s.value, 'unit': s.unit,
@@ -184,6 +231,7 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
                      for u in all_untagged],
         'setpoints': setpoint_rows,
         'vendor': vendor_payload,
+        'coverage': coverage,
         'cause_notes': all_cause_notes,
         'alarmtrip': alarmtrip_payload,
         'summary': {
@@ -203,6 +251,10 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
             'vendorCells': sum(len(f['cells']) for f in vendor_fills.values()) if vendor_fills else 0,
             'vendorConflicts': sum(1 for c in vendor_conflicts if c['type'] == 'engineering'),
             'causeNotes': len(all_cause_notes),
+            'coverage': coverage,
+            'coverageFound': sum(d['found'] for d in coverage.get('onUploadedDrawings', [])),
+            'coverageRows': sum(d['baselineRows'] for d in coverage.get('onUploadedDrawings', [])),
+            'notUploadedRows': coverage.get('notUploadedRows', 0),
             'elapsed_s': round(time.monotonic() - t0, 1),
         },
         'warnings': warnings,

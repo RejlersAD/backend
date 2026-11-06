@@ -167,7 +167,7 @@ class IOListProject(models.Model):
     client         = models.CharField(max_length=255, blank=True, default='')
     location       = models.CharField(max_length=255, blank=True, default='')
     tags           = models.JSONField(default=list, blank=True)  # Flexible tagging
-    
+
     # Audit
     created_by     = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -175,6 +175,14 @@ class IOListProject(models.Model):
     )
     created_at     = models.DateTimeField(auto_now_add=True)
     updated_at     = models.DateTimeField(auto_now=True)
+
+    # Project-level options for the P&ID → IO List workflow. Known keys:
+    #   tag_padding (int|null)      — function-letter width detected from the
+    #                                 IO-list baseline (export only)
+    #   include_review_sheets (bool)— append review sheets to the export (on)
+    # NB: named 'settings', so it must be declared AFTER created_by — inside
+    # the class body it shadows django.conf.settings.
+    settings       = models.JSONField(default=dict, blank=True)
     
     class Meta:
         ordering = ['-created_at']

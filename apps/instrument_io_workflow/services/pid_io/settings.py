@@ -1,10 +1,17 @@
-"""Soft-coded thresholds for the P&ID IO extraction engine.
+"""Soft-coded patterns and thresholds for the P&ID IO extraction engine.
 
-Every number here was measured on the reference drawing set (13-PP-152-45100 /
-72010 / 72020 / 72030, Rev Q). They are project-settable defaults — a project
-may override any of them in its settings JSON; code must read them from here,
-never inline.
+Everything here is a project-agnostic DEFAULT, measured on the reference
+drawing set (13-PP-152-45100 / 72010 / 72020 / 72030, Rev Q). A project may
+override any of them in its settings JSON / legend rules; code must read
+them from here, never inline. Document-number patterns are deliberately
+generic (any client numbering scheme); when an IO-list baseline exists, its
+P&ID column is the authoritative drawing-number vocabulary.
 """
+
+# Document / drawing numbers — generic, works for any client scheme
+# (13-PP-152-72065-P2 · E3-PP-152-02020 · 68-PP-152-14307 · …)
+DRAWING_TOKEN_RE = r'\b[0-9A-Z]{2,4}(?:-[0-9A-Z]{2,8}){2,5}\b'
+DRAWING_REV_SUFFIX_RE = r'-(P\d+|R\d+)$'
 
 # §6.1.1 — smart-tag layer
 SMART_TAG_PREFIXES = ('IN#', 'EQ#')
@@ -12,8 +19,11 @@ SMART_TAG_MAX_SIZE_PT = 1.5          # hidden layer renders at 1.1 pt
 SMART_TAG_WHITE = 0xFFFFFF           # colour int for white text
 
 # §6.1.2 — bubble tag pairing
-TAG_TOP_RE = r'^\d{2}[A-Z]{1,6}$'          # unit + function letters (13-LT)
+# unit code is 2 alphanumeric chars by default (13, A1, U2…) — a project may
+# override via legend rules (tagTopRe / tagBottomRe / unitFuncSplitRe)
+TAG_TOP_RE = r'^[0-9A-Z]{2}[A-Z]{1,6}$'     # unit + function letters (13-LT)
 TAG_BOTTOM_RE = r'^\d{3,5}[A-Z]{0,2}\d?$'  # loop number + suffix (7201C)
+UNIT_FUNC_SPLIT_RE = r'^(\d{1,4}|(?=[0-9A-Z]*\d)[0-9A-Z]{2})([A-Z]{1,6})$'
 TAG_PAIR_MIN_GAP_PT = 5.0                  # top→bottom vertical gap range
 TAG_PAIR_MAX_GAP_PT = 9.5
 TAG_PAIR_MAX_CENTRE_DX_PT = 4.5            # horizontal centre alignment
@@ -74,7 +84,8 @@ LINE_VIA_RUN_MAX_HOPS = 3
 # §6.5 — service confidence bands
 CONFIDENCE_HIGH = 0.85
 CONFIDENCE_REVIEW = 0.6
-CONNECTOR_RE = r'\d{2}-P[PU]-152-\d{5,6}-P2'
+# Off-page connector drawing references — generic numbering scheme
+CONNECTOR_RE = r'\d{2}-[A-Z]{2,3}-\d{2,4}-\d{4,6}(?:-P\d)?'
 UTILITY_FLUIDS_RE = r'FLARE|NITROGEN|VENT|DRAIN|STEAM'
 UTILITY_EXEMPT_SERVICE_CODES = ('WG', 'WL', 'FL', 'NI')
 

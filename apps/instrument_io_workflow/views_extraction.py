@@ -29,7 +29,7 @@ from rest_framework.response import Response
 
 from .models import IOListDocument, IOListProject
 from .models_extraction import (IOListAISuggestion, IOListExtraction,
-                                IOListServiceDecision)
+                                IOListExportTemplate, IOListServiceDecision)
 logger = logging.getLogger(__name__)
 
 
@@ -97,10 +97,17 @@ def upload_extraction_file(request, project_id):
                 'vendor': 'vendor_db'}[kind]
     import hashlib
     from django.core.files.base import ContentFile
+    sha = hashlib.sha256(data).hexdigest()
+    dupe = project.documents.filter(pdf_sha256=sha).first()
+    if dupe:
+        return Response(
+            {'error': f'This exact file is already uploaded as '
+                      f'"{dupe.document_number}" — duplicates are not processed twice.'},
+            status=status.HTTP_409_CONFLICT)
     doc = IOListDocument(
         project=project, uploaded_by=request.user, document_type=doc_type,
         document_number=upload.name, status='uploaded',
-        pdf_sha256=hashlib.sha256(data).hexdigest(),
+        pdf_sha256=sha,
     )
     doc.pdf_file.save(upload.name, ContentFile(data))
     doc.save()
@@ -117,11 +124,11 @@ def upload_extraction_file(request, project_id):
             pages = spans.read_document(tmp.name)
             smart_in = sum(len([s for s in p.smart_tags if s.text.startswith('IN#')]) for p in pages)
             smart_eq = sum(len([s for s in p.smart_tags if s.text.startswith('EQ#')]) for p in pages)
-            drawings = []
-            for p in pages:
-                m = re.findall(r'\d{2}-PP-152-\d{5}(?:-P2)?', p.text)
-                if m:
-                    drawings.append(m[-1])
+            from .services.pid_io import docrefs
+            # the sheet's own drawing number comes from the title block, not
+            # from body references (works for any client numbering scheme)
+            drawings = [docrefs.detect_sheet_drawing(p) for p in pages]
+            drawings = [d for d in drawings if d]
             summary.update({
                 'sheets': len(pages), 'drawings': drawings,
                 'pdfType': 'Vector — text layer + smart-tag layer' if smart_in else 'Vector — text layer',
@@ -207,10 +214,103 @@ def put_doc_info(request, project_id):
     ext = _latest_extraction(project) or IOListExtraction(project=project, created_by=request.user)
     ext.doc_number = str(request.data.get('docNo', ext.doc_number))[:128]
     ext.revision = str(request.data.get('revision', ext.revision))[:32]
+    ext.contractor_number = str(request.data.get('contractorNumber', ext.contractor_number))[:128]
     ext.rejlers_number = str(request.data.get('rejlersNumber', ext.rejlers_number))[:128]
+    ext.sheet = str(request.data.get('sheet', ext.sheet))[:32]
     ext.stage_state = {**(ext.stage_state or {}), '3': 'complete'}
     ext.save()
     return Response({'ok': True, 'docNumber': ext.doc_number, 'revision': ext.revision})
+
+
+# ── Export template (I/O List) — organisation default + project override ────
+
+def _template_summary(tpl, scope):
+    v = tpl.validation or {}
+    return {
+        'id': str(tpl.id), 'name': tpl.original_name, 'scope': scope,
+        'columns': v.get('columns', 0),
+        'uploadedAt': tpl.created_at.isoformat() if tpl.created_at else None,
+    }
+
+
+def _effective_template(project):
+    """Project override wins; otherwise the organisation-level default."""
+    tpl = project.export_templates.first()
+    if tpl:
+        return tpl, 'project'
+    tpl = IOListExportTemplate.objects.filter(project__isnull=True).first()
+    if tpl:
+        return tpl, 'organisation'
+    return None, None
+
+
+@api_view(['GET', 'POST', 'DELETE'])
+@parser_classes([MultiPartParser, FormParser])
+@permission_classes([IsAuthenticated])
+def export_template(request, project_id):
+    """The `Export template (I/O List)` setting. GET reports the effective
+    template (project override or organisation default); POST uploads and
+    validates one (scope=project replaces the override, scope=organisation
+    replaces the default); DELETE removes the project override."""
+    project = _project_or_404(request, project_id)
+    if project is None:
+        return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        tpl, scope = _effective_template(project)
+        settings = project.settings or {}
+        return Response({
+            'template': _template_summary(tpl, scope) if tpl else None,
+            'tagPadding': settings.get('tag_padding'),
+            'includeReviewSheets': settings.get('include_review_sheets', True),
+        })
+
+    if request.method == 'DELETE':
+        project.export_templates.all().delete()
+        return Response({'ok': True})
+
+    upload = request.FILES.get('file')
+    if not upload:
+        return Response({'error': 'No file supplied.'}, status=status.HTTP_400_BAD_REQUEST)
+    scope = request.data.get('scope') or 'project'
+    data = upload.read()
+    from .services.pid_io import export_standard
+    result = export_standard.validate_template(data)
+    if not result['ok']:
+        return Response(
+            {'error': f"Template not accepted: {', '.join(result['missing'])}"},
+            status=status.HTTP_400_BAD_REQUEST)
+    target_project = None if scope == 'organisation' else project
+    qs = (IOListExportTemplate.objects.filter(project__isnull=True) if target_project is None
+          else project.export_templates)
+    qs.all().delete()                       # one template per scope — replace
+    tpl = IOListExportTemplate(project=target_project, original_name=upload.name,
+                               validation=result, uploaded_by=request.user)
+    from django.core.files.base import ContentFile
+    tpl.file.save(upload.name, ContentFile(data))
+    tpl.save()
+    return Response({'template': _template_summary(
+        tpl, 'organisation' if target_project is None else 'project')},
+        status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def patch_project_settings(request, project_id):
+    """Project export settings: include_review_sheets, tag_padding."""
+    project = _project_or_404(request, project_id)
+    if project is None:
+        return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+    settings = dict(project.settings or {})
+    if 'includeReviewSheets' in request.data:
+        settings['include_review_sheets'] = bool(request.data.get('includeReviewSheets'))
+    if 'tagPadding' in request.data:
+        tp = request.data.get('tagPadding')
+        settings['tag_padding'] = int(tp) if tp not in (None, '') else None
+    project.settings = settings
+    project.save(update_fields=['settings', 'updated_at'])
+    return Response({'ok': True, 'tagPadding': settings.get('tag_padding'),
+                     'includeReviewSheets': settings.get('include_review_sheets', True)})
 
 
 def _file_path(doc):
@@ -251,8 +351,17 @@ def start_extraction(request, project_id):
     if pid_doc is None:
         return Response({'error': 'Upload a P&ID drawing first (Stage 1).'},
                         status=status.HTTP_400_BAD_REQUEST)
-    # EVERY uploaded P&ID is processed (multi-file upload in Stage 1)
-    pid_docs = [d for d in docs if d.document_type == 'pid_drawing']
+    # EVERY uploaded P&ID is processed (multi-file upload in Stage 1);
+    # identical files (same sha256) are processed once
+    seen_sha = set()
+    pid_docs = []
+    for d in docs:
+        if d.document_type != 'pid_drawing':
+            continue
+        if d.pdf_sha256 and d.pdf_sha256 in seen_sha:
+            continue
+        seen_sha.add(d.pdf_sha256)
+        pid_docs.append(d)
     iolist_doc = next((d for d in docs if d.document_type == 'io_list'
                        and d.pdf_file.name.lower().endswith(('.xlsx', '.xlsm'))), None)
     # DCS first, then ESD — GDS rows live in the DCS database (spec §6.8).
@@ -275,14 +384,21 @@ def start_extraction(request, project_id):
         try:
             from .services.pid_io import engine
             extraction = IOListExtraction.objects.get(id=extraction_id)
-            # every P&ID uploaded to the project is processed
-            pid_paths = [_file_path(d) for d in IOListDocument.objects.filter(
-                project=extraction.project, document_type='pid_drawing')]
+            # every P&ID uploaded to the project is processed (once per file)
+            seen_sha = set()
+            pid_paths = []
+            for d in IOListDocument.objects.filter(
+                    project=extraction.project, document_type='pid_drawing'):
+                if d.pdf_sha256 and d.pdf_sha256 in seen_sha:
+                    continue
+                seen_sha.add(d.pdf_sha256)
+                pid_paths.append(_file_path(d))
             result = engine.run_extraction(
                 pid_paths,
                 baseline_path=_file_path(extraction.iolist_document),
                 vendor_paths=[_file_path(d) for d in
                               IOListDocument.objects.filter(id__in=extraction.vendor_documents)],
+                legend_rules=extraction.legend_rules or {},
             )
             extraction.summary = result['summary']
             extraction.tags_payload = result['tags']
@@ -519,8 +635,10 @@ def export_extraction(request, project_id, extraction_id):
     ext = IOListExtraction.objects.filter(id=extraction_id, project_id=project_id).first()
     if not ext:
         return Response({'error': 'Extraction not found.'}, status=status.HTTP_404_NOT_FOUND)
-    fmt = request.query_params.get('fmt') or request.query_params.get('format') or 'iolist'
+    fmt = request.query_params.get('fmt') or request.query_params.get('format') or 'standard'
     try:
+        if fmt == 'standard':
+            return _export_standard(request, ext)
         from .services.pid_io import export as export_mod
         path = export_mod.build_workbook(ext, fmt)
         # Read into memory: the temp file must not be tied to the response's
@@ -541,3 +659,42 @@ def export_extraction(request, project_id, extraction_id):
         logger.exception('io-list export failed')
         return Response({'error': f'Export failed: {exc}'},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _export_standard(request, ext):
+    """The Standard Template workbook — the only format offered by the UI.
+    The stored template is loaded and filled; never rebuilt from scratch."""
+    tpl, _scope = _effective_template(ext.project)
+    if tpl is None:
+        return Response({'error': 'Upload the export template in project settings.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    with tpl.file.open('rb') as fh:     # S3-backed: bytes, never .path
+        template_bytes = fh.read()
+
+    # typed baseline rows (numbers stay numbers) when the baseline workbook
+    # is still stored; otherwise fall back to the stringified payload rows
+    baseline_rows = None
+    if ext.iolist_document:
+        from .services.pid_io import baseline as baseline_mod
+        bpath = _file_path(ext.iolist_document)
+        try:
+            info = baseline_mod.read_baseline(bpath)
+            if 'error' not in info:
+                baseline_rows = info['rows']
+        finally:
+            os.unlink(bpath)
+
+    settings = ext.project.settings or {}
+    include_review = settings.get('include_review_sheets', True)
+    from .services.pid_io import export as export_mod
+    payload, row_count = export_mod.build_standard_workbook(
+        ext, template_bytes, include_review=include_review,
+        baseline_rows=baseline_rows)
+    doc = ext.doc_number or 'io-list'
+    rev = ext.revision or ''
+    filename = f'{doc}_Rev.{rev}.xlsx' if rev else f'{doc}.xlsx'
+    import io as _io
+    resp = FileResponse(_io.BytesIO(payload), as_attachment=True, filename=filename)
+    resp['X-Export-Rows'] = str(row_count)
+    resp['X-Export-Template'] = tpl.original_name or 'Standard_Template.xlsx'
+    return resp

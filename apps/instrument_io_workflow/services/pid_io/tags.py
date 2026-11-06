@@ -14,7 +14,18 @@ from . import settings as S
 
 _TOP_RE = re.compile(S.TAG_TOP_RE)
 _BOTTOM_RE = re.compile(S.TAG_BOTTOM_RE)
+_SPLIT_RE = re.compile(S.UNIT_FUNC_SPLIT_RE)
 _ALARM_RE = re.compile(r'^(?:SHH|SLL|HH|LL|SH|SL|H|L)$')
+
+
+def _patterns(legend_rules):
+    """Per-project tag-format overrides from the Stage-2 legend rules
+    (tagTopRe / tagBottomRe / unitFuncSplitRe); defaults from settings."""
+    lr = legend_rules or {}
+    top = re.compile(lr['tagTopRe']) if lr.get('tagTopRe') else _TOP_RE
+    bottom = re.compile(lr['tagBottomRe']) if lr.get('tagBottomRe') else _BOTTOM_RE
+    split = re.compile(lr['unitFuncSplitRe']) if lr.get('unitFuncSplitRe') else _SPLIT_RE
+    return top, bottom, split
 
 
 @dataclass
@@ -36,8 +47,8 @@ class BubbleTag:
     shape: object = None        # PathShape evidence
 
 
-def _split_top(text):
-    m = re.match(r'^(\d{2})([A-Z]{1,6})$', text)
+def _split_top(text, split_re=None):
+    m = (split_re or _SPLIT_RE).match(text)
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
@@ -94,16 +105,17 @@ def classify_frame(page, shape):
     return 'circle'
 
 
-def pair_tags(page):
+def pair_tags(page, legend_rules=None):
     """§6.1.2 — pair unit+function spans with loop spans directly below."""
+    top_re, bottom_re, split_re = _patterns(legend_rules)
     tops, bottoms = [], []
     for sp in page.spans:
         if sp.size <= S.SMART_TAG_MAX_SIZE_PT:
             continue
         text = sp.text.replace(' ', '')
-        if _TOP_RE.match(text):
+        if top_re.match(text):
             tops.append(sp)
-        elif _BOTTOM_RE.match(text):
+        elif bottom_re.match(text):
             bottoms.append(sp)
 
     pairs = []
@@ -128,7 +140,10 @@ def pair_tags(page):
             continue
         bot = best[1]
         used_bottoms.add(id(bot))
-        unit, func = _split_top(top.text.replace(' ', ''))
+        unit, func = _split_top(top.text.replace(' ', ''), split_re)
+        if not unit or not func:
+            continue                    # top matched the loose shape but is
+                                        # not a tag (e.g. the word 'SYSTEM')
         loop = bot.text.replace(' ', '')
         tag = f'{unit}-{func}-{loop}'
         bbox = (min(top.bbox[0], bot.bbox[0]), top.bbox[1],
