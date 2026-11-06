@@ -26,7 +26,7 @@ from .governance_serializers import (
 )
 from .models import (
     ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate,
-    GovernanceComment, GovernanceItem, Schedule,
+    GovernanceComment, GovernanceItem, PlanningJob, Schedule,
     ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleExportRecord, ScheduleReview, ScheduleReviewDecision, ScheduleVersion,
     ScheduleWBSNode, WorkCalendar,
@@ -505,6 +505,14 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'schedule_version_id': version.id,
             'schedule_state_fingerprint': schedule_state_fingerprint(version),
         }
+        project = version.schedule.project
+        from .services.planning_boundaries import calculation_inputs_current
+        if version.status != 'calculated' or not calculation_inputs_current(version):
+            # A finished job for identical inputs must not block recalculation of a draft.
+            PlanningJob.objects.filter(
+                project=project, job_type='calculate', is_deleted=False,
+                idempotency_key=request_data['schedule_state_fingerprint'], status__in=['succeeded', 'cancelled'],
+            ).update(idempotency_key=None)
         job, created = get_or_create_job(
             version.schedule.project, 'calculate', request_data, request.user,
             idempotency_key=request_data['schedule_state_fingerprint'],
