@@ -11,7 +11,7 @@ from django.utils import timezone
 from ..models import ScheduleAssuranceReview
 from .cpm import WorkdayCalendar
 from .schedule_check_details import (
-    TIMING_WARNING_CODES, activity_check_rows, apply_timing_warning_policy,
+    activity_check_rows, apply_timing_warning_policy,
     enrich_schedule_findings, relationship_check_rows,
 )
 
@@ -299,12 +299,12 @@ def current_assurance(version):
         # Apply the current approval policy without rewriting a historical review
         # on a GET. Keep its dates, evidence and calculated-state fingerprint.
         findings = [apply_timing_warning_policy(row) for row in (review.blockers or [])
-                    if row.get('code') != 'parallel_workflow_review_required'] + logic['blockers']
+                    if row.get('code') != 'parallel_workflow_review_required'] + [
+                        apply_timing_warning_policy(row) for row in logic['blockers'] + logic['warnings']]
         warnings = [apply_timing_warning_policy(row) for row in (review.warnings or [])]
         warning_codes = {row.get('code') for row in warnings}
         warnings.extend(row for row in findings if row.get('severity') == 'warning' and row.get('code') not in warning_codes)
-        review.blockers = [row for row in findings
-                           if (row.get('code') or row.get('rule')) not in TIMING_WARNING_CODES]
+        review.blockers = [row for row in findings if row.get('severity') == 'critical']
         review.warnings = warnings
         for field in ('network_validation', 'resource_validation'):
             content = dict(getattr(review, field) or {})

@@ -4,16 +4,21 @@ from datetime import date
 
 
 TIMING_WARNING_CODES = frozenset({'negative_float', 'contract_finish_overrun', 'contractual_finish_overrun'})
+QUALITY_WARNING_CODES = TIMING_WARNING_CODES | {'resource_overallocation', 'parallel_workflow_review_required', 'start_to_finish'}
 
 
 def apply_timing_warning_policy(finding):
-    """Timing feasibility is advisory, including findings saved by older code."""
+    """Recoverable quality findings are advisory, including historical reviews."""
     result = deepcopy(finding)
-    if (result.get('code') or result.get('rule')) in TIMING_WARNING_CODES and result.get('severity') != 'pass':
+    code = result.get('code') or result.get('rule')
+    if code in QUALITY_WARNING_CODES and result.get('severity') != 'pass':
         result.update(severity='warning', blocking=False)
         result['resolution'] = (
             'Keep the registered project dates. Review source durations, calendars and dependency links with Project Control. '
             'This timing warning does not prevent submission, approval or baseline publication.'
+        ) if code in TIMING_WARNING_CODES else (
+            'Review this planning assumption or capacity finding. It remains recorded as an advisory warning '
+            'and does not prevent saving, calculation or authorized approval.'
         )
     return result
 

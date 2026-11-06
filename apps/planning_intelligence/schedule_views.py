@@ -40,6 +40,7 @@ from .schedule_serializers import (
     ScheduleAssuranceReviewSerializer, ScheduleCalculationRunSerializer, ScheduleResourceSerializer, ScheduleSerializer,
     ScheduleControlSnapshotSerializer, ScheduleVersionSerializer, ScheduleWBSNodeSerializer,
     WorkCalendarSerializer,
+    PlannerRecoverySerializer,
 )
 from .services.audit import record_event
 from .services.activity_generator import build_activities
@@ -523,6 +524,19 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         job.refresh_from_db()
         return Response(PlanningJobSerializer(job, context={'request': self.request}).data, status=status.HTTP_202_ACCEPTED)
 
+    @action(detail=True, methods=['patch'], url_path='recover-draft')
+    def recover_draft(self, request, pk=None):
+        version = self.get_object()
+        serializer = PlannerRecoverySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from .services.planner_recovery import recover_planner_draft
+        try:
+            result = recover_planner_draft(version, request.user, **serializer.validated_data)
+        except ScheduleApprovalError as exc:
+            return Response(exc.payload, status=exc.status_code)
+        version.refresh_from_db()
+        return Response({**result, 'version': self.get_serializer(version).data})
+
     @action(detail=True, methods=['post'], url_path='run-assurance')
     def run_assurance(self, request, pk=None):
         version = self.get_object()
@@ -586,13 +600,19 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        generated = build_activities(
+        package = ((generation.intelligence or {}).get('schedule_engine') or {}).get('policy') == 'planning_package'
+        generated = {'logic_matrix': [
+            {'activity_id': row['successor_id'], 'predecessor_id': row['predecessor_id'],
+             'type': row.get('type', 'FS'), 'lag_days': row.get('lag_days', 0)}
+            for row in generation.logic_matrix or []
+        ]} if package else build_activities(
             version.schedule.project, generation.wbs or [], generation.intelligence or {},
         )
         with transaction.atomic():
             version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
             activity_by_external_id = {
-                item.external_id: item
+                ((item.metadata or {}).get('source_generation_activity_id')
+                 or (item.metadata or {}).get('original_external_id') or item.external_id): item
                 for item in version.activities.filter(is_deleted=False)
             }
             missing = sorted({

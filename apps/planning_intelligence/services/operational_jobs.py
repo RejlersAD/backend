@@ -174,6 +174,8 @@ def schedule_state_fingerprint(version):
         'boundary_rule': BOUNDARY_RULE_VERSION, 'calculation_rule': CALCULATION_RULE_VERSION,
         'planned_start': proposal['start'] if proposal else schedule.planned_start,
         'contractual_finish': proposal['finish'] if proposal else schedule.project.planned_end_date,
+        **({'planner_adjustments': version.evidence_input_snapshot['planner_adjustments']}
+           if (version.evidence_input_snapshot or {}).get('planner_adjustments') else {}),
         'calendar_id': getattr(default_calendar, 'pk', None),
         'planning_build_id': version.planning_build_id,
         'planning_profile_selection': _build_profile_selection(version),
