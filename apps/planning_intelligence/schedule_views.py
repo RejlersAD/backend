@@ -26,7 +26,7 @@ from .governance_serializers import (
 )
 from .models import (
     ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate,
-    GovernanceComment, GovernanceItem, Schedule,
+    GovernanceComment, GovernanceItem, PlanningJob, Schedule,
     ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleExportRecord, ScheduleReview, ScheduleReviewDecision, ScheduleVersion,
     ScheduleWBSNode, WorkCalendar,
@@ -505,6 +505,14 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'schedule_version_id': version.id,
             'schedule_state_fingerprint': schedule_state_fingerprint(version),
         }
+        project = version.schedule.project
+        from .services.planning_boundaries import calculation_inputs_current
+        if version.status != 'calculated' or not calculation_inputs_current(version):
+            # A finished job for identical inputs must not block recalculation of a draft.
+            PlanningJob.objects.filter(
+                project=project, job_type='calculate', is_deleted=False,
+                idempotency_key=request_data['schedule_state_fingerprint'], status__in=['succeeded', 'cancelled'],
+            ).update(idempotency_key=None)
         job, created = get_or_create_job(
             version.schedule.project, 'calculate', request_data, request.user,
             idempotency_key=request_data['schedule_state_fingerprint'],
@@ -544,6 +552,12 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'You cannot run assurance for this project.'}, status=status.HTTP_403_FORBIDDEN)
         if version.status != 'calculated' or not version.calculated_at:
             return Response({'error': 'Calculate the schedule before running Phase 3 assurance.'}, status=status.HTTP_409_CONFLICT)
+        from .services.planning_boundaries import calculation_inputs_current
+        if not calculation_inputs_current(version):
+            return Response({
+                'error': 'Planning inputs changed after calculation. Recalculate before running Phase 3 assurance.',
+                'code': 'calculation_inputs_stale',
+            }, status=status.HTTP_409_CONFLICT)
         request_data = {
             'schedule_version_id': version.id,
             'calculated_state_at': version.calculated_at.isoformat(),
@@ -603,13 +617,16 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         package = ((generation.intelligence or {}).get('schedule_engine') or {}).get('policy') == 'planning_package'
         generated = {'logic_matrix': [
             {'activity_id': row['successor_id'], 'predecessor_id': row['predecessor_id'],
-             'type': row.get('type', 'FS'), 'lag_days': row.get('lag_days', 0)}
+             'type': row.get('type', 'FS'), 'lag_days': row.get('lag_days', 0),
+             'metadata': {key: row.get(key) for key in ('source', 'rationale', 'source_references', 'rule_version')}}
             for row in generation.logic_matrix or []
         ]} if package else build_activities(
             version.schedule.project, generation.wbs or [], generation.intelligence or {},
         )
         with transaction.atomic():
             version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
+            if version.status not in {'draft', 'calculated'} or not current_schedule_version(version):
+                return Response({'error': 'Open the current editable revision before resetting logic.'}, status=status.HTTP_409_CONFLICT)
             activity_by_external_id = {
                 ((item.metadata or {}).get('source_generation_activity_id')
                  or (item.metadata or {}).get('original_external_id') or item.external_id): item
@@ -628,11 +645,13 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 }, status=status.HTTP_409_CONFLICT)
 
             desired = {}
+            desired_metadata = {}
             for row in generated['logic_matrix']:
                 predecessor = activity_by_external_id[row['predecessor_id']]
                 successor = activity_by_external_id[row['activity_id']]
                 relationship_type = row.get('type', 'FS')
                 desired[(predecessor.id, successor.id, relationship_type)] = row.get('lag_days', 0)
+                desired_metadata[(predecessor.id, successor.id, relationship_type)] = row.get('metadata') or {'source': row.get('source', 'generated')}
 
             existing = {
                 (link.predecessor_id, link.successor_id, link.relationship_type): link
@@ -644,6 +663,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 link.updated_at = now
                 if key in desired:
                     link.lag_days = desired.pop(key)
+                    link.metadata = desired_metadata[key]
                     link.is_deleted = False
                     link.deleted_at = None
                 else:
@@ -652,7 +672,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 updates.append(link)
             if updates:
                 ActivityRelationship.objects.bulk_update(
-                    updates, ['lag_days', 'is_deleted', 'deleted_at', 'updated_at'], batch_size=500,
+                    updates, ['lag_days', 'is_deleted', 'deleted_at', 'updated_at', 'metadata'], batch_size=500,
                 )
             ActivityRelationship.objects.bulk_create([
                 ActivityRelationship(
@@ -661,9 +681,16 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                     successor_id=successor_id,
                     relationship_type=relationship_type,
                     lag_days=lag_days,
+                    metadata=desired_metadata[(predecessor_id, successor_id, relationship_type)],
                 )
                 for (predecessor_id, successor_id, relationship_type), lag_days in desired.items()
             ], batch_size=500)
+            from .services.piping_guidance import reapply_after_reset
+            try:
+                reapply_after_reset(version)
+            except ScheduleApprovalError as exc:
+                transaction.set_rollback(True)
+                return Response(exc.payload, status=exc.status_code)
             _mark_version_draft(version)
 
         relationship_count = version.relationships.filter(is_deleted=False).count()
@@ -677,6 +704,18 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'generation_id': generation.id,
             'relationship_count': relationship_count,
         })
+
+    @action(detail=True, methods=['get', 'post'], url_path='piping-guidance')
+    def piping_guidance(self, request, pk=None):
+        from .services.piping_guidance import apply_piping_guidance, preview_piping_guidance
+        version = self.get_object()
+        if request.method == 'GET':
+            return Response(preview_piping_guidance(version, actor=request.user))
+        try:
+            result = apply_piping_guidance(version, request.user, preview_token=request.data.get('preview_token'))
+        except ScheduleApprovalError as exc:
+            return Response(exc.payload, status=exc.status_code)
+        return Response(result)
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):

@@ -255,6 +255,8 @@ def run_schedule_assurance(version, *, requested_by=None):
     resources = _resource_validation(version, activities)
     comparison = _change_comparison(version, activities, relationships)
     findings = network['findings'] + resources['findings']
+    from .piping_guidance import guidance_findings
+    findings.extend(guidance_findings(version))
     for risk in version.planning_risks.exclude(status__in=['mitigated', 'closed']):
         if risk.owner_id is None or risk.priority is None or risk.priority in {'high', 'critical'}:
             findings.append(_finding('planning_risk_review', 'warning',
@@ -301,6 +303,8 @@ def current_assurance(version):
         findings = [apply_timing_warning_policy(row) for row in (review.blockers or [])
                     if row.get('code') != 'parallel_workflow_review_required'] + [
                         apply_timing_warning_policy(row) for row in logic['blockers'] + logic['warnings']]
+        from .piping_guidance import guidance_findings
+        findings.extend(guidance_findings(version))
         warnings = [apply_timing_warning_policy(row) for row in (review.warnings or [])]
         warning_codes = {row.get('code') for row in warnings}
         warnings.extend(row for row in findings if row.get('severity') == 'warning' and row.get('code') not in warning_codes)

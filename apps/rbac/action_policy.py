@@ -171,7 +171,7 @@ UPDATE_OPERATIONS = {'update', 'partial_update', 'assign', 'unassign', 'reassign
                      'connect_outlook', 'disconnect_outlook', 'configure_sync', 'dismiss', 'enter_negotiation',
                      'force_revert', 'fulfill', 'inject_token', 'investigate', 'link_radai_account',
                      'lock', 'move_stage', 'progress', 'rate_vendor', 'reassign_approver_action',
-                     'reassign_reviewer_action', 'rebuild_generated_logic', 'recalculate',
+                     'reassign_reviewer_action', 'rebuild_generated_logic', 'piping_guidance', 'recalculate',
                      'recheck', 'recheck_output', 'reconcile', 'reconcile_status', 'recompute',
                      'refresh', 'regenerate', 'repair_identity', 'reprocess', 'request_revision',
                      'resend_missing_approvals', 'reset_password', 'retry', 'return_for_correction',

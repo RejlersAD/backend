@@ -153,8 +153,11 @@ def schedule_state_fingerprint(version):
     from .evidence_graph import input_fingerprint
     from .planning_boundaries import BOUNDARY_RULE_VERSION, CALCULATION_RULE_VERSION
     from ..schedule_serializers import WorkCalendarSerializer
+    from .piping_guidance import enabled
+    guidance_fields = ('name', 'discipline', 'activity_type') if enabled(version) else ()
     activities = list(version.activities.filter(is_deleted=False).order_by('id').values(
         'id', 'external_id', 'duration_days', 'calendar_id', 'constraint_type', 'constraint_date', 'metadata',
+        *guidance_fields,
     ))
     relationships = list(version.relationships.filter(is_deleted=False).order_by('id').values(
         'id', 'predecessor_id', 'successor_id', 'relationship_type', 'lag_days', 'updated_at',
@@ -207,6 +210,9 @@ def assurance_state_fingerprint(version):
         'parent_version_id': version.parent_version_id,
         'risks': list(version.planning_risks.order_by('pk').values('id', 'revision', 'status', 'priority', 'owner_id')),
     }
+    from .piping_guidance import enabled
+    if enabled(version):
+        payload['piping_guidance_state'] = schedule_state_fingerprint(version)
     reviews = list(version.logic_reviews.order_by('pk').values('id', 'fingerprint', 'group_id',
         'rationale', 'capacity_basis', 'duration_basis', 'max_parallel_deliverables', 'reviewed_by_id'))
     if reviews:
