@@ -8,6 +8,7 @@ from ..models import PlanningProject, ScheduleLogicReview, ScheduleVersion
 from .audit import record_event
 from .schedule_approval import ScheduleApprovalError
 from .schedule_logic_quality import analyze_schedule_logic
+from .schedule_check_details import apply_timing_warning_policy
 
 
 def _error(message, code='schedule_logic_review_invalid', status_code=409):
@@ -41,12 +42,14 @@ def logic_quality(project, tasks, deliverables=None, version=None):
                    'field': 'depends_on', 'task_id': task_ids[0] if task_ids else None,
                    'task_ids': task_ids, 'group_id': group['id'], 'message': group['message'],
                    'resolution': 'Review the actual release gates, duration basis and available capacity in Schedule logic review.'}
-        if group['requires_review']:
+        finding = apply_timing_warning_policy(finding)
+        if finding['severity'] == 'critical':
             blockers.append(finding)
-        elif group['kind'] != 'parallel_workflow':
+        elif group['requires_review'] or group['kind'] != 'parallel_workflow':
             warnings.append(finding)
     result.update(blockers=blockers, warnings=warnings)
-    result['summary'].update(unreviewed_group_count=len(blockers), requires_review_count=len(blockers),
+    unreviewed = sum(group['requires_review'] for group in result['groups'])
+    result['summary'].update(unreviewed_group_count=unreviewed, requires_review_count=unreviewed,
                              reviewed_group_count=sum(group['status'] == 'reviewed' for group in result['groups']))
     return result
 

@@ -170,24 +170,28 @@ class SimpleScheduleChecksTests(TestCase):
         ]
         self.project.save(update_fields=['simple_planning_state'])
         plan = self.read()
-        finding = next(row for row in plan['blockers'] if row['code'] == 'start_to_finish')
+        finding = next(row for row in plan['warnings'] if row['code'] == 'start_to_finish')
         self.assertEqual(finding['task_ids'], ['b'])
         self.assertEqual(finding['field'], 'depends_on')
         self.assertEqual(finding['relationships'], [{
             'predecessor_task_id': 'a', 'successor_task_id': 'b', 'type': 'SF', 'lag_days': 1,
         }])
-        self.assertEqual(self.submit_error(saved['revision'])['start_to_finish'], finding)
+        self.assertEqual(finding['severity'], 'warning')
+        response = self.client.post(self.url + 'submit/', {'revision': saved['revision']}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
         self.project.refresh_from_db()
         self.assertEqual(self.project.simple_planning_state['tasks'][1]['dependency_details'][0]['type'], 'SF')
-        self.assertFalse(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
+        self.assertTrue(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
 
-    def test_resource_rejection_retains_full_activity_and_resource_details_after_rollback(self):
+    def test_resource_warning_retains_full_details_without_blocking_submission(self):
         saved = self.save([self.task('a', owner='Engineer', duration_days=1, effort_hours=16),
                            self.task('b', owner='Engineer', duration_days=1, effort_hours=8),
                            self.task('later', owner='Engineer', duration_days=1, effort_hours=8,
                                      planned_start_date='2026-11-12')])
         self.assertEqual(saved['blockers'], [])
-        finding = self.submit_error(saved['revision'])['resource_overallocation']
+        response = self.client.post(self.url + 'submit/', {'revision': saved['revision']}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        finding = next(row for row in response.data['warnings'] if row['code'] == 'resource_overallocation')
         self.assertEqual(finding['task_ids'], ['a', 'b'])
         self.assertEqual(finding['field'], 'assignee_id')
         self.assertEqual(len(finding['resource_ids']), 1)
@@ -196,8 +200,8 @@ class SimpleScheduleChecksTests(TestCase):
         self.assertEqual(finding['resources'][0]['task_ids'], ['a', 'b'])
         self.assertEqual({row['task_id'] for row in finding['affected_activities']}, {'a', 'b'})
         self.assertTrue(finding['resolution'])
-        self.assertFalse(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
-        self.assertEqual(self.read()['revision'], saved['revision'])
+        self.assertTrue(ScheduleVersion.objects.filter(schedule__project=self.project).exists())
+        self.assertEqual(finding['severity'], 'warning')
 
     def test_stale_revision_and_outside_project_access_still_block_check_submission(self):
         self.set_finish(date(2026, 11, 9))

@@ -29,6 +29,36 @@ MATRIX = ('Table 1: Applicable Deliverables for Work Packages\n'
 
 
 class PlanningPackageSourcesTests(TestCase):
+    def test_saved_analysis_without_ai_can_use_explicit_final_deliverables(self):
+        text = ('20.1 SI FINAL DELIVERABLES\n'
+                'a) Audit close-out reports and Zero Error reports.\n'
+                'b) Approval records\n20.2 SPID FINAL DELIVERABLES\n'
+                'a) Approval records\n21 WARRANTY REQUIREMENTS\n')
+        data = build_planning_package_sources([source(text)], [])
+        self.assertEqual([row['title'] for row in data['deliverables']], [
+            'Audit close-out reports and Zero Error reports.', 'Approval records', 'Approval records',
+        ])
+        self.assertEqual(len({row['id'] for row in data['deliverables']}), 3)
+        self.assertTrue(all(row['source_basis'] == 'source_deliverable_list' for row in data['deliverables']))
+
+    def test_explicit_list_rejections_conditions_and_ai_duplicates_preserve_scope(self):
+        text = ('Deliverables\n1 Survey dossier\n2 Optional drawing (if required)\n'
+                '3 Inspection report\n')
+        rejection = fact(text, 'Inspection report', status='rejected')
+        data = build_planning_package_sources([source(text)], [
+            fact(text, 'Survey dossier', identifier=2), rejection,
+        ])
+        self.assertEqual([row['title'] for row in data['deliverables']], ['Survey dossier'])
+        self.assertEqual(data['deliverables'][0]['source_fact_ids'], [2])
+        self.assertEqual(len(data['excluded_inventory']), 2)
+
+    def test_list_scope_cannot_use_deleted_unparsed_or_output_sample_files(self):
+        text = '20.1 SI FINAL DELIVERABLES\na) Inspection reports\n'
+        for changes in ({'is_deleted': True}, {'parse_status': 'failed'},
+                        {'category': 'output_schedule_sample'}):
+            with self.subTest(changes=changes):
+                self.assertEqual(build_planning_package_sources([source(text, **changes)], [])['deliverables'], [])
+
     def test_ai_scope_is_added_when_a_register_already_exists(self):
         text = 'Item|Discipline|Deliverable\n1|Process|Process balance\n\nAdditional scope: Site survey\n'
         data = build_planning_package_sources([source(text)], [fact(text, 'Site survey')])

@@ -25,6 +25,33 @@ No document-specific names, layouts or sample dates are used as planning default
 
 ## Coverage and continuation
 
+### Explicit SOW deliverable lists
+
+Engine `6.3-explicit-deliverable-lists` also retains outputs listed under
+numbered final-deliverable headings, including alphabetic item labels and
+wrapped PDF titles. It uses the shared source-list reader, not catalogue
+matching or generic `shall` requirements. Source groups, item labels, exact
+quoted spans and text hashes remain attached; PDF page furniture is not
+appended to titles. Conditional or explicitly excluded outputs remain
+review inventory, not eligible package scope.
+
+The `planning-package-proposal/2` builder can read the same explicit lists from
+unchanged uploaded text when an existing analysis has no AI deliverable facts.
+It preserves distinct source occurrences, register ambiguity, rejected facts,
+confirmed scope selections and source/version guards. It makes no AI call and
+does not modify the saved analysis or approve a schedule. New analyses expose
+these deterministic facts and their eligible/excluded outputs in the preview.
+
+Verification recovered 17 deliverables from an uploaded SOW whose AI pass had
+paused with `invalid_api_key` (HTTP 401). A read-only package build produced
+87 activities, 19 WBS nodes and 109 relationships with exact source quotations,
+zero SQL writes and zero provider calls. The provider credential remains a
+separate configuration issue. There is no model or migration change.
+
+The scoped parser, analysis, package API/job and builder checks passed 126
+distinct tests. Four unrelated AI fixtures also fail with baseline code because
+their `SimpleTestCase` performs central credential database reads.
+
 Each provider pass is bounded by `PLANNING_AI_MAX_CHUNKS` (default 16). Coverage
 records every chunk's source/offset, processed, skipped, failed or partial state,
 and remaining count. Provider output truncation never counts as completed review.

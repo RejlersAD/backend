@@ -36,6 +36,7 @@ def generation_fingerprint(project, request_data):
         configuration = ProjectScheduleConfiguration.objects.filter(project=project, is_deleted=False).first()
         from .preview_confirmation import review_fingerprint
         from .planning_package_request import package_preview_selection
+        from .planning_package import VERSION as package_version
         from .register_geometry_cache import cached_register_geometry
         run = DocumentIntelligenceRun.objects.filter(
             pk=options.get('intelligence_run_id'), project=project, is_deleted=False,
@@ -51,7 +52,7 @@ def generation_fingerprint(project, request_data):
                 project__isnull=True, is_system=True, is_default=True, status='active', is_deleted=False,
             ).order_by('-version').values_list('pk', flat=True)[:1])
         package_inputs = {
-            'policy': 'planning-package-proposal/1',
+            'policy': package_version,
             'analysis_run_id': run.pk if run else None,
             'review_fingerprint': review_token,
             'confirmed_preview': package_preview_selection(run, review_token=review_token) if run else None,
@@ -152,8 +153,11 @@ def schedule_state_fingerprint(version):
     from .evidence_graph import input_fingerprint
     from .planning_boundaries import BOUNDARY_RULE_VERSION, CALCULATION_RULE_VERSION
     from ..schedule_serializers import WorkCalendarSerializer
+    from .piping_guidance import enabled
+    guidance_fields = ('name', 'discipline', 'activity_type') if enabled(version) else ()
     activities = list(version.activities.filter(is_deleted=False).order_by('id').values(
         'id', 'external_id', 'duration_days', 'calendar_id', 'constraint_type', 'constraint_date', 'metadata',
+        *guidance_fields,
     ))
     relationships = list(version.relationships.filter(is_deleted=False).order_by('id').values(
         'id', 'predecessor_id', 'successor_id', 'relationship_type', 'lag_days', 'updated_at',
@@ -173,6 +177,8 @@ def schedule_state_fingerprint(version):
         'boundary_rule': BOUNDARY_RULE_VERSION, 'calculation_rule': CALCULATION_RULE_VERSION,
         'planned_start': proposal['start'] if proposal else schedule.planned_start,
         'contractual_finish': proposal['finish'] if proposal else schedule.project.planned_end_date,
+        **({'planner_adjustments': version.evidence_input_snapshot['planner_adjustments']}
+           if (version.evidence_input_snapshot or {}).get('planner_adjustments') else {}),
         'calendar_id': getattr(default_calendar, 'pk', None),
         'planning_build_id': version.planning_build_id,
         'planning_profile_selection': _build_profile_selection(version),
@@ -204,6 +210,9 @@ def assurance_state_fingerprint(version):
         'parent_version_id': version.parent_version_id,
         'risks': list(version.planning_risks.order_by('pk').values('id', 'revision', 'status', 'priority', 'owner_id')),
     }
+    from .piping_guidance import enabled
+    if enabled(version):
+        payload['piping_guidance_state'] = schedule_state_fingerprint(version)
     reviews = list(version.logic_reviews.order_by('pk').values('id', 'fingerprint', 'group_id',
         'rationale', 'capacity_basis', 'duration_basis', 'max_parallel_deliverables', 'reviewed_by_id'))
     if reviews:
