@@ -261,6 +261,130 @@ def build_rows(extraction, template_headers, baseline_rows=None):
     return rows, sources
 
 
+_SYSTEM_BY_LETTER = {'I': 'DCS', 'S': 'ESD', 'K': 'GDS'}
+
+
+def build_extraction_rows(extraction, template_headers):
+    """One dict per FIELD-I/O row of this extraction, keyed by the template's
+    exact header names. Baseline rows are never exported — the baseline is
+    used in the app only (Service review, Conflicts).
+
+    Merged per tag:
+      - extracted values (Service as extracted, Instrument_Type Name = the
+        tag's function letters, System letter -> DCS/ESD/GDS, IO_Type_Name =
+        ioClass, Tag_Status = New, Rev = Document info revision);
+      - P&ID = the drawing number of the tag's sheet title block, or
+        "Sheet <n>" (1-based) when the title block was not read;
+      - set points with a P&ID value -> alarm column by letter;
+      - Remark 4 = "Line: <line>[, <line>]" then " | Alarm/trip: <isa>[, …]";
+      - vendor IO database cells into still-empty cells (Status = Live rows
+        are matched upstream into vendor_payload['fills']).
+
+    Returns (rows, sources) with the same sources shape as build_rows.
+    """
+    key = {h: _norm_header(h) for h in template_headers}
+    vendor = extraction.vendor_payload or {}
+    fills = vendor.get('fills') or {}
+    # the vendor IO database row per tag: the baseline stores the vendor
+    # record; the fills overlay the cells the baseline lacked
+    vend_rows = {}
+    for rec in vendor.get('baselineRows') or []:
+        n0 = rec.get('_tag_norm')
+        if n0:
+            vend_rows[n0] = {_norm_header(k): _coerce_number(v)
+                             for k, v in rec.items() if k != '_tag_norm'}
+
+    def _norm(t):
+        return re.sub(r'\s+', '', str(t or '')).upper()
+
+    io_tags = [t for t in (extraction.tags_payload or [])
+               if t.get('ioClass') in ('AI', 'AO', 'DI', 'DO') or t.get('derived')]
+    io_tags.sort(key=lambda t: (t.get('page') or 0, t.get('loopKey') or '',
+                                t.get('tag') or ''))
+    io_norms = {_norm(t.get('norm') or t.get('tag')) for t in io_tags}
+
+    sp_by_tag = {}
+    for sp in extraction.setpoints_payload or []:
+        if sp.get('value') and _norm(sp.get('tag')) in io_norms:
+            sp_by_tag.setdefault(_norm(sp['tag']), []).append(sp)
+
+    at_rows = ((extraction.alarmtrip_payload or {}).get('all') or {}).get('rows') or []
+    at_by_tag = {}
+    for r in at_rows:
+        n = _norm(r.get('tag'))
+        if n in io_norms and r.get('isaTag'):
+            at_by_tag.setdefault(n, [])
+            if r['isaTag'] not in at_by_tag[n]:
+                at_by_tag[n].append(r['isaTag'])
+
+    current_rev = extraction.revision or ''
+    # columns owned by the extraction merge — never vendor-filled
+    owned = {'Loop_Name', 'TAG_Number', 'Instrument_Type Name', 'System',
+             'IO_Type_Name', 'Tag_Status', 'Rev', 'Remark 4',
+             'Low_Alarm_Value', 'Low_Low_Alarm_Value', 'High_Alarm_Value',
+             'High_High_Alarm_Value'}
+    rows, sources = [], []
+    for t in io_tags:
+        n = _norm(t.get('norm') or t.get('tag'))
+        fill = fills.get(n) or fills.get(t.get('norm')) or {}
+        cells = dict(vend_rows.get(n) or vend_rows.get(t.get('norm')) or {})
+        cells.update(fill.get('cells', {}))
+        pid_ref = t.get('drawing') or cells.get('P&ID') \
+            or 'Sheet %s' % ((t.get('page') or 0) + 1)
+        out = {h: None for h in template_headers}
+        for h in template_headers:
+            k = key[h]
+            if k == 'Loop_Name':
+                out[h] = t.get('loopKey') or ''
+            elif k == 'TAG_Number':
+                out[h] = t.get('tag') or ''
+            elif k == 'Instrument_Type Name':
+                out[h] = t.get('func') or ''
+            elif k == 'Service':
+                out[h] = t.get('service') or cells.get(k) or ''
+                if out[h]:
+                    sources.append({'tag': n, 'column': k, 'value': out[h],
+                                    'source': 'P&ID' if t.get('service') else 'Vendor DB',
+                                    'sheet': (t.get('page') or 0) + 1,
+                                    'vendorDoc': '' if t.get('service') else fill.get('source', '')})
+            elif k == 'P&ID':
+                out[h] = pid_ref
+            elif k == 'System':
+                out[h] = _SYSTEM_BY_LETTER.get(t.get('system') or '',
+                                               t.get('system') or '')
+            elif k == 'IO_Type_Name':
+                out[h] = t.get('ioClass') or ''
+            elif k == 'Tag_Status':
+                out[h] = 'New'
+            elif k == 'Rev':
+                out[h] = current_rev
+            elif k in cells and cells[k] not in (None, '') and k not in owned:
+                out[h] = cells[k]
+                sources.append({'tag': n, 'column': k, 'value': out[h],
+                                'source': 'Vendor DB', 'sheet': '',
+                                'vendorDoc': fill.get('source', '')})
+
+        parts = []
+        lines = [ln for ln in (t.get('line'), t.get('lineAlt')) if ln]
+        if lines:
+            parts.append('Line: ' + ', '.join(lines))
+        if at_by_tag.get(n):
+            parts.append('Alarm/trip: ' + ', '.join(at_by_tag[n]))
+        if parts and 'Remark 4' in out:
+            out['Remark 4'] = ' | '.join(parts)
+
+        for sp in sp_by_tag.get(n, []):
+            col = _ALARM_COLUMN_BY_LETTER.get(sp.get('point'), '') or sp.get('column', '')
+            hh = next((h for h in template_headers if key[h] == col), None)
+            if hh and not out[hh]:
+                out[hh] = f"{sp['value']} {sp.get('unit', '')}".strip()
+                sources.append({'tag': n, 'column': col, 'value': out[hh],
+                                'source': 'P&ID', 'sheet': sp.get('sheet', ''),
+                                'vendorDoc': ''})
+        rows.append(out)
+    return rows, sources
+
+
 def fill_template(template_bytes, rows, cover, data_sheet_name=None, tag_pad_width=None):
     """Load the stored template, write one row per IO-list row from row 3 in
     the template's column order (matching each value by header name) and fill
@@ -279,6 +403,8 @@ def fill_template(template_bytes, rows, cover, data_sheet_name=None, tag_pad_wid
             v = row.get(h)
             if h == 'TAG_Number':
                 v = pad_tag(v, tag_pad_width)
+            elif h == 'Loop_Name' and tag_pad_width:
+                v = pad_tag(v, 2)
             if v in (None, ''):
                 cell = ws.cell(r, c)
                 cell.value = None
@@ -303,18 +429,19 @@ def fill_template(template_bytes, rows, cover, data_sheet_name=None, tag_pad_wid
     return wb
 
 
-def save_with_header(wb, cover, data_sheet_name):
+def save_with_header(wb, cover, data_sheet_name, center=None):
     """Save the workbook and rewrite the data sheet's page header with the
     project's document numbers (the template hard-codes stale values, and
-    openpyxl would write the line breaks as _x000a_). Returns .xlsx bytes."""
-    ws = wb[COVER_SHEET]
+    openpyxl would write the line breaks as _x000a_). Returns .xlsx bytes.
+    `center` must be passed when the cover sheet has already been removed."""
+    if center is None:
+        g4 = (wb[COVER_SHEET]['G4'].value or '').strip() \
+            if COVER_SHEET in wb.sheetnames else ''
+        center = re.sub(r'[ \t]+\n', '\n', re.sub(r'[ \t]{2,}', ' ', g4)).strip()
     out = io.BytesIO()
     wb.save(out)
-    g4 = (ws['G4'].value or '').strip()
     left = '\n'.join([f"COMPANY DOCUMENT NUMBER: {cover.get('company_doc_no', '')}",
                       f"CONTRACTOR DOCUMENT NUMBER: {cover.get('contractor_doc_no', '')}",
                       f"REJLERS DOCUMENT NUMBER: {cover.get('rejlers_doc_no', '')}"])
     right = f"{cover.get('company_doc_no', '')}_Rev.{cover.get('rev', '')}"
-    return _set_header(out.getvalue(), data_sheet_name, left,
-                       re.sub(r'[ \t]+\n', '\n', re.sub(r'[ \t]{2,}', ' ', g4)).strip(),
-                       right)
+    return _set_header(out.getvalue(), data_sheet_name, left, center, right)

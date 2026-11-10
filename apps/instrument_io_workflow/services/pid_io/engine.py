@@ -111,7 +111,7 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
         if 'error' in baseline_info:
             warnings.append(baseline_info['error'])
             baseline_info = {}
-    if baseline_info and vendor_paths:
+    if vendor_paths:
         mark('vendor', 'Matching vendor IO databases')
         dbs = []
         for path in vendor_paths:
@@ -120,8 +120,29 @@ def run_extraction(pid_path, baseline_path=None, vendor_paths=(), legend_rules=N
                 warnings.append(db['error'])
             else:
                 dbs.append(db)
-        fills, vendor_conflicts, no_vendor = vendor_mod.autofill(baseline_info['rows'], dbs)
-        vendor_fills = fills
+        if baseline_info:
+            fills, vendor_conflicts, no_vendor = vendor_mod.autofill(
+                baseline_info['rows'], dbs)
+            vendor_fills = fills
+        elif dbs:
+            warnings.append(
+                'Vendor data matched without an IO-list baseline — upload the '
+                'current IO list to enable comparison (conflicts, coverage).')
+        # vendor data must reach the extracted rows even without a baseline:
+        # match the extracted field-I/O tags directly against the vendor DBs
+        io_norms = [c.tag.tag.replace(' ', '') for c in all_classified
+                    if c.is_field_io]
+        io_norms += [d.get('norm') for d in derived if d.get('norm')]
+        direct_fills, direct_no_record = vendor_mod.match_tags(io_norms, dbs)
+        for tag, f in direct_fills.items():
+            if tag in vendor_fills:
+                # baseline-driven cells win; direct adds the remaining vendor cells
+                merged = {**f['cells'], **vendor_fills[tag]['cells']}
+                vendor_fills[tag] = {'cells': merged,
+                                     'source': vendor_fills[tag].get('source') or f['source']}
+            else:
+                vendor_fills[tag] = f
+        no_vendor = sorted(set(no_vendor) | set(direct_no_record))
 
     # ── assemble result (§8 contract) ──────────────────────────────────
     mark('assemble', 'Building the register')

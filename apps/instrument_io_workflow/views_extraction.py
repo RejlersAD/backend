@@ -262,7 +262,6 @@ def export_template(request, project_id):
         return Response({
             'template': _template_summary(tpl, scope) if tpl else None,
             'tagPadding': settings.get('tag_padding'),
-            'includeReviewSheets': settings.get('include_review_sheets', True),
         })
 
     if request.method == 'DELETE':
@@ -297,20 +296,19 @@ def export_template(request, project_id):
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
 def patch_project_settings(request, project_id):
-    """Project export settings: include_review_sheets, tag_padding."""
+    """Project export settings: tag_padding (review sheets are never
+    exported — the download holds only the `IO List` sheet)."""
     project = _project_or_404(request, project_id)
     if project is None:
         return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
     settings = dict(project.settings or {})
-    if 'includeReviewSheets' in request.data:
-        settings['include_review_sheets'] = bool(request.data.get('includeReviewSheets'))
+    settings.pop('include_review_sheets', None)
     if 'tagPadding' in request.data:
         tp = request.data.get('tagPadding')
         settings['tag_padding'] = int(tp) if tp not in (None, '') else None
     project.settings = settings
     project.save(update_fields=['settings', 'updated_at'])
-    return Response({'ok': True, 'tagPadding': settings.get('tag_padding'),
-                     'includeReviewSheets': settings.get('include_review_sheets', True)})
+    return Response({'ok': True, 'tagPadding': settings.get('tag_padding')})
 
 
 def _file_path(doc):
@@ -409,8 +407,36 @@ def start_extraction(request, project_id):
             extraction.cause_notes_payload = result.get('cause_notes', [])
             extraction.alarmtrip_payload = result.get('alarmtrip', {})
             extraction.warnings = result['warnings']
-            extraction.status = IOListExtraction.STATUS_COMPLETED
             extraction.stage_state = {**(extraction.stage_state or {}), '1': 'complete'}
+            # BYOK as a main-extraction step: with use_ai and a stored key,
+            # the low-confidence loops are reviewed by the AI right here —
+            # suggestions stay 'suggested' until confirmed in the app, and a
+            # provider failure never fails the extraction.
+            if extraction.use_ai:
+                from .services.pid_io import ai_pass
+
+                def _ai_progress(p):
+                    extraction.stage_state = {**(extraction.stage_state or {}),
+                                              'aiProgress': p}
+                    extraction.save(update_fields=['stage_state', 'updated_at'])
+
+                try:
+                    ai = ai_pass.run_ai_pass(extraction, progress=_ai_progress)
+                    extraction.summary = {**(extraction.summary or {}),
+                                          'aiSuggested': ai['suggested'],
+                                          'aiFailed': ai['failed'],
+                                          'aiTotal': ai['total']}
+                    if ai['failed']:
+                        extraction.warnings = (extraction.warnings or []) + [
+                            f"AI review: {ai['failed']} of {ai['total']} loops failed "
+                            "(the rules-based values are kept)"]
+                except Exception as exc:    # no key configured etc.
+                    logger.warning('[io-list] AI pass skipped: %s', exc)
+                    extraction.warnings = (extraction.warnings or []) + [
+                        f'AI review skipped: {exc}']
+                extraction.stage_state = {**(extraction.stage_state or {}),
+                                          'aiProgress': None}
+            extraction.status = IOListExtraction.STATUS_COMPLETED
             extraction.save()
         except Exception as exc:
             logger.exception('io-list extraction failed')
@@ -433,7 +459,8 @@ def extraction_status(request, project_id, extraction_id):
     if not ext:
         return Response({'error': 'Extraction not found.'}, status=status.HTTP_404_NOT_FOUND)
     return Response({'status': ext.status, 'error': ext.error, 'summary': ext.summary,
-                     'isOutdated': ext.is_outdated})
+                     'isOutdated': ext.is_outdated,
+                     'aiProgress': (ext.stage_state or {}).get('aiProgress')})
 
 
 @api_view(['GET'])
@@ -594,28 +621,13 @@ def ai_suggest(request, project_id, extraction_id, loop_key):
         return Response({'error': 'Loop not found in this extraction.'},
                         status=status.HTTP_404_NOT_FOUND)
 
-    from apps.core.ai_consumer_clients import (AIProviderOperationError,
-                                               lazy_provider_client)
-    import json as _json
+    from apps.core.ai_consumer_clients import AIProviderOperationError
+    from .services.pid_io.ai_pass import suggest_for_loop, user_ai_key
 
-    context = {
-        'loop': loop_key,
-        'members': [{'tag': t['tag'], 'system': t['system'], 'ioType': t['ioType'],
-                     'line': t.get('line') or '', 'equipment': t.get('equipment') or '',
-                     'serviceEvidence': t.get('serviceEvidence') or ''} for t in members],
-    }
-    prompt = (
-        'You are an instrument engineer completing an IO list. Given the loop members '
-        'and rule-based evidence from a P&ID, propose the SERVICE text and LINE NUMBER. '
-        'Return ONLY JSON: {"service": str, "line": str, "reason": str}.\n'
-        f'Loop data: {_json.dumps(context)}')
+    cred = user_ai_key(request.user)
+    kw = {'provider': cred[0], 'api_key': cred[1]} if cred else {}
     try:
-        client = lazy_provider_client('anthropic', __import__('anthropic').Anthropic,
-                                      api_key=lambda: '', timeout=60)
-        resp = client.messages.create(model='claude-haiku-4-5', max_tokens=512,
-                                      messages=[{'role': 'user', 'content': prompt}])
-        text = ''.join(b.text for b in resp.content if getattr(b, 'type', None) == 'text')
-        suggestion = _json.loads(text[text.find('{'):text.rfind('}') + 1] or '{}')
+        suggestion = suggest_for_loop(ext, loop_key, **kw)
     except AIProviderOperationError as exc:
         return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
     except Exception as exc:
@@ -684,12 +696,9 @@ def _export_standard(request, ext):
         finally:
             os.unlink(bpath)
 
-    settings = ext.project.settings or {}
-    include_review = settings.get('include_review_sheets', True)
     from .services.pid_io import export as export_mod
     payload, row_count = export_mod.build_standard_workbook(
-        ext, template_bytes, include_review=include_review,
-        baseline_rows=baseline_rows)
+        ext, template_bytes, baseline_rows=baseline_rows)
     doc = ext.doc_number or 'io-list'
     rev = ext.revision or ''
     filename = f'{doc}_Rev.{rev}.xlsx' if rev else f'{doc}.xlsx'

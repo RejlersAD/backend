@@ -151,6 +151,34 @@ def _vendor_value(rec, candidates):
     return None
 
 
+def match_tags(tag_norms, vendor_dbs):
+    """Match EXTRACTED tags directly against the vendor DBs, independent of
+    the IO-list baseline — the baseline only adds comparison (conflicts);
+    vendor data must flow even when no baseline is uploaded.
+
+    Returns (fills, no_record): fills[tag] = {'cells': {col: value},
+    'source': db.name} with every non-empty COLUMN_MAP cell; no_record lists
+    the extracted tags absent from every vendor database."""
+    fills, no_record = {}, []
+    for tag in tag_norms:
+        vrow, source = None, None
+        for db in vendor_dbs:
+            if tag in db.by_tag:
+                vrow, source = db.by_tag[tag], db.name
+                break
+        if vrow is None:
+            no_record.append(tag)
+            continue
+        cells = {}
+        for io_col, candidates in COLUMN_MAP.items():
+            v = _vendor_value(vrow, candidates)
+            if v is not None:
+                cells[io_col] = v
+        if cells:
+            fills[tag] = {'cells': cells, 'source': source}
+    return fills, no_record
+
+
 def autofill(baseline_rows, vendor_dbs):
     """Match every baseline row against the vendor DBs.
 

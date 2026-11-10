@@ -179,7 +179,8 @@ class IOListProject(models.Model):
     # Project-level options for the P&ID → IO List workflow. Known keys:
     #   tag_padding (int|null)      — function-letter width detected from the
     #                                 IO-list baseline (export only)
-    #   include_review_sheets (bool)— append review sheets to the export (on)
+    #   (include_review_sheets removed: the export always holds only the
+    #    single `IO List` sheet)
     # NB: named 'settings', so it must be declared AFTER created_by — inside
     # the class body it shadows django.conf.settings.
     settings       = models.JSONField(default=dict, blank=True)

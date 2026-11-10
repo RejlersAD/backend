@@ -13,6 +13,7 @@ register (P&ID-letter rows first, then IO-list-only rows).
 SERVICE_CHECK, IOL_NOT_ON_PID, UNTAGGED, IO_LIST_AUTOFILLED,
 VENDOR_CONFLICTS, NOT_IN_VENDOR.
 """
+import re
 import tempfile
 
 import openpyxl
@@ -108,18 +109,26 @@ def _append_review_sheets(wb, extraction, sources=None):
         ws.append([k, v])
 
 
+EXPORT_SHEET_NAME = 'IO List'      # the export holds this single sheet
+
+
 def build_standard_workbook(extraction, template_bytes, include_review=True,
                             baseline_rows=None):
     """The Standard Template export: fill the stored template (never rebuild
-    it) and append the review sheets after the two template sheets.
-    Returns (.xlsx bytes, row_count)."""
+    it) with the field-I/O rows of THIS extraction only — baseline rows are
+    never exported. The download holds exactly one sheet — the filled data
+    sheet, renamed `IO List`; the cover and the review sheets (LINE_TAGS,
+    ALARM_TRIP, SETPOINTS, SERVICE_CHECK, UNTAGGED, VENDOR_CONFLICTS,
+    NOT_IN_VENDOR, SOURCES, README, coverage) are never exported. The
+    review data stays in the app's result tabs. Returns (.xlsx bytes,
+    row_count)."""
     from . import export_standard
     import io
     wb0 = openpyxl.load_workbook(io.BytesIO(template_bytes))
     headers = [wb0[export_standard.DATA_SHEET].cell(2, c).value
                for c in range(1, wb0[export_standard.DATA_SHEET].max_column + 1)]
     wb0.close()
-    rows, sources = export_standard.build_rows(extraction, headers, baseline_rows)
+    rows, _sources = export_standard.build_extraction_rows(extraction, headers)
 
     # Tag padding: the baseline's layout (most common function-part width) is
     # a project setting; apply it to every tag, export only.
@@ -138,8 +147,6 @@ def build_standard_workbook(extraction, template_bytes, include_review=True,
         project.save(update_fields=['settings', 'updated_at'])
         pad = detected
 
-    baseline = (extraction.vendor_payload or {}).get('baseline') or {}
-    data_sheet_name = baseline.get('sheet_name') or None   # keep 'Template' without a baseline
     cover = {
         'company_doc_no': extraction.doc_number or '',
         'sheet': extraction.sheet or '',
@@ -147,13 +154,15 @@ def build_standard_workbook(extraction, template_bytes, include_review=True,
         'contractor_doc_no': extraction.contractor_number or '',
         'rejlers_doc_no': extraction.rejlers_number or '',
     }
-    sheet_name = data_sheet_name or export_standard.DATA_SHEET
     wb = export_standard.fill_template(template_bytes, rows, cover,
-                                       data_sheet_name=data_sheet_name,
+                                       data_sheet_name=EXPORT_SHEET_NAME,
                                        tag_pad_width=pad)
-    if include_review:
-        _append_review_sheets(wb, extraction, sources=sources)
-    return export_standard.save_with_header(wb, cover, sheet_name), len(rows)
+    # one sheet only: capture the header centre from the cover, then drop it
+    g4 = (wb[export_standard.COVER_SHEET]['G4'].value or '').strip()
+    center = re.sub(r'[ \t]+\n', '\n', re.sub(r'[ \t]{2,}', ' ', g4)).strip()
+    del wb[export_standard.COVER_SHEET]
+    return export_standard.save_with_header(wb, cover, EXPORT_SHEET_NAME,
+                                            center=center), len(rows)
 
 
 def _line_tags_sheet(wb, extraction):
