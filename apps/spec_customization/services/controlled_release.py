@@ -156,6 +156,13 @@ def validate_release(job, author):
 def readiness(job, manifest, previews, errors, author=None):
     blockers = list(errors)
     blockers.extend(codelist_release_blockers(job))
+    for decision in job.match_decisions.all():
+        if decision.review_decision not in ('approved', 'remapped') or not decision.final_commodity_code:
+            blockers.append('Every extracted match decision must be resolved and approved before release.')
+            break
+        if decision.state == 'ambiguous' and decision.review_decision == 'approved' and not decision.discriminators_matched.get('selected_candidate_id'):
+            blockers.append('Ambiguous matches require an explicitly selected catalog candidate before release.')
+            break
     if job.status != 'completed' or extraction_completeness(job)['state'] != 'complete':
         blockers.append('Extraction must be completed with verified complete coverage.')
     reference = job.reference_workbook_set
@@ -271,6 +278,10 @@ def codelist_release_blockers(job):
         if evidence.get('profile') != 'BUHASA':
             continue
         problems.extend(f'{decision.pdf_component_name}: {problem}' for problem in blockers(evidence))
-        if decision.state not in ('unique_match', 'ambiguous') or decision.review_decision not in ('approved', 'remapped') or not evidence.get('selected_candidate_id'):
+        approved_selection = (decision.review_decision == 'approved' and decision.state in ('unique_match', 'ambiguous')
+                              and evidence.get('selected_candidate_id'))
+        verified_remap = (decision.review_decision == 'remapped' and decision.state not in ('ineligible', 'invalid_reference')
+                          and evidence.get('remapped_catalog_code') == decision.final_commodity_code)
+        if not (approved_selection or verified_remap):
             problems.append(f'{decision.pdf_component_name}: unresolved BUHASA catalog selection.')
     return problems

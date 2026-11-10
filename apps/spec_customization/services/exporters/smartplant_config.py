@@ -219,12 +219,12 @@ PIPING_COMMODITY_FILTER_DEFAULTS = {
     # order) so it always evaluates correctly regardless of when SecondSizeFrom
     # is filled. 1 = multisize (reducers/swages/branches), 0 = single-size.
     'MultisizeOption':              lambda c: '1' if _pcf_short_code_is_size_reducer(c) else '0',
-    'Comments':                     'SP3D auto-bulkload',
-    'FluidCode':                    'Process Fluid',
+    'Comments':                     '',
+    'FluidCode':                    '1',
     'JacketedPipingBasis':          '0',          # 0 = not jacketed
-    'MaximumTemperature':           '650F',       # ASTM A106 Gr B service limit
-    'MinimumTemperature':           '-29C',       # ASME B31.3 minimum without impact test
-    'EngineeringTag':               lambda c: c.get('ShortCode') or 'AUTO',
+    'MaximumTemperature':           '',
+    'MinimumTemperature':           '',
+    'EngineeringTag':               '',
     'FabricationCategoryOverride':  '0',          # 0 = inherit from spec
     'SupplyResponsibilityOverride': '0',          # 0 = inherit from spec
     # First-size schedule — LS1E reference fills this on every pipe row
@@ -232,19 +232,19 @@ PIPING_COMMODITY_FILTER_DEFAULTS = {
     # pattern exactly via _pcf_first_size_schedule, with the pressure-class
     # → schedule lookup table (PCF_SCHEDULE_BY_RATING) above so the value
     # auto-tracks the spec's rating without code changes.
-    'FirstSizeSchedule':            _pcf_first_size_schedule,
+    'FirstSizeSchedule':            '',
     'SecondSizeFrom':               lambda c: c.get('FirstSizeFrom', '') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeTo':                 lambda c: c.get('FirstSizeTo',   '') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeUnits':              lambda c: (c.get('FirstSizeUnits') or 'in') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeSchedule':           lambda c: (c.get('FirstSizeSchedule') or '') if _pcf_has_second_size(c) else '',
-    'ReportableCommodityCode':      lambda c: c.get('CommodityCode', ''),
+    'ReportableCommodityCode':      '',
     'QuantityOfReportableParts':    '1',
     # AssociatedCommodityCode: LS1E reference ships blank ("no companion
     # commodity"). To eliminate visible blanks in the export canvas we
     # mirror the row's own CommodityCode — SP3D treats a self-reference as
     # "no pair" (identical to blank) and the column now always carries a
     # human-readable value.
-    'AssociatedCommodityCode':      lambda c: c.get('CommodityCode', '') or 'NONE',
+    'AssociatedCommodityCode':      '',
     'BendRadiusMultiplier':         lambda c: '1.5' if _pcf_short_code_is_bend(c) else '0',  # 1.5D LR elbow; 0 = N/A for non-bends
     'BendRadius':                   lambda c: _pcf_compute_bend_radius(c) or '0',
     'NumberOfMiterCuts':            '0',          # 0 = smooth (non-mitered); valid for every row
@@ -257,7 +257,7 @@ PIPING_COMMODITY_FILTER_DEFAULTS = {
     'PreferredPipeLength':          '6.0',        # 6 m random length stock
     'PipingNote1':                  'N/A',
     # AltReportableCommodityCode: mirror primary so the column is never blank.
-    'AltReportableCommodityCode':   lambda c: c.get('ReportableCommodityCode') or c.get('CommodityCode', ''),
+    'AltReportableCommodityCode':   '',
     'QuantityOfAltReportableParts': '0',
 }
 
@@ -295,7 +295,7 @@ TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
             c.get('PressureRating') or c.get('Rating1') or '900'
         ),
         'AlternateEndStandard':         '5',     # ASME / ANSI — same as primary
-        'FluidCode':                    'Process Fluid',
+        'FluidCode':                    '',  # Await an explicit source value or approved mapping.
         'ScheduleThickness':            '',
         'Priority':                     '1',
         # RingNumber: blank in LS1E reference (gasket ring number is sized
@@ -308,9 +308,7 @@ TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
         # the column is never blank in the canvas (SP3D treats self-ref as
         # "no separate alt reporting"; QuantityOfAltReportableParts=0 prevents
         # any double-counting in MTO rollups).
-        'AltReportableCommodityCode':   lambda c: (
-            c.get('ContractorCommodityCode') or c.get('ReportableCommodityCode') or 'NONE'
-        ),
+        'AltReportableCommodityCode':   '',
         'QuantityOfReportableParts':    '1',
         'ReportableCommodityCode':      lambda c: c.get('ContractorCommodityCode', ''),
         'PipingNote1':                  'N/A',
@@ -336,15 +334,9 @@ TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
         'LubricationRequirements':      'Molykote 1000 anti-seize (or equivalent) applied to threads and nut bearing faces',
     },
     'InsideSurfaceTreatment': {
-        # LS1E reference template populates FluidCode=521 for every IST row
-        # (7/7 data rows). The numeric code is a SP3D-internal FluidCode ID;
-        # we resolve it from the row's SpecName via SPEC_NAME_NUMERIC_FLUID_MAP
-        # (defined later in this module). Falls back to the project default
-        # ('521' matching LS1E) for unmapped prefixes so the column is NEVER
-        # blank in the canvas.
-        'FluidCode': lambda c: _infer_numeric_fluid_from_spec_name(
-            c.get('SpecName') or ''
-        ),
+        # A numeric FluidCode needs an approved mapping. Do not infer one
+        # from a specification name or copy the LS1E sample's value.
+        'FluidCode': '',
         'CoatingType':              '0',  # 0 = no coating, matches LS1E
         'InsideSurfaceTreatment':   '0',  # 0 = none, matches LS1E
     },
@@ -864,12 +856,13 @@ _UNICODE_FRACTION_MAP = {
 # ('3/8" THK', 'NOTE 1', ...) is preserved verbatim. Disable via 'enabled'.
 SCHEDULE_VALUE_NORMALIZE_CONFIG = {
     'enabled': True,
-    'pattern': r'^(?:SCH(?:EDULE)?\.?|S[-\s]?)?\s*(10|20|30|40|60|80|100|120|140|160|STD|XS|XXS)$',
+    'pattern': r'^(?:SCH(?:EDULE)?\.?|S[-\s]?)?\s*(10S|40S|80S|10|20|30|40|60|80|100|120|140|160|STD|XS|XXS)$',
     'canonical_map': {
         '10': 'S-10', '20': 'S-20', '30': 'S-30', '40': 'S-40',
         '60': 'S-60', '80': 'S-80', '100': 'S-100', '120': 'S-120',
         '140': 'S-140', '160': 'S-160',
-        'std': 'STD', 'xs': 'XS', 'xxs': 'XXS',
+        '10s': 'S-10S', '40s': 'S-40S', '80s': 'S-80S',
+        'std': 'S-STD', 'xs': 'S-XS', 'xxs': 'S-XXS',
     },
 }
 
@@ -2134,16 +2127,8 @@ def _rows_service_limits(cls):
     # so every P/T point inherits the same range — SP3D treats each row as
     # an independent service-limit envelope, but for a single piping class
     # the NPD range is invariant across temperature/pressure points.
-    _npd_min, _npd_max = _class_npd_range(cls)
-    npd_from = (
-        _normalize_npd(_npd_min) if _npd_min is not None
-        else SPEC_DEFAULTS['service_limits_npd_from_default']
-    )
-    npd_to = (
-        _normalize_npd(_npd_max) if _npd_max is not None
-        else SPEC_DEFAULTS['service_limits_npd_to_default']
-    )
-    npd_units = S3D_DEFAULTS['NpdUnitType']
+    # Class-wide component sizes do not establish the pressure-table size range.
+    npd_from = npd_to = npd_units = ''
 
     rows = []
     for pt in (cls.pt_rating_table or []):
@@ -2200,100 +2185,13 @@ def _rows_pipe_nominal_diameters(cls):
 
 
 def _rows_piping_commodity_matl_control_data(cls):
-    """One row per (component × NPD) — emits the full PipingCommodityMatlControlData
-    schema (49 columns) so the SP3D bulkload sheet matches the LS1E-A3 reference
-    exactly. Every column is soft-coded via SPEC_DEFAULTS['pcmd_*'] so values can
-    be re-tuned per project without touching this builder.
-    """
-    rows = []
-    cls_token = _safe_class_token(cls)
-    # Pre-resolve constants once per class (microoptimisation; values are dict lookups).
-    fab_type      = SPEC_DEFAULTS['pcmd_fabrication_type']
-    supply_resp   = SPEC_DEFAULTS['pcmd_supply_responsibility']
-    rpt_type      = SPEC_DEFAULTS['pcmd_reporting_type']
-    qty_rpt       = SPEC_DEFAULTS['pcmd_quantity_reportable_parts']
-    gasket_req    = SPEC_DEFAULTS['pcmd_gasket_requirements']
-    bolt_req      = SPEC_DEFAULTS['pcmd_bolting_requirements']
-    weld_req      = SPEC_DEFAULTS['pcmd_welding_requirement']
-
-    for c in cls.components.all():
-        sheet = route_component_to_cat_sheet(c)
-        prefix = (CAT_SHEET_DEFAULTS.get(sheet, {}) or {}).get('icc_prefix', 'RAD_CMP')
-        npds = _enumerate_npds(c.size_from, c.size_to)
-        if not npds:
-            continue
-        for npd in npds:
-            icc = f'{prefix}_{cls_token}_{_npd_token(npd)}'
-            first_size = _normalize_npd(npd)
-            rows.append({
-                # ── Identification ───────────────────────────────────────────────────
-                '_source_component_id':           str(c.id),
-                'ContractorCommodityCode':        icc,
-                # Reference uses identical first-size bounds for fixed-size parts;
-                # reducers/multisize would populate SecondSize* via overrides.
-                'FirstSizeFrom':                  first_size,
-                'FirstSizeTo':                    first_size,
-                'FirstSizeUnits':                 S3D_DEFAULTS['NpdUnitType'],
-                'SecondSizeFrom':                 SPEC_DEFAULTS['pcmd_second_size_from'],
-                'SecondSizeTo':                   SPEC_DEFAULTS['pcmd_second_size_to'],
-                'SecondSizeUnits':                SPEC_DEFAULTS['pcmd_second_size_units'],
-                'MultisizeOption':                SPEC_DEFAULTS['pcmd_multisize_option'],
-                'IndustryCommodityCode':          icc,
-                'ClientCommodityCode':            '',
-                'CIMISCommodityCode':             '',
-                'ShortMaterialDescription':       (c.description or c.sub_type or c.component_type)[:60],
-                'LocalizedShortMaterialDesc':     '',
-                'LongMaterialDescription':        (c.description or '')[:255],
-                'Vendor':                         '',
-                'Manufacturer':                   '',
-                # ── Fabrication / supply (numeric SP3D codes — reference confirmed) ──
-                'FabricationType':                fab_type,
-                'SupplyResponsibility':           supply_resp,
-                'ReportingType':                  rpt_type,
-                'QuantityOfReportableParts':      qty_rpt,
-                # ── Joint requirements ──────────────────────────────────────────────
-                'GasketRequirements':             gasket_req,
-                'BoltingRequirements':            bolt_req,
-                'ClampRequirement':               SPEC_DEFAULTS['pcmd_clamp_requirement'],
-                'WeldingRequirement':             weld_req,
-                'LooseMaterialRequirements':      SPEC_DEFAULTS['pcmd_loose_material_requirements'],
-                # ── Cap-screw substitution (only for flanged caps/blinds) ──────────────────
-                'SubstCapScrewsQuantity':         SPEC_DEFAULTS['pcmd_subst_cap_screws_quantity'],
-                'SubstCapScrewCntrCommodityCode': SPEC_DEFAULTS['pcmd_subst_cap_screw_cntr_code'],
-                'SubstCapScrewDiameter':          SPEC_DEFAULTS['pcmd_subst_cap_screw_diameter'],
-                'TappedHoleDepth':                SPEC_DEFAULTS['pcmd_tapped_hole_depth'],
-                'TappedHoleDepth2':               SPEC_DEFAULTS['pcmd_tapped_hole_depth_2'],
-                'CapScrewEngagementGap':          SPEC_DEFAULTS['pcmd_cap_screw_engagement_gap'],
-                # ── Valve operator (only for valve commodities) ──────────────────────────
-                'MultiportValveOpReq':            SPEC_DEFAULTS['pcmd_multiport_valve_op_req'],
-                'ValveOperatorType':              SPEC_DEFAULTS['pcmd_valve_operator_type'],
-                'ValveOperatorGeoIndStd':         SPEC_DEFAULTS['pcmd_valve_operator_geo_ind_std'],
-                'ValveOperatorCatalogPartNumber': SPEC_DEFAULTS['pcmd_valve_operator_catalog_part'],
-                # ── Reporting / procurement metadata ─────────────────────────────────
-                # ReportableCommodityCode defaults to the contractor code so the
-                # SP3D MTO references the same identifier; can be overridden in
-                # future via a component-level field.
-                'ReportableCommodityCode':        icc,
-                'PartDataSource':                 SPEC_DEFAULTS['pcmd_part_data_source'],
-                'AltOrientationCommodityCode':    SPEC_DEFAULTS['pcmd_alt_orientation_commodity'],
-                'HyperlinkToElectronicVendor':    SPEC_DEFAULTS['pcmd_hyperlink_vendor'],
-                'HyperlinkToElectronicManuals':   SPEC_DEFAULTS['pcmd_hyperlink_manuals'],
-                'PipingNote1':                    (c.notes or '')[:255],
-                'VendorPartNumber':               SPEC_DEFAULTS['pcmd_vendor_part_number'],
-                'ManufacturerPartNumber':         SPEC_DEFAULTS['pcmd_manufacturer_part_number'],
-                'AltReportableCommodityCode':     SPEC_DEFAULTS['pcmd_alt_reportable_commodity'],
-                'QuantityOfAltReportableParts':   SPEC_DEFAULTS['pcmd_quantity_alt_reportable_parts'],
-                'eClasseProcurementCode':         SPEC_DEFAULTS['pcmd_eclasse_procurement_code'],
-                'UNSPSCeProcurementCode':         SPEC_DEFAULTS['pcmd_unspsc_procurement_code'],
-                'LegacyCommodityCode':            SPEC_DEFAULTS['pcmd_legacy_commodity_code'],
-            })
-    return rows
+    """Hold generated rows. Catalog control data needs approved commodity identifiers."""
+    return []
 
 
 def _rows_gasket_selection_filter(cls):
     rows = []
     spec_name = _spec_name(cls)
-    fluid_code = _infer_fluid_from_spec_name(spec_name)
     for c in cls.components.all():
         if c.component_type != 'gasket':
             continue
@@ -2313,7 +2211,7 @@ def _rows_gasket_selection_filter(cls):
             'AlternateEndPreparation':      SPEC_DEFAULTS['gasket_alt_end_preparation'],
             'AlternatePressureRating':      SPEC_DEFAULTS['gasket_alt_pressure_rating'],
             'AlternateEndStandard':         SPEC_DEFAULTS['gasket_alt_end_standard'],
-            'FluidCode':                    fluid_code,
+            'FluidCode':                    '',
             'ScheduleThickness':            SPEC_DEFAULTS['gasket_schedule_thickness'],
             'ContractorCommodityCode':      contractor_code,
             'Priority':                     SPEC_DEFAULTS['gasket_priority'],
@@ -2664,58 +2562,13 @@ def _rows_materials_data(cls):
 
 
 def _rows_pipe_branch(cls):
-    """One row per (header_npd, branch_npd) pair when fittings include tees.
-
-    SP3D treats PipeBranch as the branch CONNECTION matrix: only emit rows
-    when the class actually carries a branch-making component (tee, olet, or
-    a generic weld-type umbrella family that fans out to them). Otherwise
-    every spec would bulkload the full NPD cross-product (up to N² rows) even
-    for straight-run-only classes that have no branch connections at all.
-    """
-    def _is_branch_maker(c) -> bool:
-        if route_component_to_cat_sheet(c) in ('Tee', 'ReducingTee', 'Weldolet'):
-            return True
-        # Generic "B.W./S.W./SCRD FITTINGS" umbrella rows fan out to tees /
-        # olets (see GENERIC_FITTING_FAMILY_SHEETS) — they make branches too.
-        if is_generic_fitting_family(c):
-            return True
-        # Unrouted olet-likes (sockolet/elbolet/latrolet/...) bulkload onto
-        # the Weldolet sheet but route to None — detect by name so they count.
-        blob = f'{c.sub_type or ""} {c.description or ""}'.lower()
-        return 'olet' in blob
-    has_branch_fitting = any(_is_branch_maker(c) for c in cls.components.all())
-    if not has_branch_fitting:
-        return []
-    npds = sorted({n for c in cls.components.all()
-                   for n in _enumerate_npds(c.size_from, c.size_to)})
-    if not npds:
-        return []
-    rows = []
-    for h in npds:
-        for b in npds:
-            if b > h:
-                continue
-            rows.append({
-                'SpecName':           _spec_name(cls),
-                'HeaderSize':         _normalize_npd(h),
-                'BranchSize':         _normalize_npd(b),
-                'AngleLow':           SPEC_DEFAULTS['pipe_branch_angle_low'],
-                'AngleHigh':          SPEC_DEFAULTS['pipe_branch_angle_high'],
-                'HdrSizeNPDUnitType': S3D_DEFAULTS['NpdUnitType'],
-                'BrSizeNPDUnitType':  S3D_DEFAULTS['NpdUnitType'],
-                'ShortCode':          SPEC_DEFAULTS['pipe_branch_short_code'],
-                'SecondaryShortCode': SPEC_DEFAULTS['pipe_branch_secondary_short_code'],
-                'TertiaryShortCode':  SPEC_DEFAULTS['pipe_branch_tertiary_short_code'],
-            })
-    return rows
+    """Hold branch rules until a class-specific approved matrix is available."""
+    return []
 
 
 def _rows_permissible_taps(cls):
-    return [{
-        'SpecName':             _spec_name(cls),
-        'PermissibleTapNumber': SPEC_DEFAULTS['permissible_tap_number'],
-        'IsPreferredTap':       SPEC_DEFAULTS['permissible_tap_is_preferred'],
-    }]
+    """Hold tap rules until class-specific engineering approval is available."""
+    return []
 
 
 def _rows_joint_quality_factor(cls):
@@ -2734,218 +2587,19 @@ def _rows_joint_quality_factor(cls):
 
 
 def _rows_thickness_data_rule(cls):
-    npds = sorted({n for c in cls.components.all()
-                   for n in _enumerate_npds(c.size_from, c.size_to)})
-    return [
-        _thickness_row_for_npd(cls, n)
-        for n in npds
-    ]
-
-
-# Soft-coded ASME B36.10 / B31.3 wall-thickness lookup for the LS1E-class spec.
-# Values are reference-confirmed from LS1E-A3_SPEC.xlsx (mm).
-# Key: nominal pipe diameter (inches, float). Value: dict with
-#   'min'      → MinimumThickness (calculated minimum wall, post corrosion allowance)
-#   'retire'   → RetirementThickness (corrosion allowance + safety margin)
-#   'sched1'   → PreferredSchedule1 (primary pipe schedule at this NPD)
-# Override per-project via DB or admin; never hardcode in builders.
-THICKNESS_DATA_BY_NPD = {
-    0.5:  {'min': '3.73mm', 'retire': '1mm',   'sched1': 'S-80'},
-    0.75: {'min': '3.91mm', 'retire': '1mm',   'sched1': 'S-80'},
-    1.0:  {'min': '4.55mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    1.5:  {'min': '5.08mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    2.0:  {'min': '5.54mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    3.0:  {'min': '5.49mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    4.0:  {'min': '6.02mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    6.0:  {'min': '7.11mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    8.0:  {'min': '6.35mm', 'retire': '1.5mm', 'sched1': 'S-80'},
-    10.0: {'min': '6.35mm', 'retire': '2.3mm', 'sched1': 'S-80'},
-    12.0: {'min': '6.35mm', 'retire': '2.8mm', 'sched1': 'S-80'},
-    14.0: {'min': '6.35mm', 'retire': '2.8mm', 'sched1': 'S-80'},
-    16.0: {'min': '6.35mm', 'retire': '3.1mm', 'sched1': 'S-80'},
-    18.0: {'min': '6.35mm', 'retire': '3.1mm', 'sched1': 'S-80'},
-    20.0: {'min': '6.35mm', 'retire': '3.1mm', 'sched1': 'S-80'},
-    24.0: {'min': '9.53mm', 'retire': '3.1mm', 'sched1': 'S-80'},
-    # Above 24" SP3D uses explicit wall-thickness schedules instead of S-series
-    26.0: {'min': '7.92mm', 'retire': '3.8mm', 'sched1': '26.0 mm'},
-    28.0: {'min': '7.92mm', 'retire': '3.8mm', 'sched1': '26.0 mm'},
-    30.0: {'min': '7.92mm', 'retire': '3.8mm', 'sched1': '26.0 mm'},
-    32.0: {'min': '7.92mm', 'retire': '3.8mm', 'sched1': '26.0 mm'},
-}
-
-
-def _thickness_row_for_npd(cls, n):
-    """Build one ThicknessDataRule row, looking up NPD-specific thickness
-    values from THICKNESS_DATA_BY_NPD with safe fallback to SPEC_DEFAULTS."""
-    try:
-        key = float(n)
-    except (TypeError, ValueError):
-        key = None
-    entry = THICKNESS_DATA_BY_NPD.get(key, {}) if key is not None else {}
-    return {
-        'SpecName':                   _spec_name(cls),
-        'NominalPipingDiameter':      _normalize_npd(n),
-        'NominalPipingDiameterUnits': S3D_DEFAULTS['NpdUnitType'],
-        'MinimumThickness':           entry.get('min',    SPEC_DEFAULTS['min_thickness']),
-        'RetirementThickness':        entry.get('retire', SPEC_DEFAULTS['retirement_thickness']),
-        'ThreadThickness':            SPEC_DEFAULTS['thread_thickness'],
-        'PreferredSchedule1':         entry.get('sched1', SPEC_DEFAULTS['preferred_schedule']),
-        'PreferredSchedule2':         SPEC_DEFAULTS['preferred_schedule_2'],
-        'PreferredSchedule3':         SPEC_DEFAULTS['preferred_schedule_3'],
-        'PreferredSchedule4':         SPEC_DEFAULTS['preferred_schedule_4'],
-        'PreferredSchedule5':         SPEC_DEFAULTS['preferred_schedule_5'],
-        'PreferredSchedule6':         SPEC_DEFAULTS['preferred_schedule_6'],
-    }
-
-
-# Soft-coded SP3D bolt-diameter ladder per ASME B16.5 / B18.2.1 — 0.25" to 4"
-# in 0.125" increments. Matches the LS1E-A3 NutSelectionFilter reference
-# (31 rows). Override per-project by editing this constant or by injecting
-# project-specific diameters via env / admin in future.
-BOLT_DIAMETERS_INCH = [
-    '0.25in',  '0.375in', '0.5in',   '0.625in', '0.75in',  '0.875in', '1in',
-    '1.125in', '1.25in',  '1.375in', '1.5in',   '1.625in', '1.75in',  '1.875in',
-    '2in',     '2.125in', '2.25in',  '2.375in', '2.5in',   '2.625in', '2.75in',
-    '2.875in', '3in',     '3.125in', '3.25in',  '3.375in', '3.5in',   '3.625in',
-    '3.75in',  '3.875in', '4in',
-]
+    """Hold generated rows. Thickness rules need class-specific schedule evidence."""
+    return []
 
 
 def _rows_nut_selection_filter(cls):
-    """One row per bolt diameter, populating every SP3D NutSelectionFilter
-    column with soft-coded defaults. Reference (LS1E-A3) emits 31 rows from
-    0.25in to 4in; ContractorCommodityCode is sequential (NUT001…NUT031)."""
-    spec_name = _spec_name(cls)
-    pr        = _normalize_pressure_class(cls.pressure_rating)
-    prefix    = SPEC_DEFAULTS['nut_contractor_commodity_code_prefix']
-    rows = []
-    for idx, diam in enumerate(BOLT_DIAMETERS_INCH, start=1):
-        rows.append({
-            'SpecName':                     spec_name,
-            'NutOption':                    SPEC_DEFAULTS['nut_option'],
-            'MaximumTemperature':           SPEC_DEFAULTS['nut_max_temperature'],
-            'BoltType':                     SPEC_DEFAULTS['nut_bolt_type'],
-            'BoltDiameter':                 diam,
-            'PressureRating':               pr,
-            'ContractorCommodityCode':      f'{prefix}{idx:03d}',
-            'SupplementaryNutOption':       SPEC_DEFAULTS['nut_supplementary_nut_option'],
-            'SupplNutCntrCommodityCode':    SPEC_DEFAULTS['nut_suppl_cntr_commodity_code'],
-            'FabricationCategoryOverride':  SPEC_DEFAULTS['nut_fabrication_category_override'],
-            'SupplyResponsibilityOverride': SPEC_DEFAULTS['nut_supply_responsibility_override'],
-            'Comments':                     SPEC_DEFAULTS['nut_comments'],
-            'PipingNote1':                  SPEC_DEFAULTS['nut_piping_note_1'],
-        })
-    return rows
-
-
-def _infer_fluid_from_spec_name(spec_name: str) -> str:
-    """Soft-coded prefix→fluid lookup. Returns SPEC_DEFAULTS['default_fluid_code']
-    if no prefix matches. Longest-prefix-wins so 'AN3' beats 'A'."""
-    if not spec_name:
-        return SPEC_DEFAULTS['default_fluid_code']
-    sn = spec_name.upper().strip()
-    # Strip 'PIPING SPEC: ' prefix if present
-    if ':' in sn:
-        sn = sn.split(':', 1)[1].strip()
-    # Longest-prefix-wins
-    for prefix in sorted(SPEC_NAME_FLUID_PREFIX_MAP.keys(), key=len, reverse=True):
-        if sn.startswith(prefix):
-            return SPEC_NAME_FLUID_PREFIX_MAP[prefix]
-    return SPEC_DEFAULTS['default_fluid_code']
-
-
-# Soft-coded prefix→fluid map for AllowablePipingMaterialsClass FluidCode
-# inference when a piping class has no extracted service_list. Project-tunable
-# without code change. Codes match common Rejlers/ADNOC service naming.
-SPEC_NAME_FLUID_PREFIX_MAP = {
-    # Air services
-    'AA':  'Instrument Air',
-    'AC':  'Compressed Air',
-    'AF':  'Filtered Air',
-    'AG':  'Plant Air',
-    'AJ':  'Jacket Air',
-    'AS':  'Service Air',
-    # Nitrogen services
-    'AN':  'Nitrogen',
-    'N':   'Nitrogen',
-    # Water services
-    'CW':  'Cooling Water',
-    'PW':  'Potable Water',
-    'FW':  'Fire Water',
-    'BFW': 'Boiler Feed Water',
-    'DW':  'Demineralised Water',
-    'RW':  'Raw Water',
-    # Steam
-    'HPS': 'High Pressure Steam',
-    'MPS': 'Medium Pressure Steam',
-    'LPS': 'Low Pressure Steam',
-    'ST':  'Steam',
-    # Hydrocarbons
-    'HC':  'Hydrocarbon',
-    'NG':  'Natural Gas',
-    'FG':  'Fuel Gas',
-    'LPG': 'LPG',
-    'CO':  'Crude Oil',
-    'DO':  'Diesel Oil',
-    # Flare / vent
-    'FL':  'Flare',
-    'VT':  'Vent',
-    # Generic process / utility (LS1E project codes start with 'A' → utility-air family)
-    'A':   'Utility Air',
-    'B':   'Process Fluid',
-    'C':   'Chemical',
-    'D':   'Drain',
-}
-
-
-# ── Soft-coded prefix → numeric SP3D FluidCode ID map ───────────────────
-# SP3D bulkload sheets like InsideSurfaceTreatment require a NUMERIC
-# FluidCode (e.g. 521 in LS1E reference) rather than a fluid name.
-# These IDs come from the project's SP3D FluidCode catalog. Keep this
-# map aligned with the customer's master list; add new prefixes as
-# additional specs are imported.  Longest-prefix-wins (same as the name
-# map above).  Anything unmatched falls back to
-# SPEC_DEFAULTS['numeric_fluid_code'].
-SPEC_NAME_NUMERIC_FLUID_MAP = {
-    # LS-prefixed specs (low-pressure service) — LS1E reference uses 521
-    'LS':  '521',
-    # Common Rejlers/ADNOC numeric IDs (placeholders aligned to LS1E
-    # family; override per project via SP3D FluidCode master).
-    'HS':  '521',
-    'MS':  '521',
-    # Hydrocarbon / process families default to the same generic ID until
-    # the customer provides an authoritative FluidCode map.
-    'HC':  '521',
-    'NG':  '521',
-    'FG':  '521',
-}
-
-
-def _infer_numeric_fluid_from_spec_name(spec_name: str) -> str:
-    """Soft-coded prefix → numeric FluidCode ID.  Used by sheets whose
-    SP3D bulkload column expects a numeric FluidCode (e.g.
-    InsideSurfaceTreatment in the LS1E reference uses 521).  Falls back to
-    SPEC_DEFAULTS['numeric_fluid_code'] for unmapped prefixes."""
-    default = SPEC_DEFAULTS['numeric_fluid_code']
-    if not spec_name:
-        return default
-    sn = str(spec_name).upper().strip()
-    if ':' in sn:
-        sn = sn.split(':', 1)[1].strip()
-    for prefix in sorted(SPEC_NAME_NUMERIC_FLUID_MAP.keys(), key=len, reverse=True):
-        if sn.startswith(prefix):
-            return SPEC_NAME_NUMERIC_FLUID_MAP[prefix]
-    return default
+    """Hold generated rows. Nut selection requires approved catalog commodity mapping."""
+    return []
 
 
 def _rows_allowable_piping_materials_class(cls):
-    """Emit one FluidCode row per service. Smart fallback chain ensures the
-    column is NEVER blank: explicit service_list → inferred-from-spec-name →
-    SPEC_DEFAULTS['default_fluid_code']. Deduplicates within a single class."""
+    """Emit only explicitly extracted services; no spec-name fluid inference."""
     spec_name = _spec_name(cls)
     services  = [s for s in (cls.service_list or []) if s and str(s).strip()]
-    if not services:
-        services = [_infer_fluid_from_spec_name(spec_name)]
     # Dedup while preserving order
     seen, ordered = set(), []
     for s in services:
@@ -2987,16 +2641,12 @@ def _rows_inside_surface_treatment(cls):
     if not npds:
         return []
     spec_name = _spec_name(cls)
-    # FluidCode: numeric SP3D ID resolved from spec_name prefix
-    # (SPEC_NAME_NUMERIC_FLUID_MAP). LS1E reference template populates
-    # this column for every IST row — never blank.
-    fluid_code = _infer_numeric_fluid_from_spec_name(spec_name)
     return [{
         'SpecName':                       spec_name,
         'NominalPipingDiameterFrom':      _normalize_npd(min(npds)),
         'NominalPipingDiameterTo':        _normalize_npd(max(npds)),
         'NominalPipingDiameterUnits':     S3D_DEFAULTS['NpdUnitType'],
-        'FluidCode':                      fluid_code,
+        'FluidCode':                      '',
         'CoatingType':                    SPEC_DEFAULTS['coating_type'],
         'InsideSurfaceTreatment':         SPEC_DEFAULTS['inside_surface_treatment'],
     }]
@@ -3140,7 +2790,7 @@ CAT_SHEET_TO_SHORT_CODE: dict = {
     'ConcentricReducer':  'Concentric Reducer',
     'EccentricReducer':   'Eccentric Reducer',
     'ConcentricSwage':    'Concentric Swage',
-    'Cap':                'Cap',
+    'Cap':                'CAP',
     'Weldolet':           'Weldolet',
     'Coupling':           'Coupling',
     'Nipple':             'Nipple',
@@ -3293,48 +2943,28 @@ def _generate_custom_size_range_rows(base_row: dict, cls_token: str, prefix: str
 
 
 def _rows_piping_commodity_filter(cls):
-    """Emit one PCF row per (component × NPD).
-
-    Identification + sizing + materials are taken from the extracted spec;
-    the 25+ side columns (FluidCode, MaxTemp, BendRadius, etc.) are filled
-    automatically by `PIPING_COMMODITY_FILTER_DEFAULTS` so this builder
-    stays small and the side defaults remain editable from a single place.
-    
-    CUSTOM SIZE RANGES: When trigger_size (e.g., 1.5") is encountered,
-    additional rows with custom from-to ranges are automatically generated
-    per CUSTOM_SIZE_RANGE_CONFIG for improved filtering granularity.
-    """
+    """Emit source-backed component sizes with unsupported identifiers blank."""
     rows = []
     spec_name = _spec_name(cls)
-    cls_token = _safe_class_token(cls)
     pressure  = _normalize_pressure_class(cls.pressure_rating)
-    fluid_code = _infer_fluid_from_spec_name(spec_name) if '_infer_fluid_from_spec_name' in globals() else ''
-    
-    # Track if we've generated custom ranges (to avoid duplicates)
-    custom_ranges_generated = False
 
     for c in cls.components.all():
-        sheet = route_component_to_cat_sheet(c)
-        prefix = (CAT_SHEET_DEFAULTS.get(sheet, {}) or {}).get('icc_prefix', 'RAD_CMP')
         npds = _enumerate_npds(c.size_from, c.size_to)
         if not npds:
             continue
         short_code = _pcf_short_code_for_component(c)
-        end_prep   = _normalize_end_prep(c.end_connection) or S3D_DEFAULTS['EndPrep_BW']
+        end_prep   = _normalize_end_prep(c.end_connection) or ''
         sched      = _normalize_schedule(c.schedule_or_rating or '')
-        # Optional commodity_code attribute (set at runtime by extractor on some
-        # components) — fall back to the deterministic ICC so the column is
-        # never blank and the SPEC↔CAT cross-link stays intact.
+        # Only an explicit source or approved catalog commodity code may be used.
         commodity_code_override = (getattr(c, 'commodity_code', '') or '').strip()
 
         for npd in npds:
-            icc = f'{prefix}_{cls_token}_{_npd_token(npd)}'
             first_size = _normalize_npd(npd)
             base_row = {
                 # ── Identification (canonical SPEC↔CAT join key) ──────────
                 '_source_component_id': str(c.id),
                 'SpecName':            spec_name,
-                'CommodityCode':       commodity_code_override or icc,
+                'CommodityCode':       commodity_code_override,
                 'ShortCode':           short_code,
                 # ── First-size range (always same value for fixed-size parts;
                 # size-reducing components are flagged by autofill via
@@ -3358,17 +2988,10 @@ def _rows_piping_commodity_filter(cls):
                 'MaterialGrade':       cls.material_grade or '',
                 'GeometricIndustryStandard': c.material_standard or '',
                 # ── Fluid (mirrors GasketSelectionFilter inference) ───────
-                'FluidCode':           fluid_code or 'Process Fluid',
+                'FluidCode':           '1',
             }
             rows.append(base_row)
             
-            # ── Generate custom size range entries (user-defined bins) ────
-            # Only generate once per class (when trigger_size is first encountered)
-            if not custom_ranges_generated:
-                custom_rows = _generate_custom_size_range_rows(base_row, cls_token, prefix)
-                if custom_rows:
-                    rows.extend(custom_rows)
-                    custom_ranges_generated = True
     
     return rows
 
@@ -3595,11 +3218,9 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
     column-name variants — only whichever matches the template's actual header
     is written; the rest are silently dropped by the writer."""
     d = CAT_SHEET_DEFAULTS.get(sheet_name, {}) or {}
-    cls_token = _safe_class_token(cls)
-    suffix_parts = [_npd_token(n) for n in (npd1, npd2, npd3) if n is not None]
-    icc = f'{d.get("icc_prefix", "RAD_CMP")}_{cls_token}_{"_".join(suffix_parts)}'
-    end_prep = _normalize_end_prep(comp.end_connection) or S3D_DEFAULTS['EndPrep_BW']
-    sched = _normalize_schedule(comp.schedule_or_rating) or 'STD'
+    icc = ''  # Await an approved catalog identifier.
+    end_prep = _normalize_end_prep(comp.end_connection) or ''
+    sched = _normalize_schedule(comp.schedule_or_rating) or ''
     pressure = _normalize_pressure_class(cls.pressure_rating)
     primary_lbl   = d.get('primary_label', '')
     secondary_lbl = d.get('secondary_label', '')
@@ -3709,25 +3330,22 @@ def _build_cat_rows(cls, comp, sheet_name) -> list[dict]:
 
 
 def _build_gasket_part_rows(cls, comp) -> list[dict]:
-    d = CAT_SHEET_DEFAULTS['GasketPartData']
-    cls_token = _safe_class_token(cls)
     npds = _enumerate_npds(comp.size_from, comp.size_to)
     if not npds:
         return []
     rows = []
     sheet_constants = cat_sheet_constants('GasketPartData', cls, comp)
     for npd in npds:
-        icc = f'{d["icc_prefix"]}_{cls_token}_{_npd_token(npd)}'
         row = {
-            'IndustryCommodityCode':  icc,
+            'IndustryCommodityCode':  '',
             'NominalDiameterFrom':    _normalize_npd(npd),
             'NominalDiameterTo':      _normalize_npd(npd),
             'NominalDiameter':        _normalize_npd(npd),
             'NpdUnitType':            S3D_DEFAULTS['NpdUnitType'],
-            'GasketType':             comp.sub_type or 'SpiralWound',
-            'GasketIndustryStandard': comp.material_standard or 'ASME B16.20',
+            'GasketType':             comp.sub_type or '',
+            'GasketIndustryStandard': comp.material_standard or '',
             'MaterialsGrade':         cls.material_grade or '',
-            'FlangeFacing':           cls.flange_facing or 'RF',
+            'FlangeFacing':           cls.flange_facing or '',
             'MaximumPressure':        _normalize_pressure_class(cls.pressure_rating),
         }
         # Sheet-level constants (ThicknessFor3DModel, ProcurementThickness,
@@ -3738,18 +3356,15 @@ def _build_gasket_part_rows(cls, comp) -> list[dict]:
 
 
 def _build_bolt_part_rows(cls, comp) -> list[dict]:
-    d = CAT_SHEET_DEFAULTS['BoltPartData']
-    cls_token = _safe_class_token(cls)
     npds = _enumerate_npds(comp.size_from, comp.size_to)
     if not npds:
         return []
     rows = []
     sheet_constants = cat_sheet_constants('BoltPartData', cls, comp)
     for npd in npds:
-        icc = f'{d["icc_prefix"]}_{cls_token}_{_npd_token(npd)}'
         row = {
-            'IndustryCommodityCode':     icc,
-            'BoltType':                  comp.sub_type or 'Stud',
+            'IndustryCommodityCode':     '',
+            'BoltType':                  comp.sub_type or '',
             'GeometricIndustryStandard': _resolve_gis_code('BoltPartData', comp.material_standard),
             'MaterialsGrade':            cls.material_grade or '',
             'CoatingType':               '0',

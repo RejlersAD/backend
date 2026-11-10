@@ -94,6 +94,16 @@ class ControlledReleaseTests(TestCase):
         self.assertTrue(SpecAuditEvent.objects.filter(job_identity=self.job.pk, event='released_export').exists())
         self.assertEqual(ValidationRun.objects.filter(job=self.job).count(), 1)
 
+    def test_match_review_must_be_resolved_before_freeze(self):
+        self.decision.review_decision = 'rejected'
+        self.decision.final_commodity_code = ''
+        self.decision.save(update_fields=['review_decision', 'final_commodity_code'])
+        self.assertEqual(self.client.post(self.root + 'releases/validate/').status_code, 201)
+        draft = self.client.post(self.root + 'releases/')
+        response = self.client.post(self.root + f"releases/{draft.data['id']}/freeze/")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('Every extracted match decision must be resolved and approved before release.', response.data['blockers'])
+
     def test_unknown_completeness_validation_errors_and_authority_block_freeze(self):
         with override_settings(S3D_RELEASE_AUTHORITY_USER_IDS=[]):
             draft = self.client.post(self.root + 'releases/')
@@ -182,6 +192,35 @@ class ControlledReleaseTests(TestCase):
         self.assertEqual(self.client.post(self.root + 'import-attempts/', payload).status_code, 409)
         payload.update(status='succeeded', target_id='disposable-test')
         self.assertEqual(self.client.post(self.root + 'import-attempts/', payload).status_code, 400)
+
+    def test_release_approval_requires_exact_successful_pilot_and_authority(self):
+        release = self.frozen()
+        path = self.root + f'releases/{release.pk}/approve/'
+        partial = self.client.post(self.root + 'import-attempts/', {
+            'release_id': str(release.pk), 'target_id': 'disposable-test', 'status': 'succeeded',
+            'report': SimpleUploadedFile('pilot.txt', b'Pilot target report'),
+            'result_details': '{"load_package": true, "select_components": true}'}, format='multipart')
+        self.assertEqual(partial.status_code, 201, partial.data)
+        self.assertEqual(self.client.post(path, {'attempt_id': partial.data['id']}).status_code, 409)
+        complete = self.client.post(self.root + 'import-attempts/', {
+            'release_id': str(release.pk), 'target_id': 'disposable-test', 'status': 'succeeded',
+            'report': SimpleUploadedFile('pilot-complete.txt', b'Complete pilot target report'),
+            'result_details': '{"load_package": true, "select_components": true, "check_boundary_sizes": true}'}, format='multipart')
+        self.assertEqual(complete.status_code, 201, complete.data)
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.post(path, {'attempt_id': complete.data['id']}).status_code, 403)
+        self.client.force_authenticate(self.owner)
+        approved = self.client.post(path, {'attempt_id': complete.data['id']})
+        self.assertEqual(approved.status_code, 201, approved.data)
+        self.assertEqual(self.client.post(path, {'attempt_id': complete.data['id']}).status_code, 200)
+        alternate = ImportAttempt.objects.create(release=release, author=self.owner, status='succeeded',
+            sp3d_version='Agreed test version', import_profile='Piping pilot', disposable_target='disposable-test',
+            report_name='alternate.txt', report_bytes=b'Another target report', report_sha256=digest(b'Another target report'),
+            result_details={'load_package': True, 'select_components': True, 'check_boundary_sizes': True})
+        self.assertEqual(self.client.post(path, {'attempt_id': str(alternate.pk)}).status_code, 409)
+        self.assertEqual(SpecAuditEvent.objects.filter(job_identity=self.job.pk, event='release_approved').count(), 1)
+        state = self.client.get(self.root + 'releases/')
+        self.assertEqual(next(item for item in state.data['items'] if item['id'] == str(release.pk))['approval']['id'], approved.data['id'])
 
     def test_zip_timestamps_do_not_change_canonical_workbook_hash(self):
         wb = Workbook(); wb.active.append(['same input'])

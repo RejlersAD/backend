@@ -54,11 +54,45 @@ class ReferenceIntelligenceTests(TestCase):
         self.assertEqual(response.status_code, 400)
         response = self.client.post(endpoint, {'decision_id': str(decision.pk), 'review_decision': 'approved',
                                                'final_commodity_code': 'VLV-B'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        candidate_id = next(candidate['candidate_id'] for candidate in decision.candidates if candidate['commodity_code'] == 'VLV-B')
+        response = self.client.post(endpoint, {'decision_id': str(decision.pk), 'review_decision': 'approved',
+                                               'final_commodity_code': 'VLV-B', 'candidate_id': candidate_id,
+                                               'source_reference': {'page': 1}}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(self.run_matching().status_code, 200)
         decision.refresh_from_db()
         self.assertEqual(decision.final_commodity_code, 'VLV-B')
+        self.assertEqual(decision.discriminators_matched['selected_candidate_id'], candidate_id)
         self.assertEqual(ComponentMatchDecision.objects.filter(job=self.job).count(), 1)
+
+    def test_unmatched_value_can_be_remapped_only_to_pinned_catalog_code(self):
+        self.assertEqual(self.run_matching().status_code, 200)
+        decision = ComponentMatchDecision.objects.get(job=self.job)
+        decision.state = 'unmatched'
+        decision.candidates = []
+        decision.matched_commodity_code = ''
+        decision.save(update_fields=['state', 'candidates', 'matched_commodity_code'])
+        endpoint = '/api/v1/spec-customization/matching-decision-review/'
+        payload = {'decision_id': str(decision.pk), 'review_decision': 'remapped', 'review_notes': 'Selected approved pinned catalog code.'}
+        self.assertEqual(self.client.post(endpoint, {**payload, 'final_commodity_code': 'NOT-IN-CAT'}, format='json').status_code, 400)
+        response = self.client.post(endpoint, {**payload, 'final_commodity_code': 'VLV-B'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        decision.refresh_from_db()
+        self.assertEqual(decision.final_commodity_code, 'VLV-B')
+        self.assertEqual(decision.discriminators_matched['remapped_catalog_code'], 'VLV-B')
+
+    def test_clarification_requires_note_and_does_not_approve_link(self):
+        self.assertEqual(self.run_matching().status_code, 200)
+        decision = ComponentMatchDecision.objects.get(job=self.job)
+        endpoint = '/api/v1/spec-customization/matching-decision-review/'
+        payload = {'decision_id': str(decision.pk), 'review_decision': 'clarification'}
+        self.assertEqual(self.client.post(endpoint, payload, format='json').status_code, 400)
+        response = self.client.post(endpoint, {**payload, 'review_notes': 'Confirm material grade on the source page.'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        decision.refresh_from_db()
+        self.assertEqual(decision.review_decision, 'clarification')
+        self.assertFalse(decision.final_commodity_code)
 
     def test_unauthorized_run_list_review_and_freeze(self):
         self.run_matching()
@@ -68,7 +102,8 @@ class ReferenceIntelligenceTests(TestCase):
         self.assertEqual(self.client.get('/api/v1/spec-customization/matching-decisions/', {'job': str(self.job.pk)}).status_code, 403)
         self.assertEqual(self.client.get('/api/v1/spec-customization/matching-decisions/').data['items'], [])
         self.assertEqual(self.client.post('/api/v1/spec-customization/matching-decision-review/', {
-            'decision_id': str(decision.pk), 'review_decision': 'rejected'}).status_code, 403)
+            'decision_id': str(decision.pk), 'review_decision': 'rejected',
+            'review_notes': 'No approved catalog item supports this record.'}).status_code, 403)
         self.assertEqual(self.client.post('/api/v1/spec-customization/matching-set-freeze/', {
             'workbook_set_id': str(self.reference.pk)}).status_code, 403)
 
@@ -101,7 +136,7 @@ class ReferenceIntelligenceTests(TestCase):
     def test_remap_requires_existing_catalog_code(self):
         self.run_matching()
         decision = ComponentMatchDecision.objects.get(job=self.job)
-        payload = {'decision_id': str(decision.pk), 'review_decision': 'remapped'}
+        payload = {'decision_id': str(decision.pk), 'review_decision': 'remapped', 'review_notes': 'Selected approved pinned catalog code.'}
         endpoint = '/api/v1/spec-customization/matching-decision-review/'
         self.assertEqual(self.client.post(endpoint, payload).status_code, 400)
         self.assertEqual(self.client.post(endpoint, {**payload, 'final_commodity_code': 'INVENTED'}).status_code, 400)

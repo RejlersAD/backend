@@ -32,6 +32,7 @@ from .services.config import (
 )
 from .services.extraction_service import PaperSpecExtractionService, ExtractionProviderConfigurationError
 from .services.data_quality import process_extracted_classes
+from .services.pms_source_guard import verified_pms_classes
 from .services.advanced_validation import (
     validate_extracted_classes,
     ADVANCED_VALIDATION_CONFIG,
@@ -381,6 +382,13 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             quality_report
         )
         
+        cleaned_classes, rejected_classes = verified_pms_classes(pdf_path, cleaned_classes)
+        job.config_snapshot.setdefault('extraction_outcome', {})['verified_heading_pages'] = {
+            cls['class_code']: cls['_verified_heading_page'] for cls in cleaned_classes
+        }
+        if rejected_classes:
+            job.config_snapshot.setdefault('extraction_outcome', {})['rejected_class_headings'] = rejected_classes
+            logger.warning('[SpecExtraction] Job %s held %d classes without verified headings', job_id, len(rejected_classes))
         saved = _persist_classes(job, cleaned_classes)
         if saved == 0:
             logger.warning("[SpecExtraction] Job %s found zero piping classes", job_id)
@@ -391,7 +399,7 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         total_components = PipingClassComponent.objects.filter(piping_class__job=job).count()
         has_classes = saved > 0
         has_records = has_classes and total_components > 0
-        partial_review = has_classes and total_components == 0
+        partial_review = (has_classes and total_components == 0) or bool(rejected_classes)
         job.config_snapshot['extraction_outcome'].update({
             'classes_saved': saved,
             'components_saved': total_components,

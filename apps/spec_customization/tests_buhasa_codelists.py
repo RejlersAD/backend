@@ -90,7 +90,7 @@ class BuhasaWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data['state'], 'unique_match')
         candidate = response.data['candidates'][0]
-        response = self.review(review_decision='approved', final_commodity_code='MALE', candidate_id=candidate['candidate_id'])
+        response = self.review(review_decision='approved', final_commodity_code='MALE', candidate_id=candidate['candidate_id'], source_reference={'page': 1})
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(codelist_release_blockers(self.job), [])
         self.assertEqual(self.run_matching().status_code, 200)
@@ -105,7 +105,7 @@ class BuhasaWorkflowTests(TestCase):
         decision = ComponentMatchDecision.objects.get(job=self.job)
         self.assertEqual(decision.discriminators_matched['codelists']['attributes']['EndPreparation']['status'], 'UNMAPPED_CODELIST')
         self.assertEqual(decision.state, 'ambiguous')
-        self.assertEqual(self.review(review_decision='remapped', final_commodity_code='MALE').status_code, 409)
+        self.assertEqual(self.review(review_decision='remapped', final_commodity_code='MALE', review_notes='Resolve source code first.').status_code, 409)
         before = decision.discriminators_matched
         response = self.review(review_decision='normalized', codelist_selections={'EndPreparation': {'shortDesc': 'fake', 'code': 331}})
         self.assertEqual(response.status_code, 409)

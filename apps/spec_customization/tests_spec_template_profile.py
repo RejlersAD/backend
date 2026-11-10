@@ -108,6 +108,18 @@ class TemplateExportTests(TestCase):
                 if header.casefold() in keys:
                     self.assertEqual(header, keys[header.casefold()], sheet['name'])
 
+    def test_missing_service_does_not_infer_fluid_code_from_spec_name(self):
+        piping_class = self.job.piping_classes.get()
+        piping_class.class_code = 'LS1E'
+        piping_class.service_list = []
+        piping_class.save(update_fields=['class_code', 'service_list'])
+        sheets = {sheet['name']: sheet for sheet in build_preview(self.job, WORKBOOK_SPEC)['sheets']}
+        self.assertFalse(any(row['source'].get('class_id') for row in sheets['AllowablePipingMaterialsClass']['rows']))
+        for name in ('GasketSelectionFilter', 'InsideSurfaceTreatment'):
+            generated = [row for row in sheets[name]['rows'] if row['source'].get('class_id')]
+            self.assertTrue(generated, name)
+            self.assertTrue(all(row['cells'].get('FluidCode', '') == '' for row in generated), name)
+
     def test_export_retains_exact_schema_and_updates_index_without_sample_facts(self):
         book = load_workbook(build_spec_workbook(self.job), data_only=True)
         try:

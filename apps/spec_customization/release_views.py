@@ -20,11 +20,15 @@ def _job(request, job_id):
 
 
 def release_payload(release):
+    approval = next((row for row in SpecAuditEvent.objects.filter(job_identity=release.job_id, event='release_approved')
+                     if row.details.get('release_id') == str(release.pk)), None)
     return {'id': str(release.pk), 'state': release.state, 'manifest': release.manifest,
             'parent_id': str(release.parent_id) if release.parent_id else None,
             'validation_id': str(release.validation_id) if release.validation_id else None,
             'blockers': release.blockers, 'author': release.author_id, 'created_at': release.created_at.isoformat(),
-            'invalidated': release.successors.filter(state='invalidated').exists()}
+            'invalidated': release.successors.filter(state='invalidated').exists(),
+            'approval': {'id': str(approval.pk), 'author': approval.author_id,
+                         'created_at': approval.created_at.isoformat(), 'details': approval.details} if approval else None}
 
 
 @api_view(['GET', 'POST'])
@@ -180,6 +184,47 @@ def import_attempts(request, job_id):
     service.audit(job, 'import_attempt_recorded', request.user, attempt_id=str(attempt.pk), release_id=str(release.pk),
                   status=attempt.status, report_sha256=attempt.report_sha256)
     return Response(attempt_payload(attempt), status=201)
+
+
+class ReleaseApprovalInput(serializers.Serializer):
+    attempt_id = serializers.UUIDField()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def approve_release(request, job_id, release_id):
+    """Approve only a current frozen package with a successful documented pilot."""
+    job = _job(request, job_id)
+    authorities = {str(value) for value in getattr(settings, 'S3D_RELEASE_AUTHORITY_USER_IDS', [])}
+    if str(request.user.pk) not in authorities:
+        return Response({'error': 'Configured release authority is required.'}, status=403)
+    payload = ReleaseApprovalInput(data=request.data)
+    payload.is_valid(raise_exception=True)
+    release = get_object_or_404(SpecRelease, pk=release_id, job=job, state='frozen')
+    attempt = get_object_or_404(ImportAttempt, pk=payload.validated_data['attempt_id'], release=release)
+    _, spec_blockers, _ = service.released_bytes(job, 'spec', release.pk)
+    _, cat_blockers, _ = service.released_bytes(job, 'cat', release.pk)
+    if spec_blockers or cat_blockers:
+        return Response({'error': 'Frozen package is no longer current.', 'blockers': list(dict.fromkeys(spec_blockers + cat_blockers))}, status=409)
+    checks = attempt.result_details or {}
+    required = ('load_package', 'select_components', 'check_boundary_sizes')
+    if attempt.status != 'succeeded' or attempt.rejection_count or not attempt.report_sha256 or any(checks.get(key) is not True for key in required):
+        return Response({'error': 'A successful zero-rejection pilot with all three checks and a target report is required.'}, status=409)
+    if service.digest(bytes(attempt.report_bytes)) != attempt.report_sha256:
+        return Response({'error': 'Pilot report integrity check failed.'}, status=409)
+    previous = next((row for row in SpecAuditEvent.objects.filter(job_identity=job.pk, event='release_approved')
+                     if row.details.get('release_id') == str(release.pk)), None)
+    if previous:
+        if previous.details.get('attempt_id') != str(attempt.pk):
+            return Response({'error': 'This frozen package was already approved against another pilot attempt.'}, status=409)
+        return Response({'id': str(previous.pk), 'release_id': str(release.pk), 'attempt_id': previous.details['attempt_id'],
+                         'approved_at': previous.created_at.isoformat(), 'approved_by': previous.author_id})
+    event = service.audit(job, 'release_approved', request.user, release_id=str(release.pk), attempt_id=str(attempt.pk),
+                          input_sha256=release.manifest['input_sha256'], spec_sha256=release.manifest['spec_sha256'],
+                          cat_sha256=release.manifest['cat_sha256'], report_sha256=attempt.report_sha256)
+    return Response({'id': str(event.pk), 'release_id': str(release.pk), 'attempt_id': str(attempt.pk),
+                     'approved_at': event.created_at.isoformat(), 'approved_by': event.author_id}, status=201)
 
 
 def frozen_export(request, job, kind):

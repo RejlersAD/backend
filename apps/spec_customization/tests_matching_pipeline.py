@@ -8,13 +8,25 @@ from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.files.storage import InMemoryStorage
 from django.db import ProgrammingError
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from openpyxl import Workbook
 from rest_framework.test import APIClient
 from .matching_models import MatchingWorkbookSet, MatchingRule, ComponentMatchingResult
 from .models import PaperSpecDocument, PaperSpecExtractionJob, PipingClass
 from .project_models import SpecProject
 from .services.component_matcher import match_component, parse_match_xlsx
+from .matching_views import _candidate_blockers
+
+
+class CandidateEvidenceTests(SimpleTestCase):
+    def test_same_size_does_not_approve_missing_required_end_or_material(self):
+        decision = SimpleNamespace(nominal_size='0.5', discriminators_matched={'codelists': {'attributes': {
+            'EndPreparation': {'status': 'NOT_SUPPLIED'}, 'MaterialsGrade': {'status': 'NOT_SUPPLIED'},
+        }}})
+        candidate = {'codelists': {'EndPreparation': {'values': ['BW']}, 'MaterialsGrade': {'values': ['A105']}},
+                     'discriminators': {'size': {'requested': '0.5', 'values': ['0.5'], 'matched': True}}}
+        blockers = _candidate_blockers(decision, candidate)
+        self.assertEqual(len(blockers), 2)
 
 
 def xlsx(sheet, headers, rows):
