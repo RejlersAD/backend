@@ -48,9 +48,17 @@ catalog row, matched/unknown attributes, differences, coverage and confirmabilit
 Existing confirmation records the reviewer and timestamp. Unchanged matching
 reruns preserve the confirmed selection; changed evidence invalidates it.
 
-PCF preview retains the PMS code and exposes a distinct ConfirmedPCMCCode. Draft
-source downloads retain the literal source code; frozen SPEC exports use only the
-confirmed mapping in the template CommodityCode column. Required mappings are
+Following the user's supplied review workbook and explicit generation request,
+blank PMS cells now receive project-generated CommodityCode values in preview and
+draft exports. The old RAD/component/spec/nominal-size pattern is compacted to
+alphanumeric text; ordinary values such as RADCAP10A0600N0050 contain 18 characters.
+Long/short patterns and distinct engineering variants sharing a base use a stable
+20-character digest form. Source IDs and timestamps do not seed these identifiers.
+The literal PMS value and locator remain separate source evidence. Generated codes
+are not catalog confirmations. Confirmed PCMC Code is not a visible field or an
+extra worksheet column: the approved PCF template's columns remain unchanged.
+Frozen SPEC exports still use the reviewed mapping under existing release gates.
+Required mappings are
 checked by the existing validation/freeze gates. Pilot and release approval remain
 required. Previously requested PCF blank fields, FluidCode=1, PipeBranch angle/code
 fields and Tap-001 formatting are applied in the shared preview/export path.

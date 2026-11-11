@@ -2943,29 +2943,31 @@ def _generate_custom_size_range_rows(base_row: dict, cls_token: str, prefix: str
 
 
 def _rows_piping_commodity_filter(cls):
-    """Emit source-backed component sizes with unsupported identifiers blank."""
+    """Emit component sizes and compact project identifiers for blank PMS cells."""
     rows = []
     spec_name = _spec_name(cls)
     pressure  = _normalize_pressure_class(cls.pressure_rating)
 
     for c in cls.components.all():
+        prefix = (CAT_SHEET_DEFAULTS.get(route_component_to_cat_sheet(c), {}) or {}).get('icc_prefix', 'RAD_CMP')
         npds = _enumerate_npds(c.size_from, c.size_to)
         if not npds:
             continue
         short_code = _pcf_short_code_for_component(c)
         end_prep   = _normalize_end_prep(c.end_connection) or ''
         sched      = _normalize_schedule(c.schedule_or_rating or '')
-        # Optional commodity_code attribute (set at runtime by extractor on some
-        # components) — fall back to the deterministic ICC so the column is
-        # never blank and the SPEC↔CAT cross-link stays intact.
+        # Literal source codes stay intact. Blank output identifiers are
+        # generated after grouping engineering variants below.
         commodity_code_override = c.pms_commodity_code
 
         for npd in npds:
-            icc = ''  # Requires a confirmed project catalog identifier.
             first_size = _normalize_npd(npd)
             base_row = {
                 # ── Identification (canonical SPEC↔CAT join key) ──────────
                 '_source_component_id': str(c.id),
+                '_generation_base': f'{prefix}_{_safe_class_token(cls)}_{_npd_token(npd)}',
+                '_generation_attributes': {'description': c.description, 'source_material': c.material_standard,
+                                           'source_schedule': c.schedule_or_rating, 'source_end': c.end_connection},
                 'SpecName':            spec_name,
                 'CommodityCode':       commodity_code_override,
                 'ShortCode':           short_code,
@@ -2996,7 +2998,8 @@ def _rows_piping_commodity_filter(cls):
             rows.append(base_row)
             
     
-    return rows
+    from .commodity_codes import assign_generated_codes
+    return assign_generated_codes(rows)
 
 
 # Sheet → list of builders. Each builder yields zero-or-more rows per class.

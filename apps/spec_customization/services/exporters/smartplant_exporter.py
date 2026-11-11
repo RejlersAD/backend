@@ -172,8 +172,8 @@ def build_spec_workbook(job, preview_data=None, export_state='draft') -> io.Byte
             continue
         rows = [r['cells'] for r in sheet['rows']]
         if sheet_name == 'PipingCommodityFilter':
-            rows = [{**{k: v for k, v in cells.items() if k not in ('PMSCommodityCode', 'CommodityCodeStatus', 'ConfirmedPCMCCode')},
-                     'CommodityCode': cells.get('ConfirmedPCMCCode', '') if export_state != 'draft' and 'PMSCommodityCode' in cells else cells.get('PMSCommodityCode', cells.get('CommodityCode', ''))}
+            rows = [{**{k: v for k, v in cells.items() if k not in ('PMSCommodityCode', 'CommodityCodeStatus', 'ConfirmedPCMCCode', 'GeneratedCommodityCode')},
+                     'CommodityCode': cells.get('ConfirmedPCMCCode', '') if export_state != 'draft' and 'PMSCommodityCode' in cells else cells.get('CommodityCode', '')}
                     for cells in rows]
         n = _write_preview_rows_to_sheet(wb[sheet_name], rows)
         if n:

@@ -238,18 +238,21 @@ class ControlledReleaseTests(TestCase):
         self.assertTrue(any(row['cells'].get('IndustryCommodityCode') == 'CODE-001' for row in cat_rows))
         pcf_rows = [row for sheet in spec['sheets'] if sheet['name'] == 'PipingCommodityFilter' for row in sheet['rows'] if row.get('source', {}).get('component_id') == str(self.component.pk)]
         self.assertTrue(any(row['cells'].get('ConfirmedPCMCCode') == 'CODE-001' for row in pcf_rows))
-        self.assertTrue(all(row['cells']['CommodityCode'] == self.component.pms_commodity_code for row in pcf_rows))
+        self.assertTrue(all(row['cells']['PMSCommodityCode'] == self.component.pms_commodity_code for row in pcf_rows))
+        self.assertTrue(all(18 <= len(row['cells']['CommodityCode']) <= 20 and row['cells']['CommodityCode'].isalnum() for row in pcf_rows))
         for export_state in ('draft', 'frozen'):
             output = self.real_spec_exporter(self.job, preview_data=spec, export_state=export_state)
             workbook = load_workbook(output, read_only=True)
             values = list(workbook['PipingCommodityFilter'].values)
             header = next(row for row in values if 'COMMODITYCODE' in [str(value).upper() for value in row])
             column = [str(value).upper() for value in header].index('COMMODITYCODE')
+            self.assertNotIn('CONFIRMEDPCMCCODE', [str(value).upper() for value in header])
             exported = [row[column] for row in values[values.index(header) + 1:] if len(row) > column]
             if export_state == 'frozen':
                 self.assertIn('CODE-001', exported)
             else:
                 self.assertNotIn('CODE-001', exported)
+                self.assertTrue(any(row['cells']['CommodityCode'] in exported for row in pcf_rows))
         self.assertTrue(any(row.get('provenance', {}).get('IndustryCommodityCode') == 'reference' for row in cat_rows))
         output = self.real_cat_exporter(self.job, preview_data=cat)
         workbook = load_workbook(output, read_only=True)
