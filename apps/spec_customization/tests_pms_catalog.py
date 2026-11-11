@@ -5,6 +5,23 @@ from .services.pcmc_matching import match_pcmc
 
 
 class CatalogResolutionTests(unittest.TestCase):
+    def test_wrapped_header_preserves_blank_cell_without_using_reference_document(self):
+        from .services.local_tables import LocalTableParser
+        parser = LocalTableParser(r'PIPING SPEC:\s*(?P<code>\S+)', 'test')
+        parser.read_text('PIPING SPEC: 10A06.00\ncomponent|description|size|COMMODITY\n|||CODE\npipe|pipe (REF DOC:ITN14200)|1|', 779)
+        component = parser.classes['10A06.00']['components'][0]
+        self.assertEqual(component['pms_commodity_code'], '')
+        self.assertEqual(component['_source_reference']['pms_commodity_code_status'], 'blank')
+        self.assertIn('ITN14200', component['description'])
+
+    def test_commodity_without_code_header_is_not_a_code_column(self):
+        from .services.local_tables import LocalTableParser
+        parser = LocalTableParser(r'PIPING SPEC:\s*(?P<code>\S+)', 'test')
+        parser.read_text('PIPING SPEC: 10A06.00\ncomponent|description|size|Commodity\npipe|pipe|1|PART-SYMBOL', 1)
+        component = parser.classes['10A06.00']['components'][0]
+        self.assertEqual(component['pms_commodity_code'], '')
+        self.assertEqual(component['_source_reference']['pms_commodity_code_status'], 'unreadable')
+
     def source(self, **values):
         return {'description': 'pipe', 'component_type': 'pipe', 'size_from': '1', 'size_to': '1',
                 'pms_commodity_code': '', **values}

@@ -11,7 +11,7 @@ from statistics import median
 
 
 HEADER_ALIASES = {
-    'commodity code': 'pms_commodity_code', 'commoditycode': 'pms_commodity_code', 'commodity': 'pms_commodity_code',
+    'commodity code': 'pms_commodity_code', 'commoditycode': 'pms_commodity_code',
     'component': 'component_type', 'component type': 'component_type',
     'item': 'component_type', 'type': 'component_type',
     'subtype': 'sub_type', 'sub type': 'sub_type',
@@ -131,6 +131,13 @@ class LocalTableParser:
             if self._class(text, page):
                 continue
             keys = [HEADER_ALIASES.get(header_key(cell[2])) for cell in cells]
+            if index + 1 < len(rows):
+                for column, cell in enumerate(cells):
+                    if header_key(cell[2]) == 'commodity' and any(
+                        header_key(next_cell[2]) == 'code' and cell[0] - 2 <= next_cell[0] <= cell[1] + 2
+                        for next_cell in rows[index + 1]['cells']
+                    ):
+                        keys[column] = 'pms_commodity_code'
             mapped = [key for key in keys if key]
             if (len(mapped) >= 3 and len(mapped) == len(set(mapped))
                     and ('description' in mapped or 'component_type' in mapped)
@@ -153,7 +160,12 @@ class LocalTableParser:
                     continue
                 key = self.columns[max(positions)][1]
                 if key:
-                    fields[key] = clean(fields.get(key, '') + ' ' + clean(value))
+                    if key == 'pms_commodity_code':
+                        fields[key] = (fields.get(key, '') + ' ' if fields.get(key) else '') + str(value)
+                        if not fields[key].strip():
+                            fields[key] = ''
+                    else:
+                        fields[key] = clean(fields.get(key, '') + ' ' + clean(value))
             if not any(fields.values()):
                 continue
             label = fields.get('component_type') or fields.get('description', '')
