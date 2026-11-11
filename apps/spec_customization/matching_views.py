@@ -729,9 +729,6 @@ def matching_decision_review(request):
         selected = next((candidate for candidate in decision.candidates
                          if candidate.get('candidate_id') == values.get('candidate_id')), None)
         if decision.discriminators_matched.get('pcmc'):
-            from .services.pcmc_matching import pcmc_code_format_issue
-            if pcmc_code_format_issue(code or decision.matched_commodity_code):
-                return Response({'error': pcmc_code_format_issue(code or decision.matched_commodity_code)}, status=409)
             if not selected or not selected.get('confirmable') or selected['commodity_code'] != (code or decision.matched_commodity_code):
                 return Response({'error': 'Choose an eligible catalog candidate with no engineering conflict and complete range coverage.'}, status=409)
             decision.discriminators_matched['selected_candidate_id'] = selected['candidate_id']

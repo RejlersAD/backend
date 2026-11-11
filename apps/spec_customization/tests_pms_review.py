@@ -66,22 +66,3 @@ class PMSReviewTests(TestCase):
                 'review_notes': 'Review engineering conflict.',
                 'candidate_id': decision.candidates[0]['candidate_id'], 'final_commodity_code': 'GATE00000000000001'}, format='json')
             self.assertEqual(result.status_code, 409)
-
-    def test_format_is_rechecked_for_old_candidates_and_existing_confirmations(self):
-        self.assertEqual(self.run_matching().status_code, 200)
-        decision = ComponentMatchDecision.objects.get(job=self.job)
-        candidate = decision.candidates[0]
-        candidate['commodity_code'] = 'BAD CODE'
-        decision.candidates = [candidate]
-        decision.save(update_fields=['candidates'])
-        response = self.client.post('/api/v1/spec-customization/matching-decision-review/', {
-            'decision_id': str(decision.pk), 'review_decision': 'approved', 'candidate_id': candidate['candidate_id'],
-            'final_commodity_code': 'BAD CODE', 'source_reference': {'page': 1}}, format='json')
-        self.assertEqual(response.status_code, 409)
-        self.assertIn('18–20', response.data['error'])
-        decision.final_commodity_code = 'BAD CODE'
-        decision.review_decision = 'approved'
-        decision.save(update_fields=['final_commodity_code', 'review_decision'])
-        self.job.refresh_from_db()
-        from .services.release_provenance import bindings
-        self.assertFalse(bindings(self.job)[str(self.component.pk)]['approved'])

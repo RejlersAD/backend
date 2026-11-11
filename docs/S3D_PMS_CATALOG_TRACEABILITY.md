@@ -28,9 +28,8 @@ reference pinning, freeze and release authority checks remain in force. The loca
 approved workbook is verification input; it does not overwrite a frozen project
 revision or grant release authority. Industry codes are not substituted for blank
 contractor codes. Approved catalog identifiers are never padded or reformatted.
-Confirmed PCMC codes must contain 18–20 characters and no whitespace, per the
-user's subsequent format requirement. Noncompliant catalog identifiers remain
-Needs review; they are never padded, truncated or rewritten to pass the rule.
+The 18–20 character/no-whitespace rule applies to new generated project codes.
+Literal PMS and approved catalog identifiers are retained as supplied.
 Confirmed contractor codes are not copied into blank industry-code fields.
 Missing geometry/industry identifiers still block the existing CAT release gates.
 

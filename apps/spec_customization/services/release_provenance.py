@@ -28,9 +28,6 @@ def bindings(job):
                             and decision.state not in ('ineligible', 'invalid_reference'),
                 'commodity_code': decision.final_commodity_code, 'state': decision.state}
             if decision.discriminators_matched.get('pcmc'):
-                from .pcmc_matching import pcmc_code_format_issue
-                if pcmc_code_format_issue(decision.final_commodity_code):
-                    output[str(component.pk)]['approved'] = False
                 selected = next((c for c in decision.candidates if c.get('candidate_id') == decision.discriminators_matched.get('selected_candidate_id')), {})
                 output[str(component.pk)].update(pcmc=True, industry_commodity_code=selected.get('industry_commodity_code', ''))
             locator = decision.discriminators_matched.get('source_reference')

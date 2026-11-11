@@ -5,14 +5,13 @@ from .services.pcmc_matching import match_pcmc
 
 
 class CatalogResolutionTests(unittest.TestCase):
-    def test_noncompliant_catalog_identifiers_are_flagged_without_rewriting(self):
+    def test_catalog_identifiers_are_not_restricted_by_generated_code_format(self):
         for code in ('SHORT1', 'CODE0000000000000000001', 'PIPE 0000000000001', ' PIPE00000000000001'):
             with self.subTest(code=code):
                 result = match_pcmc(pd.DataFrame([self.catalog(CONTRACTORCOMMODITYCODE=code)]), self.source())
                 candidate = result['candidates'][0]
                 self.assertEqual(candidate['commodity_code'], code)
-                self.assertFalse(candidate['confirmable'])
-                self.assertIn('18–20', candidate['code_format_issue'])
+                self.assertTrue(candidate['confirmable'])
 
     def test_twenty_character_approved_code_is_not_changed(self):
         code = 'PIPE0000000000000001'
