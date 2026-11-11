@@ -105,7 +105,7 @@ def match_pcmc(cat, source, codelists=None):
         return ('literal', key(re.sub(r'(?i)\bASTM\b', '', value)) if name == 'material' else key(value))
     for record in pool:
         row, code, description, described = record['row'], record['code'], record['description'], record['described']
-        matched, unknown, differences = {}, [], []
+        matched, unknown, differences, missing_source = {}, [], [], []
         for name, names in aliases.items():
             wanted, actual = str(source.get(name) or ''), cell(row, *names) or described.get(name, '')
             if wanted and actual:
@@ -115,6 +115,8 @@ def match_pcmc(cat, source, codelists=None):
                     differences.append({'attribute': name, 'source': wanted, 'catalog': actual})
             else:
                 unknown.append(name)
+                if actual and not wanted and name in ('material', 'rating', 'end_connection', 'facing'):
+                    missing_source.append(name)
         if differences and not exact:
             # Known conflicts cannot be suggested. Avoid expensive ranking and
             # row hashing for unrelated rows in large approved catalogs.
@@ -149,7 +151,8 @@ def match_pcmc(cat, source, codelists=None):
                      'catalog_row': int(row['__source_row__']) if '__source_row__' in row else None,
                      'matched_attributes': matched, 'unknown_attributes': unknown,
                      'differences': differences, 'coverage': coverage,
-                     'confirmable': not differences and (not is_range or coverage['complete']),
+                     'missing_required_source': missing_source,
+                     'confirmable': not differences and not missing_source and (not is_range or coverage['complete']),
                      'ranking_score': SequenceMatcher(None, str(source.get('description', '')).casefold(), description.casefold()).ratio()}
         (rejected if differences else candidates).append(candidate)
     candidates.sort(key=lambda value: (-len(value['matched_attributes']), -value['ranking_score'], value['commodity_code'], value['candidate_id']))

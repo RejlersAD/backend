@@ -33,7 +33,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .access import PlanningObjectPermission, accessible_projects, can_final_approve_defaults, can_write_project
+from .access import PlanningObjectPermission, accessible_projects, can_access_enterprise_project, can_final_approve_defaults, can_write_project
 from .models import PlanningAuditEvent, PlanningFile, PlanningGeneration, PlanningJob, PlanningProject
 from .serializers import (
     PlanningAuditEventSerializer, PlanningFileListSerializer, PlanningFileSerializer,
@@ -145,6 +145,27 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         if enterprise_project_id:
             queryset = queryset.filter(enterprise_project_id=enterprise_project_id)
         return queryset.order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        # enterprise_project is one-to-one and the DB constraint also counts archived rows, so an
+        # archived workspace would block creation and be unreachable (404) for deletion. Restore it.
+        enterprise_id = request.data.get('enterprise_project')
+        if enterprise_id not in (None, '') and str(enterprise_id).isdigit():
+            from apps.core.project_models import Project
+            with transaction.atomic():
+                archived = PlanningProject.objects.select_for_update().filter(
+                    enterprise_project_id=int(enterprise_id), is_deleted=True,
+                ).first()
+                enterprise = Project.objects.filter(pk=int(enterprise_id), is_deleted=False).first() if archived else None
+                if archived and enterprise:
+                    from rest_framework.exceptions import PermissionDenied
+                    if not can_access_enterprise_project(request.user, enterprise, write=True):
+                        raise PermissionDenied('You cannot create a planning workspace for this enterprise project.')
+                    archived.restore()
+                    record_event(project=archived, actor=request.user, action='project.restored', entity=archived)
+                    restored = self.get_queryset().get(pk=archived.pk)
+                    return Response(self.get_serializer(restored).data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
 
     @transaction.atomic
     def perform_create(self, serializer):

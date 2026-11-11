@@ -30,7 +30,8 @@ class PMSReviewTests(TestCase):
         candidate = decision.candidates[0]
         result = self.client.post('/api/v1/spec-customization/matching-decision-review/', {
             'decision_id': str(decision.pk), 'review_decision': 'approved',
-            'candidate_id': candidate['candidate_id'], 'final_commodity_code': candidate['commodity_code']}, format='json')
+            'candidate_id': candidate['candidate_id'], 'final_commodity_code': candidate['commodity_code'],
+            'source_reference': {'page': 1}}, format='json')
         self.assertEqual(result.status_code, 200, result.data)
         self.assertEqual(self.run_matching().status_code, 200)
         decision.refresh_from_db()

@@ -432,14 +432,15 @@ def match_component(pdf_component_name, nominal_size, pressure_rating, material_
         if cfg['commodity_code_col'] not in cat.columns:
             return outcome('invalid_reference', 'CAT sheet lacks commodity codes.')
         viable = []
-        for _, row in cat.drop_duplicates().iterrows():
+        for row_index, row in cat.drop_duplicates().iterrows():
             details = {}
             for key, (wanted, columns, normalize) in criteria.items():
                 actual = [_clean(row.get(c, '')) for c in columns if c in cat.columns]
                 matches = None if not wanted else (re.sub(r'[^a-z0-9]', '', wanted.casefold()) in re.sub(r'[^a-z0-9]', '', rule.catalog_component_name.casefold()) if not columns else any(normalize(v) == normalize(wanted.strip()) for v in actual))
                 details[key] = {'requested': wanted, 'values': actual or ([rule.catalog_component_name] if key == 'sub_type' else []), 'matched': matches}
             score = sum(d['matched'] is True for d in details.values()) / len(criteria)
-            candidate = {'commodity_code': _clean(row.get(cfg['commodity_code_col'])),
+            candidate = {'candidate_id': f'{rule.cat_sheet_name}:{row_index}',
+                         'commodity_code': _clean(row.get(cfg['commodity_code_col'])),
                          'description': _clean(row.get(cfg['description_col'], rule.catalog_component_name)),
                          'discriminators': details, 'ranking_score': score}
             if all(d['matched'] is not False for d in details.values()):
@@ -554,7 +555,11 @@ def run_job_matching(job, workbook_set, codelist_profile=None, selection_updates
             defaults = dict(sub_type=component.sub_type, end_connection=component.end_connection,
                             state=result['state'], matched_commodity_code=result['commodity_code'],
                             matched_description=result['description'], match_score=result['match_score'],
-                            candidates=result['candidates'], discriminators_matched={**result['discriminators_matched'], 'reason': result['error']})
+                            candidates=result['candidates'], discriminators_matched={
+                                **result['discriminators_matched'], 'reason': result['error'],
+                                'source': {'spec_name': pc.class_code, 'component_id': str(component.pk),
+                                           'class_source_pages': pc.source_pages or []},
+                            })
             decision, created = ComponentMatchDecision.objects.get_or_create(**criteria, defaults=defaults)
             if not created:
                 if codelists:
@@ -569,12 +574,12 @@ def run_job_matching(job, workbook_set, codelist_profile=None, selection_updates
                         if comparable == proposed and defaults['candidates'] == decision.candidates:
                             proposed['selected_candidate_id'] = selected
                 old_evidence = decision.discriminators_matched
-                selected_id = old_evidence.get('selected_candidate_id')
-                if (selected_id and decision.candidates == defaults['candidates']
-                        and {k: v for k, v in old_evidence.items() if k not in ('selected_candidate_id', 'source_reference')} == defaults['discriminators_matched']):
-                    defaults['discriminators_matched']['selected_candidate_id'] = selected_id
-                if old_evidence.get('source_reference') and {k: v for k, v in old_evidence.items() if k != 'source_reference'} == defaults['discriminators_matched'] and decision.candidates == defaults['candidates']:
-                    defaults['discriminators_matched']['source_reference'] = old_evidence['source_reference']
+                review_keys = {'source_reference', 'selected_candidate_id', 'remapped_catalog_code'}
+                matching_evidence = {key: value for key, value in old_evidence.items() if key not in review_keys}
+                if matching_evidence == defaults['discriminators_matched'] and decision.candidates == defaults['candidates']:
+                    for key in review_keys:
+                        if key in old_evidence:
+                            defaults['discriminators_matched'][key] = old_evidence[key]
                 changed = any(getattr(decision, k) != v for k, v in defaults.items())
                 # The requested key omits subtype/end. Do not silently combine conflicting criteria.
                 if decision.sub_type != component.sub_type or decision.end_connection != component.end_connection:
