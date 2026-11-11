@@ -9,6 +9,14 @@ and read status to components. Apply migrations before running the updated web
 and extraction workers. Missing legacy source evidence is unknown; it is not
 backfilled from generated identifiers or reference documents.
 
+Local runtime reconciliation: migration `0019_legacy_source_references_default`
+preserves a legacy plural `source_references` JSONB column where it exists and
+gives omitted inserts an empty-array database default. A database can report no
+pending migrations while retaining this extra NOT NULL column from another schema
+revision. Fresh schemas without that historical column are unchanged. Existing
+values and the NOT NULL constraint are retained. A transactional PostgreSQL insert
+probe verified this failure path; its inserted row was rolled back.
+
 Native LNG grids recognize wrapped COMMODITY CODE headers. Values come only
 from that cell, retaining raw cell text and page/table/row/bounding-box evidence.
 Part symbols, ERP numbers and REF DOC identifiers remain separate source evidence.
