@@ -159,7 +159,7 @@ def build_spec_workbook(job, preview_data=None, export_state='draft') -> io.Byte
     BytesIO ready to stream as an HTTP attachment."""
     wb = load_workbook(cfg.SPEC_TEMPLATE_PATH)
     wb.properties.title = f'RADAI {export_state.upper()} SPEC workbook'
-    wb.properties.subject = 'Engineering review draft' if export_state == 'draft' else 'Frozen engineering release'
+    wb.properties.subject = 'Engineering review draft' if export_state in ('draft', 'review') else 'Frozen engineering release'
 
     # Build the preview JSON (with overrides already merged in) and write
     # it sheet-by-sheet — this guarantees the canvas and the xlsx agree.
@@ -173,7 +173,7 @@ def build_spec_workbook(job, preview_data=None, export_state='draft') -> io.Byte
         rows = [r['cells'] for r in sheet['rows']]
         if sheet_name == 'PipingCommodityFilter':
             rows = [{**{k: v for k, v in cells.items() if k not in ('PMSCommodityCode', 'CommodityCodeStatus', 'ConfirmedPCMCCode', 'GeneratedCommodityCode')},
-                     'CommodityCode': cells.get('ConfirmedPCMCCode', '') if export_state != 'draft' and 'PMSCommodityCode' in cells else cells.get('CommodityCode', '')}
+                     'CommodityCode': cells.get('ConfirmedPCMCCode', '') if export_state not in ('draft', 'review') and 'PMSCommodityCode' in cells else cells.get('CommodityCode', '')}
                     for cells in rows]
         n = _write_preview_rows_to_sheet(wb[sheet_name], rows)
         if n:

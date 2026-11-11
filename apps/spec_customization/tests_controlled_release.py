@@ -240,7 +240,7 @@ class ControlledReleaseTests(TestCase):
         self.assertTrue(any(row['cells'].get('ConfirmedPCMCCode') == 'CODE-001' for row in pcf_rows))
         self.assertTrue(all(row['cells']['PMSCommodityCode'] == self.component.pms_commodity_code for row in pcf_rows))
         self.assertTrue(all(18 <= len(row['cells']['CommodityCode']) <= 20 and row['cells']['CommodityCode'].isalnum() for row in pcf_rows))
-        for export_state in ('draft', 'frozen'):
+        for export_state in ('draft', 'review', 'frozen'):
             output = self.real_spec_exporter(self.job, preview_data=spec, export_state=export_state)
             workbook = load_workbook(output, read_only=True)
             values = list(workbook['PipingCommodityFilter'].values)
