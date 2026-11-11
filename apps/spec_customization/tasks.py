@@ -416,11 +416,15 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
                 'then upload the document again to start a new extraction. '
                 'Any detected class headers have been retained for review.'
             )
-        elif partial_review:
+        elif partial_review and total_components == 0:
             job.error_message = (stopped_reason + ' ' if stopped_reason else '') + (
                 'Class headers were detected and saved for review, but no component rows were extracted. '
                 'Validate the source table layout and available local OCR engines before retrying.'
             )
+        elif rejected_classes:
+            job.error_message = (f'Extracted {saved} classes and {total_components} components. '
+                f'{len(rejected_classes)} class headings could not be verified against the source PDF. '
+                'Review source coverage before exporting.')
         elif not failed_chunks:
             job.error_message = ''
         
