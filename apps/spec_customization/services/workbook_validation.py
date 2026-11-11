@@ -102,7 +102,7 @@ def _validate_sheet(workbook: str, sheet: dict[str, Any], issues: list[dict[str,
                 suggestion="Fill description for reliable matching and export quality.",
             )
 
-        if col_commodity and not _norm(cells.get(col_commodity)):
+        if col_commodity and not _norm(cells.get('ConfirmedPCMCCode') if sheet_name == 'PipingCommodityFilter' else cells.get(col_commodity)):
             _add_issue(
                 issues,
                 severity="high",
@@ -110,9 +110,9 @@ def _validate_sheet(workbook: str, sheet: dict[str, Any], issues: list[dict[str,
                 sheet_name=sheet_name,
                 row_key=row_key,
                 column_name=col_commodity,
-                message="Commodity code is empty.",
+                message="Catalog mapping needs review." if sheet_name == 'PipingCommodityFilter' else "Commodity code is empty.",
                 value=cells.get(col_commodity),
-                suggestion="Provide a commodity code for catalog routing.",
+                suggestion="Confirm a catalog mapping; preserve a blank PMS source cell." if sheet_name == 'PipingCommodityFilter' else "Provide a commodity code for catalog routing.",
             )
 
         if col_material:

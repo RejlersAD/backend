@@ -471,6 +471,10 @@ class PipingClassComponent(models.Model):
 
     end_connection = models.CharField(max_length=128, blank=True, default='')
 
+    pms_commodity_code = models.CharField(max_length=128, blank=True, default='')
+    source_reference = models.JSONField(blank=True, default=dict)
+    source_read_status = models.CharField(max_length=16, blank=True, default='')
+
     # Source-table "REV NO" column, captured verbatim for traceability
     # (blank when the spec sheet leaves the cell empty / merged).
     revision_number = models.CharField(max_length=32, blank=True, default='')

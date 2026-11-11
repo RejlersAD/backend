@@ -612,6 +612,8 @@ def _decision_payload(decision):
             'job_id': str(decision.job_id), 'workbook_set_id': str(decision.workbook_set_id),
             'reviewed_by': str(decision.reviewed_by_id) if decision.reviewed_by_id else None,
             'reviewed_at': decision.reviewed_at.isoformat() if decision.reviewed_at else None,
+            'catalog_revision': decision.workbook_set.version_label,
+            'catalog_sha256': decision.workbook_set.cat_file_hash,
             'score_description': 'Ranking aid only; not calibrated probability.'}
 
 
@@ -698,6 +700,15 @@ def matching_decision_review(request):
         return Response({'error': 'Decision does not belong to the pinned reference.'}, status=409)
     action = values['review_decision']
     code = values.get('final_commodity_code', '')
+    if action in ('approved', 'remapped'):
+        selected = next((candidate for candidate in decision.candidates
+                         if candidate.get('candidate_id') == values.get('candidate_id')), None)
+        if decision.discriminators_matched.get('pcmc'):
+            if not selected or not selected.get('confirmable') or selected['commodity_code'] != (code or decision.matched_commodity_code):
+                return Response({'error': 'Choose an eligible catalog candidate with no engineering conflict and complete range coverage.'}, status=409)
+            decision.discriminators_matched['selected_candidate_id'] = selected['candidate_id']
+        elif code and code not in {candidate.get('commodity_code') for candidate in decision.candidates}:
+            return Response({'error': 'The code does not satisfy the source engineering attributes.'}, status=400)
     evidence = decision.discriminators_matched.get('codelists', {})
     if 'source_reference' in values:
         if action != 'approved':

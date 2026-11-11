@@ -50,7 +50,10 @@ def read_reference_sheet(source, sheet_name):
         data = data[~data['Head'].str.strip().str.lower().isin(['start', 'end'])]
         data = data.drop(columns=['Head'])
     data = data.loc[:, data.columns != '']
-    return data.loc[(data != '').any(axis=1)].reset_index(drop=True)
+    data = data.loc[(data != '').any(axis=1)]
+    result = data.reset_index(drop=True)
+    result['__source_row__'] = [int(i) + 1 for i in data.index]
+    return result
 
 
 def validate_reference_files(match, spec, cat):
@@ -58,6 +61,14 @@ def validate_reference_files(match, spec, cat):
     from .component_matcher import COMPONENT_MATCHING_CONFIG, normalize_catalog_name_to_sheet
     errors = []
     try:
+        try:
+            pcmc = read_reference_sheet(cat, 'PipingCommodityMatlControlData')
+            columns = {str(c).upper(): c for c in pcmc.columns}
+            pcmc_valid = (not pcmc.empty and 'CONTRACTORCOMMODITYCODE' in columns
+                and pcmc[columns['CONTRACTORCOMMODITYCODE']].str.strip().any()
+                and 'SHORTMATERIALDESCRIPTION' in columns)
+        except Exception:
+            pcmc_valid = False
         mappings = read_reference_sheet(match, 0)
         if mappings.shape[1] < 4:
             errors.append('Match: expected component name in column A and catalog name in column D.')
@@ -69,6 +80,8 @@ def validate_reference_files(match, spec, cat):
                 errors.append('Match: duplicate component names are ambiguous mappings.')
             cfg = COMPONENT_MATCHING_CONFIG['cat_xlsx']
             for sheet in {normalize_catalog_name_to_sheet(v) for v in usable.iloc[:, 3]}:
+                if pcmc_valid:
+                    continue
                 try:
                     rows = read_reference_sheet(cat, sheet)
                     required = [cfg['commodity_code_col'], cfg['material_grade_col']]

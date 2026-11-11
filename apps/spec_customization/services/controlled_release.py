@@ -131,10 +131,20 @@ def validate_release(job, author):
     state = snapshot(job)
     result = validate_extracted_workbook(job=job, workbook_scope='both', previews=state[1])
     cat_codes = {row['cells'].get('IndustryCommodityCode') for sheet in state[1]['cat']['sheets'] for row in sheet['rows'] if row.get('source', {}).get('component_id')}
+    cat_codes.update(row['match_decision']['commodity_code'] for sheet in state[1]['cat']['sheets'] for row in sheet['rows']
+                     if row.get('match_decision', {}).get('approved') and row['cells'].get('IndustryCommodityCode'))
     missing = []
+    from .release_provenance import bindings
+    confirmed = bindings(job)
+    for component in PipingClassComponent.objects.filter(piping_class__job=job):
+        if not confirmed.get(str(component.pk), {}).get('approved'):
+            missing.append({'severity': 'high', 'workbook': 'spec', 'sheet_name': 'PipingCommodityFilter',
+                'row_key': f'component:{component.pk}', 'column_name': 'ConfirmedPCMCCode',
+                'message': 'Catalog mapping needs review.', 'value': component.pms_commodity_code,
+                'suggestion': 'Confirm an eligible project catalog record; retain the raw PMS code.'})
     for sheet in state[1]['spec']['sheets']:
         for row in sheet['rows']:
-            code = row['cells'].get('CommodityCode') or row['cells'].get('IndustryCommodityCode')
+            code = row['cells'].get('ConfirmedPCMCCode') if sheet['name'] == 'PipingCommodityFilter' else row['cells'].get('CommodityCode') or row['cells'].get('IndustryCommodityCode')
             if row.get('source', {}).get('class_id') and code and code not in cat_codes:
                 missing.append({'severity': 'high', 'workbook': 'spec', 'sheet_name': sheet['name'], 'row_key': row['row_key'], 'column_name': 'CommodityCode', 'message': 'SPEC commodity is absent from generated CAT.', 'value': code, 'suggestion': 'Resolve the reviewed SPEC/CAT commodity relationship.'})
     from collections import Counter
@@ -175,7 +185,10 @@ def readiness(job, manifest, previews, errors, author=None):
     if not components:
         blockers.append('No extracted components are available for release.')
     cat_rows = [row for sheet in previews['cat']['sheets'] for row in sheet['rows'] if row.get('source', {}).get('component_id')]
-    covered = {row['source']['component_id'] for row in cat_rows if row.get('match_decision', {}).get('approved') and (row['cells'].get('IndustryCommodityCode') or row['cells'].get('CommodityCode')) == row['match_decision'].get('commodity_code')}
+    covered = {row['source']['component_id'] for row in cat_rows if row.get('match_decision', {}).get('approved')
+               and (row['cells'].get('IndustryCommodityCode') or row['cells'].get('CommodityCode'))
+               and (row['cells'].get('IndustryCommodityCode') or row['cells'].get('CommodityCode')) ==
+               (row['match_decision'].get('industry_commodity_code') if row['match_decision'].get('pcmc') else row['match_decision'].get('commodity_code'))}
     if any(str(component.pk) not in covered for component in components):
         blockers.append('Every extracted component must have an approved pinned match consumed by generated CAT rows.')
     if previews['cat'].get('unrouted_components'):

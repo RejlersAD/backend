@@ -11,6 +11,7 @@ from statistics import median
 
 
 HEADER_ALIASES = {
+    'commodity code': 'pms_commodity_code', 'commoditycode': 'pms_commodity_code', 'commodity': 'pms_commodity_code',
     'component': 'component_type', 'component type': 'component_type',
     'item': 'component_type', 'type': 'component_type',
     'subtype': 'sub_type', 'sub type': 'sub_type',
@@ -168,7 +169,7 @@ class LocalTableParser:
             if self.size_unit:
                 sizes = tuple(value if re.match(r'^(?:DN|NPS)\b', value, re.I) else f'{self.size_unit} {value}' for value in sizes)
             component = {key: fields.get(key, '') for key in (
-                'sub_type', 'description', 'material_standard', 'schedule_or_rating',
+                'sub_type', 'description', 'pms_commodity_code', 'material_standard', 'schedule_or_rating',
                 'end_connection', 'notes', 'revision_number')}
             component.update(component_type=component_type, size_from=sizes[0], size_to=sizes[1])
             if any(len(component.get(key, '')) > limit for key, limit in FIELD_LIMITS.items()):
@@ -177,6 +178,7 @@ class LocalTableParser:
             locator = f'Source page {page}, row {index + 1}; local table extraction; engineering review required.'
             component['notes'] = clean(component['notes'] + ' ' + locator)
             component['_source_reference'] = {'page': page, 'row': index + 1}
+            component['_source_reference']['pms_commodity_code_status'] = ('read' if component['pms_commodity_code'] else 'blank') if 'pms_commodity_code' in self.header_fields else 'unreadable'
             self.current['components'].append(component)
             self.current['_source_pages'][1] = page
             self.component_count += 1

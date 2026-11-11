@@ -577,7 +577,26 @@ def _build_preview(job, workbook: str) -> dict:
                 'rows':      ur_rows,
             })
     from ..release_provenance import apply_reference_bindings
-    return apply_reference_bindings(job, result)
+    result = apply_reference_bindings(job, result)
+    for sheet in result['sheets']:
+        for row in sheet['rows']:
+            cells = row['cells']
+            if sheet['name'] == 'PipingCommodityFilter':
+                for field in ('Comments', 'MaximumTemperature', 'MinimumTemperature', 'EngineeringTag',
+                              'ReportableCommodityCode', 'AssociatedCommodityCode', 'AltReportableCommodityCode',
+                              'FirstSizeUOMBasisInCatalog', 'SecondSizeUOMBasisInCatalog', 'PreferredPipeLength',
+                              'PipingNote1', 'PressureRating', 'Rating1'):
+                    if field in cells:
+                        cells[field] = ''
+                if 'FluidCode' in cells:
+                    cells['FluidCode'] = '1'
+            elif sheet['name'] == 'PipeBranch':
+                for field, value in {'AngleLow': '90.5deg', 'AngleHigh': '90.5deg', 'SecondaryShortCode': '', 'TertiaryShortCode': ''}.items():
+                    if field in cells:
+                        cells[field] = value
+            elif sheet['name'] == 'PermissibleTaps' and 'PermissibleTapNumber' in cells:
+                cells['PermissibleTapNumber'] = 'Tap-001'
+    return result
 
 
 def apply_overrides_to_row(

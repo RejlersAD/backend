@@ -2223,7 +2223,7 @@ def _rows_piping_commodity_matl_control_data(cls):
         if not npds:
             continue
         for npd in npds:
-            icc = f'{prefix}_{cls_token}_{_npd_token(npd)}'
+            icc = ''  # Requires a confirmed project catalog identifier.
             first_size = _normalize_npd(npd)
             rows.append({
                 # ── Identification ───────────────────────────────────────────────────
@@ -3325,16 +3325,16 @@ def _rows_piping_commodity_filter(cls):
         # Optional commodity_code attribute (set at runtime by extractor on some
         # components) — fall back to the deterministic ICC so the column is
         # never blank and the SPEC↔CAT cross-link stays intact.
-        commodity_code_override = (getattr(c, 'commodity_code', '') or '').strip()
+        commodity_code_override = c.pms_commodity_code
 
         for npd in npds:
-            icc = f'{prefix}_{cls_token}_{_npd_token(npd)}'
+            icc = ''  # Requires a confirmed project catalog identifier.
             first_size = _normalize_npd(npd)
             base_row = {
                 # ── Identification (canonical SPEC↔CAT join key) ──────────
                 '_source_component_id': str(c.id),
                 'SpecName':            spec_name,
-                'CommodityCode':       commodity_code_override or icc,
+                'CommodityCode':       commodity_code_override,
                 'ShortCode':           short_code,
                 # ── First-size range (always same value for fixed-size parts;
                 # size-reducing components are flagged by autofill via
@@ -3364,11 +3364,6 @@ def _rows_piping_commodity_filter(cls):
             
             # ── Generate custom size range entries (user-defined bins) ────
             # Only generate once per class (when trigger_size is first encountered)
-            if not custom_ranges_generated:
-                custom_rows = _generate_custom_size_range_rows(base_row, cls_token, prefix)
-                if custom_rows:
-                    rows.extend(custom_rows)
-                    custom_ranges_generated = True
     
     return rows
 
@@ -3597,7 +3592,7 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
     d = CAT_SHEET_DEFAULTS.get(sheet_name, {}) or {}
     cls_token = _safe_class_token(cls)
     suffix_parts = [_npd_token(n) for n in (npd1, npd2, npd3) if n is not None]
-    icc = f'{d.get("icc_prefix", "RAD_CMP")}_{cls_token}_{"_".join(suffix_parts)}'
+    icc = ''  # Requires a confirmed project catalog identifier.
     end_prep = _normalize_end_prep(comp.end_connection) or S3D_DEFAULTS['EndPrep_BW']
     sched = _normalize_schedule(comp.schedule_or_rating) or 'STD'
     pressure = _normalize_pressure_class(cls.pressure_rating)
@@ -3717,7 +3712,7 @@ def _build_gasket_part_rows(cls, comp) -> list[dict]:
     rows = []
     sheet_constants = cat_sheet_constants('GasketPartData', cls, comp)
     for npd in npds:
-        icc = f'{d["icc_prefix"]}_{cls_token}_{_npd_token(npd)}'
+        icc = ''  # Requires a confirmed project catalog identifier.
         row = {
             'IndustryCommodityCode':  icc,
             'NominalDiameterFrom':    _normalize_npd(npd),
@@ -3746,7 +3741,7 @@ def _build_bolt_part_rows(cls, comp) -> list[dict]:
     rows = []
     sheet_constants = cat_sheet_constants('BoltPartData', cls, comp)
     for npd in npds:
-        icc = f'{d["icc_prefix"]}_{cls_token}_{_npd_token(npd)}'
+        icc = ''  # Requires a confirmed project catalog identifier.
         row = {
             'IndustryCommodityCode':     icc,
             'BoltType':                  comp.sub_type or 'Stud',

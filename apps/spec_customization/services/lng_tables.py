@@ -203,6 +203,8 @@ class LNGTableReader:
                     kind = 'other'
                     self.parser.issues.append({'page': page, 'row': row + 1, 'reason': 'lng_component_classification_requires_review'})
                 component = {field: values.get(field, '') for field in ('description', 'schedule_or_rating', 'revision_number')}
+                code_cell = fields.get('commodity_code')
+                component['pms_commodity_code'] = (grid.values[code_cell[1]][columns['commodity_code']] or '') if code_cell and code_cell[1] is not None else ''
                 component.update(component_type=kind, sub_type=values['part_name'],
                                  size_from=bounds[0], size_to=bounds[1], material_standard='', end_connection='')
                 if any(len(component.get(field, '')) > limit for field, limit in FIELD_LIMITS.items()):
@@ -225,6 +227,18 @@ class LNGTableReader:
                 if re.search(r'\bAS\s+(?:ABOVE|BELOW)|\bREFER\b|\bSEE\s+NOTE', values['description'], re.I):
                     self.parser.issues.append({'page': page, 'row': row + 1, 'reason': 'lng_description_reference_requires_review'})
                 component['_source_reference'] = source
+                source['pms_commodity_code_status'] = ('read' if component['pms_commodity_code'] else 'blank') if 'commodity_code' in columns else 'unreadable'
+                if '\ufffd' in component['pms_commodity_code']:
+                    source['pms_commodity_code_status'] = 'unreadable'
+                if not code_cell or code_cell[1] is None:
+                    source['pms_commodity_code_status'] = 'unreadable'
+                elif code_cell[2]:
+                    source['bbox'] = list(code_cell[2])
+                    source['coordinate_space'] = 'pdf_points'
+                    source['table_id'] = f'lng-{table_index + 1}-row-{row + 1}'
+                source['reference_documents'] = re.findall(r'REF\s+DOC\s*:\s*([A-Z0-9-]+)', values['description'], re.I)
+                source['part_symbol'] = values.get('part_symbol', '')
+                source['erp_number'] = values.get('me_number', '')
                 cls['components'].append(component)
                 self.parser.component_count += 1
         if not matched:

@@ -59,6 +59,7 @@ class PipingClassComponentSerializer(serializers.ModelSerializer):
             'id', 'component_type', 'sub_type', 'size_from', 'size_to',
             'description', 'schedule_or_rating', 'material_standard',
             'end_connection', 'revision_number', 'notes', 'display_order',
+            'pms_commodity_code', 'source_reference', 'source_read_status',
         ]
 
 
