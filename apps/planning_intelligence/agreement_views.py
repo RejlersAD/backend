@@ -216,6 +216,11 @@ class AgreementWorkspaceView(APIView):
                     enterprise = self.enterprise(request, project_id, write=True, lock=True)
                 project = PlanningProject.objects.filter(enterprise_project=enterprise, is_deleted=False).first()
                 if not project:
+                    archived = PlanningProject.objects.select_for_update().filter(enterprise_project=enterprise, is_deleted=True).first()
+                    if archived:
+                        archived.restore()
+                        project = archived
+                if not project:
                     if not module_action_allowed(request.user, 'planning_package', 'create'):
                         raise PermissionDenied('Planning workspace creation access is required.')
                     project = PlanningProject.objects.create(enterprise_project=enterprise, name=enterprise.name,

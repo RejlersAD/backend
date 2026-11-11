@@ -337,11 +337,13 @@ class ComponentMatchDecision(models.Model):
     REVIEW_APPROVED = 'approved'
     REVIEW_REJECTED = 'rejected'
     REVIEW_REMAPPED = 'remapped'
+    REVIEW_CLARIFICATION = 'clarification'
 
     REVIEW_DECISION_CHOICES = [
         (REVIEW_APPROVED, 'Approved'),
         (REVIEW_REJECTED, 'Rejected'),
         (REVIEW_REMAPPED, 'Remapped'),
+        (REVIEW_CLARIFICATION, 'Clarification requested'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

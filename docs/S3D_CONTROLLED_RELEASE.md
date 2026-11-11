@@ -102,6 +102,7 @@ used throughout. Evidence bodies omit workbook/report binary data.
 | `GET import-attempts/` | Latest 100 evidence records and the accuracy-publication boundary. |
 | `POST import-attempts/` | Append planned/import/reconciliation evidence for a current frozen release and configured disposable target. |
 | `GET import-attempts/{attempt_id}/report/` | Authorized report download with SHA-256 integrity verification; records an audit event. Historical reports remain readable. |
+| `POST releases/{frozen_release_id}/approve/` | Authorized approval of an unchanged frozen package and a successful, zero-rejection pilot with load, component-selection and boundary-size checks. Requires an intact target report. Appends a `release_approved` audit event containing package and report hashes; repeat requests return the existing approval. |
 
 Released exports add `X-Spec-Export-State`, `X-Spec-Release-ID` and
 `X-Content-SHA256`, alongside pinned-reference headers. Drafts add

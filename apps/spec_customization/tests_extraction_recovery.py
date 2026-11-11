@@ -51,6 +51,13 @@ class ClaudeRequestCompatibilityTests(SimpleTestCase):
 class ExtractionOutcomeTests(TestCase):
     def setUp(self):
         cache.clear()
+        import pymupdf
+        source_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        source = source_dir / 'synthetic.pdf'
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.insert_text((36, 40), 'PIPING SPEC: SYN150')
+            document.save(source)
         self.document = PaperSpecDocument.objects.create(original_filename='synthetic.pdf', sha256_hash='f' * 64)
         self.job = PaperSpecExtractionJob.objects.create(document=self.document,
             user_openai_api_key='synthetic-key', user_claude_api_key='synthetic-key')
@@ -63,13 +70,15 @@ class ExtractionOutcomeTests(TestCase):
             'gemini_prompt_tokens': 0, 'gemini_completion_tokens': 0,
             'openai_prompt_tokens': 100, 'openai_completion_tokens': 25, 'cost_usd': Decimal('0.001'),
         }
-        self.enterContext(patch('apps.spec_customization.tasks._get_local_path', return_value=('synthetic.pdf', False)))
+        self.enterContext(patch('apps.spec_customization.tasks._get_local_path', return_value=(str(source), False)))
         self.progress = self.enterContext(patch('apps.spec_customization.tasks._write_progress'))
         self.enterContext(patch('apps.spec_customization.tasks.validate_extracted_classes', return_value={
             'overall_status': 'needs_retry', 'classes_validated': 0, 'warnings_total': 0,
         }))
 
     def run_with_classes(self, classes):
+        for piping_class in classes:
+            piping_class.setdefault('_source_pages', [1, 1])
         self.service.merge_classes.return_value = classes
         with patch('apps.spec_customization.tasks.process_extracted_classes', return_value=(classes, {'duplicates_removed': 0})):
             result = extract_paper_spec.run(str(self.job.pk))

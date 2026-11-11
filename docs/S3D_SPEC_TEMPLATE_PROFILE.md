@@ -29,6 +29,11 @@ guards remain; template selection does not authorize export of partial work as
 an approved/released SPEC. Template changes invalidate existing input fingerprints
 under the established release rules; no historical data or approvals are rewritten.
 
+The SPEC fluid-code builders do not derive a code from a specification name or
+copy the LS1E sample's numeric value. AllowablePipingMaterialsClass uses only
+explicit extracted service entries; gasket selection and inside surface
+treatment leave unsupported FluidCode cells blank for engineering resolution.
+
 Validation: all 199 isolated S3D regressions completed successfully (six existing
 skips), including blank-template preparation, input preservation, case-insensitive
 writing, canonical preview/override keys, exact 50-sheet output and release guards.

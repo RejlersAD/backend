@@ -55,6 +55,7 @@ urlpatterns = [
     path('paper-spec/jobs/<uuid:job_id>/releases/', release_views.releases, name='release-list'),
     path('paper-spec/jobs/<uuid:job_id>/releases/validate/', release_views.validate, name='release-validate'),
     path('paper-spec/jobs/<uuid:job_id>/releases/<uuid:release_id>/freeze/', release_views.freeze, name='release-freeze'),
+    path('paper-spec/jobs/<uuid:job_id>/releases/<uuid:release_id>/approve/', release_views.approve_release, name='release-approve'),
     path('paper-spec/jobs/<uuid:job_id>/release-history/', release_views.history, name='release-history'),
     path('paper-spec/jobs/<uuid:job_id>/import-attempts/', release_views.import_attempts, name='import-attempts'),
 

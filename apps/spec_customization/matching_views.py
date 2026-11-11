@@ -612,7 +612,26 @@ def _decision_payload(decision):
             'job_id': str(decision.job_id), 'workbook_set_id': str(decision.workbook_set_id),
             'reviewed_by': str(decision.reviewed_by_id) if decision.reviewed_by_id else None,
             'reviewed_at': decision.reviewed_at.isoformat() if decision.reviewed_at else None,
+            'candidate_blockers': {str(candidate.get('candidate_id') or candidate.get('commodity_code')): _candidate_blockers(decision, candidate)
+                                   for candidate in decision.candidates},
             'score_description': 'Ranking aid only; not calibrated probability.'}
+
+
+def _candidate_blockers(decision, candidate):
+    """A same-size candidate is insufficient when applicable fields lack source evidence."""
+    missing = []
+    if not decision.nominal_size or '..' in decision.nominal_size:
+        missing.append('Size requires a verified nominal value.')
+    attributes = decision.discriminators_matched.get('codelists', {}).get('attributes', {})
+    if attributes:
+        for name, detail in (candidate.get('codelists') or {}).items():
+            if name in {'PressureRating', 'EndPreparation', 'MaterialsGrade', 'FlangeFacing', 'BoltType'} and detail.get('values') and attributes.get(name, {}).get('status') != 'RESOLVED':
+                missing.append(f'{name} requires verified source and codelist values.')
+    else:
+        for name, detail in (candidate.get('discriminators') or {}).items():
+            if name in {'size', 'pressure', 'material', 'end_connection'} and detail.get('values') and detail.get('matched') is not True:
+                missing.append(f'{name.replace("_", " ")} requires verified source and catalog values.')
+    return missing
 
 
 class DecisionFilters(serializers.Serializer):
@@ -668,12 +687,17 @@ class SourceReferenceSerializer(serializers.Serializer):
 
 class DecisionReviewSerializer(serializers.Serializer):
     decision_id = serializers.UUIDField()
-    review_decision = serializers.ChoiceField(choices=['approved', 'rejected', 'remapped', 'normalized'])
+    review_decision = serializers.ChoiceField(choices=['approved', 'rejected', 'remapped', 'normalized', 'clarification'])
     codelist_selections = serializers.DictField(required=False)
     candidate_id = serializers.CharField(max_length=64, required=False)
     final_commodity_code = serializers.CharField(max_length=128, required=False, allow_blank=True)
     review_notes = serializers.CharField(required=False, allow_blank=True)
     source_reference = SourceReferenceSerializer(required=False)
+
+    def validate(self, values):
+        if values['review_decision'] in ('clarification', 'rejected', 'remapped') and not values.get('review_notes', '').strip():
+            raise serializers.ValidationError('This exception or clarification requires a review note.')
+        return values
 
 
 @api_view(['POST'])
@@ -721,18 +745,37 @@ def matching_decision_review(request):
         problems = blockers(evidence)
         if problems:
             return Response({'error': 'Resolve codelist selections first.', 'blockers': problems}, status=409)
-        selected = next((candidate for candidate in decision.candidates
-                         if candidate.get('candidate_id') == values.get('candidate_id')), None)
-        if not selected or selected['commodity_code'] != (code or decision.matched_commodity_code):
-            return Response({'error': 'Select an eligible catalog row explicitly.'}, status=400)
-        evidence['selected_candidate_id'] = selected['candidate_id']
+        if action == 'approved':
+            selected = next((candidate for candidate in decision.candidates
+                             if candidate.get('candidate_id') == values.get('candidate_id')), None)
+            if not selected or selected['commodity_code'] != (code or decision.matched_commodity_code):
+                return Response({'error': 'Select an eligible catalog row explicitly.'}, status=400)
+            evidence['selected_candidate_id'] = selected['candidate_id']
     if action == 'approved':
         if decision.state not in ('unique_match', 'ambiguous'):
             return Response({'error': 'This state requires rejection or explicit remapping.'}, status=409)
         code = code or decision.matched_commodity_code
         if not code or code not in {c['commodity_code'] for c in decision.candidates}:
             return Response({'error': 'Select a candidate commodity code explicitly.'}, status=400)
+        selected_for_check = next((candidate for candidate in decision.candidates
+                                   if (candidate.get('candidate_id') or candidate.get('commodity_code')) == values.get('candidate_id')), None)
+        if not selected_for_check and decision.state == 'unique_match':
+            selected_for_check = next((candidate for candidate in decision.candidates if candidate.get('commodity_code') == code), None)
+        if selected_for_check:
+            missing_fields = _candidate_blockers(decision, selected_for_check)
+            if missing_fields:
+                return Response({'error': 'Required match fields are unverified.', 'blockers': missing_fields}, status=409)
+        if decision.state == 'ambiguous':
+            selected = next((candidate for candidate in decision.candidates
+                             if (candidate.get('candidate_id') or candidate.get('commodity_code')) == values.get('candidate_id')), None)
+            if not selected or selected['commodity_code'] != code:
+                return Response({'error': 'Select the exact candidate before approving an ambiguous match.'}, status=400)
+            decision.discriminators_matched['selected_candidate_id'] = values['candidate_id']
+        if not values.get('source_reference') and not decision.discriminators_matched.get('source_reference'):
+            return Response({'error': 'A source PDF page reference is required before approving a catalog link.'}, status=409)
     elif action == 'remapped':
+        if decision.state in ('ineligible', 'invalid_reference'):
+            return Response({'error': 'Correct the source or reference before remapping this decision.'}, status=409)
         if not code:
             return Response({'error': 'Remap requires final_commodity_code.'}, status=400)
         # A remap must still identify an actual code in the pinned catalog.
@@ -749,6 +792,7 @@ def matching_decision_review(request):
                 break
         if not found:
             return Response({'error': 'Commodity code is absent from the pinned catalog.'}, status=400)
+        decision.discriminators_matched['remapped_catalog_code'] = code
     else:
         code = ''
     decision.review_decision = action
