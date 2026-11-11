@@ -2290,7 +2290,7 @@ SPEC_DEFAULTS = {
     # → Sockolet (small branches on large headers, socket-weld systems).
     'pipe_branch_secondary_short_code':'Weldolet',
     'pipe_branch_tertiary_short_code': 'Sockolet',
-    'permissible_tap_number':          '1',
+    'permissible_tap_number':          'Tap-001',
     'permissible_tap_is_preferred':    '1',
     'commodity_option_main':           '1',           # main-line commodity option
     'joint_quality_factor':            '1.0',
@@ -2562,13 +2562,20 @@ def _rows_materials_data(cls):
 
 
 def _rows_pipe_branch(cls):
-    """Hold branch rules until a class-specific approved matrix is available."""
-    return []
+    """Restore the user-approved template matrix for the current specification."""
+    path = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'approved_pipe_branch.json')
+    with open(path, encoding='utf-8') as stream:
+        matrix = json.load(stream)['rows']
+    return [{**row, 'SpecName': _spec_name(cls),
+             'AngleLow': '90.5deg', 'AngleHigh': '90.5deg',
+             'SecondaryShortCode': '', 'TertiaryShortCode': ''} for row in matrix]
 
 
 def _rows_permissible_taps(cls):
-    """Hold tap rules until class-specific engineering approval is available."""
-    return []
+    """Restore the requested single tap row per extracted specification."""
+    return [{'SpecName': _spec_name(cls),
+             'PermissibleTapNumber': SPEC_DEFAULTS['permissible_tap_number'],
+             'IsPreferredTap': SPEC_DEFAULTS['permissible_tap_is_preferred']}]
 
 
 def _rows_joint_quality_factor(cls):

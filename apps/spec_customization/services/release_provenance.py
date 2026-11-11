@@ -55,6 +55,9 @@ def apply_reference_bindings(job, preview):
             origins = row.setdefault('provenance', {key: 'reference' if row['row_key'].startswith('tpl:') else 'inferred' for key in row['cells']})
             pc = classes.get(source.get('class_id'))
             component = components.get(source.get('component_id'))
+            if sheet['name'] == 'PipeBranch':
+                for field in ('HeaderSize', 'BranchSize', 'HdrSizeNPDUnitType', 'BrSizeNPDUnitType', 'ShortCode'):
+                    origins[field] = 'reference'
             if component and sheet['name'] == 'PipingCommodityFilter':
                 row['cells']['CommodityCode'] = component.pms_commodity_code or row['cells'].get('GeneratedCommodityCode') or row['cells'].get('CommodityCode', '')
                 row['cells']['PMSCommodityCode'] = component.pms_commodity_code

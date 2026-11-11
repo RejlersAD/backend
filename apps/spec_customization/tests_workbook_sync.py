@@ -61,13 +61,14 @@ class ExtractionToExportRoundtripTests(TestCase):
         self.assertIsNotNone(branch)
         self.assertTrue(branch['rows'])
 
-    def test_straight_run_class_emits_no_branch_rows(self):
+    def test_straight_run_class_keeps_approved_branch_template(self):
         self.cls.components.filter(component_type='fitting').delete()
         preview = build_preview(self.job, WORKBOOK_SPEC)
         branch = next((s for s in preview['sheets'] if s['name'] == 'PipeBranch'), None)
         self.assertIsNotNone(branch)
-        # Template Start/End marker rows remain even when no branch data exists.
-        self.assertFalse(any(row['source'].get('class_id') for row in branch['rows']))
+        # Approved template rules are review reference data, not extracted fittings.
+        self.assertEqual(len(branch['rows']), 148)
+        self.assertTrue(all(row['provenance']['ShortCode'] == 'reference' for row in branch['rows']))
 
     def test_preview_and_xlsx_agree_on_valve_trim(self):
         from openpyxl import load_workbook as _load

@@ -62,6 +62,19 @@ checked by the existing validation/freeze gates. Pilot and release approval rema
 required. Previously requested PCF blank fields, FluidCode=1, PipeBranch angle/code
 fields and Tap-001 formatting are applied in the shared preview/export path.
 
+PipeBranch restoration uses the 148 explicit size-pair/primary-ShortCode records
+from the user-approved Sample-Template PCF File-1AA1B.xlsx. The bundled JSON records
+the source filename and SHA-256; no Windows-local path is required at runtime.
+Each extracted specification receives that matrix with its own SpecName. Header
+and branch sizes, units, and primary codes remain the approved matrix values.
+Per the user's explicit override, both AngleLow and AngleHigh are 90.5deg (the
+source AngleLow was 89.5deg), and SecondaryShortCode/TertiaryShortCode remain blank.
+These rows are template reference data, not extracted PMS branch instructions or
+new class-specific engineering approvals; existing release/pilot gates remain.
+PermissibleTaps restores one row per specification with Tap-001, retaining the
+existing IsPreferredTap=1 setting shown in the user's screenshot. This request
+does not expand the sheet to the template's additional Tap-002 through Tap-037.
+
 Verification on physical page 779 of PMS_FI4VsV1.pdf, spec 10A06.00, extracted 14
 source rows with blank commodity cells. ITN14200 and ITN82034 remained REF DOC
 values. The approved Sample Template -2-CatalogDataExtractor_PCMCD.xlsx contains
