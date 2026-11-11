@@ -222,6 +222,7 @@ class ExportReadinessTests(TestCase):
         self.assertEqual(self.client.get(f'/api/v1/spec-customization/paper-spec/jobs/{self.job.id}/export-spec/').status_code, 409)
 
     def test_worker_persists_appendix_code_when_chunk_returns_no_classes(self):
+        self.enterContext(patch('apps.spec_customization.tasks.verified_pms_classes', side_effect=lambda path, classes: ([dict(cls, _verified_heading_page=cls['_source_pages'][0]) for cls in classes], [])))
         from .tasks import extract_paper_spec
         from .services.extraction_service import PaperSpecExtractionService
         service = self.enterContext(patch('apps.spec_customization.tasks.PaperSpecExtractionService')).return_value

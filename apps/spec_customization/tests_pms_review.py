@@ -63,5 +63,6 @@ class PMSReviewTests(TestCase):
         for action in ('approved', 'remapped'):
             result = self.client.post('/api/v1/spec-customization/matching-decision-review/', {
                 'decision_id': str(decision.pk), 'review_decision': action,
+                'review_notes': 'Review engineering conflict.',
                 'candidate_id': decision.candidates[0]['candidate_id'], 'final_commodity_code': 'GATE001'}, format='json')
             self.assertEqual(result.status_code, 409)

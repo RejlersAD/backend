@@ -17,6 +17,8 @@ def verified_pms_classes(pdf_path, classes):
     """
     import pymupdf
 
+    if not classes:
+        return [], []
     verified, rejected, page_codes = [], [], {}
     with pymupdf.open(pdf_path) as document:
         for cls in classes:

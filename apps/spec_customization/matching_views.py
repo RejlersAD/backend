@@ -733,7 +733,15 @@ def matching_decision_review(request):
                 return Response({'error': 'Choose an eligible catalog candidate with no engineering conflict and complete range coverage.'}, status=409)
             decision.discriminators_matched['selected_candidate_id'] = selected['candidate_id']
         elif code and code not in {candidate.get('commodity_code') for candidate in decision.candidates}:
-            return Response({'error': 'The code does not satisfy the source engineering attributes.'}, status=400)
+            eligible_codes = set()
+            if action == 'remapped':
+                from .services.component_matcher import match_component
+                checked = match_component(decision.pdf_component_name, decision.nominal_size,
+                    decision.pressure_rating, decision.material_grade, ws, decision.sub_type,
+                    decision.end_connection, codelists=decision.discriminators_matched.get('codelists') or None)
+                eligible_codes = {candidate.get('commodity_code') for candidate in checked.get('candidates', [])}
+            if code not in eligible_codes:
+                return Response({'error': 'The code does not satisfy the source engineering attributes.'}, status=400)
     evidence = decision.discriminators_matched.get('codelists', {})
     if 'source_reference' in values:
         if action != 'approved':
