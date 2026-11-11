@@ -55,13 +55,16 @@ def apply_reference_bindings(job, preview):
             origins = row.setdefault('provenance', {key: 'reference' if row['row_key'].startswith('tpl:') else 'inferred' for key in row['cells']})
             pc = classes.get(source.get('class_id'))
             component = components.get(source.get('component_id'))
+            if sheet['name'] == 'PipeBranch':
+                for field in ('HeaderSize', 'BranchSize', 'HdrSizeNPDUnitType', 'BrSizeNPDUnitType', 'ShortCode'):
+                    origins[field] = 'reference'
             if component and sheet['name'] == 'PipingCommodityFilter':
-                row['cells']['CommodityCode'] = component.pms_commodity_code
+                row['cells']['CommodityCode'] = component.pms_commodity_code or row['cells'].get('GeneratedCommodityCode') or row['cells'].get('CommodityCode', '')
                 row['cells']['PMSCommodityCode'] = component.pms_commodity_code
                 row['cells']['CommodityCodeStatus'] = ('Unreadable' if component.source_read_status not in ('blank', 'read')
                     else 'Read from PMS' if component.pms_commodity_code.strip() else 'Blank in PMS')
                 row['cells']['ConfirmedPCMCCode'] = ''
-                origins.update({'CommodityCode': 'extracted', 'PMSCommodityCode': 'extracted',
+                origins.update({'CommodityCode': 'generated' if row['cells'].get('GeneratedCommodityCode') else 'extracted', 'PMSCommodityCode': 'extracted',
                                 'CommodityCodeStatus': 'extracted', 'ConfirmedPCMCCode': 'inferred'})
                 source['reference'] = component.source_reference
             facts = {'SpecName': getattr(pc, 'class_code', ''), 'MaterialGrade': getattr(pc, 'material_grade', ''),
@@ -73,6 +76,8 @@ def apply_reference_bindings(job, preview):
             if row['row_key'].startswith('unrouted:'):
                 origins.update({key: 'extracted' for key in row['cells']})
             for key in row.get('overridden', []):
+                if sheet['name'] == 'PipingCommodityFilter' and key == 'CommodityCode':
+                    continue
                 origins[key] = 'override'
             component_id = source.get('component_id')
             if not component_id:

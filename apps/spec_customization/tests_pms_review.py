@@ -15,7 +15,7 @@ class PMSReviewTests(TestCase):
         self.component.save()
         self.reference.cat_file.save('pcmc.xlsx', ContentFile(xlsx('PipingCommodityMatlControlData',
             ['CONTRACTORCOMMODITYCODE', 'SHORTMATERIALDESCRIPTION', 'FIRSTSIZEFROM', 'FIRSTSIZETO'],
-            [['GATE001', 'Gate valve', '2', '2']])))
+            [['GATE00000000000001', 'Gate valve', '2', '2']])))
         self.reference.cat_file_hash = file_sha256(self.reference.cat_file)
         self.reference.save()
 
@@ -36,7 +36,7 @@ class PMSReviewTests(TestCase):
         self.assertEqual(self.run_matching().status_code, 200)
         decision.refresh_from_db()
         self.component.refresh_from_db()
-        self.assertEqual(decision.final_commodity_code, 'GATE001')
+        self.assertEqual(decision.final_commodity_code, 'GATE00000000000001')
         self.assertEqual(decision.review_decision, 'approved')
         self.assertIsNotNone(decision.reviewed_at)
         self.assertEqual(decision.reviewed_by, self.owner)
@@ -48,14 +48,14 @@ class PMSReviewTests(TestCase):
         self.assertTrue(rows)
         self.assertTrue(all(not row['cells'].get('IndustryCommodityCode') for row in rows))
         result = self.client.get('/api/v1/spec-customization/matching-decisions/', {'job': str(self.job.pk)})
-        self.assertEqual(result.data['items'][0]['final_commodity_code'], 'GATE001')
+        self.assertEqual(result.data['items'][0]['final_commodity_code'], 'GATE00000000000001')
 
     def test_conflicting_candidate_cannot_be_confirmed_or_remapped(self):
-        self.component.pms_commodity_code = 'GATE001'
+        self.component.pms_commodity_code = 'GATE00000000000001'
         self.component.save()
         self.reference.cat_file.save('wrong-size.xlsx', ContentFile(xlsx('PipingCommodityMatlControlData',
             ['CONTRACTORCOMMODITYCODE', 'SHORTMATERIALDESCRIPTION', 'FIRSTSIZEFROM', 'FIRSTSIZETO'],
-            [['GATE001', 'Gate valve', '4', '4']])))
+            [['GATE00000000000001', 'Gate valve', '4', '4']])))
         self.reference.cat_file_hash = file_sha256(self.reference.cat_file)
         self.reference.save()
         self.assertEqual(self.run_matching().status_code, 200)
@@ -64,5 +64,5 @@ class PMSReviewTests(TestCase):
             result = self.client.post('/api/v1/spec-customization/matching-decision-review/', {
                 'decision_id': str(decision.pk), 'review_decision': action,
                 'review_notes': 'Review engineering conflict.',
-                'candidate_id': decision.candidates[0]['candidate_id'], 'final_commodity_code': 'GATE001'}, format='json')
+                'candidate_id': decision.candidates[0]['candidate_id'], 'final_commodity_code': 'GATE00000000000001'}, format='json')
             self.assertEqual(result.status_code, 409)

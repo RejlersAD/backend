@@ -9,6 +9,14 @@ and read status to components. Apply migrations before running the updated web
 and extraction workers. Missing legacy source evidence is unknown; it is not
 backfilled from generated identifiers or reference documents.
 
+Local runtime reconciliation: migration `0019_legacy_source_references_default`
+preserves a legacy plural `source_references` JSONB column where it exists and
+gives omitted inserts an empty-array database default. A database can report no
+pending migrations while retaining this extra NOT NULL column from another schema
+revision. Fresh schemas without that historical column are unchanged. Existing
+values and the NOT NULL constraint are retained. A transactional PostgreSQL insert
+probe verified this failure path; its inserted row was rolled back.
+
 Native LNG grids recognize wrapped COMMODITY CODE headers. Values come only
 from that cell, retaining raw cell text and page/table/row/bounding-box evidence.
 Part symbols, ERP numbers and REF DOC identifiers remain separate source evidence.
@@ -20,6 +28,8 @@ reference pinning, freeze and release authority checks remain in force. The loca
 approved workbook is verification input; it does not overwrite a frozen project
 revision or grant release authority. Industry codes are not substituted for blank
 contractor codes. Approved catalog identifiers are never padded or reformatted.
+The 18–20 character/no-whitespace rule applies to new generated project codes.
+Literal PMS and approved catalog identifiers are retained as supplied.
 Confirmed contractor codes are not copied into blank industry-code fields.
 Missing geometry/industry identifiers still block the existing CAT release gates.
 
@@ -37,12 +47,33 @@ catalog row, matched/unknown attributes, differences, coverage and confirmabilit
 Existing confirmation records the reviewer and timestamp. Unchanged matching
 reruns preserve the confirmed selection; changed evidence invalidates it.
 
-PCF preview retains the PMS code and exposes a distinct ConfirmedPCMCCode. Draft
-source downloads retain the literal source code; frozen SPEC exports use only the
-confirmed mapping in the template CommodityCode column. Required mappings are
+Following the user's supplied review workbook and explicit generation request,
+blank PMS cells now receive project-generated CommodityCode values in preview and
+draft exports. The old RAD/component/spec/nominal-size pattern is compacted to
+alphanumeric text; ordinary values such as RADCAP10A0600N0050 contain 18 characters.
+Long/short patterns and distinct engineering variants sharing a base use a stable
+20-character digest form. Source IDs and timestamps do not seed these identifiers.
+The literal PMS value and locator remain separate source evidence. Generated codes
+are not catalog confirmations. Confirmed PCMC Code is not a visible field or an
+extra worksheet column: the approved PCF template's columns remain unchanged.
+Frozen SPEC exports still use the reviewed mapping under existing release gates.
+Required mappings are
 checked by the existing validation/freeze gates. Pilot and release approval remain
 required. Previously requested PCF blank fields, FluidCode=1, PipeBranch angle/code
 fields and Tap-001 formatting are applied in the shared preview/export path.
+
+PipeBranch restoration uses the 148 explicit size-pair/primary-ShortCode records
+from the user-approved Sample-Template PCF File-1AA1B.xlsx. The bundled JSON records
+the source filename and SHA-256; no Windows-local path is required at runtime.
+Each extracted specification receives that matrix with its own SpecName. Header
+and branch sizes, units, and primary codes remain the approved matrix values.
+Per the user's explicit override, both AngleLow and AngleHigh are 90.5deg (the
+source AngleLow was 89.5deg), and SecondaryShortCode/TertiaryShortCode remain blank.
+These rows are template reference data, not extracted PMS branch instructions or
+new class-specific engineering approvals; existing release/pilot gates remain.
+PermissibleTaps restores one row per specification with Tap-001, retaining the
+existing IsPreferredTap=1 setting shown in the user's screenshot. This request
+does not expand the sheet to the template's additional Tap-002 through Tap-037.
 
 Verification on physical page 779 of PMS_FI4VsV1.pdf, spec 10A06.00, extracted 14
 source rows with blank commodity cells. ITN14200 and ITN82034 remained REF DOC

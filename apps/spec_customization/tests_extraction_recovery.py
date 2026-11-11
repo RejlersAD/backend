@@ -179,6 +179,18 @@ class ExtractionOutcomeTests(TestCase):
             'chunks_done': 1, 'processing_report_available': True,
         })  # Preserve successful-run completeness inputs in frozen manifests.
 
+    def test_rejected_heading_does_not_report_saved_components_as_empty(self):
+        result = self.run_with_classes([
+            {'class_code': 'SYN150', 'class_full_code': 'Synthetic class',
+             'components': [{'component_type': 'pipe', 'size_from': '2'}]},
+            {'class_code': 'NOT-ON-PAGE', 'class_full_code': 'Unverified heading', 'components': []},
+        ])
+        self.assertTrue(result['success'])
+        self.assertEqual(self.job.status, 'completed')
+        self.assertIn('1 components', self.job.error_message)
+        self.assertNotIn('no component rows', self.job.error_message)
+        self.assertEqual(extraction_completeness(self.job)['state'], 'partial')
+
     def test_partial_rows_keep_coverage_warning_after_components_are_saved(self):
         self.service.extract_chunk.return_value = {
             'piping_classes': [], 'engine_used': 'pymupdf_text',

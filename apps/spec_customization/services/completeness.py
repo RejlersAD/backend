@@ -5,7 +5,7 @@ def extraction_completeness(job):
     snapshot = job.config_snapshot if isinstance(job.config_snapshot, dict) else {}
     report = snapshot.get('extraction_outcome') or {}
     failed = report.get('failed_chunks') or []
-    partial = bool(failed) or bool(job.status == 'completed' and job.chunks_total and job.chunks_done < job.chunks_total)
+    partial = bool(report.get('partial_result')) or bool(failed) or bool(job.status == 'completed' and job.chunks_total and job.chunks_done < job.chunks_total)
     has_components = job.piping_classes.filter(components__isnull=False).exists()
     has_classes = job.piping_classes.exists()
     header_only = has_classes and not has_components

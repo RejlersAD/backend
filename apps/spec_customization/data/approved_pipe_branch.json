@@ -1,0 +1,1043 @@
+{
+  "source_file": "Sample-Template PCF File-1AA1B.xlsx",
+  "source_sha256": "ecbd88c105427a3c32db49eef36bbc3f6b95617bd4e2e8db8cfa282fdfd63840",
+  "source_sheet": "PipeBranch",
+  "rows": [
+    {
+      "HeaderSize": "0.50",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "0.75",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "0.75",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "1",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "1",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "1",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "1.50",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "1.50",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "1.50",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "1.50",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "2",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "2",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "2",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "2",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "2",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "3",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "3",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "3",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "3",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "3",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "3",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "4",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "6",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "8",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "10",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "12",
+      "BranchSize": "12",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "12",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "14",
+      "BranchSize": "14",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "12",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "14",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "16",
+      "BranchSize": "16",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "12",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "14",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "16",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "18",
+      "BranchSize": "18",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "12",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "14",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "16",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "18",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "20",
+      "BranchSize": "20",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "0.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "0.75",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "1",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "1.50",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Sockolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "2",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "3",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "4",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Weldolet"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "6",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "8",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "10",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "12",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "14",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "16",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reinforcing Weld"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "18",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "20",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Reducing Tee"
+    },
+    {
+      "HeaderSize": "24",
+      "BranchSize": "24",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "28",
+      "BranchSize": "28",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "30",
+      "BranchSize": "30",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "32",
+      "BranchSize": "32",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "34",
+      "BranchSize": "34",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "36",
+      "BranchSize": "36",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "38",
+      "BranchSize": "38",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "40",
+      "BranchSize": "40",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "42",
+      "BranchSize": "42",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "44",
+      "BranchSize": "44",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "46",
+      "BranchSize": "46",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "48",
+      "BranchSize": "48",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    },
+    {
+      "HeaderSize": "56",
+      "BranchSize": "56",
+      "HdrSizeNPDUnitType": "in",
+      "BrSizeNPDUnitType": "in",
+      "ShortCode": "Tee"
+    }
+  ]
+}

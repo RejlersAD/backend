@@ -73,8 +73,8 @@ def match_pcmc(cat, source, codelists=None):
     if cached is None:
         records, by_code = [], {}
         for row in cat.to_dict('records'):
-            code = cell(row, 'ContractorCommodityCode')
-            if not code:
+            code = str(row.get(code_column) or '')
+            if not code.strip():
                 continue
             description = cell(row, 'LongMaterialDescription', 'ShortMaterialDescription', 'Description')
             record = {'row': row, 'code': code, 'description': description,
