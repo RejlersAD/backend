@@ -5,6 +5,21 @@ from .services.pcmc_matching import match_pcmc
 
 
 class CatalogResolutionTests(unittest.TestCase):
+    def test_noncompliant_catalog_identifiers_are_flagged_without_rewriting(self):
+        for code in ('SHORT1', 'CODE0000000000000000001', 'PIPE 0000000000001', ' PIPE00000000000001'):
+            with self.subTest(code=code):
+                result = match_pcmc(pd.DataFrame([self.catalog(CONTRACTORCOMMODITYCODE=code)]), self.source())
+                candidate = result['candidates'][0]
+                self.assertEqual(candidate['commodity_code'], code)
+                self.assertFalse(candidate['confirmable'])
+                self.assertIn('18–20', candidate['code_format_issue'])
+
+    def test_twenty_character_approved_code_is_not_changed(self):
+        code = 'PIPE0000000000000001'
+        self.assertEqual(len(code), 20)
+        result = match_pcmc(pd.DataFrame([self.catalog(CONTRACTORCOMMODITYCODE=code)]), self.source())
+        self.assertTrue(result['candidates'][0]['confirmable'])
+        self.assertEqual(result['candidates'][0]['commodity_code'], code)
     def test_wrapped_header_preserves_blank_cell_without_using_reference_document(self):
         from .services.local_tables import LocalTableParser
         parser = LocalTableParser(r'PIPING SPEC:\s*(?P<code>\S+)', 'test')
@@ -27,22 +42,22 @@ class CatalogResolutionTests(unittest.TestCase):
                 'pms_commodity_code': '', **values}
 
     def catalog(self, **values):
-        return {'CONTRACTORCOMMODITYCODE': 'PIPE001', 'SHORTMATERIALDESCRIPTION': 'pipe',
+        return {'CONTRACTORCOMMODITYCODE': 'PIPE00000000000001', 'SHORTMATERIALDESCRIPTION': 'pipe',
                 'FIRSTSIZEFROM': '1', 'FIRSTSIZETO': '1', **values}
 
     def test_exact_code_checks_engineering_before_confirmation(self):
-        result = match_pcmc(pd.DataFrame([self.catalog()]), self.source(pms_commodity_code='PIPE001'))
+        result = match_pcmc(pd.DataFrame([self.catalog()]), self.source(pms_commodity_code='PIPE00000000000001'))
         self.assertEqual(result['discriminators_matched']['pms_code_lookup'], 'exact')
         self.assertTrue(result['candidates'][0]['confirmable'])
         self.assertFalse(result['matched'])
 
     def test_exact_code_conflicting_size_cannot_be_confirmed(self):
-        result = match_pcmc(pd.DataFrame([self.catalog()]), self.source(pms_commodity_code='PIPE001', size_from='2', size_to='2'))
+        result = match_pcmc(pd.DataFrame([self.catalog()]), self.source(pms_commodity_code='PIPE00000000000001', size_from='2', size_to='2'))
         self.assertFalse(result['candidates'][0]['confirmable'])
         self.assertTrue(result['candidates'][0]['differences'])
 
     def test_multiple_candidates_remain_review_work(self):
-        result = match_pcmc(pd.DataFrame([self.catalog(), self.catalog(CONTRACTORCOMMODITYCODE='PIPE002')]), self.source())
+        result = match_pcmc(pd.DataFrame([self.catalog(), self.catalog(CONTRACTORCOMMODITYCODE='PIPE00000000000002')]), self.source())
         self.assertEqual(result['candidate_count'], 2)
         self.assertEqual(result['state'], 'ambiguous')
 
@@ -62,14 +77,14 @@ class CatalogResolutionTests(unittest.TestCase):
         result = match_pcmc(pd.DataFrame([self.catalog()]), source)
         self.assertEqual(source['pms_commodity_code'], '')
         self.assertEqual(result['commodity_code'], '')
-        self.assertEqual(result['candidates'][0]['commodity_code'], 'PIPE001')
+        self.assertEqual(result['candidates'][0]['commodity_code'], 'PIPE00000000000001')
 
     def test_reference_document_cannot_supply_commodity_identifier(self):
         result = match_pcmc(pd.DataFrame([self.catalog()]), self.source(description='pipe (REF DOC:ITN14200)'))
         self.assertEqual(result['discriminators_matched']['pms_code_lookup'], 'blank')
 
     def test_conflicting_rating_codelist_id_blocks_exact_code(self):
-        result = match_pcmc(pd.DataFrame([self.catalog(PressureRating='40')]), self.source(pms_commodity_code='PIPE001', rating='150'))
+        result = match_pcmc(pd.DataFrame([self.catalog(PressureRating='40')]), self.source(pms_commodity_code='PIPE00000000000001', rating='150'))
         self.assertFalse(result['candidates'][0]['confirmable'])
         self.assertEqual(result['candidates'][0]['differences'][0]['attribute'], 'rating')
 

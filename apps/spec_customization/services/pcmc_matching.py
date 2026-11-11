@@ -9,6 +9,10 @@ def key(value):
     return re.sub(r'[^a-z0-9]', '', str(value).casefold())
 
 
+def pcmc_code_format_issue(code):
+    return 'Approved code must contain 18–20 characters with no spaces. Confirm a compliant approved catalog identifier; do not pad or rewrite this code.' if not 18 <= len(code) <= 20 or any(character.isspace() for character in code) else ''
+
+
 def description_attributes(text):
     """Recognize explicit engineering tokens, never decode a commodity code."""
     text = re.sub(r'\(REF\s+DOC:.*?\)', '', str(text), flags=re.I).upper()
@@ -73,8 +77,8 @@ def match_pcmc(cat, source, codelists=None):
     if cached is None:
         records, by_code = [], {}
         for row in cat.to_dict('records'):
-            code = cell(row, 'ContractorCommodityCode')
-            if not code:
+            code = str(row.get(code_column) or '')
+            if not code.strip():
                 continue
             description = cell(row, 'LongMaterialDescription', 'ShortMaterialDescription', 'Description')
             record = {'row': row, 'code': code, 'description': description,
@@ -154,6 +158,9 @@ def match_pcmc(cat, source, codelists=None):
                      'missing_required_source': missing_source,
                      'confirmable': not differences and not missing_source and (not is_range or coverage['complete']),
                      'ranking_score': SequenceMatcher(None, str(source.get('description', '')).casefold(), description.casefold()).ratio()}
+        if pcmc_code_format_issue(code):
+            candidate['code_format_issue'] = pcmc_code_format_issue(code)
+            candidate['confirmable'] = False
         (rejected if differences else candidates).append(candidate)
     candidates.sort(key=lambda value: (-len(value['matched_attributes']), -value['ranking_score'], value['commodity_code'], value['candidate_id']))
     shown = candidates if candidates else rejected
