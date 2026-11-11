@@ -612,6 +612,8 @@ def _decision_payload(decision):
             'job_id': str(decision.job_id), 'workbook_set_id': str(decision.workbook_set_id),
             'reviewed_by': str(decision.reviewed_by_id) if decision.reviewed_by_id else None,
             'reviewed_at': decision.reviewed_at.isoformat() if decision.reviewed_at else None,
+            'catalog_revision': decision.workbook_set.version_label,
+            'catalog_sha256': decision.workbook_set.cat_file_hash,
             'candidate_blockers': {str(candidate.get('candidate_id') or candidate.get('commodity_code')): _candidate_blockers(decision, candidate)
                                    for candidate in decision.candidates},
             'score_description': 'Ranking aid only; not calibrated probability.'}
@@ -620,7 +622,8 @@ def _decision_payload(decision):
 def _candidate_blockers(decision, candidate):
     """A same-size candidate is insufficient when applicable fields lack source evidence."""
     missing = []
-    if not decision.nominal_size or '..' in decision.nominal_size:
+    missing.extend(f'{name} requires verified source evidence.' for name in candidate.get('missing_required_source', []))
+    if not decision.nominal_size or ('..' in decision.nominal_size and not candidate.get('coverage', {}).get('complete')):
         missing.append('Size requires a verified nominal value.')
     attributes = decision.discriminators_matched.get('codelists', {}).get('attributes', {})
     if attributes:
@@ -722,6 +725,23 @@ def matching_decision_review(request):
         return Response({'error': 'Decision does not belong to the pinned reference.'}, status=409)
     action = values['review_decision']
     code = values.get('final_commodity_code', '')
+    if action in ('approved', 'remapped'):
+        selected = next((candidate for candidate in decision.candidates
+                         if candidate.get('candidate_id') == values.get('candidate_id')), None)
+        if decision.discriminators_matched.get('pcmc'):
+            if not selected or not selected.get('confirmable') or selected['commodity_code'] != (code or decision.matched_commodity_code):
+                return Response({'error': 'Choose an eligible catalog candidate with no engineering conflict and complete range coverage.'}, status=409)
+            decision.discriminators_matched['selected_candidate_id'] = selected['candidate_id']
+        elif code and code not in {candidate.get('commodity_code') for candidate in decision.candidates}:
+            eligible_codes = set()
+            if action == 'remapped':
+                from .services.component_matcher import match_component
+                checked = match_component(decision.pdf_component_name, decision.nominal_size,
+                    decision.pressure_rating, decision.material_grade, ws, decision.sub_type,
+                    decision.end_connection, codelists=decision.discriminators_matched.get('codelists') or None)
+                eligible_codes = {candidate.get('commodity_code') for candidate in checked.get('candidates', [])}
+            if code not in eligible_codes:
+                return Response({'error': 'The code does not satisfy the source engineering attributes.'}, status=400)
     evidence = decision.discriminators_matched.get('codelists', {})
     if 'source_reference' in values:
         if action != 'approved':
@@ -787,7 +807,8 @@ def matching_decision_review(request):
                 names = book.sheet_names
         for name in names:
             rows = read_reference_sheet(ws.cat_file, name)
-            if 'IndustryCommodityCode' in rows.columns and code in set(rows.IndustryCommodityCode.str.strip()):
+            code_columns = [column for column in rows.columns if str(column).casefold() in ('industrycommoditycode', 'contractorcommoditycode')]
+            if any(code in set(rows[column].str.strip()) for column in code_columns):
                 found = True
                 break
         if not found:

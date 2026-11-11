@@ -359,7 +359,8 @@ def _spec_eligibility(workbook_set, nominal_size, material_grade, spec_name=''):
 
 
 def match_component(pdf_component_name, nominal_size, pressure_rating, material_grade,
-                    workbook_set, sub_type='', end_connection='', spec_name='', codelists=None):
+                    workbook_set, sub_type='', end_connection='', spec_name='', codelists=None,
+                    source=None, pcmc_catalog=None):
     """Return an explicit state. Scores rank discriminators, not probabilities."""
     from ..matching_models import MatchingRule, ComponentMatchingResult
     result = dict(matched=False, commodity_code='', description='', match_score=0.0,
@@ -372,6 +373,16 @@ def match_component(pdf_component_name, nominal_size, pressure_rating, material_
         return result
 
     try:
+        if source is not None and pcmc_catalog is not None:
+            from .pcmc_matching import match_pcmc
+            pcmc = match_pcmc(pcmc_catalog, source, codelists=codelists)
+            if pcmc is not None:
+                for endpoint in (source.get('size_from'), source.get('size_to')):
+                    if endpoint:
+                        blocked, eligibility = _spec_eligibility(workbook_set, endpoint, '', spec_name)
+                        if blocked:
+                            return outcome(blocked, eligibility.get('error', 'Component is outside SPEC eligibility.'))
+                return pcmc
         if '..' in nominal_size:
             return outcome('unmatched', 'Extracted size interval requires engineering expansion into nominal sizes before commodity selection.')
         blocked, evidence = _spec_eligibility(workbook_set, nominal_size, '' if codelists else material_grade, spec_name)
@@ -395,10 +406,10 @@ def match_component(pdf_component_name, nominal_size, pressure_rating, material_
         if not rule:
             return outcome('unmatched', f"No mapping for '{pdf_component_name}'.")
         if not workbook_set.cat_file:
-            return outcome('invalid_reference', 'CAT workbook not uploaded.')
+            return outcome('invalid_reference', 'Catalog unavailable: CAT workbook not uploaded.')
         cat = load_cat_sheet(workbook_set.cat_file, rule.cat_sheet_name)
         if cat is None or cat.empty:
-            return outcome('invalid_reference', 'Mapped CAT sheet is missing or empty.')
+            return outcome('invalid_reference', 'Catalog unavailable: mapped CAT sheet is missing or empty.')
         if codelists:
             from .buhasa_codelists import match_catalog
             return match_catalog(result, cat, codelists, nominal_size, sub_type, rule.catalog_component_name,
@@ -491,6 +502,8 @@ def run_job_matching(job, workbook_set, codelist_profile=None, selection_updates
         job.reference_workbook_set = workbook_set
         job.save(update_fields=['reference_workbook_set'])
         summary = {state: 0 for state, _ in ComponentMatchDecision.STATE_CHOICES}
+        pcmc_catalog = load_cat_sheet(workbook_set.cat_file, 'PipingCommodityMatlControlData')
+        seen_sources = set()
         for component in PipingClassComponent.objects.filter(piping_class__job=job).select_related('piping_class'):
             pc = component.piping_class
             names = [f'{component.sub_type} {component.component_type}'.strip(), component.sub_type, component.component_type]
@@ -502,6 +515,10 @@ def run_job_matching(job, workbook_set, codelist_profile=None, selection_updates
             criteria = dict(job=job, workbook_set=workbook_set, pdf_component_name=name,
                             nominal_size=size, pressure_rating=pc.pressure_rating,
                             material_grade=component.material_standard or pc.material_grade)
+            source_key = (name, size, pc.pressure_rating, criteria['material_grade'])
+            if source_key in seen_sources:
+                raise ValueError('Distinct PMS source rows share a matching key; engineering review must separate them before confirmation.')
+            seen_sources.add(source_key)
             if len(criteria['material_grade']) > 64 or len(criteria['pressure_rating']) > 32 or len(size) > 32:
                 raise ValueError('Extracted criteria exceed decision field limits; engineering normalization is required.')
             previous = ComponentMatchDecision.objects.filter(**criteria).first()
@@ -518,7 +535,20 @@ def run_job_matching(job, workbook_set, codelist_profile=None, selection_updates
                 codelists['raw_attributes'] = attributes
                 codelists['component_id'] = str(component.pk)
             result = match_component(name, size, criteria['pressure_rating'], criteria['material_grade'], workbook_set,
-                                     component.sub_type, component.end_connection, pc.class_code, codelists=codelists)
+                                     component.sub_type, component.end_connection, pc.class_code, codelists=codelists,
+                                     pcmc_catalog=pcmc_catalog, source={
+                                         'component_id': str(component.pk), 'component_type': component.component_type,
+                                         'component_label': component.sub_type,
+                                         'description': component.description, 'size_from': component.size_from,
+                                         'size_to': component.size_to, 'material': component.material_standard or pc.material_grade,
+                                         'schedule': component.schedule_or_rating, 'rating': pc.pressure_rating,
+                                         'end_connection': component.end_connection, 'facing': pc.flange_facing,
+                                         'pms_commodity_code': component.pms_commodity_code,
+                                         'source_reference': component.source_reference})
+            result['discriminators_matched']['source'] = {
+                **result['discriminators_matched'].get('source', {}),
+                'component_id': str(component.pk), 'pms_commodity_code': component.pms_commodity_code,
+                'source_reference': component.source_reference, 'source_read_status': component.source_read_status}
             if codelists:
                 # Attach evidence even when SPEC eligibility stops before CAT.
                 result['discriminators_matched']['codelists'] = codelists

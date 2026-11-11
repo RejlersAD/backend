@@ -2955,10 +2955,13 @@ def _rows_piping_commodity_filter(cls):
         short_code = _pcf_short_code_for_component(c)
         end_prep   = _normalize_end_prep(c.end_connection) or ''
         sched      = _normalize_schedule(c.schedule_or_rating or '')
-        # Only an explicit source or approved catalog commodity code may be used.
-        commodity_code_override = (getattr(c, 'commodity_code', '') or '').strip()
+        # Optional commodity_code attribute (set at runtime by extractor on some
+        # components) — fall back to the deterministic ICC so the column is
+        # never blank and the SPEC↔CAT cross-link stays intact.
+        commodity_code_override = c.pms_commodity_code
 
         for npd in npds:
+            icc = ''  # Requires a confirmed project catalog identifier.
             first_size = _normalize_npd(npd)
             base_row = {
                 # ── Identification (canonical SPEC↔CAT join key) ──────────

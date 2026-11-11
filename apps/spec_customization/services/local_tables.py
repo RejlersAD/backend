@@ -11,6 +11,7 @@ from statistics import median
 
 
 HEADER_ALIASES = {
+    'commodity code': 'pms_commodity_code', 'commoditycode': 'pms_commodity_code',
     'component': 'component_type', 'component type': 'component_type',
     'item': 'component_type', 'type': 'component_type',
     'subtype': 'sub_type', 'sub type': 'sub_type',
@@ -130,6 +131,13 @@ class LocalTableParser:
             if self._class(text, page):
                 continue
             keys = [HEADER_ALIASES.get(header_key(cell[2])) for cell in cells]
+            if index + 1 < len(rows):
+                for column, cell in enumerate(cells):
+                    if header_key(cell[2]) == 'commodity' and any(
+                        header_key(next_cell[2]) == 'code' and cell[0] - 2 <= next_cell[0] <= cell[1] + 2
+                        for next_cell in rows[index + 1]['cells']
+                    ):
+                        keys[column] = 'pms_commodity_code'
             mapped = [key for key in keys if key]
             if (len(mapped) >= 3 and len(mapped) == len(set(mapped))
                     and ('description' in mapped or 'component_type' in mapped)
@@ -152,7 +160,12 @@ class LocalTableParser:
                     continue
                 key = self.columns[max(positions)][1]
                 if key:
-                    fields[key] = clean(fields.get(key, '') + ' ' + clean(value))
+                    if key == 'pms_commodity_code':
+                        fields[key] = (fields.get(key, '') + ' ' if fields.get(key) else '') + str(value)
+                        if not fields[key].strip():
+                            fields[key] = ''
+                    else:
+                        fields[key] = clean(fields.get(key, '') + ' ' + clean(value))
             if not any(fields.values()):
                 continue
             label = fields.get('component_type') or fields.get('description', '')
@@ -168,7 +181,7 @@ class LocalTableParser:
             if self.size_unit:
                 sizes = tuple(value if re.match(r'^(?:DN|NPS)\b', value, re.I) else f'{self.size_unit} {value}' for value in sizes)
             component = {key: fields.get(key, '') for key in (
-                'sub_type', 'description', 'material_standard', 'schedule_or_rating',
+                'sub_type', 'description', 'pms_commodity_code', 'material_standard', 'schedule_or_rating',
                 'end_connection', 'notes', 'revision_number')}
             component.update(component_type=component_type, size_from=sizes[0], size_to=sizes[1])
             if any(len(component.get(key, '')) > limit for key, limit in FIELD_LIMITS.items()):
@@ -177,6 +190,7 @@ class LocalTableParser:
             locator = f'Source page {page}, row {index + 1}; local table extraction; engineering review required.'
             component['notes'] = clean(component['notes'] + ' ' + locator)
             component['_source_reference'] = {'page': page, 'row': index + 1}
+            component['_source_reference']['pms_commodity_code_status'] = ('read' if component['pms_commodity_code'] else 'blank') if 'pms_commodity_code' in self.header_fields else 'unreadable'
             self.current['components'].append(component)
             self.current['_source_pages'][1] = page
             self.component_count += 1

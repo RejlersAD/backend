@@ -168,7 +168,11 @@ correctly)**:
     Size To, W.T., Description, Commodity Code and Notes. Map them faithfully
     into the schema: Rev No -> revision_no; Part Name -> component_type/sub_type;
     W.T. -> schedule_or_rating; Description -> description; Notes -> notes.
-    Leave commodity code in notes when no dedicated field is available. Do not
+    Return pms_commodity_code from the COMMODITY CODE column only, including
+    when its header wraps over two lines. Preserve blank cells as empty strings.
+    Never copy part symbols, ERP numbers, REF DOC values or invented identifiers
+    into pms_commodity_code. Preserve the PDF page and row in _source_reference;
+    set pms_commodity_code_status to read, blank, or unreadable. Do not
     replace source data with a generic catalog default. When the Rev No cell
     is blank or merged, return an empty string - never invent a revision.
 
