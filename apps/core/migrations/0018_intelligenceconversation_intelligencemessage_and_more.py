@@ -5,6 +5,63 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def ensure_crs_revision_reference_key(apps, schema_editor):
+    """Restore the CRS revision key missing from some restored PostgreSQL tables.
+
+    The migration history declares ``crs_revisions.id`` as the primary key, but
+    a restored table can lack the physical constraint. Its first new FK is
+    created below, so repair the target in this migration before that FK.
+    Never rewrite existing revision IDs or source evidence.
+    """
+    connection = schema_editor.connection
+    if connection.vendor != 'postgresql':
+        return
+
+    table = 'crs_revisions'
+    column = 'id'
+    quote = schema_editor.quote_name
+    with connection.cursor() as cursor:
+        cursor.execute(f'LOCK TABLE {quote(table)} IN ACCESS EXCLUSIVE MODE')
+        cursor.execute('''
+            SELECT EXISTS (
+                SELECT 1 FROM pg_index i
+                JOIN pg_attribute a ON a.attrelid = i.indrelid
+                WHERE i.indrelid = to_regclass(%s) AND a.attname = %s
+                  AND i.indisunique AND i.indisvalid AND i.indisready
+                  AND i.indimmediate AND i.indpred IS NULL
+                  AND i.indexprs IS NULL AND i.indnkeyatts = 1
+                  AND i.indkey[0] = a.attnum
+            )
+        ''', [table, column])
+        if cursor.fetchone()[0]:
+            return
+
+        cursor.execute(f'SELECT EXISTS (SELECT 1 FROM {quote(table)} WHERE {quote(column)} IS NULL)')
+        if cursor.fetchone()[0]:
+            raise RuntimeError(
+                'Cannot repair crs_revisions.id: null IDs exist. '
+                'Reconcile revision identities before retrying migrations; no rows were changed.'
+            )
+        cursor.execute(f'''
+            SELECT EXISTS (
+                SELECT 1 FROM {quote(table)}
+                GROUP BY {quote(column)} HAVING COUNT(*) > 1
+            )
+        ''')
+        if cursor.fetchone()[0]:
+            raise RuntimeError(
+                'Cannot repair crs_revisions.id: duplicate IDs exist. '
+                'Reconcile revision identities before retrying migrations; no rows were changed.'
+            )
+
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(%s) AND contype = 'p')",
+            [table],
+        )
+        kind = 'UNIQUE' if cursor.fetchone()[0] else 'PRIMARY KEY'
+        schema_editor.execute(f'ALTER TABLE {quote(table)} ADD {kind} ({quote(column)})')
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -15,6 +72,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_crs_revision_reference_key, migrations.RunPython.noop),
         migrations.CreateModel(
             name='IntelligenceConversation',
             fields=[
