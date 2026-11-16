@@ -12,6 +12,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.http import FileResponse
 from django.utils import timezone
+from django.views.decorators.debug import sensitive_variables
 from rest_framework import status
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
@@ -25,6 +26,8 @@ from apps.rbac.models import AuditLog
 from apps.rbac.ai_champion_models import AIUsageLog
 from .ai_hub_models import AIModel, AIRoute
 from .ai_hub_runtime import resolve_chain
+from .ai_credentials import (AICredentialUnavailable, get_provider_configuration,
+                             resolve_provider_credential)
 from .ai_workspace_models import (AIWorkspace, AIWorkspaceMember, AIWorkspaceInstructions,
                                   AIWorkspaceDocument, AIWorkspaceConversation,
                                   AIWorkspaceConversationShare, AIWorkspaceMessage,
@@ -36,18 +39,26 @@ INSTRUCTION_FIELDS = ('role_behavior', 'goals', 'response_format', 'terminology'
                       'standards', 'evidence_requirements', 'constraints')
 
 
-def local_chat_models():
+def chat_models():
     route = AIRoute.objects.filter(task_id='radai-intelligence-chat', data_policy='onprem').first()
-    if not route or 'text' not in (route.needs or []):
-        return []
     enabled = []
-    for provider_id, model_id, _scope in resolve_chain(route.task_id):
-        if provider_id != 'ollama':
-            continue
-        model = AIModel.objects.filter(provider_id='ollama', model_id=model_id,
-                                       enabled=True).select_related('provider').first()
-        if model and model.provider.enabled and model.provider.group == 'self' and 'text' in (model.capabilities or []):
-            enabled.append(model_id)
+    if route and 'text' in (route.needs or []):
+        for provider_id, model_id, _scope in resolve_chain(route.task_id):
+            if provider_id != 'ollama':
+                continue
+            model = AIModel.objects.filter(provider_id='ollama', model_id=model_id,
+                                           enabled=True).select_related('provider').first()
+            if model and model.provider.enabled and model.provider.group == 'self' and 'text' in (model.capabilities or []):
+                enabled.append({'provider': 'ollama', 'model_id': model_id,
+                                'label': model_id.replace(':', ' ').replace('-', ' ').title()})
+    try:
+        cloud = get_provider_configuration('anthropic')
+    except AICredentialUnavailable:
+        cloud = None
+    if cloud and cloud['managed'] and cloud['ready']:
+        model_id = cloud['model'] or 'claude-sonnet-4-6'
+        enabled.insert(0, {'provider': 'anthropic', 'model_id': model_id,
+                           'label': f'Claude ({model_id})'})
     return enabled
 
 
@@ -55,11 +66,9 @@ class AIWorkspaceModelsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        models = local_chat_models()
-        return Response({'models': [{'provider': 'ollama', 'model_id': model_id,
-                                     'label': model_id.replace(':', ' ').replace('-', ' ').title()}
-                                    for model_id in models],
-                         'default_model': models[0] if models else None})
+        models = chat_models()
+        return Response({'models': models,
+                         'default_model': models[0]['model_id'] if models else None})
 
 
 def role_for(user, workspace):
@@ -653,6 +662,7 @@ class AIWorkspaceConversationShareView(APIView):
         return Response(status=204)
 
 
+@sensitive_variables('api_key')
 def send_conversation(request, row, workspace=None):
     question = text_field(request.data, 'question', 8000)
     if not question:
@@ -682,10 +692,11 @@ def send_conversation(request, row, workspace=None):
             if original.content != question:
                 raise Conflict('This request ID belongs to a different question.')
             return Response({'conversation': conversation_payload(row, detail=True), 'idempotent_replay': True})
-        models = local_chat_models()
-        selected_model = str(request.data.get('model') or (models[0] if models else ''))
-        if not selected_model or selected_model not in models or request.data.get('provider', 'ollama') != 'ollama':
-            raise ValidationError({'model': 'Choose an enabled local Ollama model.'})
+        models = chat_models()
+        selected_model = str(request.data.get('model') or (models[0]['model_id'] if models else ''))
+        selected_provider = request.data.get('provider') or (models[0]['provider'] if models else '')
+        if not any(row['provider'] == selected_provider and row['model_id'] == selected_model for row in models):
+            raise ValidationError({'model': 'Choose an available chat model.'})
         instructions = AIWorkspaceInstructions.objects.filter(workspace=workspace).first() if workspace else None
         preferences = {field: getattr(instructions, field) for field in INSTRUCTION_FIELDS} if instructions else {}
         effective_attachment_ids = attachment_ids
@@ -750,8 +761,14 @@ def send_conversation(request, row, workspace=None):
                     context['project'] = {'id': workspace.pk, 'name': workspace.name}
             else:
                 context['notes'] = 'General chat. No project or document evidence is available. Do not claim access to project records.'
+            api_key = ''
+            if selected_provider == 'anthropic':
+                api_key, _metadata = resolve_provider_credential('anthropic')
+                if not api_key or not get_provider_configuration('anthropic')['ready']:
+                    raise ChatConfigurationError('The configured Claude credential is unavailable.')
             result = answer_question(question=question, context=context,
-                provider='ollama', model=selected_model, api_key='',
+                provider='claude' if selected_provider == 'anthropic' else 'ollama',
+                model=selected_model, api_key=api_key,
                 history=[{'role': msg.role, 'content': msg.content} for msg in history],
                 project_instructions=preferences, general_chat=workspace is None and not sources)
         except ChatConfigurationError as exc:
