@@ -75,3 +75,17 @@ its foreign keys to bypass the failure.
 Connection configuration and office-connector synchronization are separate
 from deploying the module. A restored API does not itself establish a new
 connection to the office file share.
+
+## CRS revision chain reference in P&ID migration 0027
+
+The same restored-key failure can occur when `pid_checker_v2.0027_engineering_evidence_links`
+creates a foreign key to `crs_revision_chains.id`. Its first operation now reuses
+the key repair above for all existing foreign key targets in that migration:
+user, project, EPC work item, P&ID extraction, CRS revision chain, and CRS
+revision. Existing suitable keys and source rows are retained. Null or duplicate
+IDs stop the migration for reconciliation. A failed 0027 can be retried normally
+after deploying the backend change; do not fake it. Verify with
+`python manage.py migrate --check --skip-checks` and
+`python manage.py showmigrations pid_checker_v2 --skip-checks` against the intended
+database. The repair was checked on an isolated PostgreSQL schema and through
+the disposable SQLite migration replay; no production migration was run.

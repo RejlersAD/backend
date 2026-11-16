@@ -1,6 +1,21 @@
 from django.conf import settings
 from django.db import migrations, models
 import django.db.models.deletion
+from importlib import import_module
+
+
+def ensure_engineering_reference_keys(apps, schema_editor):
+    """Restore missing PostgreSQL ID keys before deferred foreign keys run."""
+    import_module('apps.project_control.migrations.0007_epc_foundation').ensure_reference_keys(
+        apps, schema_editor, (
+            tuple(settings.AUTH_USER_MODEL.split('.')),
+            ('core', 'Project'),
+            ('project_control', 'EPCWorkItem'),
+            ('pid_checker_v2', 'PidCheckerV2Extraction'),
+            ('crs', 'CRSRevisionChain'),
+            ('crs', 'CRSRevision'),
+        ),
+    )
 
 
 class Migration(migrations.Migration):
@@ -13,6 +28,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_engineering_reference_keys, migrations.RunPython.noop),
         migrations.CreateModel(
             name='CRSChainProjectBinding',
             fields=[
