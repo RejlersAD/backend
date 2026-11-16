@@ -184,7 +184,7 @@ def _write_legend_sheet(wb, legend, used_names: set, sheet_base: Optional[str] =
 
 
 # ─── Symbols sheet writer ───────────────────────────────────────────────
-def _collect_symbol_rows(project, sections: List[str]) -> List[LegendSymbolImage]:
+def _collect_symbol_rows(project, sections: List[str], user) -> List[LegendSymbolImage]:
     """Same tier logic as views.SymbolImagesListView, restricted to the
     exported sections and to rows with a real image file."""
     from ..views import _get_symbol_images_with_fallback, _normalise_symbol_name
@@ -196,7 +196,7 @@ def _collect_symbol_rows(project, sections: List[str]) -> List[LegendSymbolImage
     # (global library): the same fallback tiers keyed on a nil UUID still
     # surface every uploaded/seeded picture (project=None rows included).
     fallback_key = str(project.project_id) if project is not None else '00000000-0000-0000-0000-000000000000'
-    for r in _get_symbol_images_with_fallback(fallback_key):
+    for r in _get_symbol_images_with_fallback(fallback_key, user):
         if r.section in wanted:
             rows.append(r)
             covered.add((r.section, _normalise_symbol_name(r.symbol_name)))
@@ -280,10 +280,13 @@ def build_legend_workbook(*, user, project=None, section: Optional[str] = None,
     endpoint).
     """
     from django.db.models import Q
+    from ..permissions import accessible_legends
 
-    qs = PidCheckerV2LegendSheet.objects.filter(created_by=user)
+    qs = accessible_legends(user)
     if project is not None:
-        qs = PidCheckerV2LegendSheet.objects.filter(Q(created_by=user) | Q(project=project))
+        qs = PidCheckerV2LegendSheet.objects.filter(
+            Q(created_by=user, project__isnull=True) | Q(project=project)
+        )
     if legend_id:
         qs = qs.filter(legend_id=legend_id)
     elif section:
@@ -322,7 +325,7 @@ def build_legend_workbook(*, user, project=None, section: Optional[str] = None,
     symbols_embedded = 0
     if symbol_sections:
         by_section: Dict[str, List[LegendSymbolImage]] = {}
-        for r in _collect_symbol_rows(project, symbol_sections):
+        for r in _collect_symbol_rows(project, symbol_sections, user):
             by_section.setdefault(r.section, []).append(r)
         for sec in symbol_sections:
             rows = by_section.get(sec) or []

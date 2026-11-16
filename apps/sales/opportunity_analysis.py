@@ -340,6 +340,8 @@ def analysis_projection(deal, actor, offset=None):
         }
         projected_result = {**projected_result, 'manager_review': {
             **(projected_result.get('manager_review') or {}),
+            'recommendation': evaluation['decision']['recommendation'].lower(),
+            'rationale': evaluation['decision']['decision_rationale'],
             'tender_evaluation': evaluation,
         }}
     if not admin_diagnostics and isinstance(projected_result, dict):
@@ -613,9 +615,8 @@ def _manager_review(report, deal, compiled):
                       'excerpt': row.get('source_text', row.get('excerpt', ''))}
                      for row in item.get('evidence', [])],
     } for item in evaluation['critical_clarifications']]
-    return {'status': 'ready', 'recommendation': 'insufficient_evidence',
-            'rationale': ('Source-stated requirements and risks are available for review. Internal capability, '
-                          'resource, and commercial information is not established by tender documents; clear the listed conditions before the official decision.'),
+    return {'status': 'ready', 'recommendation': evaluation['decision']['recommendation'].lower(),
+            'rationale': evaluation['decision']['decision_rationale'],
             'rationale_evidence': [],
             'dimensions': [{'dimension': key, 'assessment': 'unknown',
                             'summary': 'Requires internal opportunity information; source text alone cannot establish this.',

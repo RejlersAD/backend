@@ -1,5 +1,12 @@
 """P&ID Checker V2 URL routes."""
 from django.urls import path
+from .link_views import (EngineeringEvidenceCollectionView, EngineeringEvidenceDetailView,
+                         LineListProvenanceView)
+from .review_views import (PidEvidenceReviewView, PidEvidenceValidateView,
+                           PidEvidenceSubmitView, PidEvidenceCommentView,
+                           PidEvidenceDecisionView)
+from .issue_views import (PidControlledIssueView, PidControlledIssueDownloadView,
+                          PidIssueProgressEvidenceView)
 
 from .views import (
     ExtractLineTagsView,
@@ -32,6 +39,7 @@ from .views import (
     InstrumentCrossCheckView,
     ExtractEquipmentTagsFromPidView,
     ExtractInstrumentTagsFromPidView,
+    ExtractInstrumentTagsStatusView,
     IdentifySymbolsView,
     CrossReferenceResultsView,
     SymbolImagesListView,
@@ -68,6 +76,8 @@ LEGENDS_LOOKUP_SECTIONS_PATH = 'legends/lookup-sections/'
 LINE_LISTS_LIST_PATH = 'line-lists/'
 LINE_LISTS_DETAIL_PATH = 'line-lists/<uuid:line_list_id>/'
 LINE_LISTS_ACTIVATE_PATH = 'line-lists/<uuid:line_list_id>/activate/'
+# <str:...> keeps Task 5.1 UUID and legacy integer identifier compatibility.
+LINE_LISTS_PROVENANCE_PATH = 'line-lists/<str:line_list_ref>/provenance/'
 CROSS_CHECK_PATH = 'cross-check/'
 EQUIPMENT_LISTS_LIST_PATH = 'equipment-lists/'
 EQUIPMENT_LISTS_DETAIL_PATH = 'equipment-lists/<uuid:equipment_list_id>/'
@@ -79,6 +89,7 @@ INSTRUMENT_INDEXES_ACTIVATE_PATH = 'instrument-indexes/<uuid:instrument_index_id
 INSTRUMENT_CROSS_CHECK_PATH = 'instrument-cross-check/'
 EXTRACT_EQUIPMENT_TAGS_PATH = 'extract-equipment-tags/'
 EXTRACT_INSTRUMENT_TAGS_PATH = 'extract-instrument-tags/'
+EXTRACT_INSTRUMENT_TAGS_STATUS_PATH = 'extract-instrument-tags/status/<str:job_id>/'
 IDENTIFY_SYMBOLS_PATH = 'identify-symbols/'
 CROSS_REFERENCE_RESULTS_PATH = 'cross-reference-results/'
 SYMBOL_IMAGES_PATH = 'symbol-images/'
@@ -93,6 +104,26 @@ USAGE_SUMMARY_PATH = 'usage/summary/'
 USAGE_REPORT_PATH = 'usage/report/'
 
 urlpatterns = [
+    path('engineering-evidence/<uuid:extraction_id>/issue/download/',
+         PidControlledIssueDownloadView.as_view(), name='engineering-evidence-issue-download'),
+    path('engineering-evidence/<uuid:extraction_id>/issue/', PidControlledIssueView.as_view(),
+         name='engineering-evidence-issue'),
+    path('engineering-evidence/<uuid:extraction_id>/progress-evidence/',
+         PidIssueProgressEvidenceView.as_view(), name='engineering-evidence-progress'),
+    path('engineering-evidence/<uuid:extraction_id>/review/', PidEvidenceReviewView.as_view(),
+         name='engineering-evidence-review'),
+    path('engineering-evidence/<uuid:extraction_id>/validate/', PidEvidenceValidateView.as_view(),
+         name='engineering-evidence-validate'),
+    path('engineering-evidence/<uuid:extraction_id>/submit/', PidEvidenceSubmitView.as_view(),
+         name='engineering-evidence-submit'),
+    path('engineering-evidence/<uuid:extraction_id>/comments/', PidEvidenceCommentView.as_view(),
+         name='engineering-evidence-comments'),
+    path('engineering-evidence/<uuid:extraction_id>/decision/', PidEvidenceDecisionView.as_view(),
+         name='engineering-evidence-decision'),
+    path('engineering-evidence/', EngineeringEvidenceCollectionView.as_view(),
+         name='engineering-evidence-list'),
+    path('engineering-evidence/<uuid:extraction_id>/', EngineeringEvidenceDetailView.as_view(),
+         name='engineering-evidence-detail'),
     path(EXTRACT_LINE_TAGS_PATH, ExtractLineTagsView.as_view(),
          name='extract-line-tags'),
     path(VALIDATE_LINE_TAGS_PATH, ValidateLineTagsView.as_view(),
@@ -129,6 +160,8 @@ urlpatterns = [
     # Master Line List (Excel)
     path(LINE_LISTS_LIST_PATH, LineListUploadView.as_view(),
          name='line-lists'),
+    path(LINE_LISTS_PROVENANCE_PATH, LineListProvenanceView.as_view(),
+         name='line-lists-provenance'),
     path(LINE_LISTS_ACTIVATE_PATH, LineListActivateView.as_view(),
          name='line-lists-activate'),
     path(LINE_LISTS_DETAIL_PATH, LineListDetailView.as_view(),
@@ -160,6 +193,8 @@ urlpatterns = [
          name='extract-equipment-tags'),
     path(EXTRACT_INSTRUMENT_TAGS_PATH, ExtractInstrumentTagsFromPidView.as_view(),
          name='extract-instrument-tags'),
+    path(EXTRACT_INSTRUMENT_TAGS_STATUS_PATH, ExtractInstrumentTagsStatusView.as_view(),
+         name='extract-instrument-tags-status'),
     # Symbol recognition (BYOK Vision) — P&ID vs Legend Sheet comparison
     path(IDENTIFY_SYMBOLS_PATH, IdentifySymbolsView.as_view(),
          name='identify-symbols'),

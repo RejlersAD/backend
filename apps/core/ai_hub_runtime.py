@@ -71,7 +71,11 @@ def register_task(task_id, *, label, module, path='', needs, data_policy='cloud'
 def _credential_for(provider_id, user=None, module_id=None):
     """Resolve (secret, base_url, extra, scope) personal → module → org → server-config."""
     from .ai_credentials import decrypt_api_key
-    from .ai_hub_models import AICredential
+    from .ai_hub_models import AICredential, AIProvider
+
+    provider = AIProvider.objects.filter(pk=provider_id, enabled=True).first()
+    if provider and provider.group == 'self' and provider.auth_kind == 'local':
+        return '', provider.default_base_url, {}, 'local'
 
     def unwrap(cred, scope):
         try:
@@ -121,6 +125,38 @@ def _credential_for(provider_id, user=None, module_id=None):
         extra = {k: v for k, v in entry.items() if k not in ('secret', 'base_url')}
         return entry['secret'], entry.get('base_url', ''), extra, 'server_config'
     return None
+
+
+def local_ollama_base_url(base_override=None):
+    """Resolve a local Ollama address from the existing Hub provider."""
+    import ipaddress
+    import os
+    import socket
+    from urllib.parse import urlparse
+    from .ai_hub_models import AIProvider
+
+    provider = AIProvider.objects.filter(pk='ollama', enabled=True, group='self',
+                                         protocol='ollama', auth_kind='local').first()
+    if not provider:
+        raise ValueError('The local Ollama provider is not enabled in the Model Hub.')
+    base = (base_override or provider.default_base_url).rstrip('/')
+    parsed = urlparse(base)
+    docker_host = parsed.hostname == 'host.docker.internal'
+    local_docker = (getattr(settings, 'DEBUG', False)
+                    and getattr(settings, 'ENVIRONMENT', '').lower() == 'development'
+                    and os.environ.get('AIFLOW_ENVIRONMENT') == 'local')
+    if (parsed.scheme != 'http' or parsed.hostname not in ('localhost', '127.0.0.1', '::1', 'host.docker.internal')
+            or parsed.username or parsed.password or parsed.path not in ('', '/')
+            or parsed.query or parsed.fragment or (docker_host and (not local_docker or parsed.port != 11434))):
+        raise ValueError('Ollama must use a local HTTP endpoint.')
+    try:
+        addresses = [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(parsed.hostname, parsed.port)]
+    except (OSError, ValueError):
+        raise ValueError('The local Ollama endpoint could not be resolved.') from None
+    if not addresses or any(not (address.is_private if docker_host else address.is_loopback)
+                            for address in addresses):
+        raise ValueError('Ollama must resolve only to a local address.')
+    return base
 
 
 def resolve_chain(task_id, user=None, module_id=None):

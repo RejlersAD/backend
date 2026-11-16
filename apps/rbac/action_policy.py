@@ -254,6 +254,27 @@ def operation_action(request, view):
     explicit = getattr(view, 'permission_action', None)
     if explicit:
         return explicit
+    if view.__class__.__module__ == 'apps.pid_checker_v2.views':
+        name = view.__class__.__name__
+        if method in {'GET', 'HEAD'}:
+            return 'export' if name == 'LegendWorkbookExportView' else 'read'
+        if method == 'DELETE':
+            return 'delete'
+        if method in {'PUT', 'PATCH'}:
+            return 'update'
+        if name in {'TokenReportView'}:
+            return 'export'
+        if name in {'ValidateLineTagsView', 'CrossCheckView',
+                    'EquipmentCrossCheckView', 'InstrumentCrossCheckView',
+                    'CrossReferenceResultsView', 'LegendWorkbookPreviewView',
+                    'DefaultSymbolImagesView', 'TestApiKeyView', 'RadAIChatView'}:
+            return 'read'
+        if name in {'LegendSheetActivateView', 'LineListActivateView',
+                    'EquipmentListActivateView', 'InstrumentIndexActivateView',
+                    'LegendLookupAddView', 'LegendLookupEditView',
+                    'LegendLookupDeleteView'}:
+            return 'update'
+        return 'create'
     operation = getattr(view, 'action', '') or view.__class__.__name__
     if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'QuoteViewSet'):
         review_actions = {'review': 'read', 'review_bind': 'update', 'review_content': 'read',

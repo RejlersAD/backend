@@ -15,6 +15,7 @@ EXTRACT_TAG_HARD_LIMIT_S = 3600        # 60 min — SIGKILL
 EXTRACT_TAG_RESULT_TTL_S = 14400       # 4 hours in Redis
 
 EXTRACT_INSTRUMENT_CACHE_KEY_FMT = 'pidv2_extract_instrument:{job_id}'
+EXTRACT_INSTRUMENT_OWNER_KEY_FMT = 'pidv2_extract_instrument_owner:{job_id}'
 EXTRACT_EQUIPMENT_CACHE_KEY_FMT  = 'pidv2_extract_equipment:{job_id}'
 
 
@@ -50,6 +51,9 @@ def run_extract_instrument_tags_task(
     from .views import _persist_token_usage  # local import to avoid app-load cycles
 
     cache_key = EXTRACT_INSTRUMENT_CACHE_KEY_FMT.format(job_id=job_id)
+    if user_id is not None:
+        cache.set(EXTRACT_INSTRUMENT_OWNER_KEY_FMT.format(job_id=job_id),
+                  user_id, EXTRACT_TAG_RESULT_TTL_S)
     logger.info('[PIDV2InstrExtract] start job=%s file=%s provider=%s',
                 job_id, filename, provider)
     _set_progress(cache_key, 5, 'Initialising instrument vision extraction…')
