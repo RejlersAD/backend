@@ -681,3 +681,10 @@ from .ai_hub_models import (  # noqa: E402,F401
     AIAudit, AICredential, AIHubSettings, AIModel, AIProvider, AIRoute, AISyncRun,
 )
 from .shared_record_models import SharedRecordLinkCommand  # noqa: E402,F401
+from .project_models import (  # noqa: E402,F401
+    ProjectAIInstructions, IntelligenceConversation, IntelligenceMessage, ProjectKnowledgeSource,
+)
+from .ai_workspace_models import (  # noqa: E402,F401
+    AIWorkspace, AIWorkspaceMember, AIWorkspaceInstructions, AIWorkspaceDocument,
+    AIWorkspaceConversation, AIWorkspaceConversationShare, AIWorkspaceMessage,
+)

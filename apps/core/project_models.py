@@ -258,3 +258,87 @@ class ProjectMilestone(BaseModel):
 
     def __str__(self):
         return f"{self.project.code} - {self.name}"
+
+
+class ProjectAIInstructions(models.Model):
+    """Versioned project preferences for the RADAI Intelligence workspace."""
+
+    project = models.OneToOneField(Project, on_delete=models.CASCADE, related_name='ai_instructions')
+    instructions = models.TextField(blank=True, default='')
+    discipline_context = models.TextField(blank=True, default='')
+    engineering_references = models.TextField(blank=True, default='')
+    response_format = models.TextField(blank=True, default='')
+    terminology = models.TextField(blank=True, default='')
+    evidence_expectations = models.TextField(blank=True, default='')
+    review_requirements = models.TextField(blank=True, default='')
+    version = models.PositiveIntegerField(default=1)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_project_ai_instructions'
+
+
+class IntelligenceConversation(models.Model):
+    """Project-scoped transcript; provider credentials are never stored here."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='intelligence_conversations')
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='intelligence_conversations')
+    title = models.CharField(max_length=160, default='New conversation')
+    archived_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_intelligence_conversations'
+        indexes = [models.Index(fields=['project', 'owner', '-updated_at'])]
+
+
+class IntelligenceMessage(models.Model):
+    conversation = models.ForeignKey(IntelligenceConversation, on_delete=models.CASCADE, related_name='messages')
+    role = models.CharField(max_length=12, choices=[('user', 'User'), ('assistant', 'Assistant')])
+    content = models.TextField()
+    provider = models.CharField(max_length=30, blank=True, default='')
+    model = models.CharField(max_length=100, blank=True, default='')
+    sources = models.JSONField(default=list, blank=True)
+    instruction_version = models.PositiveIntegerField(default=0)
+    request_id = models.UUIDField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'core_intelligence_messages'
+        indexes = [models.Index(fields=['conversation', 'created_at'])]
+        constraints = [models.UniqueConstraint(fields=['conversation', 'request_id', 'role'],
+                                               condition=models.Q(request_id__isnull=False),
+                                               name='core_intelligence_message_request_role_uniq')]
+
+
+class ProjectKnowledgeSource(models.Model):
+    """Explicit project evidence referencing existing stored files or live CRS revisions."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='intelligence_knowledge')
+    project_document = models.ForeignKey('project_control.ProjectDocument', on_delete=models.PROTECT, null=True, blank=True)
+    crs_revision = models.ForeignKey('crs.CRSRevision', on_delete=models.PROTECT, null=True, blank=True)
+    status = models.CharField(max_length=20, default='pending', choices=[
+        ('pending', 'Pending'), ('processing', 'Processing'), ('ready', 'Ready'),
+        ('failed', 'Failed'), ('needs_review', 'Needs review'),
+    ])
+    extracted_pages = models.JSONField(default=list, blank=True)
+    error = models.CharField(max_length=300, blank=True, default='')
+    content_sha256 = models.CharField(max_length=64, blank=True, default='')
+    linked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_project_knowledge_sources'
+        constraints = [
+            models.CheckConstraint(check=(models.Q(project_document__isnull=False, crs_revision__isnull=True) |
+                                          models.Q(project_document__isnull=True, crs_revision__isnull=False)),
+                                   name='core_knowledge_one_source'),
+            models.UniqueConstraint(fields=['project', 'project_document'], condition=models.Q(project_document__isnull=False),
+                                    name='core_knowledge_unique_project_doc'),
+            models.UniqueConstraint(fields=['project', 'crs_revision'], condition=models.Q(crs_revision__isnull=False),
+                                    name='core_knowledge_unique_crs_rev'),
+        ]

@@ -121,6 +121,46 @@ class ProjectViewSet(viewsets.ModelViewSet):
                             status=status.HTTP_202_ACCEPTED)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=['get', 'put'], url_path='ai-instructions')
+    def ai_instructions(self, request, pk=None):
+        """Project-owned workspace preferences, separate from mutable project metadata."""
+        from rest_framework.exceptions import ValidationError
+        from .project_ai_instructions import require_read, payload, save
+        from .project_models import ProjectAIInstructions
+
+        project = self.get_object()
+        require_read(request.user, project)
+        if request.method == 'GET':
+            record = ProjectAIInstructions.objects.filter(project=project).first()
+            return Response(payload(project, record, request.user))
+        expected = request.data.get('expected_version')
+        if isinstance(expected, bool):
+            raise ValidationError({'expected_version': 'A nonnegative version is required.'})
+        try:
+            expected = int(expected)
+        except (TypeError, ValueError):
+            raise ValidationError({'expected_version': 'A nonnegative version is required.'})
+        if expected < 0:
+            raise ValidationError({'expected_version': 'A nonnegative version is required.'})
+        return Response(save(project=project, user=request.user,
+                             data=request.data, expected_version=expected))
+
+    @action(detail=True, methods=['get'], url_path='ai-activity')
+    def ai_activity(self, request, pk=None):
+        from .project_ai_instructions import require_read
+        from apps.rbac.models import AuditLog
+
+        project = self.get_object()
+        require_read(request.user, project)
+        events = AuditLog.objects.filter(
+            resource_type='ProjectAIInstructions', metadata__project_id=project.pk,
+        ).order_by('-timestamp')[:20]
+        return Response([{
+            'id': str(event.pk), 'action': event.action,
+            'actor': event.user_email, 'version': event.metadata.get('version'),
+            'timestamp': event.timestamp.isoformat(),
+        } for event in events])
+
     @transaction.atomic
     def update(self, request, *args, **kwargs):
         # Serialize scope edits with integrated-baseline capture and acceptance.

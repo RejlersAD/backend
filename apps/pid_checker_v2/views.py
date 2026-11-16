@@ -23,6 +23,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from .permissions import PidCheckerScopePermission, accessible_legends
 
 from .models import (
     PidCheckerV2Extraction,
@@ -239,7 +240,7 @@ def _resolve_active_legend(user, section: str) -> PidCheckerV2LegendSheet | None
     read-only view (multi-active support).
     """
     return _merged_legend(
-        PidCheckerV2LegendSheet.objects.filter(created_by=user, section=section, is_active=True)
+        accessible_legends(user).filter(section=section, is_active=True)
     )
 
 
@@ -290,8 +291,8 @@ def _resolve_legend_smart(user, section: str, legend_id=None, project=None):
     """
     if legend_id:
         obj = (
-            PidCheckerV2LegendSheet.objects
-            .filter(created_by=user, legend_id=legend_id)
+            accessible_legends(user)
+            .filter(legend_id=legend_id)
             .first()
         )
         if obj:
@@ -318,8 +319,8 @@ def _resolve_legend_smart(user, section: str, legend_id=None, project=None):
         return obj, obj.definition, obj.name, LEGEND_SOURCE_ACTIVE
 
     obj = (
-        PidCheckerV2LegendSheet.objects
-        .filter(created_by=user, section=section)
+        accessible_legends(user)
+        .filter(section=section)
         .order_by('-updated_at')
         .first()
     )
@@ -361,7 +362,7 @@ def _enrich_tags_with_legend(tag_dicts: list[dict], legend: PidCheckerV2LegendSh
 class ExtractLineTagsView(APIView):
     """POST a PDF, receive extracted line tags — and auto-save the run."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, *args, **kwargs):
@@ -484,7 +485,7 @@ class ExtractLineTagsView(APIView):
 class ExtractionListView(ListAPIView):
     """List the current user's extraction runs (most recent first)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     serializer_class = PidCheckerV2ExtractionListSerializer
     pagination_class = None
 
@@ -492,6 +493,7 @@ class ExtractionListView(ListAPIView):
         return (
             PidCheckerV2Extraction.objects
             .filter(created_by=self.request.user)
+            .filter(Q(project__isnull=True) | Q(project__created_by=self.request.user))
             .order_by('-created_at')[:HISTORY_PAGE_SIZE]
         )
 
@@ -499,12 +501,14 @@ class ExtractionListView(ListAPIView):
 class ExtractionDetailView(RetrieveAPIView):
     """Retrieve one extraction (with tags) or delete it."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     serializer_class = PidCheckerV2ExtractionDetailSerializer
     lookup_field = 'extraction_id'
 
     def get_queryset(self):
-        return PidCheckerV2Extraction.objects.filter(created_by=self.request.user)
+        return PidCheckerV2Extraction.objects.filter(created_by=self.request.user).filter(
+            Q(project__isnull=True) | Q(project__created_by=self.request.user)
+        )
 
     def delete(self, request, extraction_id, *args, **kwargs):
         obj = get_object_or_404(
@@ -512,6 +516,9 @@ class ExtractionDetailView(RetrieveAPIView):
             extraction_id=extraction_id,
             created_by=request.user,
         )
+        if hasattr(obj, 'engineering_evidence'):
+            from .services.technical_review import ReviewConflict
+            raise ReviewConflict('Linked engineering evidence cannot be deleted.')
         obj.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -521,10 +528,10 @@ class LegendSheetListCreateView(APIView):
     """GET → list current user's legends (optionally filter by ?section=).
        POST → create a legend."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request):
-        qs = PidCheckerV2LegendSheet.objects.filter(created_by=request.user)
+        qs = accessible_legends(request.user)
         section = request.query_params.get('section')
         if section:
             qs = qs.filter(section=section)
@@ -534,7 +541,7 @@ class LegendSheetListCreateView(APIView):
         if project is not None:
             qs = (
                 PidCheckerV2LegendSheet.objects
-                .filter(Q(created_by=request.user) | Q(project=project))
+                .filter(Q(created_by=request.user, project__isnull=True) | Q(project=project))
             )
             if section:
                 qs = qs.filter(section=section)
@@ -559,7 +566,7 @@ class LegendSheetListCreateView(APIView):
 class LegendSheetDetailView(APIView):
     """GET / PATCH / DELETE one legend."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def _get_obj(self, request, legend_id):
         return get_object_or_404(
@@ -596,7 +603,7 @@ class LegendSheetActivateView(APIView):
     deactivate all siblings and activate only this one.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, legend_id):
         obj = get_object_or_404(
@@ -632,7 +639,7 @@ class LegendLookupAddView(APIView):
     section, without resending the whole definition — backs the "+ Add to
     Legend" quick-add button on an unrecognised cross-check finding."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request):
         section = request.data.get('section')
@@ -643,9 +650,7 @@ class LegendLookupAddView(APIView):
                 {'error': 'section and code are required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        legend = PidCheckerV2LegendSheet.objects.filter(
-            created_by=request.user, section=section, is_active=True,
-        ).first()
+        legend = accessible_legends(request.user).filter(section=section, is_active=True).first()
         if not legend:
             return Response(
                 {'error': f'No active legend for section "{section}"'},
@@ -666,7 +671,7 @@ class LegendLookupEditView(APIView):
     """PUT → edit ONE lookup entry in the user's active legend for a
     section."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def put(self, request):
         section = request.data.get('section')
@@ -677,9 +682,7 @@ class LegendLookupEditView(APIView):
                 {'error': 'section and code are required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        legend = PidCheckerV2LegendSheet.objects.filter(
-            created_by=request.user, section=section, is_active=True,
-        ).first()
+        legend = accessible_legends(request.user).filter(section=section, is_active=True).first()
         if not legend:
             return Response(
                 {'error': f'No active legend for section "{section}"'},
@@ -700,7 +703,7 @@ class LegendLookupDeleteView(APIView):
     """DELETE → remove ONE lookup entry from the user's active legend for
     a section."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def delete(self, request):
         section = request.data.get('section')
@@ -710,9 +713,7 @@ class LegendLookupDeleteView(APIView):
                 {'error': 'section and code are required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        legend = PidCheckerV2LegendSheet.objects.filter(
-            created_by=request.user, section=section, is_active=True,
-        ).first()
+        legend = accessible_legends(request.user).filter(section=section, is_active=True).first()
         if legend:
             field = _legend_lookup_field(legend.definition)
             if field:
@@ -729,12 +730,10 @@ class LegendLookupSectionsView(APIView):
     add to" no matter what they typed. Filters the dropdown down to only
     sections a code can actually be added to."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request):
-        legends = PidCheckerV2LegendSheet.objects.filter(
-            created_by=request.user, is_active=True,
-        )
+        legends = accessible_legends(request.user).filter(is_active=True)
         sections = [l.section for l in legends if _legend_lookup_field(l.definition)]
         return Response({'sections': sections})
 
@@ -742,7 +741,7 @@ class LegendLookupSectionsView(APIView):
 class LegendSheetDefaultTemplateView(APIView):
     """GET → return the built-in default template for a section (?section=line_list)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request):
         section = request.query_params.get('section') or ''
@@ -768,7 +767,7 @@ class LegendWorkbookPreviewView(APIView):
     Multipart form:
         file  (required)  .xlsx / .xlsm workbook
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -798,7 +797,7 @@ class LegendWorkbookImportView(APIView):
         project_id  (required)  shared Project Organizer project UUID
         sheet_map   (required)  JSON object {sheet_name: section_id | null}
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -856,7 +855,7 @@ class LegendWorkbookExportView(APIView):
         legend_id   export a single legend
         project_id  include the project pack legends alongside the user's own
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request):
         from django.http import HttpResponse
@@ -891,7 +890,7 @@ class LegendPackUploadView(APIView):
         name        (optional)  pack display name
         use_ai      (optional)  default true — AI vision parse for scanned packs
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -937,7 +936,7 @@ class ValidateLineTagsView(APIView):
         vision_provider: 'openai'|'claude'   (required if use_ai=True)
         vision_api_key: str                   (required if use_ai=True)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request):
         tags = request.data.get('tags')
@@ -1104,7 +1103,7 @@ def _persist_line_list(user, filename: str, parsed: dict, owner_project_id=None)
 
 class LineListUploadView(APIView):
     """GET → list user's uploads.  POST → parse + save an xlsx."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def get(self, request):
@@ -1146,19 +1145,20 @@ class LineListUploadView(APIView):
 
 class LineListListView(APIView):
     """Deprecated — kept for backward compat; use LineListUploadView.get."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request):
         qs = (
             PidCheckerV2LineListUpload.objects
             .filter(created_by=request.user)
+            .filter(Q(owner_project__isnull=True) | Q(owner_project__created_by=request.user))
             .order_by('-created_at')[:HISTORY_PAGE_SIZE]
         )
         return Response(PidCheckerV2LineListListSerializer(qs, many=True).data)
 
 
 class LineListDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request, line_list_id):
         obj = get_object_or_404(
@@ -1178,7 +1178,7 @@ class LineListDetailView(APIView):
 
 class LineListActivateView(APIView):
     """POST → mark this line list active for the user (deactivate siblings)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, line_list_id):
         obj = get_object_or_404(
@@ -1204,7 +1204,7 @@ class CrossCheckView(APIView):
         use_ai:         bool        default False
         vision_provider, vision_api_key   (required if use_ai=True)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request):
         tags = request.data.get('tags')
@@ -1364,7 +1364,7 @@ def _persist_equipment_list(user, filename: str, parsed: dict, owner_project_id=
 
 class EquipmentListUploadView(APIView):
     """GET → list user's uploads.  POST → parse + save an xlsx."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def get(self, request):
@@ -1405,7 +1405,7 @@ class EquipmentListUploadView(APIView):
 
 
 class EquipmentListDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request, equipment_list_id):
         obj = get_object_or_404(
@@ -1425,7 +1425,7 @@ class EquipmentListDetailView(APIView):
 
 class EquipmentListActivateView(APIView):
     """POST → mark this equipment list active for the user (deactivate siblings)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, equipment_list_id):
         obj = get_object_or_404(
@@ -1456,7 +1456,7 @@ class EquipmentCrossCheckView(APIView):
                                           from Vision extractor; triggers
                                           attribute-level comparison.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request):
         tags = request.data.get('equipment_tags')
@@ -1638,7 +1638,7 @@ def _persist_instrument_index(user, filename: str, parsed: dict, owner_project_i
 
 
 class InstrumentIndexUploadView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def get(self, request):
@@ -1679,7 +1679,7 @@ class InstrumentIndexUploadView(APIView):
 
 
 class InstrumentIndexDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request, instrument_index_id):
         obj = get_object_or_404(
@@ -1698,7 +1698,7 @@ class InstrumentIndexDetailView(APIView):
 
 
 class InstrumentIndexActivateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, instrument_index_id):
         obj = get_object_or_404(
@@ -1728,7 +1728,7 @@ class InstrumentCrossCheckView(APIView):
                                              from Vision extractor; triggers
                                              attribute-level comparison.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request):
         tags = request.data.get('instrument_tags')
@@ -1831,7 +1831,7 @@ class InstrumentCrossCheckView(APIView):
 class ExtractEquipmentTagsFromPidView(APIView):
     """POST a P&ID PDF + BYOK, receive equipment tags found on the drawing."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, *args, **kwargs):
@@ -1890,7 +1890,7 @@ class ExtractEquipmentTagsFromPidView(APIView):
 class ExtractInstrumentTagsFromPidView(APIView):
     """POST a P&ID PDF + BYOK, receive instrument tags found on the drawing."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, *args, **kwargs):
@@ -1946,6 +1946,29 @@ class ExtractInstrumentTagsFromPidView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class ExtractInstrumentTagsStatusView(APIView):
+    """Read a cached instrument result only for the actor who owns the job."""
+
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
+
+    def get(self, request, job_id):
+        from django.core.cache import cache
+        from .tasks import (EXTRACT_INSTRUMENT_CACHE_KEY_FMT,
+                            EXTRACT_INSTRUMENT_OWNER_KEY_FMT)
+
+        try:
+            uuid.UUID(str(job_id))
+        except (TypeError, ValueError):
+            return Response({'error': 'job not found'}, status=status.HTTP_404_NOT_FOUND)
+        owner = cache.get(EXTRACT_INSTRUMENT_OWNER_KEY_FMT.format(job_id=job_id))
+        if owner is None or str(owner) != str(request.user.pk):
+            return Response({'error': 'job not found'}, status=status.HTTP_404_NOT_FOUND)
+        result = cache.get(EXTRACT_INSTRUMENT_CACHE_KEY_FMT.format(job_id=job_id))
+        if result is None:
+            return Response({'error': 'job not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(result)
+
+
 def _normalise_symbol_name(name):
     """Mirror the frontend's normaliseSymbolName so cross-project /
     cross-request symbol-name matching lines up regardless of stray
@@ -1953,30 +1976,8 @@ def _normalise_symbol_name(name):
     return re.sub(r'\s+', ' ', str(name or '')).strip().upper()
 
 
-def _get_symbol_images_with_fallback(project_id):
-    """Every legend symbol picture available to a project: its own
-    uploads, plus — for any (section, symbol_name) it hasn't uploaded
-    itself — whichever other project uploaded that symbol most recently,
-    used as a cross-project fallback.
-
-    Deliberately per-symbol rather than all-or-nothing (i.e. NOT "if this
-    project has zero uploads, use every other project's images") — a
-    project that already uploaded a few symbols of its own should still
-    get fallback coverage for the ones it hasn't uploaded yet, not lose
-    fallback entirely just because it has *some* pictures.
-
-    Uploads are still stored strictly per-project (see
-    SymbolImageUploadView) — this is the only place the "shared across all
-    projects, project's own copy wins" behaviour is applied, so a picture
-    uploaded once under any project becomes usable everywhere (including
-    by SymbolImagesListView for display and IdentifySymbolsView for Vision
-    reference) without needing to be re-uploaded or explicitly promoted.
-    Separate from the static-file default library (DefaultSymbolImagesView)
-    — that one covers a fresh server with an empty database; this one
-    covers "someone already uploaded this exact symbol somewhere".
-
-    Returns a list of LegendSymbolImage rows (own rows first).
-    """
+def _get_symbol_images_with_fallback(project_id, user):
+    """Own project images plus accessible fallback uploads, own rows first."""
     from .models import LegendSymbolImage
 
     own_rows = list(
@@ -1999,6 +2000,8 @@ def _get_symbol_images_with_fallback(project_id):
         .exclude(is_default=True)
         .order_by('-updated_at')
     )
+    if not user.is_superuser:
+        other_rows = other_rows.filter(project__created_by=user)
     for r in other_rows:
         key = (r.section, _normalise_symbol_name(r.symbol_name))
         if key in own_keys or key in seen_fallback_keys:
@@ -2013,7 +2016,7 @@ class SymbolImagesListView(APIView):
     """GET the legend symbol pictures available to a project. Four tiers,
     in priority order — each only fills gaps the previous one left:
       1. The project's own uploads.
-      2. Any OTHER project's upload of that same (section, symbol_name) —
+      2. An accessible project's upload for a missing (section, symbol_name) —
          see _get_symbol_images_with_fallback().
       3. The shared default library seeded into the DB (LegendSymbolImage,
          is_default=True, project=None) — see
@@ -2025,7 +2028,7 @@ class SymbolImagesListView(APIView):
          (re-)seeded into the DB.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request, *args, **kwargs):
         project_id = (request.query_params.get('project_id') or '').strip()
@@ -2033,7 +2036,7 @@ class SymbolImagesListView(APIView):
             return Response({'error': 'project_id is required'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        rows = _get_symbol_images_with_fallback(project_id)
+        rows = _get_symbol_images_with_fallback(project_id, request.user)
         images = [{
             'section': r.section,
             'symbol_name': r.symbol_name,
@@ -2073,7 +2076,7 @@ class DefaultSymbolImagesView(APIView):
     the pictures ship with the code.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, *args, **kwargs):
         from .services.default_symbol_images import get_default_symbol_image_url
@@ -2138,7 +2141,7 @@ class SymbolImageUploadView(APIView):
     regardless of the source image's size/aspect/background.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     ALLOWED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.svg')
@@ -2211,7 +2214,7 @@ class SymbolImageUploadView(APIView):
 class SymbolImageDeleteView(APIView):
     """DELETE the manually-uploaded image for one (project, section, symbol_name)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def delete(self, request, *args, **kwargs):
         project_id = (request.query_params.get('project_id') or '').strip()
@@ -2241,7 +2244,7 @@ class TestApiKeyView(APIView):
     the rest of BYOK Vision.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, *args, **kwargs):
         provider = (request.data.get('provider') or 'claude').lower()
@@ -2278,7 +2281,7 @@ class RadAIChatView(APIView):
       history    (array)          prior [{role, content}] turns for continuity
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, *args, **kwargs):
         from .services.radai_chat import (
@@ -2305,6 +2308,37 @@ class RadAIChatView(APIView):
         if not isinstance(history, list):
             history = []
 
+        project_instructions = None
+        instruction_version = 0
+        if context.get('page') == 'radai_intelligence':
+            from rest_framework.exceptions import PermissionDenied, ValidationError
+            from apps.core.project_models import Project, ProjectAIInstructions
+            from apps.planning_intelligence.access import can_access_enterprise_project
+            from apps.core.project_ai_instructions import FIELDS
+
+            selected = context.get('project')
+            if not isinstance(selected, dict):
+                raise ValidationError({'project': 'Select an accessible project.'})
+            try:
+                project_id = int(selected.get('id'))
+            except (TypeError, ValueError):
+                raise ValidationError({'project': 'Select an accessible project.'})
+            project = Project.objects.filter(pk=project_id, is_deleted=False).first()
+            if project is None or not can_access_enterprise_project(request.user, project):
+                raise PermissionDenied('Project access is required.')
+            # Workspace context comes from the server, never from client-supplied
+            # document, domain-prompt or action fields.
+            context = {'page': 'radai_intelligence', 'project': {
+                'id': project.pk, 'code': project.code, 'name': project.name,
+            }}
+            instruction_record = ProjectAIInstructions.objects.filter(project=project).first()
+            if instruction_record:
+                project_instructions = {
+                    field.replace('_', ' ').title(): getattr(instruction_record, field)
+                    for field in FIELDS
+                }
+                instruction_version = instruction_record.version
+
         try:
             result = answer_question(
                 question=question,
@@ -2313,6 +2347,7 @@ class RadAIChatView(APIView):
                 api_key=api_key,
                 history=history,
                 model=model,
+                project_instructions=project_instructions,
             )
         except ChatConfigurationError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2325,6 +2360,8 @@ class RadAIChatView(APIView):
             safe = detail[:300] if detail else 'The assistant could not answer right now. Check your AI key and try again.'
             return Response({'error': safe}, status=status.HTTP_502_BAD_GATEWAY)
 
+        if context.get('page') == 'radai_intelligence':
+            result['project_instruction_version'] = instruction_version
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -2346,7 +2383,7 @@ class RadAIChatArchiveView(APIView):
       document   (object)         uploaded document meta (optional)
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, *args, **kwargs):
         import json as _json
@@ -2381,7 +2418,10 @@ class RadAIChatArchiveView(APIView):
             f"{session_id}.json",
             _json.dumps(transcript, default=str, ensure_ascii=False).encode('utf-8'),
             content_type='application/json',
-            project=transcript['project'],
+            # `project` is a free-text UI label, not a verified project ID.
+            # Keep it in a per-user namespace so a forged label/session cannot
+            # overwrite another actor's project archive key.
+            project=f"user-{request.user.pk}-{transcript['project']}",
             metadata={'session-id': session_id, 'page': transcript['page']},
         )
         return Response({'archived': bool(arc.get('success')),
@@ -2401,7 +2441,7 @@ class IdentifySymbolsView(APIView):
     verification; nothing here is auto-saved or treated as ground truth.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, *args, **kwargs):
@@ -2429,7 +2469,7 @@ class IdentifySymbolsView(APIView):
         # sharing behaviour as SymbolImagesListView (see
         # _get_symbol_images_with_fallback), so a brand-new project can
         # still run Identify Symbols using pictures uploaded elsewhere.
-        symbol_image_rows = _get_symbol_images_with_fallback(str(pid_document.project.project_id))
+        symbol_image_rows = _get_symbol_images_with_fallback(str(pid_document.project.project_id), request.user)
         if not symbol_image_rows:
             return Response({'error': 'no reference symbol pictures have been uploaded to any '
                                        'project yet. Legend Sheets → pick a section → Reference '
@@ -2514,7 +2554,7 @@ USAGE_LIST_MAX_PAGE_SIZE = 1000
 
 class UsageLogListView(ListAPIView):
     """List the current user's token usage rows (most recent first)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
     serializer_class = PidCheckerV2UsageLogSerializer
 
     def get_queryset(self):
@@ -2545,7 +2585,7 @@ class UsageLogListView(ListAPIView):
 
 class UsageSummaryView(APIView):
     """Aggregate usage for the current user (optionally within a date range)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def get(self, request):
         qs = PidCheckerV2UsageLog.objects.filter(created_by=request.user)
@@ -2604,7 +2644,7 @@ class CrossReferenceResultsView(APIView):
     reported in the same coarse region (e.g. both "top-left") come back as
     a CONFIRMED high-confidence pair.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request, *args, **kwargs):
         line_tags = request.data.get('line_tags')
@@ -2625,7 +2665,7 @@ class CrossReferenceResultsView(APIView):
 
 class TokenReportView(APIView):
     """Generate a consolidated token report (Excel or PDF)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PidCheckerScopePermission]
 
     def post(self, request):
         fmt = (request.data.get('format') or 'xlsx').lower()

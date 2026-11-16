@@ -83,6 +83,28 @@ def first_value(result, key):
 
 
 class TenderEvaluatorFactExtractionTests(SimpleTestCase):
+    def test_response_due_time_remains_in_cited_submission_fact(self):
+        compiled = compiled_with('Scope of Work:\nAssess the structures.\n'
+                                 'Deliverables:\nIssue passports.\n'
+                                 'Response Due: 12-Nov-2026 10:58 AM GST')
+        result = build_tender_evaluation(FakeDeal(), compiled)
+        self.assertTrue(any('10:58 AM GST' in row['value']
+                            for row in result['opportunity_summary']['project_facts']['submission_details']))
+        compiled['evidence_debug'][0]['chunks'] = [('Email body', 'Due date: 11/12/2026 10:58 AM')]
+        result = build_tender_evaluation(FakeDeal(), compiled)
+        self.assertTrue(any('10:58 AM' in row['value']
+                            for row in result['opportunity_summary']['project_facts']['submission_details']))
+
+    def test_relative_email_submission_time_uses_dated_header(self):
+        compiled = compiled_with('Date: Thu, 12 Nov 2026 08:49:26 +0000\n'
+                                 'Submission is at 10.58 AM today.')
+        compiled['evidence_debug'][0]['source_name'] = 'Incoming.eml'
+        compiled['evidence_debug'][0]['chunks'] = [('Email body',
+            'Date: Thu, 12 Nov 2026 08:49:26 +0000\nSubmission is at 10.58 AM today.')]
+        result = build_tender_evaluation(FakeDeal(), compiled)
+        self.assertEqual(result['opportunity_summary']['project_facts']['submission_details'][0]['relative_date'],
+                         '2026-11-12')
+
     def test_rejlers_dashboard_uses_requested_weights_without_invented_fit(self):
         review = build_rejlers_review([{'source_id': 'sow', 'source_name': 'SOW.pdf',
                                         'chunks': [('Page 3', 'Digital transformation for ADNOC in the UAE.\n'
@@ -115,7 +137,9 @@ class TenderEvaluatorFactExtractionTests(SimpleTestCase):
         self.assertEqual(summary['project_name'], 'ADNOC L&S ERP Transformation')
         self.assertEqual(summary['client_name'], 'ADNOC Logistics & Services')
         self.assertEqual(summary['submission_date'], '2026-12-15')
-        self.assertEqual(result['decision']['recommendation'], 'INSUFFICIENT_EVIDENCE')
+        self.assertEqual(result['decision']['recommendation'], 'CONDITIONAL_GO')
+        self.assertIn('capability', result['decision']['decision_rationale'].lower())
+        self.assertEqual(result['source_inventory'][0]['purpose'], 'Scope of Work')
         self.assertIn('Abu Dhabi', summary['location'])
 
         facts = summary['project_facts']

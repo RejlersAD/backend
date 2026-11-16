@@ -1,5 +1,7 @@
 """Source-first tender facts; no internal capability or commercial assumptions."""
 import re
+from email.utils import parsedate_to_datetime
+from zoneinfo import ZoneInfo
 
 from ..email_extraction import DATE_TOKEN, _date_value
 
@@ -13,7 +15,7 @@ LABELS = {
     'timeline': r'timeline|project\s+(?:schedule|duration)|implementation\s+schedule|milestones?',
     'locations': r'locations?|delivery\s+locations?|geographic\s+scope',
     'key_risks': r'(?:key|project|technical|delivery|commercial)?\s*risks?',
-    'submission_details': r'(?:bid\s+)?submission\s+(?:deadline|date)|tender\s+closing\s+date',
+    'submission_details': r'(?:bid\s+)?submission\s+(?:deadline|date|due)|tender\s+closing\s+(?:date|time)|response\s+due|bid\s+closing|due\s+date',
     'contract_type': r'contract\s+type',
     'commercial_model': r'(?:commercial|pricing)\s+model',
     'payment_terms': r'payment\s+terms',
@@ -48,7 +50,7 @@ def source_facts(diagnostics):
     facts = {key: [] for key in LABELS}
     seen = set()
 
-    def add(key, value, quote, source, location, *, direct=True):
+    def add(key, value, quote, source, location, *, direct=True, relative_date=''):
         value = value.strip()
         if key in {'project_name', 'client'}:
             value = re.sub(r'^[*•\-\s]+', '', value).strip()
@@ -65,9 +67,23 @@ def source_facts(diagnostics):
             'confidence': 86, 'confidence_method': 'deterministic_source_rule',
             'matched_rule': 'section_or_label' if direct else 'content_pattern',
             'status': 'likely', 'verification_status': 'Source Confirmed',
+            'relative_date': relative_date,
         })
 
     for source in diagnostics:
+        source_day = ''
+        if str(source.get('source_name', '')).lower().endswith('.eml'):
+            first_chunk = (source.get('chunks') or [None])[0]
+            source_text = (first_chunk.get('text', '') if isinstance(first_chunk, dict)
+                           else first_chunk[1] if isinstance(first_chunk, (list, tuple)) and len(first_chunk) == 2 else '')
+            header = re.search(r'^Date:\s*(.+)$', str(source_text), re.I | re.M)
+            if header:
+                try:
+                    sent = parsedate_to_datetime(header[1].strip())
+                    if sent.tzinfo:
+                        source_day = sent.astimezone(ZoneInfo('Asia/Dubai')).date().isoformat()
+                except (TypeError, ValueError, OverflowError):
+                    pass
         section = None
         for chunk in source.get('chunks', []):
             location, text = ((chunk.get('location', ''), chunk.get('text', '')) if isinstance(chunk, dict)
@@ -112,6 +128,9 @@ def source_facts(diagnostics):
                     add('commercial_model', 'T&M', raw.strip(), source, location)
                 if re.search(r'\b(?:purely\s+)?milestone[ -]based\s+payments?\b|\b(?:purely\s+)?milestone\s+payments?\b', line, re.I):
                     add('payment_terms', 'Milestone payments', raw.strip(), source, location)
+                if source_day and re.search(r'\bsubmission\s+is\s+at\s+\d{1,2}[.:][0-5]\d\s*(?:AM|PM)\s+today\b', line, re.I):
+                    add('submission_details', line, raw.strip(), source, location,
+                        direct=False, relative_date=source_day)
                 if section:
                     if re.match(r'^\d+(?:\.\d+)*[.)]?\s+[A-Z]', line) or re.fullmatch(r'[A-Z][A-Za-z /&-]{2,70}:', line):
                         flush()

@@ -48,6 +48,23 @@ def build_tender_evaluation(deal, compiled):
     } for item in rows[:40]]
 
     project_facts = source_facts(diagnostics)
+    def document_purpose(name):
+        label = name.casefold()
+        for pattern, purpose in ((r'\brfp\b|request.for.proposal', 'RFP'),
+                                 (r'\brfq\b|request.for.quotation', 'RFQ'),
+                                 (r'\bitt\b|invitation.to.tender', 'ITT'),
+                                 (r'\bsow\b|scope.of.work|statement.of.work', 'Scope of Work'),
+                                 (r'\bdrawing', 'Drawings'),
+                                 (r'\btechnical|specification', 'Technical specification'),
+                                 (r'\bcommercial|pricing|boq|price.schedule', 'Commercial document')):
+            if re.search(pattern, label):
+                return purpose
+        return 'Purpose to verify'
+    source_inventory = [{'name': row.get('source_name', ''),
+                         'purpose': document_purpose(row.get('source_name', '')),
+                         'status': row.get('parse_status', 'unknown'),
+                         'reason': row.get('parse_reason', '')}
+                        for row in diagnostics]
     for key, claims in (('submission_details', [item for item in evidence if item.get('kind') == 'deadline']),
                         ('key_risks', risks)):
         if not project_facts[key]:
@@ -87,11 +104,20 @@ def build_tender_evaluation(deal, compiled):
     ]
     if deadline == 'Unknown':
         conditions.append('Confirm the submission deadline and any clarification cut-off with the client.')
-    recommendation = 'insufficient_evidence'
+    # A conditional pursuit is possible from a substantive tender basis, while
+    # delivery capability and commercial approval remain explicit conditions.
+    # Never turn an unreadable file or a CRM title alone into a positive signal.
+    has_scope = bool(project_facts['scope'])
+    has_delivery = bool(project_facts['deliverables'] or submission)
+    source_conflict = any(row.get('contradictory') for row in field_diagnostics)
+    recommendation = ('conditional_go' if has_scope and has_delivery and not source_conflict
+                      else 'insufficient_evidence')
     rationale = (
-        f'The tender identifies {len(submission)} submission/compliance obligations, {len(milestones)} milestones, '
-        f'and {len(risks)} explicit risks for {project}. An internal recommendation needs approved capability, '
-        'resource capacity and commercial evidence. The tender facts alone do not establish those inputs.'
+        'The cited tender scope and required output support a conditional pursuit review. '
+        'Confirm Rejlers capability, named capacity, qualification compliance, schedule and commercial terms before committing.'
+        if recommendation == 'conditional_go' else
+        'The available source evidence does not yet establish a clear scope and required output, or contains a material conflict. '
+        'Resolve the source gap before making a pursuit recommendation.'
     )
 
     # Client clarification follows fact resolution, never an internal assessment
@@ -106,7 +132,7 @@ def build_tender_evaluation(deal, compiled):
 
     dimension_rows = {key: {'score': None, 'assessment': 'Unknown', 'evidence': []}
                       for key in WEIGHTS}
-    letter_type = 'eoi' if recommendation == 'go' else 'regret_expertise' if recommendation == 'no_go' else 'none'
+    letter_type = 'none'  # An advisory assessment never authorizes correspondence.
     letter_data = {
         'letter_type': letter_type, 'project_name': project, 'client_name': client,
         'client_reference': field_value('tender_reference'), 'rfq_reference': field_value('rfq_reference'),
@@ -134,6 +160,7 @@ def build_tender_evaluation(deal, compiled):
             'field_diagnostics': field_diagnostics,
         },
         'evidence_coverage': source_coverage(diagnostics),
+        'source_inventory': source_inventory,
         'rejlers_review': build_rejlers_review(diagnostics),
         'scope_analysis': {
             'required_services': [item.get('text', '') for item in submission[:30]],

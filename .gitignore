@@ -170,6 +170,7 @@ test_*.py
 !config/test_runner.py
 # Runtime detection helper is imported by startup and migration receivers.
 !apps/core/test_runtime.py
+!apps/core/tests/test_ai_workspace_http.py
 # Application regression suites and their isolated test app configuration.
 !apps/sales/tests/test_mailbox_search.py
 !apps/core/tests/test_shared_records.py
@@ -211,6 +212,10 @@ test_*.py
 !apps/portfolio/tests/*.py
 !apps/rbac/tests/test_organization_catalog_data.py
 *.md
+!docs/PID_CHECKER_V2_SECURITY.md
+!docs/PID_ENGINEERING_EVIDENCE.md
+!docs/PID_TECHNICAL_REVIEW.md
+!docs/PID_CONTROLLED_ISSUE.md
 *.txt
 # Keep the office-agent runbook, but never track its credential file.
 !scripts/TIMESHEET_MIRROR_SETUP.md

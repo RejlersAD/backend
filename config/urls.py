@@ -170,6 +170,7 @@ urlpatterns = [
     path('api/v1/electrical-comparison/', include('apps.electrical_comparison.urls')),  # Electrical Comparison — P&ID electrical tag vs Equipment/Load List comparison
     path('api/v1/marketing-analytics/', include('apps.marketing_analytics.urls')),  # GA4 Real-time
     path('api/v1/projects/', include('apps.core.project_urls')),
+    path('api/v1/ai-workspaces/', include('apps.core.ai_workspace_urls')),
     path('api/v1/project-control/', include('apps.project_control.urls')),  # Project Management — cost dashboards, estimates, documents
     path('api/v1/file-replica/', include('apps.file_replica.urls')),
     path('api/v1/planning-intelligence/', include('apps.planning_intelligence.urls')),  # RADAI Project Planning Application

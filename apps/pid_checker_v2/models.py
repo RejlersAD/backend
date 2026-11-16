@@ -135,6 +135,148 @@ class PidCheckerV2Extraction(models.Model):
         return f'{self.filename} â€” {self.tag_count} tags ({self.mode})'
 
 
+class CRSChainProjectBinding(models.Model):
+    """Explicit canonical identity for an existing CRS revision chain."""
+
+    chain = models.OneToOneField('crs.CRSRevisionChain', on_delete=models.PROTECT,
+                                 related_name='canonical_project_binding')
+    project = models.ForeignKey('core.Project', on_delete=models.PROTECT,
+                                related_name='pid_crs_chain_bindings')
+    linked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class PidLineListProvenance(models.Model):
+    """One master Line List's explicit canonical project and exact CRS source revision."""
+
+    line_list = models.OneToOneField('pid_checker_v2.PidCheckerV2LineListUpload',
+                                     on_delete=models.CASCADE, related_name='provenance')
+    project = models.ForeignKey('core.Project', on_delete=models.PROTECT,
+                                related_name='pid_line_list_provenances')
+    revision = models.ForeignKey('crs.CRSRevision', on_delete=models.PROTECT,
+                                 related_name='pid_line_list_provenances')
+    linked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                  related_name='pid_line_list_provenances_created')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                   related_name='pid_line_list_provenances_updated')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class PidEngineeringEvidenceLink(models.Model):
+    """One extraction's explicit project, EPC work, and exact CRS revision."""
+
+    extraction = models.OneToOneField(PidCheckerV2Extraction, on_delete=models.CASCADE,
+                                      related_name='engineering_evidence')
+    project = models.ForeignKey('core.Project', on_delete=models.PROTECT,
+                                related_name='pid_engineering_evidence')
+    work_item = models.ForeignKey('project_control.EPCWorkItem', on_delete=models.PROTECT,
+                                  related_name='pid_evidence_links')
+    revision = models.ForeignKey('crs.CRSRevision', on_delete=models.PROTECT,
+                                 related_name='pid_evidence_links')
+    linked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                  related_name='pid_evidence_links_created')
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                   related_name='pid_evidence_links_updated')
+    review_state = models.CharField(max_length=20, default='draft', choices=[
+        ('draft', 'Draft'), ('validated', 'Validated'),
+        ('under_review', 'Under Review'), ('approved', 'Approved'),
+        ('returned', 'Returned'), ('rejected', 'Rejected'),
+    ])
+    line_list = models.ForeignKey('pid_checker_v2.PidCheckerV2LineListUpload',
+                                  on_delete=models.PROTECT, null=True, blank=True)
+    validation_snapshot = models.JSONField(default=dict, blank=True)
+    evidence_fingerprint = models.CharField(max_length=64, blank=True, default='')
+    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                 null=True, blank=True, related_name='pid_technical_reviews')
+    submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                     null=True, blank=True, related_name='pid_technical_submissions')
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                                   null=True, blank=True, related_name='pid_technical_decisions')
+    decided_at = models.DateTimeField(null=True, blank=True)
+    review_round = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class PidEvidenceReviewEvent(models.Model):
+    """Append-only review comments and state changes for one evidence link."""
+
+    link = models.ForeignKey(PidEngineeringEvidenceLink, on_delete=models.PROTECT,
+                             related_name='review_events')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    action = models.CharField(max_length=20)
+    review_round = models.PositiveIntegerField()
+    note = models.TextField(blank=True)
+    fingerprint = models.CharField(max_length=64, blank=True, default='')
+    details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class IssuedEvidenceQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValueError('Issued P&ID evidence is immutable.')
+
+    def delete(self):
+        raise ValueError('Issued P&ID evidence cannot be deleted.')
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValueError('Issued P&ID evidence is immutable.')
+
+
+class PidControlledIssue(models.Model):
+    """Immutable issue snapshot for one approved technical review round."""
+
+    objects = IssuedEvidenceQuerySet.as_manager()
+    link = models.OneToOneField(PidEngineeringEvidenceLink, on_delete=models.PROTECT,
+                                related_name='controlled_issue')
+    project = models.ForeignKey('core.Project', on_delete=models.PROTECT)
+    work_item = models.ForeignKey('project_control.EPCWorkItem', on_delete=models.PROTECT)
+    revision = models.ForeignKey('crs.CRSRevision', on_delete=models.PROTECT)
+    work_event = models.OneToOneField('project_control.EPCWorkEvent', on_delete=models.PROTECT)
+    issue_number = models.CharField(max_length=100)
+    issue_revision = models.CharField(max_length=50)
+    evidence_fingerprint = models.CharField(max_length=64)
+    source_bytes = models.BinaryField()
+    source_manifest = models.JSONField(default=dict)
+    issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['project', 'issue_number'],
+                                                name='pid_issue_project_number_uniq')]
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError('Issued P&ID evidence is immutable.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Issued P&ID evidence cannot be deleted.')
+
+
+class PidIssueProgressEvidence(models.Model):
+    """One Project Control intake record; earning remains with EPC acceptance."""
+
+    objects = IssuedEvidenceQuerySet.as_manager()
+    issue = models.OneToOneField(PidControlledIssue, on_delete=models.PROTECT,
+                                 related_name='progress_evidence')
+    work_event = models.OneToOneField('project_control.EPCWorkEvent', on_delete=models.PROTECT)
+    reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    reported_at = models.DateTimeField(auto_now_add=True)
+    note = models.TextField()
+    snapshot = models.JSONField(default=dict)
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError('Issued P&ID evidence is immutable.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Issued P&ID evidence cannot be deleted.')
+
+
 class PidCheckerV2LineTag(models.Model):
     """A single line tag extracted during a run."""
 
