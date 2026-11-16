@@ -20,6 +20,8 @@ from apps.core.ai_workspace_models import (AIWorkspace, AIWorkspaceConversation,
                                            AIWorkspaceDocument, AIWorkspaceMessage, AIWorkspaceAttachment)
 from apps.core.project_models import Project
 from apps.core.ai_hub_models import AIModel, AIProvider, AIRoute
+from apps.core.ai_credential_models import AIProviderConfiguration, AIProviderCredential
+from apps.core.ai_credentials import encrypt_api_key
 from apps.core.ai_hub_runtime import local_ollama_base_url
 from apps.rbac.ai_champion_models import AIUsageLog
 from apps.rbac.models import (AuditLog, Organization, Module, Permission, Role,
@@ -61,6 +63,79 @@ class AIWorkspaceHTTPTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
         return client
+
+    @override_settings(AI_CREDENTIAL_ENCRYPTION_KEY='synthetic-test-encryption-material')
+    def test_managed_claude_chat_uses_selected_key_and_project_evidence(self):
+        key = AIProviderCredential.objects.create(
+            provider='anthropic', label='Selected Claude',
+            encrypted_key=encrypt_api_key('synthetic-anthropic-test-key'))
+        config = AIProviderConfiguration.objects.create(
+            provider='anthropic', enabled=True, selected_credential=key,
+            model='claude-sonnet-4-6')
+        owner = self.client_for(self.owner)
+        project_id = self.create()
+        base = f'/api/v1/ai-workspaces/{project_id}/'
+        uploaded = owner.post(f'{base}knowledge/', {'file': self.pdf()}, format='multipart')
+        self.assertEqual(uploaded.status_code, 201, uploaded.data)
+        models = owner.get('/api/v1/ai-workspaces/models/')
+        self.assertIn({'provider': 'anthropic', 'model_id': 'claude-sonnet-4-6',
+                       'label': 'Claude (claude-sonnet-4-6)'}, models.data['models'])
+        conversation_id = owner.post(f'{base}conversations/', {}, format='json').data['id']
+        send_url = f'{base}conversations/{conversation_id}/send/'
+        request_id = str(uuid4())
+        payload = {'question': 'What material is specified for component P-101?', 'request_id': request_id,
+                   'provider': 'anthropic', 'model': 'claude-sonnet-4-6'}
+        with patch('apps.pid_checker_v2.services.radai_chat.answer_question', return_value={
+            'answer': 'ASTM A106 Grade B.', 'provider': 'claude', 'model': 'claude-sonnet-4-6',
+            'token_usage': {'input_tokens': 20, 'output_tokens': 6, 'cost_usd': '0.00015'},
+        }) as answer:
+            sent = owner.post(send_url, payload, format='json')
+            self.assertEqual(sent.status_code, 200, sent.data)
+            self.assertIn('ASTM A106', answer.call_args.kwargs['context']['document_excerpt'])
+            self.assertEqual(answer.call_args.kwargs['provider'], 'claude')
+            self.assertEqual(answer.call_args.kwargs['api_key'], 'synthetic-anthropic-test-key')
+            self.assertEqual(sent.data['conversation']['messages'][-1]['provider'], 'claude')
+            self.assertTrue(sent.data['conversation']['messages'][-1]['sources'])
+            self.assertTrue(owner.post(send_url, payload, format='json').data['idempotent_replay'])
+            answer.assert_called_once()
+        self.assertEqual(AIUsageLog.objects.filter(application='radai-intelligence',
+                                                    request_id=request_id).count(), 1)
+        attachment = owner.post(f'{base}conversations/{conversation_id}/attachments/',
+                                {'file': self.pdf()}, format='multipart')
+        self.assertEqual(attachment.status_code, 201, attachment.data)
+        with patch('apps.pid_checker_v2.services.radai_chat.answer_question', return_value={
+            'answer': 'The attachment specifies ASTM A106 Grade B.', 'provider': 'claude',
+            'model': 'claude-sonnet-4-6',
+            'token_usage': {'input_tokens': 20, 'output_tokens': 8, 'cost_usd': '0.00018'},
+        }) as answer:
+            attached = owner.post(send_url, {
+                **payload, 'request_id': str(uuid4()),
+                'attachment_ids': [attachment.data['id']],
+            }, format='json')
+            self.assertEqual(attached.status_code, 200, attached.data)
+            self.assertIn('ASTM A106', answer.call_args.kwargs['context']['document_excerpt'])
+            self.assertTrue(any(source['source_id'] == f"attachment-{attachment.data['id']}"
+                                for source in attached.data['conversation']['messages'][-1]['sources']))
+        general_base = '/api/v1/ai-workspaces/general/conversations/'
+        general_id = owner.post(general_base, {}, format='json').data['id']
+        with patch('apps.pid_checker_v2.services.radai_chat.answer_question', return_value={
+            'answer': 'A general answer.', 'provider': 'claude', 'model': 'claude-sonnet-4-6',
+            'token_usage': {'input_tokens': 5, 'output_tokens': 5, 'cost_usd': '0.00009'},
+        }) as answer:
+            general = owner.post(f'{general_base}{general_id}/send/', {
+                **payload, 'question': 'Hello', 'request_id': str(uuid4()),
+            }, format='json')
+            self.assertEqual(general.status_code, 200, general.data)
+            self.assertTrue(answer.call_args.kwargs['general_chat'])
+            self.assertEqual(general.data['conversation']['messages'][-1]['sources'], [])
+        config.enabled = False
+        config.save(update_fields=['enabled'])
+        self.assertNotIn('anthropic', [row['provider'] for row in owner.get(
+            '/api/v1/ai-workspaces/models/').data['models']])
+        with patch('apps.pid_checker_v2.services.radai_chat.answer_question') as forbidden:
+            denied = owner.post(send_url, {**payload, 'request_id': str(uuid4())}, format='json')
+            self.assertEqual(denied.status_code, 400)
+            forbidden.assert_not_called()
 
     def create(self):
         response = self.client_for(self.owner).post('/api/v1/ai-workspaces/', {
