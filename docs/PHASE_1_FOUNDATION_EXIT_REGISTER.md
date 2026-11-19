@@ -1,6 +1,6 @@
 # Sales Phase 1 Foundation Exit Register
 
-- **Version:** 0.2
+- **Version:** 0.3
 - **Baseline date:** 19 November 2026
 - **Phase status:** OPEN
 **Closure rule:** Every exit criterion is `VERIFIED`, there are zero open P1
@@ -17,7 +17,7 @@ scenario. Status is `NOT MET` until the listed evidence is available.
 
 | ID | Exit criterion | Required evidence | Status |
 |---|---|---|---|
-| F1-01 | This register is tracked and committed, with criteria and evidence requirements defined. | Initial register committed as `70ec0fd0`; current evidence and status are recorded in version 0.2. | VERIFIED |
+| F1-01 | This register is tracked and committed, with criteria and evidence requirements defined. | Initial register committed as `70ec0fd0`; current evidence and status are recorded through version 0.3. | VERIFIED |
 | F1-02 | Sales migrations 0038, 0039 and 0040 are tracked, dependency-ordered and applied successfully to a disposable PostgreSQL database. | Migration graph, exact PostgreSQL version/commands, `showmigrations`/schema evidence, and no model drift. | VERIFIED |
 | F1-03 | The agreed Sales test suite has zero failures and zero errors. | Full command, test count, skips with reasons, failure-free output; previously known failures are triaged and resolved or explicitly excluded by approved scope. | NOT MET |
 | F1-04 | Canonical Sales API and feature contracts are current and stored in an authoritative tracked location. | Tracked route/payload map and linked detail contracts committed as `3e26630c`; current limitations and superseded policy boundaries are identified. | VERIFIED |
@@ -31,7 +31,7 @@ scenario. Status is `NOT MET` until the listed evidence is available.
 | ID | Blocker | Current evidence | Closure action |
 |---|---|---|---|
 | P1-01 | **Closed:** migrations were untracked and PostgreSQL application was unverified. | Migrations and model state committed as `2e4e65f5`; disposable PostgreSQL 15.18 reported successful `migrate sales`, 0038-0040 applied in `showmigrations`, inspected schema columns, and `makemigrations sales --check --dry-run` found no drift. | Retain the command/schema record. Separately investigate the non-fatal post-migrate seed errors for unrelated apps before a full-application migration certification. |
-| P1-02 | **Open:** agreed Sales suite is not clean. | Latest full run before the final test-fixture correction: 1,274 tests, 25 failures, 6 errors and 41 skips. Focused post-fix email/review and access suites pass; see Test Evidence. | Resolve the remaining code/test/environment failures, capture skip reasons, and rerun the full suite with zero failures/errors. |
+| P1-02 | **Open:** agreed Sales suite is not clean. | Supported Docker run: 1,291 tests, 24 failures, 4 errors and 41 skips. Focused post-fix email/review, access and PDF suites pass; see Test Evidence. | Resolve the remaining code/test failures, capture skip reasons, and rerun the full suite with zero failures/errors. |
 | P1-03 | **Closed:** canonical contracts were not in a tracked authoritative location. | Current contract and linked route details committed as `3e26630c`. | Maintain the tracked contract when routes, payloads, access rules or lifecycle behavior changes. |
 | P1-04 | **Open:** no passing seven-stage acceptance run exists. | The synthetic manual-intake test committed as `e18fa75c` passes, but it does not automate delivery planning/capability matching or exercise a complete requirement matrix, compliance gate, submission package or external transport. | Extend and run acceptance for the complete target with provenance, denial, stale-source, provider failure, approval and output cases. |
 | P1-05 | **Open:** no approved universal proposal template/evidence baseline is available. | `SALES_TECHNICAL_PROPOSAL_BASELINE.md` is version 0.1 DRAFT; owner, corporate template/evidence library, and approval record remain pending. | Obtain the authorized source material and named business/legal/technical approvers; keep unsupported claims as placeholders. |
@@ -39,27 +39,29 @@ scenario. Status is `NOT MET` until the listed evidence is available.
 
 ## Test evidence
 
-- Broad command: `python manage.py test apps.sales.tests --settings=config.settings_release_test --noinput --verbosity=1`.
-  Found 1,274 tests; 25 failures, 6 errors, 41 skips; exit code 1. This run
-  preceded the final fixture-only correction to the out-of-department registration
-  test; the affected 25-test subset then passed with one PostgreSQL-only skip.
+- Broad command in the supported runtime:
+  `docker exec radai_backend_local python manage.py test apps.sales.tests --settings=config.settings_release_test --noinput --verbosity=1`
+  Found 1,291 tests; 24 failures, 4 errors, 41 skips; exit code 1.
 - Remaining clusters: 17 Opportunity Analysis failures and 3 errors because the
   current pipeline is rules-only while the tracked feature contract and tests
   require the configured provider/durable refresh behavior; 5 classification
-  failures and 1 test error; 2 PDF/letters errors because Windows cannot load
-  WeasyPrint's `libgobject-2.0-0`; and failures in ZIP classification and
-  workspace deletion. The test error in the classification storage-change case
-  is an `override_settings` fixture cleanup error.
+  failures and 1 test error; and failures in ZIP classification and workspace
+  deletion. The classification storage-change error occurs because the rules-only
+  path never invokes the mocked provider callback, leaving its settings override
+  uninitialized.
 - Focused email analysis/customer matching/review suites: 216 passed after the
   Sales visibility-role correction.
 - Focused registration, proposal-readiness and bid-justification suites: 66
   passed after client-scope corrections.
 - Current Sales lifecycle and VF registration suites: 25 passed, 1
   PostgreSQL-only skip.
+- Sales PDF/letter suites in the supported Docker runtime: 65 passed. The native
+  WeasyPrint dependency missing from the Windows host is therefore not a blocker
+  to supported test execution.
 - Acceptance plus bid-decision/workflow governance tests: 39 passed.
-- Sales model drift check: `python manage.py makemigrations sales --check
-  --dry-run --settings=config.settings` reported no changes. The test settings
-  disable migrations, so they are not used for migration certification.
+- Sales model drift check: `python manage.py makemigrations sales --check --dry-run --settings=config.settings`
+  reported no changes. The test settings disable migrations, so they are not
+  used for migration certification.
 
 The broad suite still fails. Its 41 skip reasons were not fully emitted at
 verbosity 1; that evidence must be captured before F1-03 can be verified.
@@ -101,7 +103,7 @@ evidence; it does not transmit externally.
 | Risk | Status | Owner/approval evidence |
 |---|---|---|
 | Analysis and classification providers are not integrated to the behavior required by their tracked contracts/tests. | OPEN | Technical owner and provider behavior acceptance pending. |
-| Windows PDF tests cannot load the required native WeasyPrint library. | OPEN | Build/test environment owner and reproducible supported runtime pending. |
+| Windows host lacks the native WeasyPrint library. | CLOSED for verification | Supported Docker runtime is available; 65 PDF/letter tests passed there. Direct Windows execution is not used as release evidence. |
 | Full Sales suite has failures/errors and unclassified skips. | OPEN | Sales engineering/test owner pending. |
 | Proposal template/evidence sources and claims are not approved. | OPEN | Business owner, evidence-library owner, Legal/compliance and technical approver pending. |
 | Target acceptance lacks automated planning, compliance and submission-package/transport coverage. | OPEN | Sales, delivery/PMO, compliance and submission owners pending. |
@@ -150,3 +152,5 @@ provider, production-storage or deployment evidence.
   blockers.
 - **0.2 — 19 November 2026:** Recorded migration, contract, test and synthetic
   acceptance evidence; updated blocker/risk/approval status. Phase remains OPEN.
+- **0.3 — 19 November 2026:** Added supported Docker PDF and broad Sales test
+  results; updated remaining failures and risks. Phase remains OPEN.
