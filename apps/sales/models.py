@@ -9,7 +9,7 @@ from django.utils import timezone
 from apps.core.models import TimeStampedModel, SoftDeleteModel
 import uuid
 from decimal import Decimal
-from .workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload, OpportunityFolderTag, OpportunityDocument  # noqa: F401
+from .workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload, OpportunityFolderTag, OpportunityDocument, OpportunityZipImport  # noqa: F401
 from .classification_models import OpportunityDocumentClassification, OpportunityDocumentClassificationRun, OpportunityDocumentClassificationCommand  # noqa: F401
 from .proposal_review_models import ProposalReviewDocument, ProposalReviewComment, ProposalReviewCommand  # noqa: F401
 from .bid_preparation_models import BidPreparation, QuotePreparationRevision, BidPreparationCommand  # noqa: F401
@@ -598,17 +598,17 @@ class Quote(TimeStampedModel):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     
     # Financial
-    subtotal = models.DecimalField(max_digits=15, decimal_places=2)
+    subtotal = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     tax_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     discount_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    total_amount = models.DecimalField(max_digits=15, decimal_places=2)
-    estimated_cost = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    estimated_cost = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     expected_margin_percent = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=10, default='USD')
     
     # Timeline
     issue_date = models.DateField(default=timezone.now)
-    valid_until = models.DateField()
+    valid_until = models.DateField(null=True, blank=True)
     sent_date = models.DateTimeField(null=True, blank=True)
     viewed_date = models.DateTimeField(null=True, blank=True)
     response_date = models.DateTimeField(null=True, blank=True)
