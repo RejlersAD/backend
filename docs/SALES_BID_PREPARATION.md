@@ -86,8 +86,12 @@ visibility is required. Connecting also requires opportunity update and Planning
 create for a new workspace, or Planning update and writable selected project for
 attach. Apply requires proposal update. A known organization relationship and
 consistent canonical project/client scope are required; a connection grants no
-access. Active client/new-proposal eligibility and the recorded approved bid
-decision are enforced for new preparation work.
+access. Under the current Sales decision-access policy, client status, the
+`new_proposals_permitted` flag, prior Go decision and stage are not separate
+gates for this Planning connection. Connecting still requires current Sales
+entry and record/organization visibility plus the applicable Planning
+permissions and source visibility. This optional cross-module Planning flow is
+not a prerequisite for creating or drafting a Sales proposal.
 
 Actor-bound one-hour tokens bind the current opportunity, Quote and precise source
 fingerprint. Commands lock actor (NO KEY UPDATE), Deal (NO KEY UPDATE), Planning

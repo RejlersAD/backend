@@ -1,10 +1,21 @@
 # Proposal preparation opportunities
 
+Current policy follows the user's 17 November 2026 Sales decision-access
+direction, which supersedes the original October Go/stage/client-status
+eligibility rules recorded later in this historical brief. Any active user with
+current Sales entry access may prepare proposals on visible records. Proposal
+creation does not require a recorded Go decision, Proposal stage, notification
+acknowledgement, CEO go-ahead, a particular Client status, or
+`new_proposals_permitted`. Current identity, Sales access, record/client
+visibility, canonical Deal/Client consistency, required fields and audit
+integrity remain enforced. Commercial approval and external submission remain
+separate governed actions.
+
 `GET /api/v1/sales/quotes/preparation-opportunities/` provides canonical Deal
-summaries for recorded `bid`/`conditional_bid` decisions in stage `proposal`.
-The Proposal register uses these as derived **Proposal preparation** rows until
-an explicit Quote exists. Reading never creates Quotes, revisions, Planning
-workspaces, prices, validity dates or business audit events.
+summaries for visible opportunities. The Proposal register uses these as
+derived **Proposal preparation** rows until an explicit Quote exists. Reading
+never creates Quotes, revisions, Planning workspaces, prices, validity dates or
+business audit events.
 
 Query parameters: `page` (default 1), `page_size` (1-500, default 100), `search`
 (up to 200 characters), and `pending_only=true|false` (default false). Other
@@ -21,26 +32,22 @@ contains canonical Deal `id`, `deal_code`, `deal_name`, `client`, `client_name`,
 number, revision or financial figure. The browser follows pages rather than
 joining independently paginated Client and Deal lists.
 
-Current active identity and Proposal/Opportunity read grants govern the queue;
-existing Deal and known-organization scope remain. Client identity/name are null
-when the current actor lacks Client read or client-record access, and the
-inaccessible client-name field is excluded from search. Eligible scoped Go opportunities
-remain visible when creation is blocked, with an explicit capability reason.
+Current active identity, Sales entry and existing Deal/known-organization
+visibility govern the queue. Client identity/name are null when the current
+actor cannot access that client, and the inaccessible client-name field is
+excluded from search. The row reports current creation capability and a
+blocker when its canonical client is unavailable.
 Responses are `private, no-store`.
 
-The user explicitly permits **Active and Prospect** clients for preparation;
-`new_proposals_permitted` must still be true. Inactive/other restricted statuses
-remain blocked. The shared `client_permits_proposal_preparation` predicate covers
-candidate/create eligibility, editable Quote content and existing BidPreparation
-connect/import capabilities. It never changes Client status or commercial
-approval/submission rules.
+Client status and `new_proposals_permitted` do not independently block proposal
+preparation under the current Sales decision-access policy. The canonical client
+must still be visible and match the opportunity. Preparation never changes
+Client status or commercial approval/submission rules.
 
 `require_proposal_creation(actor, deal, client=None)` accepts objects or canonical
-IDs and returns fresh `(actor, deal, client)`. Require Proposal create, Opportunity
-read, Client read, current record/client scope and matching inherited client,
-recorded Go plus Proposal stage, and the client rule above. No negotiation-stage
-creation or stage-only substitute for an actual bid decision is introduced.
-The ordinary Quote serializer uses this helper. Quote creation locks Deal then
+IDs and returns fresh `(actor, deal, client)`. It validates current active
+identity, Sales entry, record/client scope and matching canonical client. The
+ordinary Quote serializer uses this helper. Quote creation locks Deal then
 its current Client and revalidates before committing Quote and its existing audit
 together. Explicit revisions remain supported; unique proposal numbers prevent
 duplicate same-number retries. This does not add general idempotent replay or a
@@ -56,7 +63,12 @@ in-memory timestamp, causing DRF to reject the create response when the actual
 form omitted this field. Existing PUT/PATCH issue dates remain unchanged when
 omitted; this API correction needs no schema migration.
 
-## Verification — 1 October 2026
+## Historical verification — 1 October 2026
+
+These results predate the 17 November Sales decision-access policy. The listed
+Go/stage and client-eligibility expectations, including the PostgreSQL
+restriction-contention scenario below, describe superseded behavior and are not
+acceptance criteria for current proposal preparation.
 
 The guarded SQLite API suites passed 63 tests in 22.266 seconds, exit 0:
 

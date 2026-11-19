@@ -3,21 +3,32 @@
 The read-only writer supports a new proposal before Quote creation and an
 existing editable Quote. It reuses the configured Sales AI provider and centrally
 managed credentials with proposal-specific trusted instructions. It does not
-create, save, approve, submit or revise any business record. There is no schema
-change, historical backfill, document ingestion or outbound correspondence.
+create, save, approve, submit or revise any business record. Explicitly selected
+current opportunity documents may supply bounded excerpts; this does not create
+a separate document-ingestion record or send outbound correspondence.
 
 ## HTTP contract
 
 - `POST /api/v1/sales/deals/{id}/proposal-draft-field/`: new-proposal context.
 - `POST /api/v1/sales/quotes/{id}/draft-field/`: exact saved-Quote context.
 
-Both accept only `{field, text, draft_fields?}` with no query parameters. `field`
-is `scope`, `deliverables`, `assumptions` or `exclusions`. Text defaults to empty;
+Both accept `{field, text, draft_fields?, source_file_ids?}` with no query
+parameters. `field` is `scope`, `deliverables`, `assumptions` or `exclusions`.
+Text defaults to empty;
 nonblank text requests a rewrite. Every supplied text is a string of at most
 4,000 characters. Optional `draft_fields` contains any of those four keys, with
 at most 16,000 characters across the target and its siblings. If it includes
 the target field, that value must match `text` exactly. The target is sent to
 the provider once. Unsupported fields and invalid control characters fail 400.
+
+`source_file_ids` is optional and accepts at most four distinct current upload
+UUIDs from the same opportunity's Tender or Correspondence folder. The source
+catalog is `GET /api/v1/sales/deals/{id}/proposal-draft-sources/?search=&offset=`.
+The writer accepts `.pdf`, `.docx`, `.txt`, `.md`, `.eml`, `.msg`, `.xlsx`,
+`.csv`, `.html` and `.htm` sources up to 32 MiB each. Unreadable, unsupported,
+stale or inaccessible selections fail rather than being silently ignored.
+Selected content is extracted into bounded, field-ranked excerpts and passed as
+untrusted evidence, not application instructions.
 
 The private, non-cacheable response is:
 
@@ -33,7 +44,10 @@ The private, non-cacheable response is:
     "opportunity_type_label": "RFQ",
     "opportunity_updated_at": "ISO timestamp",
     "quote_updated_at": null,
-    "evidence": [{"field": "opportunity_type", "excerpt": "RFQ"}]
+    "sources": [{"field": "source_1", "id": "UUID", "name": "Scope.pdf",
+                 "folder": "tender", "source_path": "Scope.pdf",
+                 "version": 1, "sha256": "content digest"}],
+    "evidence": [{"field": "source_1", "excerpt": "Exact source excerpt"}]
   }
 }
 ```
@@ -46,20 +60,19 @@ saves its output. It returns neither provider credentials nor raw provider data.
 
 ## Authority and freshness
 
-The route guard treats the endpoint as a read. The domain additionally requires
-fresh active-account Proposal read and create (new) or update (saved), plus
-Opportunity and Client read permissions and current record/organization scope.
-New drafting calls `proposal_readiness.require_proposal_creation` before and
-after generation: Proposal stage, recorded Bid/Conditional Bid, canonical
-accessible client and current proposal eligibility. Active and Prospect clients
-are permitted only while `new_proposals_permitted` remains true, as explicitly
-authorized for preparation. Other client statuses remain blocked.
+The route guard treats the endpoint as a read. The domain revalidates the
+current active identity, Sales entry, current record/organization scope and
+canonical visible client. This follows the 17 November 2026 Sales decision-access
+direction: proposal preparation does not require a prior Go decision, a
+particular stage, notification acknowledgement, CEO go-ahead, a Client status,
+or `new_proposals_permitted`. Current Sales policy and record visibility remain
+authoritative.
 
-Saved drafting requires the exact Quote to remain editable under
-`bid_preparation.require_editable`, its canonical client to match the Deal,
-recorded Bid/Conditional Bid and Proposal or Negotiation stage. Existing
-approval/submission evidence prevents generation for immutable revisions.
-These checks do not grant commercial approval or submission authority.
+Saved drafting additionally requires the exact Quote to remain editable under
+`bid_preparation.require_editable` and its canonical client to match the Deal.
+Existing approval/submission evidence prevents generation for immutable
+revisions. These checks do not grant commercial approval or submission
+authority. Selected documents also require current opportunity export access.
 
 Before returning output, the helper reloads permissions, scope, eligibility and
 source records, and compares the normalized source fingerprint and configured
@@ -76,15 +89,18 @@ editor PATCH rather than flattened merely by opening the form.
 
 ## Source and output boundaries
 
-Allowed facts are saved opportunity title/reference/type/scope/description,
+Allowed record facts are saved opportunity title/reference/type/scope/description,
 recorded bid decision/rationale, visible client name, location and service
 categories; saved Quote scope/deliverables/assumptions/exclusions; and separate
-unverified current browser draft strings. Missing or unknown Opportunity Type
-remains unknown. Narrative fields are bounded to 4,000 source characters.
+unverified current browser draft strings. Explicitly selected Tender or
+Correspondence files contribute only the bounded source excerpts described
+above. Missing or unknown Opportunity Type remains unknown. Narrative fields are
+bounded to 4,000 source characters.
 Legacy/Planning lists inspect at most 40 items and only string narrative keys
 (`document_number`, `title`, `name`, `description`, `text`, `content`,
-`discipline`). Arbitrary nested JSON, resource prices, costs, hours, approvals,
-private documents and commercial calculations are not added as structured facts.
+`discipline`). Arbitrary nested JSON, resource prices, costs, hours, approvals
+and commercial calculations are not added as structured facts. No unselected
+document content is sent to this writer.
 Authored narrative remains its author's text; it is not a verified commercial
 finding. Oversized historical narrative is an excerpt, not a complete review.
 
@@ -109,12 +125,15 @@ this helper, and no AI response is cached or retained as approval evidence.
 ## Verification
 
 Focused test module: `apps.sales.tests.test_proposal_draft_ai`. Its isolated
-guarded HTTP fixtures cover all four fields, fresh access/scope, Active/Prospect
-and blocked clients, open-Go and immutable-proposal eligibility, exact evidence,
-bounded structured sources, hostile text isolation, safe failures and changed
-source/provider/access. Tests assert no Deal, Quote or audit mutation and mock
-provider SDK access. No live client documents or live provider calls are used.
-Verified on 1 October 2026 from `backend/`, with the explicit local test
+guarded HTTP fixtures cover all four fields, current Sales access/scope, drafting
+without Go or stage/client-status restrictions, immutable proposals, exact
+evidence, selected document limits and freshness, hostile text isolation, safe
+failures and changed source/provider/access. Tests assert no Deal, Quote or audit
+mutation and mock provider SDK access. No live client documents or live
+provider calls are used.
+
+Historical verification — 1 October 2026, before the current November Sales
+decision-access policy. The focused run used the explicit local test
 environment documented in workspace `CONTRIBUTING.md`:
 
 ```powershell

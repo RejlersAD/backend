@@ -1,5 +1,13 @@
 # Opportunity to saved proposal draft — 19 October 2026
 
+Historical release record. Its 19 October policy and deployment conditions
+predate the 17 November Sales decision-access direction and are superseded for
+proposal preparation. Use the current tracked
+[Sales Opportunity-to-Proposal Contracts](SALES_OPPORTUNITY_TO_PROPOSAL_CONTRACTS.md)
+and current implementation for authorization and eligibility. This note remains
+evidence of its original local checks; it is not current deployment or
+PostgreSQL-migration evidence for migrations 0038-0040.
+
 ## Development push preparation
 
 The user requests publishing all pending backend/frontend changes after remote

@@ -1,5 +1,12 @@
 # Sales and shared records release - 1 October 2026
 
+Historical release note. The proposal-eligibility and temporary access behavior
+below records the 1 October state and is superseded by the 17 November Sales
+decision-access direction. The current tracked contract is
+[Sales Opportunity-to-Proposal Contracts](SALES_OPPORTUNITY_TO_PROPOSAL_CONTRACTS.md).
+Do not use the historical Go/client-status conditions in this note as current
+proposal-creation requirements.
+
 This release connects canonical clients, employees and projects with Sales,
 Planning, Finance and Project Control records; adds bid preparation and proposal
 review; and extends opportunity documents with preserved originals, revisions,
