@@ -112,8 +112,8 @@ The current local Sales migration dependency order is:
 Migration 0039 makes draft financial totals, estimated cost and validity
 nullable; the approval requirements above remain. Do not treat model
 autodetection as evidence that the migrations were applied. PostgreSQL migration
-validation and deployment status are recorded separately in the Phase 1 exit
-register.
+validation and deployment status are recorded separately in the
+[authoritative Phase 1 exit register](governance/PHASE_1_FOUNDATION_EXIT_REGISTER.md).
 
 ## Known feature boundaries
 
