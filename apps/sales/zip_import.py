@@ -4,6 +4,7 @@ import os
 import zipfile
 from datetime import timedelta
 from io import BytesIO
+from time import monotonic
 from uuid import uuid4
 
 from django.core.files import File
@@ -87,12 +88,30 @@ def _archive_error(job, stats, code, path):
     job.errors.append({'code': code, 'path': path})
 
 
+PROGRESS_SECONDS = 2
+
+
+def _progress(job, stats, force=False):
+    """Publish counts while extracting so the workspace can show live progress."""
+    now = monotonic()
+    if not force and now - stats.get('reported_at', 0) < PROGRESS_SECONDS:
+        return
+    stats['reported_at'] = now
+    OpportunityZipImport.objects.filter(pk=job.pk).update(
+        entries_total=stats['found'], processed=stats['processed'],
+        skipped=stats['skipped'], failed=stats['failed'], updated_at=timezone.now())
+
+
 def _extract(archive, job, workspace, actor, prefix, stats, storage, fingerprint, depth=0):
     if depth > MAX_NESTING_DEPTH:
         _archive_error(job, stats, 'nested_archive_limit', prefix)
         return
     infos = archive.infolist()
     stats['seen'] += len(infos)
+    # Nested ZIPs count as their files once opened, not as one entry.
+    stats['found'] += sum(1 for info in infos if not info.is_dir()
+                          and not info.filename.lower().endswith('.zip'))
+    _progress(job, stats, force=True)
     if stats['seen'] > MAX_ZIP_ENTRIES:
         _archive_error(job, stats, 'archive_entry_limit', prefix or archive.filename)
         return
@@ -137,6 +156,7 @@ def _extract(archive, job, workspace, actor, prefix, stats, storage, fingerprint
                 _archive_error(job, stats, 'invalid_nested_archive', full)
             continue
         _store_entry(storage, fingerprint, workspace, actor, job, name, full, data, stats)
+        _progress(job, stats)
 
 
 def run_zip_import(zip_import_id):
@@ -163,7 +183,7 @@ def run_zip_import(zip_import_id):
         job.lease_token = job.lease_until = None
         job.save()
         return {'processed': True, 'status': 'failed'}
-    stats = {'processed': 0, 'skipped': 0, 'failed': 0, 'seen': 0, 'bytes_read': 0}
+    stats = {'processed': 0, 'skipped': 0, 'failed': 0, 'seen': 0, 'bytes_read': 0, 'found': 0}
     try:
         storage, fingerprint = _storage()
         source = job.source_upload
@@ -194,6 +214,7 @@ def run_zip_import(zip_import_id):
         status, error_code = 'failed', 'zip_extraction_failed'
     job.status = status
     job.error_code = error_code
+    job.entries_total = max(stats['found'], processed + skipped + failed)
     job.processed = processed
     job.skipped = skipped
     job.failed = failed
