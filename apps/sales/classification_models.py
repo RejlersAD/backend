@@ -38,6 +38,8 @@ class OpportunityDocumentClassificationRun(models.Model):
     model = models.CharField(max_length=200, blank=True)
     extraction_code = models.CharField(max_length=50, blank=True)
     tags = models.JSONField(default=list)
+    tag_details = models.JSONField(default=list, blank=True)
+    content_profile = models.JSONField(default=dict, blank=True)
     confidence = models.PositiveSmallIntegerField(default=0, validators=[MaxValueValidator(100)])
     recommended_folder = models.CharField(max_length=30, blank=True)
     reasoning = models.CharField(max_length=500, blank=True)
