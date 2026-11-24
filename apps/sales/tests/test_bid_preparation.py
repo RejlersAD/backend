@@ -19,6 +19,7 @@ from apps.rbac.models import Organization, RolePermission, UserProfile
 from apps.rbac.route_guard import secure_module_endpoints
 from apps.sales.models import BidPreparation, BidPreparationCommand, Client, Deal, Quote, QuotePreparationRevision, OpportunityAuditEvent
 from apps.sales.views import DealViewSet, QuoteViewSet
+from apps.sales.opportunity_workspace import delete_opportunity_with_workspace_guard
 from .access_fixtures import grant_sales_actions
 
 
@@ -86,6 +87,21 @@ class PreparationFixtures:
 
 @override_settings(ROOT_URLCONF=__name__)
 class BidPreparationTests(PreparationFixtures, TestCase):
+    def test_opportunity_delete_removes_sales_preparation_but_retains_planning_source(self):
+        self.attach()
+        payload = self.apply_payload()
+        self.assertEqual(self.api.post(self.quote_url + 'prepare/', payload, format='json').status_code, 200)
+
+        delete_opportunity_with_workspace_guard(Deal.objects.get(pk=self.deal.pk))
+
+        self.assertFalse(Deal.objects.filter(pk=self.deal.pk).exists())
+        self.assertFalse(Quote.objects.filter(pk=self.quote.pk).exists())
+        self.assertFalse(BidPreparation.objects.exists())
+        self.assertFalse(BidPreparationCommand.objects.exists())
+        self.assertFalse(QuotePreparationRevision.objects.exists())
+        self.assertTrue(PlanningProject.objects.filter(pk=self.project.pk).exists())
+        self.assertTrue(TechnicalProposal.objects.filter(pk=self.technical.pk).exists())
+
     def test_read_does_not_create_and_known_source_create_has_no_delivery_project(self):
         state = self.api.get(self.bid_url)
         self.assertTrue(state.data['capabilities']['can_create'])

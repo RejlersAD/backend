@@ -9,7 +9,9 @@ from uuid import UUID
 
 from django.core import signing
 from django.core.files import File
-from django.db import transaction
+from datetime import timedelta
+
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -67,7 +69,10 @@ def _identity(attempt):
     return storage
 
 
-def _project(attempt, viewer=None):
+_UNSET = object()
+
+
+def _project(attempt, viewer=None, classification_state=_UNSET, classification_run=_UNSET):
     from .document_classification import classification_projection
     actor = attempt.actor
     actor_name = (actor.get_full_name() or actor.username) if actor else None
@@ -76,7 +81,10 @@ def _project(attempt, viewer=None):
             'modified_at': attempt.updated_at.isoformat(), 'created_by': actor_name, 'modified_by': actor_name,
             **version_projection(attempt, viewer), 'publication_level': None, 'is_folder': False, 'web_url': None,
             'storage_provider': 'radai', 'folder_key': attempt.folder_key,
-            'classification': classification_projection(attempt, viewer),
+            'classification': (classification_projection(attempt, viewer)
+                               if classification_state is _UNSET or classification_run is _UNSET
+                               else classification_projection(
+                                   attempt, viewer, state=classification_state, run=classification_run)),
             'storage_encoding': attempt.storage_encoding,
             'stored_size': attempt.stored_size if attempt.stored_size is not None else attempt.size}
 
@@ -162,12 +170,20 @@ def list_private_files(opportunity, actor, key, cursor=None):
     count = query.count()
     if after_id and after_updated:
         query = query.filter(Q(updated_at__lt=after_updated) | Q(updated_at=after_updated, pk__lt=after_id))
-    rows = list(query.select_related('actor', 'document__head_upload').order_by('-updated_at', '-pk')[:101])
+    rows = list(query.select_related(
+        'actor', 'workspace__opportunity__client', 'document__head_upload',
+    ).order_by('-updated_at', '-pk')[:101])
+    visible_rows = rows[:100]
+    states = {row.document_id: row for row in OpportunityDocumentClassification.objects.filter(
+        document_id__in=[row.document_id for row in visible_rows if row.document_id])}
+    runs = {row.upload_id: row for row in OpportunityDocumentClassificationRun.objects.filter(
+        upload_id__in=[row.pk for row in visible_rows])}
     next_cursor = signing.dumps({'opportunity': str(opportunity.pk), 'folder': key, 'provider': 'radai',
                                  'storage': fingerprint, 'after': str(rows[99].pk),
                                  'after_updated': rows[99].updated_at.isoformat()},
                                 salt='sales-private-attachments') if len(rows) > 100 else None
-    return {'folder_key': key, 'storage_provider': 'radai', 'files': [_project(row, actor) for row in rows[:100]],
+    return {'folder_key': key, 'storage_provider': 'radai', 'files': [
+        _project(row, actor, states.get(row.document_id), runs.get(row.pk)) for row in visible_rows],
             'item_count': count, 'next_cursor': next_cursor}
 
 
@@ -306,11 +322,16 @@ def download_private_file(opportunity, actor, key, file_id):
         raise
 
 
+def _compressible(uploaded):
+    """Archives are stored as uploaded: they barely shrink, and ZIP extraction needs fast random access."""
+    return not str(getattr(uploaded, 'name', '') or '').lower().endswith(('.zip', '.7z', '.rar', '.gz'))
+
+
 def upload_private_file(opportunity, actor, key, uploaded, request_id):
     require_access(actor, opportunity, 'create', 'update')
     _folder(key)
     try:
-        with prepare_upload(uploaded, compress=True) as prepared:
+        with prepare_upload(uploaded, compress=_compressible(uploaded)) as prepared:
             return _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared)
     except OSError:
         raise WorkspaceAPIError('private_storage_unavailable') from None
@@ -321,11 +342,29 @@ def upload_private_version(opportunity, actor, key, file_id, uploaded, request_i
     _identity(target)
     validate_version_input(expected_token, note)
     try:
-        with prepare_upload(uploaded, compress=True) as prepared:
+        with prepare_upload(uploaded, compress=_compressible(uploaded)) as prepared:
             return _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared,
                                     target=target, expected_token=expected_token, note=note)
     except OSError:
         raise WorkspaceAPIError('private_storage_unavailable') from None
+
+
+STALE_UPLOAD_AFTER = timedelta(hours=2)
+
+
+def _release_name(workspace, key, normalized_name):
+    """A deleted or failed first version keeps its row for audit but must not block the same
+    file name forever (the per-folder name constraint covers every status). An upload that
+    is still in progress keeps its reservation."""
+    blocking = OpportunityWorkspaceUpload.objects.select_for_update().filter(
+        workspace=workspace, provider='radai', folder_key=key, normalized_name=normalized_name,
+        version_number=1).exclude(status='ready').first()
+    if blocking is None:
+        return
+    if blocking.status == 'uploading' and blocking.updated_at > timezone.now() - STALE_UPLOAD_AFTER:
+        raise WorkspaceAPIError('upload_in_progress', 409)
+    blocking.normalized_name = hashlib.sha256(f'{normalized_name}:released:{blocking.pk}'.encode()).hexdigest()
+    blocking.save(update_fields=['normalized_name', 'updated_at'])
 
 
 def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *, target=None, expected_token='', note=''):
@@ -391,6 +430,8 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
                                                                          normalized_name=normalized_name, version_number=1,
                                                                          status='ready').exists():
                 raise WorkspaceAPIError('name_conflict', 409)
+            if not target:
+                _release_name(workspace, key, normalized_name)
             mime = str(getattr(uploaded, 'content_type', '') or '')
             attempt = reserve_version(document, target, actor, uploaded, request_id, prepared, fingerprint,
                                       normalized_name, expected_token, note) if target else OpportunityWorkspaceUpload(workspace=workspace, request_id=request_id, actor=actor,
@@ -401,7 +442,11 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
                 mime_type='')
             attempt.mime_type = mime if re.fullmatch(r'[A-Za-z0-9!#$&^_.+\-/]{1,255}', mime) else ''
             attempt.storage_name = _name(attempt)
-            attempt.save()
+            try:
+                with transaction.atomic():
+                    attempt.save()
+            except IntegrityError:
+                raise WorkspaceAPIError('name_conflict', 409) from None
             if document:
                 document.pending_upload = attempt
                 document.save(update_fields=['pending_upload'])

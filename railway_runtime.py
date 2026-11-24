@@ -44,6 +44,15 @@ def runtime_commands(environ: Mapping[str, str]) -> list[tuple[str, list[str]]]:
             f"--max-tasks-per-child={value('CELERY_MAX_TASKS_PER_CHILD', '100')}",
             '--without-heartbeat', '--without-mingle',
         ]))
+    # Scheduled dispatchers (ZIP imports, document tagging, analyses, proposal builds and the
+    # rest of CELERY_BEAT_SCHEDULE) run only where a Beat process exists. Enable on exactly
+    # one replica, as local Docker runs one celery_beat_local container.
+    if environ.get('CELERY_BEAT_ENABLED') == 'true':
+        commands.append(('celery-beat', [
+            'celery', '-A', 'config', 'beat',
+            f"--loglevel={value('CELERY_LOG_LEVEL', 'info')}",
+            '--schedule', value('CELERY_BEAT_SCHEDULE_FILE', '/tmp/celerybeat-schedule'),
+        ]))
     if environ.get('FINANCE_SHAREPOINT_SYNC_ENABLED', '').strip().lower() in {
         'true', '1', 'yes', 'on',
     }:

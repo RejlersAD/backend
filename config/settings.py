@@ -730,6 +730,15 @@ SALES_WORKSPACE_ROOT_PATH = config('SALES_WORKSPACE_ROOT_PATH', default='')
 # Zero removes the Sales application cap; ingress, time and storage limits remain.
 SALES_WORKSPACE_MAX_UPLOAD_BYTES = config('SALES_WORKSPACE_MAX_UPLOAD_BYTES', default=0, cast=int)
 SALES_WORKSPACE_MAX_DOWNLOAD_BYTES = config('SALES_WORKSPACE_MAX_DOWNLOAD_BYTES', default=0, cast=int)
+# Technical proposal builder (DEC-TP-001): 'legacy' keeps the 16-section composer;
+# 'standard' builds the company-standard binder with backend/proposal_engine.
+SALES_PROPOSAL_ENGINE = config('SALES_PROPOSAL_ENGINE', default='standard')  # DEC-TP-001; 'legacy' keeps the previous builder
+SALES_PROPOSAL_STANDARD_CONFIG = config('SALES_PROPOSAL_STANDARD_CONFIG', default='')  # '' = bundled standard
+SALES_PROPOSAL_CONVERTER = config('SALES_PROPOSAL_CONVERTER', default='auto')  # auto | office | libreoffice
+# Per-file limit inside imported ZIPs; 0 keeps the built-in 32 MiB default.
+SALES_ZIP_MAX_ENTRY_BYTES = config('SALES_ZIP_MAX_ENTRY_BYTES', default=0, cast=int)
+# Total extracted size of one ZIP import; 0 keeps the built-in 512 MiB default.
+SALES_ZIP_MAX_TOTAL_BYTES = config('SALES_ZIP_MAX_TOTAL_BYTES', default=0, cast=int)
 SALES_ATTACHMENT_ROOT = config('SALES_ATTACHMENT_ROOT', default='')
 SALES_MAILBOX_SYNC_INTERVAL_SECONDS = config('SALES_MAILBOX_SYNC_INTERVAL_SECONDS', default=60, cast=int)
 SALES_MAILBOX_SYNC_MAX_STEPS = config('SALES_MAILBOX_SYNC_MAX_STEPS', default=30, cast=int)
@@ -1264,6 +1273,14 @@ CELERY_BEAT_SCHEDULE['sales-document-classifications'] = {
 CELERY_BEAT_SCHEDULE['sales-opportunity-analyses'] = {
     'task': 'apps.sales.tasks.dispatch_opportunity_analyses',
     'schedule': 15.0, 'options': {'expires': 15},
+}
+CELERY_BEAT_SCHEDULE['sales-opportunity-zip-imports'] = {
+    'task': 'apps.sales.tasks.dispatch_opportunity_zip_imports',
+    'schedule': 30.0, 'options': {'expires': 30},
+}
+CELERY_BEAT_SCHEDULE['sales-proposal-builds'] = {
+    'task': 'apps.sales.tasks.dispatch_proposal_builds',
+    'schedule': 30.0, 'options': {'expires': 30},
 }
 
 # ==============================================================================

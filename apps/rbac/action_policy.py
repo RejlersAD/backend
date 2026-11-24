@@ -291,11 +291,20 @@ def operation_action(request, view):
         if operation in review_actions:
             # PDF bytes additionally require the source opportunity export grant.
             return review_actions[operation]
+        # Technical proposal workspace commands. Each service call also requires proposal
+        # read+update (`_quote(write=True)`) and opportunity workspace access.
+        workspace_actions = {'technical_proposal_workspace_generate': 'update',
+                             'technical_proposal_workspace_regenerate_section': 'update',
+                             'technical_proposal_workspace_review': 'update',
+                             'technical_proposal_workspace_plan': 'read',
+                             'technical_proposal_workspace_job': 'read'}
+        if operation in workspace_actions:
+            return workspace_actions[operation]
     if (view.__class__.__module__, view.__class__.__name__) == ('apps.sales.views', 'DealViewSet'):
         if operation == 'ceo_decision':
-            # CEO identity and lifecycle eligibility are rechecked by the
-            # locked Sales command; this endpoint is an approval operation.
-            return 'approve'
+            # Any user with current Sales View access may record this decision;
+            # the command rechecks current visibility and lifecycle state.
+            return 'read'
         if operation in {'opportunity_analysis', 'opportunity_analysis_sources'}:
             return 'export'
         if operation in {'bid_decision_justification', 'proposal_draft_field'}:
@@ -308,7 +317,7 @@ def operation_action(request, view):
                 return 'read'
         if operation in {'prepare_letter', 'list_letters', 'send_letter'}:
             return 'read'
-        storage_actions = {'workspace': 'read', 'workspace_files': 'read',
+        storage_actions = {'workspace': 'read', 'workspace_files': 'read', 'workspace_zip_imports': 'read',
                            'workspace_file': 'read', 'workspace_versions': 'read', 'workspace_download': 'export',
                            'workspace_setup': 'update', 'workspace_upload': 'create', 'workspace_upload_version': 'create',
                            'workspace_folder_tag': 'update',
