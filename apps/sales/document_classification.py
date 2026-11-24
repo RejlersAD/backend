@@ -44,13 +44,25 @@ def _identity(upload):
 
 
 def queue_classification(upload, actor):
-    """Call within readiness/head/audit transaction; performs no broker/provider I/O."""
+    """Call within readiness/head/audit transaction. Broker I/O happens only after commit;
+    the durable run stays due for the Beat dispatcher if that dispatch fails."""
     if upload.provider != 'radai' or upload.status != 'ready' or not upload.document_id:
         raise ValueError('Classification requires a ready, canonical private upload.')
-    return Run.objects.get_or_create(upload=upload, defaults={
+    run, created = Run.objects.get_or_create(upload=upload, defaults={
         'requested_by': actor, 'source_sha256': upload.sha256, 'source_identity': _identity(upload),
         'next_attempt_at': timezone.now(),
-    })[0]
+    })
+    if created:
+        transaction.on_commit(lambda run_id=run.pk: _dispatch_classification(run_id))
+    return run
+
+
+def _dispatch_classification(run_id):
+    try:
+        from .tasks import classify_opportunity_document
+        classify_opportunity_document.delay(str(run_id))
+    except Exception:
+        pass
 
 
 _UNSET = object()

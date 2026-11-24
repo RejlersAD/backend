@@ -312,7 +312,7 @@ def operation_action(request, view):
                 return 'read'
         if operation in {'prepare_letter', 'list_letters', 'send_letter'}:
             return 'read'
-        storage_actions = {'workspace': 'read', 'workspace_files': 'read',
+        storage_actions = {'workspace': 'read', 'workspace_files': 'read', 'workspace_zip_imports': 'read',
                            'workspace_file': 'read', 'workspace_versions': 'read', 'workspace_download': 'export',
                            'workspace_setup': 'update', 'workspace_upload': 'create', 'workspace_upload_version': 'create',
                            'workspace_folder_tag': 'update',

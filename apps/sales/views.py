@@ -831,6 +831,21 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         response['X-Content-Type-Options'] = 'nosniff'
         return response
 
+    @action(detail=True, methods=['get'], url_path=r'workspace/zip-imports')
+    def workspace_zip_imports(self, request, pk=None):
+        """Latest ZIP extraction jobs, so users can see queued, skipped and failed imports."""
+        from .opportunity_workspace import require_access
+        opportunity = self.get_object()
+        require_access(request.user, opportunity)
+        rows = opportunity.zip_imports.select_related('source_upload').order_by('-created_at')[:20]
+        return Response({'imports': [{
+            'id': str(row.pk), 'folder_key': row.folder_key, 'status': row.status,
+            'source_name': row.source_upload.name, 'entries_total': row.entries_total,
+            'processed': row.processed, 'skipped': row.skipped, 'failed': row.failed,
+            'error_code': row.error_code, 'errors': list(row.errors or [])[:50],
+            'created_at': row.created_at, 'updated_at': row.updated_at,
+        } for row in rows]}, headers={'Cache-Control': 'no-store, private'})
+
     @action(detail=True, methods=['post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/upload')
     def workspace_upload(self, request, pk=None, folder_key=None):
         from .opportunity_workspace import upload_workspace_file
@@ -847,12 +862,18 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             from .private_attachments import upload_private_file
             result, created = upload_private_file(opportunity, request.user, folder_key,
                                                   uploaded, request_id)
-            if created and str(getattr(uploaded, 'name', '') or '').lower().endswith('.zip'):
+            if str(getattr(uploaded, 'name', '') or '').lower().endswith('.zip'):
                 attempt = OpportunityWorkspaceUpload.objects.get(pk=result['id'][6:])
-                job = OpportunityZipImport.objects.create(
-                    opportunity=opportunity, source_upload=attempt,
-                    actor=request.user, folder_key=folder_key, status='queued',
-                )
+                job = OpportunityZipImport.objects.filter(source_upload=attempt).first()
+                if created or job is None:
+                    job, queued = OpportunityZipImport.objects.get_or_create(source_upload=attempt, defaults={
+                        'opportunity': opportunity, 'actor': request.user,
+                        'folder_key': folder_key, 'status': 'queued',
+                    })
+                    if queued:
+                        from .zip_import import dispatch_zip_import
+                        transaction.on_commit(lambda job_id=job.pk: dispatch_zip_import(job_id))
+                # A retried upload returns the same import it started.
                 result = {**result, 'zip_import': {'id': str(job.pk), 'status': job.status}}
             return Response(result, status=201 if created else 200)
         result, created = upload_workspace_file(opportunity, request.user, folder_key,
