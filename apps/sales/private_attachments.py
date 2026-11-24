@@ -9,7 +9,9 @@ from uuid import UUID
 
 from django.core import signing
 from django.core.files import File
-from django.db import transaction
+from datetime import timedelta
+
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -347,6 +349,24 @@ def upload_private_version(opportunity, actor, key, file_id, uploaded, request_i
         raise WorkspaceAPIError('private_storage_unavailable') from None
 
 
+STALE_UPLOAD_AFTER = timedelta(hours=2)
+
+
+def _release_name(workspace, key, normalized_name):
+    """A deleted or failed first version keeps its row for audit but must not block the same
+    file name forever (the per-folder name constraint covers every status). An upload that
+    is still in progress keeps its reservation."""
+    blocking = OpportunityWorkspaceUpload.objects.select_for_update().filter(
+        workspace=workspace, provider='radai', folder_key=key, normalized_name=normalized_name,
+        version_number=1).exclude(status='ready').first()
+    if blocking is None:
+        return
+    if blocking.status == 'uploading' and blocking.updated_at > timezone.now() - STALE_UPLOAD_AFTER:
+        raise WorkspaceAPIError('upload_in_progress', 409)
+    blocking.normalized_name = hashlib.sha256(f'{normalized_name}:released:{blocking.pk}'.encode()).hexdigest()
+    blocking.save(update_fields=['normalized_name', 'updated_at'])
+
+
 def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *, target=None, expected_token='', note=''):
     digest = prepared['sha256']
     _, fingerprint = _storage()
@@ -410,6 +430,8 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
                                                                          normalized_name=normalized_name, version_number=1,
                                                                          status='ready').exists():
                 raise WorkspaceAPIError('name_conflict', 409)
+            if not target:
+                _release_name(workspace, key, normalized_name)
             mime = str(getattr(uploaded, 'content_type', '') or '')
             attempt = reserve_version(document, target, actor, uploaded, request_id, prepared, fingerprint,
                                       normalized_name, expected_token, note) if target else OpportunityWorkspaceUpload(workspace=workspace, request_id=request_id, actor=actor,
@@ -420,7 +442,11 @@ def _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared, *,
                 mime_type='')
             attempt.mime_type = mime if re.fullmatch(r'[A-Za-z0-9!#$&^_.+\-/]{1,255}', mime) else ''
             attempt.storage_name = _name(attempt)
-            attempt.save()
+            try:
+                with transaction.atomic():
+                    attempt.save()
+            except IntegrityError:
+                raise WorkspaceAPIError('name_conflict', 409) from None
             if document:
                 document.pending_upload = attempt
                 document.save(update_fields=['pending_upload'])
