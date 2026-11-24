@@ -150,6 +150,8 @@ class DocumentClassificationTests(PrivateFixtures, TestCase):
                          ('technical_proposal', 'rule', 'not_needed'))
         intelligence = result['intelligence']
         self.assertEqual((intelligence['documentType'], intelligence['confidence']), ('Technical Proposal', 95))
+        self.assertEqual((result['custom_tag'], result['tag_origin'], intelligence['primaryTag']),
+                         ('Technical Proposal', 'automatic', 'Technical Proposal'))
         self.assertEqual(intelligence['folder'], upload.folder_key)
         self.assertIn(f'opportunity_id:{self.opportunity.pk}', intelligence['tags'])
         self.assertIn('client_name:', ' '.join(intelligence['tags']))
@@ -178,6 +180,8 @@ class DocumentClassificationTests(PrivateFixtures, TestCase):
         self.assertEqual((result['origin'], result['document_type'], result['ai_status']),
                          ('unclassified', 'unclassified', 'disabled'))
         self.assertEqual(result['extraction_code'], 'unsupported_format')
+        self.assertEqual((result['custom_tag'], result['intelligence']['primaryTag']),
+                         ('Proposal Document', 'Proposal Document'))
         self.provider.assert_not_called()
 
     def test_confirm_retry_and_stale_command_preserve_human_choice(self):

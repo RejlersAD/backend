@@ -68,6 +68,9 @@ class OpportunityWorkspaceUpload(models.Model):
     status = models.CharField(max_length=20, default='uploading')
     result = models.JSONField(default=dict)
     error_code = models.CharField(max_length=40, blank=True)
+    zip_import = models.ForeignKey('sales.OpportunityZipImport', null=True, blank=True,
+                                   on_delete=models.PROTECT, related_name='extracted_uploads')
+    source_path = models.CharField(max_length=1024, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -99,4 +102,26 @@ class OpportunityDocument(models.Model):
         constraints = [
             models.UniqueConstraint(fields=('workspace', 'folder_key', 'normalized_name'), name='sales_document_name_uq'),
         ]
+
+
+class OpportunityZipImport(models.Model):
+    """Durable import intent for a ZIP already saved in private RADAI storage."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    opportunity = models.ForeignKey('sales.Deal', on_delete=models.CASCADE, related_name='zip_imports')
+    source_upload = models.OneToOneField(OpportunityWorkspaceUpload, on_delete=models.PROTECT,
+                                         related_name='zip_import_job')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    folder_key = models.CharField(max_length=30, default='tender')
+    status = models.CharField(max_length=20, default='queued', db_index=True)
+    entries_total = models.PositiveIntegerField(default=0)
+    processed = models.PositiveIntegerField(default=0)
+    skipped = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    cursor = models.PositiveIntegerField(default=0)
+    errors = models.JSONField(default=list)
+    error_code = models.CharField(max_length=60, blank=True)
+    lease_token = models.UUIDField(null=True)
+    lease_until = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 

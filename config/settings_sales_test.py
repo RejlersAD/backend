@@ -12,6 +12,7 @@ INSTALLED_APPS = [  # noqa: F405
     'apps.payroll',
     'apps.payroll_engine',
     'apps.timesheet',
+    'apps.crs',
 ]
 ROOT_URLCONF = 'config.urls_sales_test'
 # Optional AI senders are deliberately absent from this isolated registry.

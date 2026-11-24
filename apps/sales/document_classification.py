@@ -17,7 +17,8 @@ from .classification_models import (OpportunityDocumentClassification as Classif
                                     OpportunityDocumentClassificationRun as Run,
                                     OpportunityDocumentClassificationCommand as Command)
 from .document_classification_content import (COLORS, LABELS, SOURCE_BYTES, extract_document_text,
-                                               intelligence_tags, rule_suggestion, type_catalog)
+                                               intelligence_tags, primary_custom_tag, rule_suggestion,
+                                               type_catalog)
 from .email_ai_provider import analyze_document_sources, email_ai_cache_identity, email_ai_configuration
 from .evidence.evidence_engine import build_unified_evidence, document_evidence_records
 from .opportunity_workspace import _actor, require_access, workspace_allowed
@@ -52,11 +53,16 @@ def queue_classification(upload, actor):
     })[0]
 
 
-def classification_projection(upload, actor=None):
+_UNSET = object()
+
+
+def classification_projection(upload, actor=None, state=_UNSET, run=_UNSET):
     from .document_versions import resolve_document
     document = resolve_document(upload)
-    state = Classification.objects.filter(document=document).first() if document else None
-    run = Run.objects.filter(upload=upload).first()
+    if state is _UNSET:
+        state = Classification.objects.filter(document=document).first() if document else None
+    if run is _UNSET:
+        run = Run.objects.filter(upload=upload).first()
     confirmed = state.confirmed_type if state else ''
     kind = confirmed or (run.suggested_type if run else 'unclassified')
     head = document is None or document.head_upload_id == upload.pk
@@ -69,6 +75,7 @@ def classification_projection(upload, actor=None):
     # worker extracts document content. Worker tags are added when available.
     immediate_tags, _, _, _ = intelligence_tags(upload.folder_key, upload.name, '', kind, [], 'unclassified')
     run_tags = list(dict.fromkeys(immediate_tags + (list(run.tags) if run else [])))
+    automatic_tag = primary_custom_tag(upload.folder_key, run_tags, kind) if run and run.status == 'completed' else ''
     global_tags = [
         f'opportunity_id:{opportunity.pk}', f'client_name:{client.company_name}', f'country:{client.country or ""}',
         'business_unit:', f'service_line:{",".join(opportunity.service_categories or [])}',
@@ -81,14 +88,15 @@ def classification_projection(upload, actor=None):
     ]))
     intelligence = {
         'documentType': LABELS.get(kind, LABELS['unclassified']), 'folder': upload.folder_key,
-        'tags': tags, 'confidence': run.confidence if run else 0,
+        'tags': tags, 'primaryTag': automatic_tag, 'confidence': run.confidence if run else 0,
         'recommendedFolder': run.recommended_folder if run else '',
         'reasoning': run.reasoning if run else 'Classification has not been processed.',
         'searchKeywords': [value for value in search_keywords if value],
     }
     return {
         'document_type': kind, 'label': LABELS.get(kind, LABELS['unclassified']),
-        'custom_tag': state.custom_tag if state else '',
+        'custom_tag': state.custom_tag if state else automatic_tag,
+        'tag_origin': 'manual' if state and state.updated_by_id else 'automatic',
         'color': COLORS.get(kind, 'slate'),
         'origin': 'confirmed' if confirmed else (run.origin if run else 'unclassified'),
         'status': run.status if run else 'not_requested', 'revision': state.revision if state else 0,
@@ -394,9 +402,18 @@ def run_document_classification(run_id):
         current.next_attempt_at = (timezone.now() + timedelta(seconds=60 * current.attempts)
                                    if current.status == 'failed' and current.attempts < MAX_ATTEMPTS else None)
         current.save()
+        automatic_tag = ''
+        if current.status == 'completed':
+            automatic_tag = primary_custom_tag(current_upload.folder_key, current.tags, current.suggested_type)
+            state = Classification.objects.select_for_update().filter(document=document).first()
+            if state is None:
+                Classification.objects.create(document=document, custom_tag=automatic_tag, revision=0)
+            elif not state.updated_by_id and state.custom_tag != automatic_tag:
+                state.custom_tag = automatic_tag
+                state.save(update_fields=('custom_tag', 'updated_at'))
         _audit(opportunity, actor, 'document_classification_finished', data={
             'upload_id': str(upload.pk), 'run_id': str(current.pk), 'status': current.status,
             'suggested_type': current.suggested_type, 'origin': current.origin,
-            'error_code': code, 'source_sha256': current.source_sha256,
+            'error_code': code, 'source_sha256': current.source_sha256, 'custom_tag': automatic_tag,
         })
     return {'processed': True, 'status': current.status}

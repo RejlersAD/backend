@@ -232,11 +232,16 @@ def record_bid_decision(opportunity, actor, decision, reason='', expected_decisi
 @transaction.atomic
 def record_ceo_decision(opportunity, actor, decision, reason=''):
     opportunity = Deal.objects.select_for_update().get(pk=opportunity.pk)
-    from apps.rbac.approval_eligibility import approval_access, has_business_position
-    if not approval_access(actor, 'sales_opportunities'):
-        raise PermissionDenied('Your current access does not permit CEO opportunity decisions.')
-    if not has_business_position(actor, ('ceo',)):
-        raise PermissionDenied('Only the CEO can record this lifecycle decision.')
+    from django.contrib.auth import get_user_model
+    from apps.rbac.action_policy import module_action_allowed
+    from .bid_preparation import visible_deals
+    current = get_user_model().objects.filter(
+        pk=getattr(actor, 'pk', None), is_active=True,
+    ).select_related('rbac_profile').first()
+    if not current or not module_action_allowed(current, 'sales_opportunities', 'read'):
+        raise PermissionDenied('Current Sales access is required to record this decision.')
+    if not visible_deals(current).filter(pk=opportunity.pk).exists():
+        raise PermissionDenied('This opportunity is outside your current Sales access.')
     if opportunity.stage != 'proposal' or opportunity.bid_decision not in {'bid', 'conditional_bid'}:
         raise ValidationError({'stage': 'CEO decision is available only after a Go or Conditional Go enters proposal stage.'})
     value = str(decision or '').strip().lower()
