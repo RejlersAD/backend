@@ -184,6 +184,7 @@ INSTALLED_APPS = [
     'apps.api',
     'apps.rbac',
     'apps.hr_core',  # HR Core - Unified Employee Master System (Phase 1: Parallel to existing tables)
+    'apps.enterprise',  # Team & Enterprise tiers: teams, org governance policy, audit (off unless ENABLE_ENTERPRISE_TEAMS=true)
     
     # Local apps - Features (Plugin Architecture)
     'apps.pid_analysis',
@@ -555,7 +556,8 @@ AUTHENTICATION_BACKENDS = [
 # REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # SimpleJWT + Team & Enterprise session idle timeout (no-op unless the org policy sets one)
+        'apps.enterprise.enforcement.PolicyJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -856,6 +858,7 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
     'cache-control',
     'pragma',
+    'x-radai-background',  # marks background polling so it doesn't count as user activity
 ]
 
 # Expose headers for downloads

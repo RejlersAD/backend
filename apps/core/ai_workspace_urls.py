@@ -7,14 +7,23 @@ from .ai_workspace_views import (AIWorkspaceListView, AIWorkspaceModelsView, AIW
     AIWorkspaceGeneralConversationView, AIWorkspaceGeneralConversationDetailView,
     AIWorkspaceGeneralConversationSendView,
     AIWorkspaceAttachmentUploadView, AIWorkspaceAttachmentDownloadView,
-    AIWorkspaceDocumentGenerationView, AIWorkspaceGeneratedDocumentDownloadView)
+    AIWorkspaceDocumentGenerationView, AIWorkspaceGeneratedDocumentDownloadView,
+    AIConnectorListView, AIConnectorSearchView, AIWorkspaceAttachmentConnectView, AIWorkspaceAddToProjectView,
+    AISkillListView, AISkillDetailView, AIRecentConversationsView)
 
 urlpatterns = [
     path('models/', AIWorkspaceModelsView.as_view()),
+    path('conversations/recent/', AIRecentConversationsView.as_view()),
+    path('skills/', AISkillListView.as_view()),
+    path('skills/<str:skill_id>/', AISkillDetailView.as_view()),
+    path('connectors/', AIConnectorListView.as_view()),
+    path('connectors/<slug:connector>/search/', AIConnectorSearchView.as_view()),
     path('general/conversations/', AIWorkspaceGeneralConversationView.as_view()),
     path('general/conversations/<int:conversation_id>/', AIWorkspaceGeneralConversationDetailView.as_view()),
     path('general/conversations/<int:conversation_id>/send/', AIWorkspaceGeneralConversationSendView.as_view()),
     path('general/conversations/<int:conversation_id>/attachments/', AIWorkspaceAttachmentUploadView.as_view()),
+    path('general/conversations/<int:conversation_id>/attachments/connect/', AIWorkspaceAttachmentConnectView.as_view()),
+    path('general/conversations/<int:conversation_id>/add-to-project/', AIWorkspaceAddToProjectView.as_view()),
     path('general/conversations/<int:conversation_id>/attachments/<int:attachment_id>/download/',
          AIWorkspaceAttachmentDownloadView.as_view()),
     path('general/conversations/<int:conversation_id>/documents/', AIWorkspaceDocumentGenerationView.as_view()),
@@ -35,6 +44,10 @@ urlpatterns = [
     path('<int:workspace_id>/conversations/<int:conversation_id>/send/', AIWorkspaceConversationSendView.as_view()),
     path('<int:workspace_id>/conversations/<int:conversation_id>/attachments/',
          AIWorkspaceAttachmentUploadView.as_view()),
+    path('<int:workspace_id>/conversations/<int:conversation_id>/attachments/connect/',
+         AIWorkspaceAttachmentConnectView.as_view()),
+    path('<int:workspace_id>/conversations/<int:conversation_id>/add-to-project/',
+         AIWorkspaceAddToProjectView.as_view()),
     path('<int:workspace_id>/conversations/<int:conversation_id>/attachments/<int:attachment_id>/download/',
          AIWorkspaceAttachmentDownloadView.as_view()),
 ]

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import FileResponse
 from django.utils import timezone
 from django.views.decorators.debug import sensitive_variables
@@ -39,7 +39,7 @@ INSTRUCTION_FIELDS = ('role_behavior', 'goals', 'response_format', 'terminology'
                       'standards', 'evidence_requirements', 'constraints')
 
 
-def chat_models():
+def chat_models(user=None, with_restriction=False):
     route = AIRoute.objects.filter(task_id='radai-intelligence-chat', data_policy='onprem').first()
     enabled = []
     if route and 'text' in (route.needs or []):
@@ -59,16 +59,30 @@ def chat_models():
         model_id = cloud['model'] or 'claude-sonnet-4-6'
         enabled.insert(0, {'provider': 'anthropic', 'model_id': model_id,
                            'label': f'Claude ({model_id})'})
-    return enabled
+    # Team & Enterprise: an organization's approved-model list narrows what members can use.
+    from apps.enterprise.enforcement import filter_chat_models
+    enabled, restricted = filter_chat_models(user, enabled)
+    return (enabled, restricted) if with_restriction else enabled
 
 
 class AIWorkspaceModelsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        models = chat_models()
-        return Response({'models': models,
-                         'default_model': models[0]['model_id'] if models else None})
+        models, restricted = chat_models(request.user, with_restriction=True)
+        return Response({'models': models, 'policy_restricted': restricted,
+                         'default_model': models[0]['model_id'] if models else None,
+                         'web_search': web_search_status(request.user, models)})
+
+
+def web_search_status(user, models):
+    """Whether this user may turn on web search, and why not when they can't."""
+    from apps.enterprise.enforcement import web_search_allowed
+    if not web_search_allowed(user):
+        return {'allowed': False, 'reason': 'Web search is off for your organization. An admin can turn it on in Teams & Governance.'}
+    if not any(row['provider'] == 'anthropic' for row in models):
+        return {'allowed': False, 'reason': 'Web search needs a Claude model, and none is configured.'}
+    return {'allowed': True, 'reason': '', 'providers': ['anthropic']}
 
 
 def role_for(user, workspace):
@@ -103,11 +117,42 @@ def audit_general(user, action, conversation_id, details=None):
 
 
 def project_payload(workspace, user):
-    return {'id': workspace.pk, 'name': workspace.name, 'description': workspace.description,
+    data = {'id': workspace.pk, 'name': workspace.name, 'description': workspace.description,
             'visibility': workspace.visibility, 'folder': workspace.folder,
             'enterprise_project_id': workspace.enterprise_project_id,
             'owner_id': workspace.owner_id, 'role': role_for(user, workspace),
             'created_at': workspace.created_at.isoformat(), 'updated_at': workspace.updated_at.isoformat()}
+    # Card statistics, present when the list view annotated them.
+    if hasattr(workspace, 'doc_count'):
+        last_chat = getattr(workspace, 'last_chat_at', None)
+        owner = workspace.owner
+        data.update({
+            'document_count': workspace.doc_count,
+            'member_count': workspace.member_count + 1,  # members plus the owner
+            'my_chat_count': workspace.chat_count,
+            'last_activity': max(filter(None, (workspace.updated_at, last_chat))).isoformat(),
+            'owner_name': (owner.get_full_name() or owner.email or '').strip(),
+        })
+    return data
+
+
+def project_list_stats(rows, user):
+    """Annotate counts with sub-queries (not joins) so they never multiply each other."""
+    from django.db.models import IntegerField, OuterRef, Subquery
+    from django.db.models.functions import Coalesce
+
+    def count(model, **filters):
+        sub = (model.objects.filter(workspace=OuterRef('pk'), **filters).order_by()
+               .values('workspace').annotate(n=Count('pk')).values('n'))
+        return Coalesce(Subquery(sub, output_field=IntegerField()), 0)
+
+    last_chat = (AIWorkspaceConversation.objects.filter(workspace=OuterRef('pk'), archived_at__isnull=True)
+                 .order_by('-updated_at').values('updated_at')[:1])
+    return rows.select_related('owner').annotate(
+        doc_count=count(AIWorkspaceDocument, archived_at__isnull=True),
+        member_count=count(AIWorkspaceMember),
+        chat_count=count(AIWorkspaceConversation, owner=user, archived_at__isnull=True),
+        last_chat_at=Subquery(last_chat))
 
 
 def text_field(data, field, limit):
@@ -133,6 +178,7 @@ class AIWorkspaceListView(APIView):
     def get(self, request):
         rows = AIWorkspace.objects.filter(archived_at__isnull=True).filter(
             Q(owner=request.user) | Q(visibility='shared', members__user=request.user)).distinct().order_by('-updated_at', '-pk')
+        rows = project_list_stats(rows, request.user)
         return Response({'results': [project_payload(row, request.user) for row in rows[:100]]})
 
     def post(self, request):
@@ -294,7 +340,7 @@ class AIWorkspaceActivityView(APIView):
     def get(self, request, workspace_id):
         workspace_for(request.user, workspace_id)
         rows = AuditLog.objects.filter(resource_type='AIWorkspace', metadata__ai_workspace_id=workspace_id).order_by('-created_at')[:50]
-        return Response([{'action': row.action, 'metadata': row.metadata,
+        return Response([{'action': row.action, 'metadata': row.metadata, 'user_email': row.user_email,
                           'created_at': row.created_at.isoformat()} for row in rows])
 
 
@@ -511,6 +557,62 @@ def conversation_payload(conversation, *, detail=False):
     return data
 
 
+DEFAULT_TITLES = ('', 'New conversation')
+
+
+def title_from_question(question, limit=60):
+    """A short chat title from the first question: one line, cut at a word boundary."""
+    text = re.sub(r'\s+', ' ', str(question or '')).strip().rstrip('?.!:')
+    if len(text) <= limit:
+        return text or 'New conversation'
+    cut = text[:limit].rsplit(' ', 1)[0] or text[:limit]
+    return cut.rstrip(',;:-') + '…'
+
+
+def recent_conversation_rows(user, term='', limit=50):
+    """The user's own open chats from general chat and every project they can still open, newest first."""
+    from django.db.models import Count, IntegerField, OuterRef, Subquery
+    from django.db.models.functions import Coalesce
+    from .ai_workspace_models import AIWorkspaceAttachment
+    open_projects = AIWorkspace.objects.filter(archived_at__isnull=True).filter(
+        Q(owner=user) | Q(members__user=user)).values('pk')
+    rows = AIWorkspaceConversation.objects.filter(owner=user, archived_at__isnull=True).filter(
+        Q(workspace__isnull=True) | Q(workspace__in=open_projects))
+    if term:
+        rows = rows.filter(Q(title__icontains=term) | Q(messages__content__icontains=term)).distinct()
+    last = AIWorkspaceMessage.objects.filter(conversation=OuterRef('pk')).order_by('-created_at', '-pk')
+
+    def count(model):
+        sub = model.objects.filter(conversation=OuterRef('pk')).order_by().values('conversation').annotate(n=Count('pk')).values('n')
+        return Coalesce(Subquery(sub, output_field=IntegerField()), 0)
+
+    return (rows.select_related('workspace')
+            .annotate(message_count=count(AIWorkspaceMessage), attachment_count=count(AIWorkspaceAttachment),
+                      last_content=Subquery(last.values('content')[:1]), last_role=Subquery(last.values('role')[:1]))
+            .order_by('-updated_at', '-pk')[:limit])
+
+
+def recent_payload(row):
+    preview = re.sub(r'\s+', ' ', row.last_content or '').strip()
+    return {**conversation_payload(row),
+            'project': {'id': row.workspace_id, 'name': row.workspace.name} if row.workspace_id else None,
+            'message_count': row.message_count, 'attachment_count': row.attachment_count,
+            'preview': preview[:160], 'preview_role': row.last_role or ''}
+
+
+class AIRecentConversationsView(APIView):
+    """Recent chats across general chat and all your projects (for the Recent list and history page)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            limit = max(1, min(200, int(request.query_params.get('limit', 50))))
+        except ValueError:
+            raise ValidationError({'limit': 'Use a whole number.'})
+        term = request.query_params.get('q', '').strip()[:120]
+        return Response({'results': [recent_payload(row) for row in recent_conversation_rows(request.user, term, limit)]})
+
+
 def general_conversation_for(user, conversation_id):
     row = AIWorkspaceConversation.objects.filter(pk=conversation_id, workspace__isnull=True,
                                                   owner=user, archived_at__isnull=True).first()
@@ -692,11 +794,24 @@ def send_conversation(request, row, workspace=None):
             if original.content != question:
                 raise Conflict('This request ID belongs to a different question.')
             return Response({'conversation': conversation_payload(row, detail=True), 'idempotent_replay': True})
-        models = chat_models()
+        models = chat_models(request.user)
         selected_model = str(request.data.get('model') or (models[0]['model_id'] if models else ''))
         selected_provider = request.data.get('provider') or (models[0]['provider'] if models else '')
         if not any(row['provider'] == selected_provider and row['model_id'] == selected_model for row in models):
             raise ValidationError({'model': 'Choose an available chat model.'})
+        from .ai_skills import resolve_skill, skill_prompt
+        skill = None
+        if request.data.get('skill_id'):
+            skill = resolve_skill(request.user, request.data.get('skill_id'))
+            if not skill:
+                raise ValidationError({'skill_id': 'Unknown skill.'})
+        use_web = str(request.data.get('web_search', '')).lower() in ('1', 'true', 'yes', 'on')
+        if use_web:
+            status_row = web_search_status(request.user, models)
+            if not status_row['allowed']:
+                raise ValidationError({'web_search': status_row['reason']})
+            if selected_provider != 'anthropic':
+                raise ValidationError({'web_search': 'Web search needs a Claude model. Choose Claude in the model menu.'})
         instructions = AIWorkspaceInstructions.objects.filter(workspace=workspace).first() if workspace else None
         preferences = {field: getattr(instructions, field) for field in INSTRUCTION_FIELDS} if instructions else {}
         effective_attachment_ids = attachment_ids
@@ -770,7 +885,8 @@ def send_conversation(request, row, workspace=None):
                 provider='claude' if selected_provider == 'anthropic' else 'ollama',
                 model=selected_model, api_key=api_key,
                 history=[{'role': msg.role, 'content': msg.content} for msg in history],
-                project_instructions=preferences, general_chat=workspace is None and not sources)
+                project_instructions=preferences, general_chat=workspace is None and not sources and not use_web,
+                web_search=use_web, skill_prompt=skill_prompt(skill) if skill else '')
         except ChatConfigurationError as exc:
             raise ValidationError({'provider': str(exc)})
         except Exception:
@@ -788,6 +904,8 @@ def send_conversation(request, row, workspace=None):
             })
         AIWorkspaceMessage.objects.create(conversation=row, role='user', content=question, request_id=request_id,
                                           attachments=attachment_refs)
+        if row.title in DEFAULT_TITLES:  # name the chat after its first question
+            row.title = title_from_question(question)
         usage = result.get('token_usage') or {}
         AIUsageLog.objects.create(
             user=request.user, provider='local' if result.get('provider') == 'ollama' else result.get('provider', 'other'),
@@ -797,16 +915,24 @@ def send_conversation(request, row, workspace=None):
             tokens_output=int(usage.get('output_tokens') or 0),
             cost_usd=usage.get('cost_usd') or '0',
         )
+        web_sources = [{'source_id': f'web-{index}', 'kind': 'web', 'document': item['title'], 'location': item['url'],
+                        'url': item['url'], 'cited_text': item.get('cited_text', '')}
+                       for index, item in enumerate(result.get('web_sources') or [], start=1)]
         AIWorkspaceMessage.objects.create(conversation=row, role='assistant', content=result['answer'],
             request_id=request_id, provider=result.get('provider', ''), model=result.get('model', ''),
-            sources=[{key: value for key, value in source.items() if key != 'excerpt'} for source in sources],
+            sources=[{key: value for key, value in source.items() if key != 'excerpt'} for source in sources] + web_sources,
             token_usage=usage, instruction_version=instructions.version if instructions else 0)
-        row.save(update_fields=['updated_at'])
+        row.save(update_fields=['updated_at', 'title'])
         details = {'request_id': str(request_id),
                    'source_ids': [source['source_id'] for source in sources],
                    'attachment_ids': [ref['id'] for ref in attachment_refs],
                    'provider': result.get('provider'), 'model': result.get('model'),
                    'token_usage': usage}
+        if skill:
+            details['skill_id'] = skill['id']
+        if use_web:  # every web search is visible in the audit log
+            details.update({'web_search': True, 'web_searches': result.get('web_searches', 0),
+                            'web_urls': [item['url'] for item in web_sources]})
         if workspace:
             audit(request.user, 'create', workspace, {'conversation_id': row.pk, **details})
         else:
@@ -886,6 +1012,53 @@ def compute_sha256(file_field):
     return digest.hexdigest()
 
 
+def store_attachment(request, row, workspace, uploaded, extra_details=None):
+    """Validate, save and extract one chat attachment, audit it, and return its API payload."""
+    name, suffix = validate_uploaded_file(uploaded)
+    attachment = None
+    try:
+        with transaction.atomic():
+            attachment = AIWorkspaceAttachment.objects.create(
+                conversation=row, user=request.user, file=uploaded,
+                name=name, size=uploaded.size,
+                content_type=getattr(uploaded, 'content_type', '') or '',
+                sha256='',
+            )
+            if suffix in ALLOWED:
+                try:
+                    attachment.sha256, attachment.extracted_pages, attachment.extraction_truncated = extract_pages(
+                        attachment.file, attachment.name)
+                except Exception as exc:
+                    raise ValidationError({'file': 'Document could not be parsed.'}) from exc
+                if not attachment.extracted_pages:
+                    raise ValidationError({'file': 'No extractable text found. Scanned PDFs require OCR; the file was not added.'})
+            else:
+                attachment.sha256 = compute_sha256(attachment.file)
+            attachment.save(update_fields=['sha256', 'extracted_pages', 'extraction_truncated'])
+            details = {'attachment_id': attachment.pk, 'name': name, 'size': attachment.size,
+                       'sha256': attachment.sha256, 'extracted_pages': len(attachment.extracted_pages),
+                       **(extra_details or {})}
+            if workspace:
+                audit(request.user, 'create', workspace, {'conversation_id': row.pk, **details})
+            else:
+                audit_general(request.user, 'create', row.pk, details)
+    except Exception:
+        if attachment and attachment.file:
+            attachment.file.delete(save=False)
+        raise
+    return {
+        'id': attachment.pk,
+        'name': attachment.name,
+        'size': attachment.size,
+        'content_type': attachment.content_type,
+        'sha256': attachment.sha256,
+        'extracted_pages': len(attachment.extracted_pages),
+        'extraction_truncated': attachment.extraction_truncated,
+        'created_at': attachment.created_at.isoformat(),
+        **({'source': extra_details} if extra_details else {}),
+    }
+
+
 class AIWorkspaceAttachmentUploadView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
@@ -895,47 +1068,165 @@ class AIWorkspaceAttachmentUploadView(APIView):
         uploaded = request.FILES.get('file')
         if not uploaded:
             raise ValidationError({'file': 'Choose a file.'})
-        name, suffix = validate_uploaded_file(uploaded)
-        attachment = None
+        return Response(store_attachment(request, row, workspace, uploaded), status=201)
+
+
+class AIWorkspaceAddToProjectView(APIView):
+    """Add a chat to an AI project: move a general chat into it and/or save its files as project knowledge.
+
+    Only general chats can move: a project chat's citations point at its own project's files, so moving
+    it would break them. Any chat you own (and haven't shared) can copy its attached files.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id, workspace_id=None):
+        from django.core.files.base import ContentFile
+        row, source_workspace = attachment_conversation_for(request.user, conversation_id, workspace_id)
+        target, _role = workspace_for(request.user, request.data.get('workspace_id'), minimum='editor')
+        move = str(request.data.get('move', '')).lower() in ('1', 'true', 'yes', 'on')
+        wanted = request.data.get('attachment_ids')
+        if move and source_workspace is not None:
+            raise ValidationError({'move': 'Only general chats can be moved into a project.'})
+        attachments = list(row.attachments.order_by('created_at'))
+        if wanted not in (None, 'all'):
+            if not isinstance(wanted, list):
+                raise ValidationError({'attachment_ids': 'Send a list of attachment ids or "all".'})
+            ids = {int(i) for i in wanted if str(i).isdecimal()}
+            attachments = [a for a in attachments if a.pk in ids]
+        attachments = [a for a in attachments if Path(a.name).suffix.lower() in ALLOWED and a.extracted_pages]
+        if not move and not attachments:
+            raise ValidationError({'detail': 'Nothing to add: choose to move the chat or pick files to save.'})
+        saved, created_files = [], []
         try:
             with transaction.atomic():
-                attachment = AIWorkspaceAttachment.objects.create(
-                    conversation=row, user=request.user, file=uploaded,
-                    name=name, size=uploaded.size,
-                    content_type=uploaded.content_type or '',
-                    sha256='',
-                )
-                if suffix in ALLOWED:
-                    try:
-                        attachment.sha256, attachment.extracted_pages, attachment.extraction_truncated = extract_pages(
-                            attachment.file, attachment.name)
-                    except Exception as exc:
-                        raise ValidationError({'file': 'Document could not be parsed.'}) from exc
-                    if not attachment.extracted_pages:
-                        raise ValidationError({'file': 'No extractable text found. Scanned PDFs require OCR; the file was not added.'})
-                else:
-                    attachment.sha256 = compute_sha256(attachment.file)
-                attachment.save(update_fields=['sha256', 'extracted_pages', 'extraction_truncated'])
-                details = {'attachment_id': attachment.pk, 'name': name, 'size': attachment.size,
-                           'sha256': attachment.sha256, 'extracted_pages': len(attachment.extracted_pages)}
-                if workspace:
-                    audit(request.user, 'create', workspace, {'conversation_id': row.pk, **details})
-                else:
-                    audit_general(request.user, 'create', row.pk, details)
+                AIWorkspace.objects.select_for_update().get(pk=target.pk)
+                for attachment in attachments:
+                    with attachment.file.open('rb') as handle:
+                        content = handle.read(MAX_BYTES + 1)
+                    if len(content) > MAX_BYTES:
+                        continue
+                    previous = AIWorkspaceDocument.objects.filter(workspace=target, name=attachment.name).order_by('-version').first()
+                    if previous and previous.sha256 and previous.sha256 == attachment.sha256 and previous.archived_at is None:
+                        saved.append({**document_payload(previous), 'already_present': True})
+                        continue
+                    doc = AIWorkspaceDocument(workspace=target, name=attachment.name, uploaded_by=request.user,
+                                              version=previous.version + 1 if previous else 1)
+                    doc.file.save(attachment.name, ContentFile(content), save=False)
+                    created_files.append(doc.file)
+                    doc.save()
+                    process_document(doc)
+                    audit(request.user, 'create', target, {'document_id': doc.pk, 'version': doc.version, 'sha256': doc.sha256,
+                                                           'status': doc.status, 'from_conversation_id': row.pk,
+                                                           'from_attachment_id': attachment.pk})
+                    saved.append(document_payload(doc))
+                if move:
+                    row.workspace = target
+                    row.save(update_fields=['workspace', 'updated_at'])
+                    audit(request.user, 'update', target, {'conversation_id': row.pk, 'moved_from': 'general'})
+                    audit_general(request.user, 'update', row.pk, {'moved_to_ai_workspace_id': target.pk})
         except Exception:
-            if attachment and attachment.file:
-                attachment.file.delete(save=False)
+            for stored in created_files:
+                stored.delete(save=False)
             raise
-        return Response({
-            'id': attachment.pk,
-            'name': attachment.name,
-            'size': attachment.size,
-            'content_type': attachment.content_type,
-            'sha256': attachment.sha256,
-            'extracted_pages': len(attachment.extracted_pages),
-            'extraction_truncated': attachment.extraction_truncated,
-            'created_at': attachment.created_at.isoformat(),
-        }, status=201)
+        return Response({'conversation_id': row.pk, 'workspace_id': target.pk, 'workspace_name': target.name,
+                         'moved': move, 'documents': saved})
+
+
+def audit_skill(user, action, skill, details=None):
+    AuditLog.objects.create(user=user, user_email=user.email or '', action=action, resource_type='AICustomSkill',
+                            resource_repr=f'Custom skill {skill.pk}: {skill.name}'[:255],
+                            metadata={'custom_skill_id': skill.pk, 'visibility': skill.visibility, **(details or {})})
+
+
+class AISkillListView(APIView):
+    """The skills library in Add context > Skills: built-in skills, then custom skills you can use."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .ai_skills import CATEGORIES, CUSTOM_CATEGORIES, SKILLS, custom_payload, user_organization, visible_custom_skills
+        custom = [custom_payload(row, request.user) for row in visible_custom_skills(request.user)]
+        return Response({'categories': CATEGORIES, 'custom_categories': CUSTOM_CATEGORIES, 'results': SKILLS,
+                         'custom': custom, 'can_share': bool(user_organization(request.user))})
+
+    def post(self, request):
+        from .ai_skills import MAX_CUSTOM_SKILLS_PER_USER, clean_custom_skill, custom_payload
+        from .ai_workspace_models import AICustomSkill
+        if AICustomSkill.objects.filter(owner=request.user, archived_at__isnull=True).count() >= MAX_CUSTOM_SKILLS_PER_USER:
+            raise ValidationError({'detail': f'You can keep up to {MAX_CUSTOM_SKILLS_PER_USER} custom skills. Delete one first.'})
+        fields = clean_custom_skill(request.data, request.user)
+        fields.setdefault('category', 'Custom')
+        skill = AICustomSkill.objects.create(owner=request.user, **fields)
+        audit_skill(request.user, 'create', skill)
+        return Response(custom_payload(skill, request.user), status=201)
+
+
+class AISkillDetailView(APIView):
+    """Edit or delete one of your custom skills (others can use shared skills but not change them)."""
+    permission_classes = [IsAuthenticated]
+
+    def _own(self, request, skill_id):
+        from .ai_workspace_models import AICustomSkill
+        if not str(skill_id).startswith('custom-') or not str(skill_id)[7:].isdecimal():
+            raise PermissionDenied('Built-in skills cannot be changed. Use Customise to make your own copy.')
+        skill = AICustomSkill.objects.filter(pk=int(str(skill_id)[7:]), archived_at__isnull=True).first()
+        if not skill:
+            raise NotFound('Skill not found.')
+        if skill.owner_id != request.user.pk:
+            raise PermissionDenied('Only the person who created this skill can change it.')
+        return skill
+
+    def patch(self, request, skill_id):
+        from .ai_skills import clean_custom_skill, custom_payload
+        skill = self._own(request, skill_id)
+        fields = clean_custom_skill(request.data, request.user, partial=True)
+        for key, value in fields.items():
+            setattr(skill, key, value)
+        skill.save()
+        audit_skill(request.user, 'update', skill, {'fields': sorted(k for k in fields if k != 'organization')})
+        return Response(custom_payload(skill, request.user))
+
+    def delete(self, request, skill_id):
+        skill = self._own(request, skill_id)
+        skill.archived_at = timezone.now()
+        skill.save(update_fields=['archived_at', 'updated_at'])
+        audit_skill(request.user, 'delete', skill)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AIConnectorListView(APIView):
+    """Connectors the user can use, with a reason when one is unavailable."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .ai_connectors import available
+        return Response({'results': available(request.user)})
+
+
+class AIConnectorSearchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, connector):
+        from .ai_connectors import search
+        return Response({'results': search(request.user, connector, request.query_params.get('q', ''))})
+
+
+class AIWorkspaceAttachmentConnectView(APIView):
+    """Attach a record from another RADAI module to a conversation, as if it were uploaded."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id, workspace_id=None):
+        from django.core.files.base import ContentFile
+        from .ai_connectors import fetch
+        row, workspace = attachment_conversation_for(request.user, conversation_id, workspace_id)
+        connector = str(request.data.get('connector') or '')
+        item_id = str(request.data.get('item_id') or '')
+        if not connector or not item_id:
+            raise ValidationError({'item_id': 'Choose a record to attach.'})
+        name, content, content_type, provenance = fetch(request.user, connector, item_id)
+        uploaded = ContentFile(content, name=name)
+        uploaded.content_type = content_type
+        return Response(store_attachment(request, row, workspace, uploaded,
+                                         {'connector': connector, **provenance}), status=201)
 
 
 class AIWorkspaceAttachmentDownloadView(APIView):
@@ -975,6 +1266,10 @@ class AIWorkspaceDocumentGenerationView(APIView):
             raise ValidationError({'format': 'Supported formats: docx, xlsx, pdf, csv, txt.'})
         if not filename:
             raise ValidationError({'filename': 'Filename is required.'})
+        from .ai_design import DESIGNS
+        design = str(request.data.get('design') or 'rejlers').lower().strip()
+        if design not in DESIGNS:
+            raise ValidationError({'design': 'Choose rejlers or plain.'})
         safe_name = Path(filename).name
         if not safe_name.lower().endswith('.' + fmt):
             safe_name = f'{safe_name}.{fmt}'
@@ -984,13 +1279,14 @@ class AIWorkspaceDocumentGenerationView(APIView):
                     conversation=None, user=request.user, name=safe_name, format=fmt,
                     size=0,
                 )
-                file_bytes, content_type = self._generate_bytes(fmt, content, safe_name)
+                file_bytes, content_type = self._generate_bytes(fmt, content, safe_name, design,
+                                                                (request.user.get_full_name() or '').strip())
                 generated.file.save(safe_name, __import__('django.core.files.base', fromlist=['ContentFile']).ContentFile(file_bytes), save=False)
                 generated.size = len(file_bytes)
                 generated.sha256 = hashlib.sha256(file_bytes).hexdigest()
                 generated.save()
                 audit_general(request.user, 'create', row.pk,
-                              {'generated_document_id': generated.pk, 'name': safe_name, 'format': fmt})
+                              {'generated_document_id': generated.pk, 'name': safe_name, 'format': fmt, 'design': design})
         except ValidationError:
             raise
         except Exception as exc:
@@ -1005,7 +1301,14 @@ class AIWorkspaceDocumentGenerationView(APIView):
             'created_at': generated.created_at.isoformat(),
         }, status=201)
 
-    def _generate_bytes(self, fmt, content, filename):
+    def _generate_bytes(self, fmt, content, filename, design='plain', author=''):
+        if design == 'rejlers' and fmt in ('docx', 'pdf', 'xlsx'):
+            from . import ai_design
+            builders = {'docx': (ai_design.build_docx, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+                        'pdf': (ai_design.build_pdf, 'application/pdf'),
+                        'xlsx': (ai_design.build_xlsx, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
+            build, content_type = builders[fmt]
+            return build(filename, content, author), content_type
         if fmt == 'txt':
             return content.encode('utf-8'), 'text/plain'
         if fmt == 'csv':
