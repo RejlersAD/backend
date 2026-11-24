@@ -70,8 +70,8 @@ def validate_publication(
             paragraph_id = paragraph.get('id')
             if paragraph_id:
                 paragraph_ids[(paragraph_id, key)] = paragraph
-            if not requirement_ids:
-                continue
+            if not requirement_ids or paragraph.get('kind') == 'reviewer':
+                continue  # reviewer-written text is attributed to its reviewer, not to the tender
             reqs = set(paragraph.get('requirement_ids') or [])
             evidence = set(paragraph.get('evidence_ids') or [])
             if not reqs or not evidence or not reqs <= requirement_ids or not evidence <= evidence_ids:

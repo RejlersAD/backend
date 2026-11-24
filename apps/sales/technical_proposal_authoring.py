@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from django.db import close_old_connections
+from rest_framework.exceptions import ValidationError
 
 _TEXT = {'type': 'string'}
 _LIST = {'type': 'array', 'items': {'type': 'string'}}
@@ -411,6 +412,88 @@ def proposal_facts(quote, pool, config, version):
 
 # --- full proposal --------------------------------------------------------------------------
 
+EDITABLE_KINDS = ('authored', 'not_applicable')
+MAX_EDIT_BLOCKS = 400
+_MARKUP = re.compile(r'<\s*[a-zA-Z/!?]')
+
+
+def _edit_text(value, field, limit, required=True):
+    if not isinstance(value, str):
+        raise ValidationError({'blocks': f'{field} must be text.'})
+    text = value.strip()
+    if required and not text:
+        raise ValidationError({'blocks': f'{field} cannot be empty.'})
+    if len(text) > limit:
+        raise ValidationError({'blocks': f'{field} is longer than {limit} characters.'})
+    if _MARKUP.search(text):
+        raise ValidationError({'blocks': f'{field} must be plain text, without markup.'})
+    return text
+
+
+def validate_section_blocks(original, edited):
+    """A reviewer's edit of one section, made safe to render.
+
+    Each edited block may name the original block it came from (`ref`, its index). A block that
+    keeps its origin keeps that origin's tender citations: the reviewer reworded sourced content.
+    New blocks carry no citations and are marked as reviewer-written. Part headings (the fixed
+    method-statement chapters) cannot be renamed, removed or reordered.
+    """
+    if not isinstance(edited, list) or not edited or len(edited) > MAX_EDIT_BLOCKS:
+        raise ValidationError({'blocks': f'Provide between 1 and {MAX_EDIT_BLOCKS} blocks.'})
+    blocks = []
+    for position, block in enumerate(edited, 1):
+        if not isinstance(block, dict) or block.get('type') not in ('part', 'heading', 'paragraph', 'bullets', 'table'):
+            raise ValidationError({'blocks': f'Block {position} has an unsupported type.'})
+        ref = block.get('ref')
+        source = original[ref] if isinstance(ref, int) and 0 <= ref < len(original) else None
+        if source is not None and source.get('type') != block['type']:
+            source = None
+        kind = block['type']
+        if kind == 'part':
+            if source is None:
+                raise ValidationError({'blocks': 'Chapter headings cannot be added or changed.'})
+            blocks.append(dict(source))
+            continue
+        label = f'Block {position}'
+        record = {'type': kind}
+        if kind == 'heading':
+            record['text'] = _edit_text(block.get('text'), label, 200)
+            record['level'] = 3 if block.get('level') == 3 else 2
+        elif kind == 'paragraph':
+            record['text'] = _edit_text(block.get('text'), label, 4000)
+        elif kind == 'bullets':
+            items = block.get('items')
+            if not isinstance(items, list) or not items or len(items) > 100:
+                raise ValidationError({'blocks': f'{label}: provide between 1 and 100 bullet items.'})
+            record['text'] = _edit_text(block.get('text') or '', f'{label} introduction', 4000, required=False)
+            record['items'] = [_edit_text(item, f'{label} item', 1000) for item in items]
+        else:
+            columns, rows = block.get('columns'), block.get('rows')
+            if not isinstance(columns, list) or not 1 <= len(columns) <= 8:
+                raise ValidationError({'blocks': f'{label}: a table has 1 to 8 columns.'})
+            if not isinstance(rows, list) or not 1 <= len(rows) <= 300:
+                raise ValidationError({'blocks': f'{label}: a table has 1 to 300 rows.'})
+            record['text'] = _edit_text(block.get('text') or '', f'{label} introduction', 4000, required=False)
+            record['columns'] = [_edit_text(value, f'{label} column', 120) for value in columns]
+            record['rows'] = []
+            for row in rows:
+                if not isinstance(row, list) or len(row) > len(columns):
+                    raise ValidationError({'blocks': f'{label}: each row has at most one cell per column.'})
+                record['rows'].append([_edit_text(cell, f'{label} cell', 600, required=False) for cell in row])
+        if kind != 'heading':
+            if source is not None:
+                record['citations'] = list(source.get('citations') or [])
+                if source.get('source'):
+                    record['source'] = source['source']
+            else:
+                record['citations'], record['source'] = [], 'reviewer'
+        blocks.append(record)
+    parts = lambda items: [b.get('text') for b in items if b.get('type') == 'part']  # noqa: E731
+    if parts(blocks) != parts(original):
+        raise ValidationError({'blocks': 'Chapter headings must stay in their original order.'})
+    return blocks
+
+
 def paragraph_records(section_key, blocks, requirement_ids):
     records = []
     for index, block in enumerate(blocks):
@@ -426,7 +509,8 @@ def paragraph_records(section_key, blocks, requirement_ids):
             text = block.get('text') or ''
         citations = block.get('citations') or []
         digest = hashlib.sha256(f'{section_key}:{index}:{text}'.encode()).hexdigest()[:12]
-        records.append({'id': f'PAR-{digest}', 'kind': block['type'], 'text': text[:100_000],
+        kind = 'reviewer' if block.get('source') == 'reviewer' else block['type']
+        records.append({'id': f'PAR-{digest}', 'kind': kind, 'text': text[:100_000],
                         'requirement_ids': [c for c in citations if c in requirement_ids],
                         'evidence_ids': list(citations)})
     return records

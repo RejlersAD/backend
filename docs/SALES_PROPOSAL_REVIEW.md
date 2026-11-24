@@ -172,3 +172,23 @@ Rendering follows the approved Execution Plan of Q-101505 Rev 0: Arial, justifie
 tables sized to their content with a shaded repeating header row, and the company stamp on the
 covering letter. Compliance-matrix rows exclude requirement fragments (fewer than six words or not
 starting a sentence) and duplicates from documents uploaded twice.
+
+## Editing a standard Technical Proposal in the review canvas - 25 November 2026
+
+The review canvas (`/sales/proposals/{id}/preview`) has an **Edit content** panel for standard
+Technical Proposals (`template_version` `rejlers_authored_v1`). Reviewers edit one authored or
+not-applicable section at a time as structured blocks (sub-headings, paragraphs, bullet lists,
+tables); method-statement chapter headings are fixed.
+
+- `POST /api/v1/sales/quotes/{id}/workspace/sections/{section_key}/content/` with
+  `{expected_version, blocks, reason}` (proposal read+update, opportunity workspace update)
+  returns `202 {job}`. Blocks are validated: plain text only, the AI drafting length limits,
+  at most 400 blocks; a block that names its original (`ref`) keeps that block's tender
+  citations, new blocks are recorded with `source: "reviewer"` and no citations.
+- The build job (`summary.mode = "edit"`) needs neither tender access nor the AI provider: it
+  re-renders the latest version with the edited section, stores the PDF as the next version of
+  the single deliverable, binds it as the next canvas revision and records the next workspace
+  version. The edited section returns to draft; other sections keep their approval. If the
+  section changed after the edit was made, the job fails with `version_changed`.
+- Reviewer-written paragraphs (`kind: "reviewer"`) are attributed to the reviewer and are not
+  reported as untraceable to the tender; tender requirements still need cited content.
