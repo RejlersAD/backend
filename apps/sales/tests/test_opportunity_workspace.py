@@ -18,6 +18,7 @@ from apps.rbac.action_policy import operation_action
 from apps.sales.tests.access_fixtures import deny_sales_action
 from apps.rbac.route_guard import ModuleActionGuardMixin
 from apps.sales.models import (Client, Deal, OpportunityWorkspace, OpportunityWorkspaceUpload,
+                               OpportunityZipImport,
                                ProposalReviewCommand, ProposalReviewComment, ProposalReviewDocument, Quote)
 from apps.sales.opportunity_registration import create_registered_opportunity
 from apps.sales.opportunity_workspace import (
@@ -146,6 +147,27 @@ class OpportunityWorkspaceTests(WorkspaceFixtures, TestCase):
         self.assertEqual(self.api.delete(f'/api/v1/sales/deals/{replacement.pk}/').status_code, 204)
         self.assertFalse(OpportunityWorkspace.objects.exists())
         self.assertFalse(Deal.objects.filter(pk=replacement.pk).exists())
+
+    def test_delete_purges_zip_import_jobs_before_protected_source_upload(self):
+        workspace = self.ready()
+        upload = OpportunityWorkspaceUpload.objects.create(
+            workspace=workspace, request_id=uuid4(), actor=self.actor, folder_key='tender',
+            name='Tender.zip', size=5, sha256='a' * 64, status='complete')
+        job = OpportunityZipImport.objects.create(
+            opportunity=self.opportunity, source_upload=upload, actor=self.actor,
+            folder_key='tender', status='succeeded')
+        extracted = OpportunityWorkspaceUpload.objects.create(
+            workspace=workspace, request_id=uuid4(), actor=self.actor, folder_key='tender',
+            name='Scope.docx', size=5, sha256='b' * 64, status='complete', zip_import=job,
+            source_path='Tender.zip/Scope.docx')
+
+        result = self.api.delete(f'/api/v1/sales/deals/{self.opportunity.pk}/')
+
+        self.assertEqual(result.status_code, 204)
+        self.assertFalse(OpportunityZipImport.objects.filter(pk=job.pk).exists())
+        self.assertFalse(OpportunityWorkspaceUpload.objects.filter(pk=upload.pk).exists())
+        self.assertFalse(OpportunityWorkspaceUpload.objects.filter(pk=extracted.pk).exists())
+        self.assertFalse(Deal.objects.filter(pk=self.opportunity.pk).exists())
 
     def test_delete_purges_proposal_review_evidence(self):
         workspace = self.ready()

@@ -99,3 +99,50 @@ def analyze_opportunity_step(report_id):
             except Exception:
                 pass
     return processed
+
+
+@shared_task(ignore_result=True, soft_time_limit=30, time_limit=45)
+def dispatch_opportunity_zip_imports():
+    from .zip_import import due_zip_import_ids
+    dispatched, started = 0, monotonic()
+    for zip_import_id in due_zip_import_ids():
+        if monotonic() - started >= 20:
+            break
+        try:
+            import_opportunity_zip.delay(str(zip_import_id))
+            dispatched += 1
+        except Exception:
+            break  # SQL intent remains due even when the broker is unavailable.
+    return {'dispatched': dispatched}
+
+
+@shared_task(ignore_result=True, acks_late=True, reject_on_worker_lost=True,
+             soft_time_limit=1500, time_limit=1740)  # large tender packages take minutes to extract
+def import_opportunity_zip(zip_import_id):
+    from .zip_import import run_zip_import
+    return run_zip_import(zip_import_id)
+
+
+@shared_task(ignore_result=True, soft_time_limit=30, time_limit=45)
+def dispatch_proposal_builds():
+    """Re-dispatch due standard proposal builds (DEC-TP-001); SQL rows are the source of truth."""
+    from .proposal_engine_service import due_build_ids, engine_enabled
+    if not engine_enabled():
+        return {'dispatched': 0}
+    dispatched, started = 0, monotonic()
+    for job_id in due_build_ids():
+        if monotonic() - started >= 20:
+            break
+        try:
+            build_technical_proposal.delay(str(job_id))
+            dispatched += 1
+        except Exception:
+            break  # rows remain due for the next Beat tick
+    return {'dispatched': dispatched}
+
+
+@shared_task(ignore_result=True, acks_late=True, reject_on_worker_lost=True,
+             soft_time_limit=1500, time_limit=1740)
+def build_technical_proposal(job_id):
+    from .proposal_engine_service import run_build_job
+    return run_build_job(job_id)

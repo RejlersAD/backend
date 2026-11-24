@@ -25,6 +25,8 @@ WORKDIR /app
 # Install minimal system dependencies (soft-coded via ARGs)
 ARG INSTALL_OCR=true
 ARG INSTALL_PDF=true
+# Headless LibreOffice renders technical proposals (DEC-TP-001, proposal_engine).
+ARG INSTALL_LIBREOFFICE=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
@@ -40,6 +42,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        fi \
     && if [ "$INSTALL_OCR" = "true" ]; then \
          apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng; \
+       fi \
+    && if [ "$INSTALL_LIBREOFFICE" = "true" ]; then \
+         apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-impress-nogui \
+           libreoffice-calc-nogui fonts-crosextra-carlito fonts-crosextra-caladea; \
        fi \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*

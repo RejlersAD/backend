@@ -686,5 +686,5 @@ from .project_models import (  # noqa: E402,F401
 )
 from .ai_workspace_models import (  # noqa: E402,F401
     AIWorkspace, AIWorkspaceMember, AIWorkspaceInstructions, AIWorkspaceDocument,
-    AIWorkspaceConversation, AIWorkspaceConversationShare, AIWorkspaceMessage,
+    AIWorkspaceConversation, AIWorkspaceConversationShare, AIWorkspaceMessage, AICustomSkill,
 )

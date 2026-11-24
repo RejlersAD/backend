@@ -93,6 +93,21 @@ TYPE_FOLDERS = {
     'completion_certificate': 'award',
 }
 
+FOLDER_DEFAULT_TAGS = {
+    'correspondence': 'Correspondence', 'tender': 'Tender Document',
+    'proposal': 'Proposal Document', 'internal': 'Internal Document',
+    'submitted': 'Submitted Document', 'award': 'Award Document',
+}
+
+
+def primary_custom_tag(folder_key, tags, document_type):
+    """Choose one stable display tag from document content and folder context."""
+    label = LABELS.get(document_type, '')
+    if document_type != 'unclassified' and label:
+        return label[:80]
+    values = [value.strip() for value in tags if isinstance(value, str) and value.strip()]
+    return (values[0] if values else FOLDER_DEFAULT_TAGS.get(folder_key, 'Document'))[:80]
+
 
 def intelligence_tags(folder_key, name, text, document_type, evidence, origin):
     """Return bounded, folder-safe tags and explainable confidence metadata."""

@@ -103,6 +103,7 @@ def authority(deal, actor):
 
 
 def inventory(deal, actor):
+    from .proposal_engine_service import is_generated_output
     """No listing/page limit: every current tracked revision participates."""
     sources = []
     # Outgoing letters are stored in the same Correspondence folder as client
@@ -126,10 +127,14 @@ def inventory(deal, actor):
         file_id = 'radai-' + str(row.pk) if row.provider == 'radai' else remote_id
         if row.folder_key == 'correspondence' and (row.provider, file_id) in letter_files:
             continue
+        # Generated technical-proposal outputs (DEC-TP-001) are not source evidence.
+        if is_generated_output(row.folder_key, row.name):
+            continue
         metadata = {'name': row.name, 'folder': row.folder_key, 'size': row.size,
                     'provider': row.provider, 'upload_id': str(row.pk),
                     'file_id': file_id,
-                    'version': row.version_number, 'sha256': row.sha256}
+                    'version': row.version_number, 'sha256': row.sha256,
+                    'source_path': row.source_path or row.name}
         sources.append({'key': 'upload:' + str(row.pk), 'identity': digest({
             'metadata': metadata, 'sha': row.sha256, 'storage': row.storage_fingerprint,
             'encoding': row.storage_encoding, 'stored_sha': row.stored_sha256,
@@ -627,6 +632,11 @@ def _manager_review(report, deal, compiled):
                          'opportunity_fields_considered': record_value_count, 'sources': report.sources.count()},
             'review_note': 'Rules-only, evidence-backed preliminary review. Internal capability, resources and commercial terms require approval before a recommendation; record the official decision separately.'}
 
+def storable_text(value):
+    """Extracted text as PostgreSQL can store it (NUL characters removed)."""
+    return str(value or '').replace('\x00', '')
+
+
 def run_analysis_step(report_id):
     """One durable extraction/provider unit per task; leases recover worker loss."""
     token, now = uuid4(), timezone.now()
@@ -706,6 +716,8 @@ def run_analysis_step(report_id):
                 locked.dirty, locked.status, locked.result = True, 'queued', {}
             elif source:
                 parts, diagnostic = extracted
+                # PostgreSQL text cannot hold NUL; some PDFs extract with it, which failed the whole report.
+                parts = [(location, storable_text(text)) for location, text in parts]
                 duplicate = _duplicate_source(source, parts, diagnostic)
                 if duplicate:
                     locked.suppressed_sources[source.source_key] = {

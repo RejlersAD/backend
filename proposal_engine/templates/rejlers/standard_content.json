@@ -1,0 +1,1211 @@
+{
+ "source": "Approved Rejlers execution methodology (baseline Q-101505 Rev 0, chapters 5-10)",
+ "items": [
+  {
+   "id": "STD-1",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "Firmly Establishing COMPANY’s expectation at the KOM"
+  },
+  {
+   "id": "STD-2",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "Timely availability of relevant inputs from COMPANY"
+  },
+  {
+   "id": "STD-3",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "Managing project stakeholders & their interest"
+  },
+  {
+   "id": "STD-4",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "Selection of sound technical, economical and environmental friendly solution"
+  },
+  {
+   "id": "STD-5",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "Optimization / Value Engineering"
+  },
+  {
+   "id": "STD-6",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "In time completion of the SERVICES without affecting safety and quality."
+  },
+  {
+   "id": "STD-7",
+   "chapter": "PROJECT SUCCESS FACTORS",
+   "section": "",
+   "text": "Precise and clear recommendations for the next phase of the PROJECT."
+  },
+  {
+   "id": "STD-8",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "",
+   "text": "The process enclosed in Appendix-I explains our overall execution approach."
+  },
+  {
+   "id": "STD-9",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT HOME OFFICE:",
+   "text": "SERVICES will be executed in our Abu Dhabi Office. All major assignments will be handled by our local office in Abu Dhabi and resources from our global professional network will be utilized (as and when required)."
+  },
+  {
+   "id": "STD-10",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT HOME OFFICE:",
+   "text": "A dedicated task force will be established to cater the need for PROJECT based on the scope and schedule requirement."
+  },
+  {
+   "id": "STD-11",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT ORGANIZATION",
+   "text": "To perform the services, EC will bring to this project its experience and expertise of project management & engineering resources. EC’s proposed management strategy shall be based upon utilizing the substantial experience and expertise available within organization, project management systems and resources."
+  },
+  {
+   "id": "STD-12",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT ORGANIZATION",
+   "text": "A dedicated project team will be assigned in ABU DHABI to perform the services. The nominated Project Team under the umbrella of Project Manager will be responsible for executing the Services in accordance with the deliverables & will perform of their tasks according to meet the project schedule."
+  },
+  {
+   "id": "STD-13",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT ORGANIZATION",
+   "text": "A high priority will be placed on proper interface with COMPANY’s team throughout all stages of the project starting from the kick-off meeting towards the completion of the Project."
+  },
+  {
+   "id": "STD-14",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Project Manager"
+  },
+  {
+   "id": "STD-15",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "The nominated project manager has the overall responsibility to ensure that qualified engineers and designers, along with appropriate means, are available for the projects.  He will be closely working with Study Manager, Team Leads, Contracts, Interface as well as  Project Controls. His role involves active interaction with COMPANY’s nominated focal point and manage the stake holders as well. Critical to successful Project management involves maintaining Project alignment to the goals of the Project Execution Plan. The primary challenge of Project Team is to achieve all of the Project goals and objectives while honouring the preconceived constraints; resources, scope, time, and budget. The secondary challenge is to optimize the allocation of necessary inputs and integrate them to meet pre-defined objectives."
+  },
+  {
+   "id": "STD-16",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Senior Engineer"
+  },
+  {
+   "id": "STD-17",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "The Engineer, who can be a senior or intermediate level, functionally reports to the Discipline Team Leader and operationally to the Project Lead Engineer. The Engineer responsibilities include:"
+  },
+  {
+   "id": "STD-18",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Planning of project activity  in consultation with the Project Lead Engineer;"
+  },
+  {
+   "id": "STD-19",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Reviewing project and technical documents to fully understand the project scope of work;"
+  },
+  {
+   "id": "STD-20",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Reviewing design deliverables in accordance with discipline procedures and project requirements, prior to formal issue;"
+  },
+  {
+   "id": "STD-21",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Executing assigned tasks;"
+  },
+  {
+   "id": "STD-22",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Providing required input to the Design team;"
+  },
+  {
+   "id": "STD-23",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Communicating issues to the discipline team in a timely fashion."
+  },
+  {
+   "id": "STD-24",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Lead Designer"
+  },
+  {
+   "id": "STD-25",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "The Lead Designer, who can be a senior of intermediate designer, shall:"
+  },
+  {
+   "id": "STD-26",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Works under the supervision of Engineer to produce complete design deliverables for the Project;"
+  },
+  {
+   "id": "STD-27",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Works independently, while directing and checking the work of other designers;"
+  },
+  {
+   "id": "STD-28",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Assigns tasks to Designers according to their capabilities, to ensure that all the work produced by the design team is in accordance with the company’s established standards and Client requirements;"
+  },
+  {
+   "id": "STD-29",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Assures that the design complies with applicable Engineering codes & standards."
+  },
+  {
+   "id": "STD-30",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "Designer"
+  },
+  {
+   "id": "STD-31",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT MANAGEMENT",
+   "text": "The Designer shall work under the general supervision of the Lead Designer or Engineer, as applicable, in accordance with established procedures, to produce design deliverables from sketches or from engineering and design information."
+  },
+  {
+   "id": "STD-32",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Following contract signature, EC will initiate a robust project management approach to the project. The project manager will:"
+  },
+  {
+   "id": "STD-33",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Prepare the planning package that will define the main tasks, deliverables. The planning package will include the deliverables register, project schedule and an outline of the execution plan."
+  },
+  {
+   "id": "STD-34",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Undertake an internal project kick-off meeting of all staff involved in the project and brief them on:"
+  },
+  {
+   "id": "STD-35",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "An overview of the Project,"
+  },
+  {
+   "id": "STD-36",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "The project’s objectives and deliverables,"
+  },
+  {
+   "id": "STD-37",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "The volume of work and the timescales,"
+  },
+  {
+   "id": "STD-38",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Allocate individual responsibilities with specific deadlines,"
+  },
+  {
+   "id": "STD-39",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Distribute copies of project brief to project team."
+  },
+  {
+   "id": "STD-40",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Arrange internal progress meetings."
+  },
+  {
+   "id": "STD-41",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "Set up monthly invoicing procedures."
+  },
+  {
+   "id": "STD-42",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MOBILIZATION",
+   "text": "The project management and engineering team will be mobilised within two weeks after the project award and subject to COMPANY approval of the resources. The activities will, in general, be in accordance with approved EC’s QA procedures and the approved project QA plan."
+  },
+  {
+   "id": "STD-43",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "The project activities will commence with a kick-off meeting to be held in EC’s Abu Dhabi office / COMPANY’s Abu Dhabi office. The purpose of the kick-off meeting will be to define:"
+  },
+  {
+   "id": "STD-44",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Restatement of the scope of work and services required,"
+  },
+  {
+   "id": "STD-45",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Establishment of communications protocol,"
+  },
+  {
+   "id": "STD-46",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Agree drawing and document formats,"
+  },
+  {
+   "id": "STD-47",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Clarify outstanding technical queries,"
+  },
+  {
+   "id": "STD-48",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Review project schedule,"
+  },
+  {
+   "id": "STD-49",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Agree on progress reporting requirements,"
+  },
+  {
+   "id": "STD-50",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Arrangement of site visit dates (if required)"
+  },
+  {
+   "id": "STD-51",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "KICK-OFF MEETING",
+   "text": "Obtain all available relevant documents drawings and data of existing facilities."
+  },
+  {
+   "id": "STD-52",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "DESIGN GUIDELINES",
+   "text": "The data can form the starting point for the ENGINEERING  CONTRACTOR’s  Design Basis  and should be  cross  checked  for  various  design data  provided elsewhere. All pertinent data should be verified for potential conflicts by the  ENGINEERING CONTRACTOR prior to commencement of FEED as part of scope."
+  },
+  {
+   "id": "STD-53",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "DESIGN GUIDELINES",
+   "text": "ENGINEERING CONTRACTOR shall complete a Basic Engineering Design Data  Specification, for use during the FEED and inclusion in the EPC RFT package."
+  },
+  {
+   "id": "STD-54",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SITE VISIT & DATA COLLECTION",
+   "text": "Following the kick-off meeting, EC shall forward relevant requests to COMPANY to enable security passes to be obtained for the site visit and data collection exercise of the proposed facilities and tie-in locations etc."
+  },
+  {
+   "id": "STD-55",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SITE VISIT & DATA COLLECTION",
+   "text": "A representative from the project management team will lead the site visit(s) supported by the relevant discipline engineers. The aim of the site visit(s) includes:"
+  },
+  {
+   "id": "STD-56",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SITE VISIT & DATA COLLECTION",
+   "text": "Familiarisation with the existing field operation and site details,"
+  },
+  {
+   "id": "STD-57",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SITE VISIT & DATA COLLECTION",
+   "text": "Review of existing operator documentation (provided at kick-off meeting),"
+  },
+  {
+   "id": "STD-58",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SITE VISIT & DATA COLLECTION",
+   "text": "Collect and review as-built drawings and document relevant to this work."
+  },
+  {
+   "id": "STD-59",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SITE VISIT & DATA COLLECTION",
+   "text": "On return from the site visits, EC will produce a site visit report for COMPANY review. This will then create a working document for the survey (if any) and subsequent engineering activities."
+  },
+  {
+   "id": "STD-60",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "ENGINEERING DELIVERABLES",
+   "text": "Please refer APPENDIX – II for the deliverables list."
+  },
+  {
+   "id": "STD-61",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "HYSYS"
+  },
+  {
+   "id": "STD-62",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "SP3D"
+  },
+  {
+   "id": "STD-63",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "CAESAR II"
+  },
+  {
+   "id": "STD-64",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "STAAD Pro"
+  },
+  {
+   "id": "STD-65",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "Mat3D"
+  },
+  {
+   "id": "STD-66",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "Pipenet"
+  },
+  {
+   "id": "STD-67",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "PV Elite"
+  },
+  {
+   "id": "STD-68",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "HAP"
+  },
+  {
+   "id": "STD-69",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "Pipesim"
+  },
+  {
+   "id": "STD-70",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "AutoCAD"
+  },
+  {
+   "id": "STD-71",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "INSTRUCALC"
+  },
+  {
+   "id": "STD-72",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SOFTWARE",
+   "text": "Primavera"
+  },
+  {
+   "id": "STD-73",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL",
+   "text": "PROJECT Control and Reporting will be executed in accordance with EC’s PROJECT Control Procedures, to be defined in the early stage of the PROJECT."
+  },
+  {
+   "id": "STD-74",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL",
+   "text": "The Report formats and content are in accordance with the PROJECT Control Procedures. The Report formats shall be agreed with the COMPANY."
+  },
+  {
+   "id": "STD-75",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL",
+   "text": "The EC will issue Weekly and Monthly progress reports as per Scope of Work."
+  },
+  {
+   "id": "STD-76",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "WEEKLY PROGRESS REPORT",
+   "text": "The weekly progress report will be submitted every  week to COMPANY on the first working day of the following week, with progress cut-off ~ last working day of the week. For the weeks which coincides with the schedule of monthly report, the weekly report will not be issued. Contents of weekly report will be as follows:"
+  },
+  {
+   "id": "STD-77",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "WEEKLY PROGRESS REPORT",
+   "text": "Brief  narratives  of  the  activities  performed,  by  each  discipline, during the week."
+  },
+  {
+   "id": "STD-78",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "WEEKLY PROGRESS REPORT",
+   "text": "Areas of concerns and proposed corrective actions."
+  },
+  {
+   "id": "STD-79",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "WEEKLY PROGRESS REPORT",
+   "text": "Activities planned for next week."
+  },
+  {
+   "id": "STD-80",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "WEEKLY PROGRESS REPORT",
+   "text": "List of documents and correspondence issued during the week."
+  },
+  {
+   "id": "STD-81",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "MONTHLY PROGRESS REPORT",
+   "text": "The monthly progress report with cut-off ~ last Friday of each month, will be submitted on 6th working day of the following month to COMPANY. Content of the Monthly Progress Report will be agreed during the KOM."
+  },
+  {
+   "id": "STD-82",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SCHEDULE",
+   "text": "EC will prepare Project Schedule which shall be reviewed and agreed with the COMPANY"
+  },
+  {
+   "id": "STD-83",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SCHEDULE",
+   "text": "Identified Engineering Services Milestones shall be included in Project Schedule"
+  },
+  {
+   "id": "STD-84",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "SCHEDULE",
+   "text": "Overall “S” Curve shall be prepared (Planned vs Earned)"
+  },
+  {
+   "id": "STD-85",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "The following change control activities will be performed to facilitate the process by Project Controls:"
+  },
+  {
+   "id": "STD-86",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Developing change control templates, incorporating project specific requirements"
+  },
+  {
+   "id": "STD-87",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Setting the baseline"
+  },
+  {
+   "id": "STD-88",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Identifying and classifying changes"
+  },
+  {
+   "id": "STD-89",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Documenting changes"
+  },
+  {
+   "id": "STD-90",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Estimating change impacts: TIC cost and schedule"
+  },
+  {
+   "id": "STD-91",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Logging changes"
+  },
+  {
+   "id": "STD-92",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Preparing change notices and change orders"
+  },
+  {
+   "id": "STD-93",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Expediting change routing and approvals to ensure efficiency and continuity of project execution"
+  },
+  {
+   "id": "STD-94",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CHANGE CONTROL",
+   "text": "Releasing approved changes; with implementation instruction for the various discipline and project controls systems."
+  },
+  {
+   "id": "STD-95",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "At the end of each project, Project Close out report will be prepared. The main objective of this report is to prepare lessons learnt summary for next project. This will give a continuous learning in developing the organization."
+  },
+  {
+   "id": "STD-96",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "The main content of this report is;"
+  },
+  {
+   "id": "STD-97",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "Project Introduction"
+  },
+  {
+   "id": "STD-98",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "Organization Charts"
+  },
+  {
+   "id": "STD-99",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "Variance Charts for Schedule, Man-hours and Cost (Budget vs Actual)"
+  },
+  {
+   "id": "STD-100",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "Deviations from initial Scope and reasons"
+  },
+  {
+   "id": "STD-101",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "Lessons Learnt and future recommendations"
+  },
+  {
+   "id": "STD-102",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CLOSE OUT REPORT",
+   "text": "Profitability (for internal use only)"
+  },
+  {
+   "id": "STD-103",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL TOOLS",
+   "text": "Primavera P6: Network Scheduling and Project Management software for all Project  \n        Schedules"
+  },
+  {
+   "id": "STD-104",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL TOOLS",
+   "text": "PRA: Primavera Risk Analysis Tool for Schedule and Cost"
+  },
+  {
+   "id": "STD-105",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL TOOLS",
+   "text": "VALUE FRAME: in house EPR system for Project Controls System for Professional \n        Services Cost Control and Resource Control"
+  },
+  {
+   "id": "STD-106",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "PROJECT CONTROL TOOLS",
+   "text": "MS Office: For Reports, Spread Sheets, Presentations etc."
+  },
+  {
+   "id": "STD-107",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "EC has an avid experience of delivering cost estimates at Pre-study, Feasibility, FEED for TIC (Total Investment Cost). Cost Estimation will be in-line with AACE."
+  },
+  {
+   "id": "STD-108",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Cost Estimate Reports (±40%) for SELECT Phase"
+  },
+  {
+   "id": "STD-109",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Each stage of Cost estimate has its own maturity level of deliverables, definitions, reason for end usage, estimating methodology and accuracy range."
+  },
+  {
+   "id": "STD-110",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "The salient deliverables for Cost estimation are;"
+  },
+  {
+   "id": "STD-111",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Economic Analysis (for all alternatives)"
+  },
+  {
+   "id": "STD-112",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Cost Estimating Plan"
+  },
+  {
+   "id": "STD-113",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Cost Estimate Basis"
+  },
+  {
+   "id": "STD-114",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Cost Estimate Summary"
+  },
+  {
+   "id": "STD-115",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Cost Estimation Details"
+  },
+  {
+   "id": "STD-116",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "Cost Estimate",
+   "text": "Risk Analysis"
+  },
+  {
+   "id": "STD-117",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST BREAKDOWN STRUCTURE:",
+   "text": "EC will address the cost breakdown listed below as minimum:"
+  },
+  {
+   "id": "STD-118",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST BREAKDOWN STRUCTURE:",
+   "text": "Location wise"
+  },
+  {
+   "id": "STD-119",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST BREAKDOWN STRUCTURE:",
+   "text": "Project Phases (Home ofﬁce, Procurement, Construction etc.)."
+  },
+  {
+   "id": "STD-120",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST BREAKDOWN STRUCTURE:",
+   "text": "COMPANY scope"
+  },
+  {
+   "id": "STD-121",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST ESTIMATE PREPARATION PLAN:",
+   "text": "EC shall submit cost estimation preparation plan as part of cost estimate methodology. Cost estimation preparation plan should include the following as a minimum:"
+  },
+  {
+   "id": "STD-122",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST ESTIMATE PREPARATION PLAN:",
+   "text": "Cost estimate methodology preparation / submission including COMPANY review cycle."
+  },
+  {
+   "id": "STD-123",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST ESTIMATE PREPARATION PLAN:",
+   "text": "Budgetary quotation request preparation, evaluations."
+  },
+  {
+   "id": "STD-124",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST ESTIMATE PREPARATION PLAN:",
+   "text": "Cost Risk Analysis simulation."
+  },
+  {
+   "id": "STD-125",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST ESTIMATE PREPARATION PLAN:",
+   "text": "Draft Cost estimate preparation / submission and COMPANY review cycle (to be issued at least 3 weeks ahead of ﬁnal cost estimate submission including two weeks for COMPANY review)."
+  },
+  {
+   "id": "STD-126",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "COST ESTIMATE PREPARATION PLAN:",
+   "text": "Final cost estimate preparation / submission integrating COMPANY comments"
+  },
+  {
+   "id": "STD-127",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "Contracts/ Subcontracts and Procurement activities will be executed according to the defined Scope of Services as part of the PROJECT execution. The activities shall include all relevant work required to complete the SERVICES to ensure that all necessary information, details, studies, surveys, drawings and documents are available"
+  },
+  {
+   "id": "STD-128",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "Procurement support services anticipated as per the scope of work include:"
+  },
+  {
+   "id": "STD-129",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "Preparation of Sub-ENGINEERING CONTRACTOR (HAZOP Study) for the services to be performed during PROJECT."
+  },
+  {
+   "id": "STD-130",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "Procurement & Selection of Sub-ENGINEERING CONTRACTORs (HAZOP Study) as required."
+  },
+  {
+   "id": "STD-131",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "Preparation of Vendor List for the project in conjunction with COMPANY"
+  },
+  {
+   "id": "STD-132",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "Assistance in the preparation of ITT package"
+  },
+  {
+   "id": "STD-133",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "All interfaces with vendors, which involve obtaining quotation/purchase of equipment and/or materials, will be through Procurement team. Also, Technical Queries will be submitted to Vendors through Procurement team and response received will be forwarded to Engineering team accordingly."
+  },
+  {
+   "id": "STD-134",
+   "chapter": "EXECUTION OVERVIEW",
+   "section": "CONTRACTS AND PROCUREMENT MANAGEMENT",
+   "text": "All received information / Data from Sub-Contractor will be incorporated in the design documents."
+  },
+  {
+   "id": "STD-135",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "COMMUNICATION STRATEGY",
+   "text": "Communication strategy is based on COMPANY’s expectations and EC’s commitment to create a transparent flow of information between the CONTRACT parties."
+  },
+  {
+   "id": "STD-136",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "COMMUNICATION STRATEGY",
+   "text": "Close interaction during the PROJECT execution is essential and will be developed with mutual interaction at Site and other relevant locations."
+  },
+  {
+   "id": "STD-137",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "COMMUNICATION STRATEGY",
+   "text": "Target is to ensure fluent flow of information in every execution level and location with proper tools, confidential environment and applying properly the communication principles in every occasion."
+  },
+  {
+   "id": "STD-138",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "PROJECT FOCAL POINTS",
+   "text": "During the Kick off Meeting the Focal Points between the parties will be defined."
+  },
+  {
+   "id": "STD-139",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEANS OF COMMUNICATION",
+   "text": "PROJECT communication and correspondence nomenclature shall be arranged according to the COMPANY procedure."
+  },
+  {
+   "id": "STD-140",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEANS OF COMMUNICATION",
+   "text": "Communication shall be executed mainly by the following means:"
+  },
+  {
+   "id": "STD-141",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEANS OF COMMUNICATION",
+   "text": "Formal correspondence"
+  },
+  {
+   "id": "STD-142",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEANS OF COMMUNICATION",
+   "text": "E-mail correspondence"
+  },
+  {
+   "id": "STD-143",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEANS OF COMMUNICATION",
+   "text": "Face-to-face meetings"
+  },
+  {
+   "id": "STD-144",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEANS OF COMMUNICATION",
+   "text": "Teleconferences and dedicated video conference meetings"
+  },
+  {
+   "id": "STD-145",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "CORRESPONDENCE BETWEEN FOCAL POINTS",
+   "text": "Correspondence process and principles between focal points of the EC and the COMPANY will be agreed in the Kick off Meeting and shown in the PROJECT Communication and PROJECT Correspondence process will be discussed at early stage of the PROJECT."
+  },
+  {
+   "id": "STD-146",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEETINGS AND REVIEWS",
+   "text": "Meetings, workshops, interactive sessions will be arranged as agreed to enhance and develop our mutual understanding in order to acquire the valuable inputs to merge and incorporate with our experiences and common practices."
+  },
+  {
+   "id": "STD-147",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEETINGS AND REVIEWS",
+   "text": "Official meeting program and schedule will be mutually agreed with the COMPANY during the Kick off Meeting."
+  },
+  {
+   "id": "STD-148",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEETINGS AND REVIEWS",
+   "text": "PROJECT Meetings to be held:"
+  },
+  {
+   "id": "STD-149",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEETINGS AND REVIEWS",
+   "text": "Monthly Progress Review Meetings"
+  },
+  {
+   "id": "STD-150",
+   "chapter": "COMMUNICATION & MANAGEMENT PLAN",
+   "section": "MEETINGS AND REVIEWS",
+   "text": "Top level Steering Meetings"
+  },
+  {
+   "id": "STD-151",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "The EC is committed to provide high-quality technical, engineering and PROJECT services to attain sound and proven high quality standards."
+  },
+  {
+   "id": "STD-152",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "The EC strives for the highest quality of operations and products in accordance with the requirements and expectations of our customers. Top management, superiors and every employee within the EC’s organization are responsible for ensuring quality in our business."
+  },
+  {
+   "id": "STD-153",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Our goal is Zero non-conformities."
+  },
+  {
+   "id": "STD-154",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Our way is – continuous improvement and lessons learned implemented in practice."
+  },
+  {
+   "id": "STD-155",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Every employee in the EC organization is responsible that his/her activity complies to the EC Quality and HSE policy. Each person is responsible for the quality of his/her performance and for controlling environmental impacts and safety issues."
+  },
+  {
+   "id": "STD-156",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Each EC’s line manager is responsible for resolving any Quality and HSE issues in his/her area of operations."
+  },
+  {
+   "id": "STD-157",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "The role of the EC’s - Quality manager is to support the line and PROJECT organizations in avoiding any HSE and Quality issues."
+  },
+  {
+   "id": "STD-158",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Nominated PROJECT Manager is responsible for the Quality of the PROJECT."
+  },
+  {
+   "id": "STD-159",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "The quality targets for the PROJECT are:"
+  },
+  {
+   "id": "STD-160",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "To meet the safety requirements set by the COMPANY"
+  },
+  {
+   "id": "STD-161",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "To meet the quality requirements set by the COMPANY"
+  },
+  {
+   "id": "STD-162",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "To meet the technical requirements set by the COMPANY"
+  },
+  {
+   "id": "STD-163",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "The PROJECT will be completed according to the budget and schedule."
+  },
+  {
+   "id": "STD-164",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "EC is planned to conduct one (1) Internal Quality Audits’s during the execution of the Project."
+  },
+  {
+   "id": "STD-165",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Implementation of the system shall be in accordance with the EC’s Quality Manual and project specific Quality Plan. A well-defined and documented Quality Policy signed by Management shall be submitted demonstrating the EC’s commitment to the Quality Requirements."
+  },
+  {
+   "id": "STD-166",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Accredited Certification Body DNV Certification Oy/Ab (S001) has certified the operations of EC. The EC’s certified Management System will be applied in the PROJECT according to EC’s Quality Manual."
+  },
+  {
+   "id": "STD-167",
+   "chapter": "QUALITY MANAGEMENT PLAN",
+   "section": "",
+   "text": "Additional to above proposed, QA/QC Audit & Quality Requirements will be aligned and followed as per COMPANY's Requirements and procedures. Please refer to relevant sections of the technical bid for EC’s QA/QC documents."
+  },
+  {
+   "id": "STD-168",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "EC is committed to apply the HSE policy and principles and specially to apply technologies and PROJECT management and implementation practices, which have been proven sound in terms of health, safety and environment."
+  },
+  {
+   "id": "STD-169",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "This entails that"
+  },
+  {
+   "id": "STD-170",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "The HSE impacts of the technology suggested to a customer are known"
+  },
+  {
+   "id": "STD-171",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "The risks are within acceptable limits"
+  },
+  {
+   "id": "STD-172",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "We follow the highest level of requirement concerning legislation and the customer’s own norms"
+  },
+  {
+   "id": "STD-173",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "High standard construction safety can be obtained through good PROJECT performance and safety practices in construction phase"
+  },
+  {
+   "id": "STD-174",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Our Goal:"
+  },
+  {
+   "id": "STD-175",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Zero incidents. We believe that all accidents are preventable."
+  },
+  {
+   "id": "STD-176",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "We put the personal health and safety of our employees and co-operation partners first"
+  },
+  {
+   "id": "STD-177",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Our Way:"
+  },
+  {
+   "id": "STD-178",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "It is how we do business and it is how we live. Our people are our greatest asset and the basis for our success. We believe that we owe it to our employees and co-operation partners to help keep them safe and healthy."
+  },
+  {
+   "id": "STD-179",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "High-quality HSE performance in the PROJECT shall be ensured by:"
+  },
+  {
+   "id": "STD-180",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "PROJECT Management commitment"
+  },
+  {
+   "id": "STD-181",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Excellent basic professional HSE competence of all discipline personnel and specific competence of HSE responsible persons, emphasizing knowledge of local and the COMPANY rules and regulations, ADNOC/COMPANY specifications and COP's."
+  },
+  {
+   "id": "STD-182",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Continuously measuring, analyzing and developing our PROJECT HSE practices and procedures"
+  },
+  {
+   "id": "STD-183",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Proper introduction of PROJECT personnel into PROJECT HSE requirements"
+  },
+  {
+   "id": "STD-184",
+   "chapter": "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN",
+   "section": "",
+   "text": "Additional to above proposed, HSE Requirements will be aligned and followed as per COMPANY's Requirements and procedures."
+  },
+  {
+   "id": "STD-185",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Document Management and Control Plan shall be submitted to COMPANY which provides description of document control and management aspects such as;"
+  },
+  {
+   "id": "STD-186",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Drawings / Document categories"
+  },
+  {
+   "id": "STD-187",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Numbering philosophy"
+  },
+  {
+   "id": "STD-188",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Drawings / Document templates"
+  },
+  {
+   "id": "STD-189",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Revision control"
+  },
+  {
+   "id": "STD-190",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Storage and Archives (Documents, Data & Records)"
+  },
+  {
+   "id": "STD-191",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Drawings / Document Submission Tool ( EDMS, WRENCH )"
+  },
+  {
+   "id": "STD-192",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Hand-over to COMPANY"
+  },
+  {
+   "id": "STD-193",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "During execution of the project, following two (2) major categories of document will be produced;"
+  },
+  {
+   "id": "STD-194",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Project Administration & Correspondence Documents such as correspondence, minutes of meeting, transmittals, site queries, project change control, and etc."
+  },
+  {
+   "id": "STD-195",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Technical Documents such as Engineering documents, drawings, technical specifications, and etc."
+  },
+  {
+   "id": "STD-196",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "The above two (2) document groups will be managed and controlled according to the ‘Project Coordination Plan’ and ‘Document Management and Control Plan’."
+  },
+  {
+   "id": "STD-197",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Final document dossier shall include all documents and drawings prepared by the EC for the PROJECT, including (but not limited to):"
+  },
+  {
+   "id": "STD-198",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Softcopies in native format (AutoCad, E database, with Latest Edition) shall be submitted for all drawings & documents."
+  },
+  {
+   "id": "STD-199",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Final Consultancy Completion Dossier shall include all documents prepared by the EC."
+  },
+  {
+   "id": "STD-200",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Final Dossier Index shall be submitted for COMPANY approval prior to compiling the documents and handing over."
+  },
+  {
+   "id": "STD-201",
+   "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
+   "section": "",
+   "text": "Upon completion and approval of all amendments to the Tender Documents shall be submitted to COMPANY"
+  }
+ ]
+}

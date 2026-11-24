@@ -151,3 +151,27 @@ class AIWorkspaceMessage(models.Model):
         db_table = 'core_ai_workspace_messages'
         constraints = [models.UniqueConstraint(fields=['conversation', 'request_id', 'role'],
                                                condition=Q(request_id__isnull=False), name='core_ai_message_request_role_unique')]
+
+
+class AICustomSkill(models.Model):
+    """A skill a user wrote for RADAI Intelligence: private, or shared read-only with their organization."""
+    VISIBILITY = [('private', 'Private'), ('organization', 'Organization')]
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ai_custom_skills')
+    organization = models.ForeignKey('rbac.Organization', null=True, blank=True, on_delete=models.SET_NULL,
+                                     related_name='ai_custom_skills')
+    name = models.CharField(max_length=80)
+    category = models.CharField(max_length=40, default='Custom')
+    description = models.CharField(max_length=300, blank=True)
+    needs = models.JSONField(default=list, blank=True)
+    output = models.CharField(max_length=200, blank=True)
+    instructions = models.JSONField(default=list)
+    starter = models.TextField(max_length=1000, blank=True)
+    visibility = models.CharField(max_length=16, choices=VISIBILITY, default='private')
+    based_on = models.CharField(max_length=60, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_ai_custom_skills'
+        indexes = [models.Index(fields=['owner', 'archived_at']), models.Index(fields=['organization', 'visibility'])]
