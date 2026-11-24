@@ -9,7 +9,8 @@ from .views import (
     PayrollAdjustmentViewSet, PayrollEmployeeViewSet, PayrollRunViewSet,
     PayslipLineItemViewSet, PayslipViewSet, PayrollWorkflowLogViewSet,
     PayrollComparisonViewSet,
-    catalog_view, engine_dashboard_summary,
+    catalog_view, engine_dashboard_summary, engine_payroll_analytics,
+    valueframe_payroll_proposal, valueframe_payroll_send,
 )
 
 router = DefaultRouter()
@@ -24,5 +25,8 @@ router.register(r'workflow-log', PayrollWorkflowLogViewSet, basename='payroll-wo
 urlpatterns = [
     path('catalog/',           catalog_view,             name='payroll-engine-catalog'),
     path('dashboard-summary/', engine_dashboard_summary, name='payroll-engine-dashboard'),
+    path('analytics/',         engine_payroll_analytics, name='payroll-engine-analytics'),
+    path('valueframe/<int:import_id>/proposal/', valueframe_payroll_proposal, name='payroll-engine-vf-proposal'),
+    path('valueframe/<int:import_id>/send/',     valueframe_payroll_send,     name='payroll-engine-vf-send'),
     path('', include(router.urls)),
 ]

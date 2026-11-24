@@ -21,7 +21,8 @@ from . import catalog
 from .config import (
     CURRENCY, EXCEL_MAX_UPLOAD_MB,
     EMPLOYEE_WRITE_ROLE_CODES, ADJUSTMENT_WRITE_ROLE_CODES,
-    RUN_FORCE_OVERRIDE_ROLE_CODES,
+    RUN_FORCE_OVERRIDE_ROLE_CODES, ANALYTICS_VIEW_ROLE_CODES,
+    ANALYTICS_MONTH_CHOICES, ANALYTICS_DEFAULT_MONTHS, ANALYTICS_TOP_DEPARTMENTS,
 )
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
@@ -220,6 +221,166 @@ def engine_dashboard_summary(request):
         ).count(),
     }
     return Response(payload)
+
+
+# ── Payroll analytics (HR dashboard "Payroll management" panel) ─────
+class PayrollAnalyticsViewPermission(IsAuthenticated):
+    """Company salary totals: HR, payroll, finance and admin roles only.
+
+    Override via env var ``PAYROLL_ANALYTICS_VIEW_ROLES`` (CSV).
+    Django super/staff are always allowed.
+    """
+
+    message = 'Payroll analysis is available to HR, payroll and finance roles.'
+
+    def has_permission(self, request, view):
+        return super().has_permission(request, view) and _user_has_any_role(
+            request.user, ANALYTICS_VIEW_ROLE_CODES)
+
+
+def _money(value) -> str:
+    return str((value or Decimal('0')).quantize(Decimal('0.01')))
+
+
+def _change_pct(current, previous):
+    """Percentage change, or None when there is no previous value to compare."""
+    if current is None or not previous:
+        return None
+    return float(((current - previous) / previous * 100).quantize(Decimal('0.1')))
+
+
+@api_view(['GET'])
+@permission_classes([PayrollAnalyticsViewPermission])
+def engine_payroll_analytics(request):
+    """Monthly payroll trend, the latest run and its department breakdown.
+
+    Read-only. ``months`` picks how many recent payroll runs to return
+    (one of ``ANALYTICS_MONTH_CHOICES``). Months without a run are not
+    invented: the UI shows them as missing.
+    """
+    try:
+        months = int(request.query_params.get('months') or ANALYTICS_DEFAULT_MONTHS)
+    except (TypeError, ValueError):
+        months = ANALYTICS_DEFAULT_MONTHS
+    if months not in ANALYTICS_MONTH_CHOICES:
+        months = ANALYTICS_DEFAULT_MONTHS if ANALYTICS_DEFAULT_MONTHS in ANALYTICS_MONTH_CHOICES \
+            else ANALYTICS_MONTH_CHOICES[0]
+
+    runs = list(PayrollRun.objects.order_by('-year', '-month')[:months])
+    runs.reverse()  # oldest first for the chart
+    status_labels = {row['code']: row['label'] for row in catalog.WORKFLOW_STATUSES}
+    trend = [{
+        'cycle_code': run.cycle_code or f'{run.year:04d}-{run.month:02d}',
+        'year': run.year,
+        'month': run.month,
+        'status': run.status,
+        'status_label': status_labels.get(run.status, run.status),
+        'employee_count': run.employee_count,
+        'gross': _money(run.total_gross),
+        'deductions': _money(run.total_deductions),
+        'net': _money(run.total_net),
+    } for run in runs]
+
+    latest = runs[-1] if runs else None
+    previous = runs[-2] if len(runs) > 1 else None
+    latest_payload = None
+    departments = []
+    if latest:
+        latest_payload = {
+            **trend[-1],
+            'gross_change_pct': _change_pct(latest.total_gross, previous.total_gross if previous else None),
+            'net_change_pct': _change_pct(latest.total_net, previous.total_net if previous else None),
+            'headcount_change': (latest.employee_count - previous.employee_count) if previous else None,
+            'average_net': _money(latest.total_net / latest.employee_count) if latest.employee_count else None,
+            'previous_cycle_code': trend[-2]['cycle_code'] if previous else None,
+        }
+        rows = (Payslip.objects.filter(run=latest)
+                .values('snapshot_department')
+                .annotate(employees=Count('id'), gross=Sum('gross_earnings'), net=Sum('net_payable'))
+                .order_by('-gross'))
+        for row in rows:
+            name = (row['snapshot_department'] or '').strip() or 'Unassigned'
+            departments.append({'department': name, 'employees': row['employees'],
+                                'gross': row['gross'] or Decimal('0'), 'net': row['net'] or Decimal('0')})
+        # Merge blank and "Unassigned" rows, then keep the largest and fold the rest into "Other".
+        merged = {}
+        for row in departments:
+            slot = merged.setdefault(row['department'], {**row, 'employees': 0, 'gross': Decimal('0'), 'net': Decimal('0')})
+            slot['employees'] += row['employees']
+            slot['gross'] += row['gross']
+            slot['net'] += row['net']
+        departments = sorted(merged.values(), key=lambda r: r['gross'], reverse=True)
+        if len(departments) > ANALYTICS_TOP_DEPARTMENTS > 0:
+            rest = departments[ANALYTICS_TOP_DEPARTMENTS - 1:]
+            departments = departments[:ANALYTICS_TOP_DEPARTMENTS - 1] + [{
+                'department': f'Other ({len(rest)} departments)',
+                'employees': sum(r['employees'] for r in rest),
+                'gross': sum((r['gross'] for r in rest), Decimal('0')),
+                'net': sum((r['net'] for r in rest), Decimal('0')),
+            }]
+        total_gross = latest.total_gross or Decimal('0')
+        departments = [{
+            **row, 'gross': _money(row['gross']), 'net': _money(row['net']),
+            'share_pct': float((row['gross'] / total_gross * 100).quantize(Decimal('0.1'))) if total_gross else None,
+        } for row in departments]
+
+    return Response({
+        'currency': CURRENCY,
+        'months': months,
+        'month_choices': list(ANALYTICS_MONTH_CHOICES),
+        'trend': trend,
+        'latest': latest_payload,
+        'departments': departments,
+        'pending_payslips': Payslip.objects.filter(
+            run__status__in=[catalog.Status.DRAFT, catalog.Status.HR_APPROVED]).count(),
+        'pending_adjustments': PayrollAdjustment.objects.filter(
+            status=catalog.AdjustmentStatus.PENDING).count(),
+        'workflow_statuses': [{'code': row['code'], 'label': row['label']} for row in catalog.WORKFLOW_STATUSES],
+    })
+
+
+# ── ValueFrame → Payroll handoff ────────────────────────────────────
+def _valueframe_import_or_404(import_id):
+    from apps.timesheet.models import ValueFrameImport
+    return ValueFrameImport.objects.filter(pk=import_id).first()
+
+
+@api_view(['GET'])
+@permission_classes([PayrollAnalyticsViewPermission])
+def valueframe_payroll_proposal(request, import_id):
+    """Proposed pending 'absent' deductions for employees flagged by a ValueFrame check."""
+    from .services.valueframe_handoff import build_proposal
+    vf_import = _valueframe_import_or_404(import_id)
+    if vf_import is None:
+        return Response({'detail': 'ValueFrame upload not found.'}, status=404)
+    today = timezone.localdate()
+    return Response({**build_proposal(vf_import), 'default_target': {'year': today.year, 'month': today.month},
+                     'can_send': _user_has_any_role(request.user, ADJUSTMENT_WRITE_ROLE_CODES)})
+
+
+@api_view(['POST'])
+@permission_classes([PayrollAdjustmentWritePermission])
+def valueframe_payroll_send(request, import_id):
+    """Create PENDING absent deductions in Payroll Management for the selected employees."""
+    from .services.valueframe_handoff import send_to_payroll
+    vf_import = _valueframe_import_or_404(import_id)
+    if vf_import is None:
+        return Response({'detail': 'ValueFrame upload not found.'}, status=404)
+    codes = request.data.get('employee_codes')
+    if codes is not None and not isinstance(codes, list):
+        return Response({'employee_codes': 'Send a list of employee numbers.'}, status=400)
+    result = send_to_payroll(vf_import, user=request.user, target_year=request.data.get('target_year'),
+                             target_month=request.data.get('target_month'),
+                             codes=[str(c).strip() for c in codes] if codes is not None else None)
+    try:
+        from apps.rbac.utils import create_audit_log
+        create_audit_log(user=request.user, action='create', resource_type='PayrollAdjustment',
+                         resource_repr=f'ValueFrame #{vf_import.pk} → payroll {result["target_year"]}-{result["target_month"]:02d}',
+                         metadata={'valueframe_import_id': vf_import.pk, **result},
+                         ip_address=request.META.get('REMOTE_ADDR'), user_agent=request.META.get('HTTP_USER_AGENT', ''))
+    except Exception:
+        logger.exception('ValueFrame payroll handoff audit log failed')
+    return Response(result, status=201 if result['created'] else 200)
 
 
 # ── Employee CRUD ───────────────────────────────────────────────────
@@ -1034,6 +1195,27 @@ class PayslipViewSet(viewsets.ModelViewSet):
             )
         return qs.order_by('snapshot_full_name')
 
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        """Add a payslip to a run. Like edit and delete, only Draft runs accept new payslips.
+
+        The run row is locked so an approval cannot land between the check and the insert.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        run = PayrollRun.objects.select_for_update().get(pk=serializer.validated_data['run'].pk)
+        if not run.is_editable:
+            return Response(
+                {'error': f'Run {run.cycle_code} is "{run.status}"; only Draft runs allow adding payslips.'},
+                status=409,
+            )
+        slip = serializer.save()
+        recompute_payslip_totals(slip)
+        slip.save()
+        recompute_run_totals(run)
+        run.save()
+        return Response(self.get_serializer(slip).data, status=http_status.HTTP_201_CREATED)
+
     def update(self, request, *args, **kwargs):
         slip = self.get_object()
         if not slip.run.is_editable:
@@ -1075,6 +1257,42 @@ class PayslipViewSet(viewsets.ModelViewSet):
             {'deleted': True, 'employee': emp_label, 'run': PayrollRunSerializer(run).data},
             status=200,
         )
+
+    # ── Employee self-service: only your own payslips, only released runs ──
+    # Listed in rbac.action_policy.SELF_SERVICE_ACTIONS so employees without
+    # payroll module access can reach them. Ownership comes from HR-controlled
+    # links (the payroll record's user, or its HR employee record's user),
+    # never from a code the requester could edit.
+    def _my_released_payslips(self, request):
+        user = request.user
+        return (Payslip.objects.select_related('employee', 'run').prefetch_related('line_items')
+                .filter(run__status=catalog.Status.RELEASED)
+                .filter(Q(employee__user=user) | Q(employee__employee__user=user))
+                .order_by('-run__year', '-run__month'))
+
+    @action(detail=False, methods=['get'], url_path='mine')
+    def mine(self, request):
+        qs = self._my_released_payslips(request)
+        try:
+            limit = max(1, min(60, int(request.query_params.get('limit') or 12)))
+        except ValueError:
+            limit = 12
+        return Response({'count': qs.count(), 'results': self.get_serializer(qs[:limit], many=True).data})
+
+    @action(detail=True, methods=['get'], url_path='mine-download')
+    def mine_download(self, request, pk=None):
+        slip = self._my_released_payslips(request).filter(pk=pk).first()
+        if slip is None:
+            return Response({'detail': 'Payslip not found.'}, status=404)
+        blob = excel_export.export_single_payslip(slip)
+        resp = HttpResponse(
+            blob,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp['Content-Disposition'] = (
+            f'attachment; filename="payslip_{slip.employee.employee_no}_{slip.run.cycle_code}.xlsx"'
+        )
+        return resp
 
     @action(detail=True, methods=['get'], url_path='download-xlsx')
     def download_xlsx(self, request, pk=None):

@@ -17,6 +17,7 @@ DEFAULT_ROUTING = {
     'partnership': ('Business Development', 24),
     'legal': ('Legal', 24),
     'hr': ('Human Resources', 24),
+    'talent_requisition': ('Human Resources', 24),
     'it_request': ('IT / Digital', 8),
     'finance_request': ('Finance', 24),
     'procurement': ('Procurement', 24),
@@ -30,6 +31,172 @@ LEGACY_TYPE_MAP = {
     'engineering-consulting': 'technical_support', 'digital-twin': 'technical_support',
     'ai-ml-services': 'technical_support', 'general': 'general', 'other': 'other',
 }
+
+# Talent requisitions are decided in stages: the requester's reporting manager
+# first, then Human Resources. Stage state lives in Enquiry.requisition_details
+# so the core enquiry lifecycle is untouched.
+REQUISITION_STAGES = (
+    ('reporting_manager', 'Reporting Manager'),
+    ('hr', 'HR Approval'),
+)
+
+
+def _requester_manager(enquiry):
+    """The requester's reporting manager (UserProfile.manager), if active."""
+    requester = enquiry.requester
+    profile = getattr(requester, 'rbac_profile', None) if requester else None
+    manager_profile = getattr(profile, 'manager', None) if profile else None
+    manager_user = getattr(manager_profile, 'user', None)
+    return manager_user if manager_user and manager_user.is_active else None
+
+
+def requisition_stage_state(enquiry):
+    details = enquiry.requisition_details if isinstance(enquiry.requisition_details, dict) else {}
+    stages = details.get('approval_stages') or []
+    try:
+        index = int(details.get('current_stage', 0))
+    except (TypeError, ValueError):
+        index = 0
+    return stages, index
+
+
+def requisition_current_approver_id(enquiry):
+    stages, index = requisition_stage_state(enquiry)
+    if 0 <= index < len(stages):
+        return stages[index].get('approver_id')
+    return None
+
+
+def _user_label(user):
+    return (user.get_full_name() or user.username) if user else ''
+
+
+def _setup_requisition_stages(enquiry, hr_representative):
+    """Initialise the approval stage chain; returns the first-stage assignee."""
+    manager = _requester_manager(enquiry)
+    stages = []
+    if manager and manager.pk != getattr(enquiry.requester, 'pk', None):
+        stages.append({
+            'key': 'reporting_manager', 'label': 'Reporting Manager',
+            'approver_id': manager.pk, 'approver_name': _user_label(manager), 'status': 'pending',
+        })
+    stages.append({
+        'key': 'hr', 'label': 'HR Approval',
+        'approver_id': hr_representative.pk if hr_representative else None,
+        'approver_name': _user_label(hr_representative), 'status': 'pending',
+    })
+    details = dict(enquiry.requisition_details or {})
+    details['approval_stages'] = stages
+    details['current_stage'] = 0
+    enquiry.requisition_details = details
+    return manager if stages[0]['key'] == 'reporting_manager' else hr_representative
+
+
+def _notify_requisition_stage_assignment(enquiry, *, sender=None):
+    recipient = enquiry.assigned_to
+    if not recipient or not enquiry.assigned_at:
+        return
+    stages, index = requisition_stage_state(enquiry)
+    label = stages[index].get('label', 'Approval') if 0 <= index < len(stages) else 'Approval'
+    _notify(
+        recipient, sender=sender,
+        title=f'Approval required: {enquiry.reference}',
+        message=f'Talent requisition "{enquiry.subject}" awaits your approval ({label}).',
+        action_url=f'/requisition-approvals/{enquiry.pk}', priority='HIGH',
+        metadata={
+            'enquiry_id': enquiry.pk, 'department': enquiry.department,
+            'requires_action': True, 'event_type': 'requisition_stage_assignment',
+            'requisition_stage': stages[index].get('key') if 0 <= index < len(stages) else None,
+            'assigned_at': enquiry.assigned_at.isoformat(),
+        },
+    )
+
+
+@transaction.atomic
+def decide_requisition_stage(enquiry, *, actor, decision, comment='', allow_override=False):
+    """Record the current stage approver's decision and advance the chain.
+
+    Rejection finalises the requisition (approval_status='rejected'). Approving
+    the final stage sets approval_status='approved'; otherwise the request is
+    reassigned to the next stage approver.
+    """
+    if enquiry.inquiry_type != 'talent_requisition':
+        raise ValueError('This request is not a talent requisition.')
+    if enquiry.status in ('resolved', 'closed', 'spam'):
+        raise ValueError('This requisition is already completed.')
+    if decision not in ('approved', 'rejected'):
+        raise ValueError('Invalid decision.')
+    details = dict(enquiry.requisition_details or {})
+    stages = [dict(stage) for stage in (details.get('approval_stages') or [])]
+    try:
+        index = int(details.get('current_stage', 0))
+    except (TypeError, ValueError):
+        index = 0
+    if enquiry.approval_status != 'pending' or not (0 <= index < len(stages)):
+        raise ValueError('There is no pending approval stage.')
+    stage = stages[index]
+    if not allow_override and stage.get('approver_id') != actor.pk and enquiry.assigned_to_id != actor.pk:
+        raise PermissionError('Only the current stage approver may decide this requisition.')
+
+    now = timezone.now()
+    stage.update({
+        'status': decision, 'decided_by_id': actor.pk, 'decided_by_name': _user_label(actor),
+        'decided_at': now.isoformat(), 'comment': str(comment or '').strip(),
+    })
+    stages[index] = stage
+    details['approval_stages'] = stages
+    update_fields = ['requisition_details', 'updated_at']
+
+    if decision == 'rejected':
+        enquiry.approval_status = 'rejected'
+        enquiry.approved_by = actor
+        enquiry.approved_at = now
+        update_fields += ['approval_status', 'approved_by', 'approved_at']
+    elif index + 1 < len(stages):
+        from django.contrib.auth import get_user_model
+        next_index = index + 1
+        next_stage = stages[next_index]
+        approver = None
+        if next_stage.get('approver_id'):
+            approver = get_user_model().objects.filter(pk=next_stage['approver_id'], is_active=True).first()
+        if approver is None:
+            candidates = _manager_candidates(enquiry.department, approval_required=True)
+            approver = candidates[0] if candidates else None
+        next_stage['approver_id'] = approver.pk if approver else None
+        next_stage['approver_name'] = _user_label(approver)
+        details['current_stage'] = next_index
+        enquiry.assigned_to = approver
+        enquiry.assigned_by = actor
+        enquiry.assigned_at = now if approver else None
+        update_fields += ['assigned_to', 'assigned_by', 'assigned_at']
+    else:
+        enquiry.approval_status = 'approved'
+        enquiry.approved_by = actor
+        enquiry.approved_at = now
+        update_fields += ['approval_status', 'approved_by', 'approved_at']
+
+    enquiry.requisition_details = details
+    enquiry.save(update_fields=update_fields)
+    EnquiryActivity.objects.create(
+        enquiry=enquiry, actor=actor, action='requisition_stage_decision',
+        details={'stage': stage['key'], 'decision': decision, 'comment': stage['comment']},
+    )
+    if decision == 'approved' and details.get('current_stage') != index:
+        _notify_requisition_stage_assignment(enquiry, sender=actor)
+    if enquiry.requester:
+        stage_word = 'approved' if decision == 'approved' else 'did not approve'
+        _notify(
+            enquiry.requester, sender=actor,
+            title=f'Requisition {decision}: {enquiry.reference}',
+            message=(f'{stage["label"]} {stage_word} your talent requisition "{enquiry.subject}".'
+                     + (f' Comments: {stage["comment"]}' if stage['comment'] else '')),
+            action_url=f'/my-enquiries/{enquiry.pk}',
+            priority='HIGH' if decision == 'rejected' else 'NORMAL',
+            metadata={'enquiry_id': enquiry.pk, 'requires_action': False,
+                      'event_type': 'requisition_stage_result', 'requisition_stage': stage['key']},
+        )
+    return enquiry
+
 
 
 def normalize_inquiry_type(value):
@@ -109,6 +276,11 @@ def _email_external_response(enquiry, body):
 
 def can_approve_enquiry(user, enquiry):
     from apps.rbac.approval_eligibility import eligible_approver, has_business_position
+    if (enquiry.inquiry_type == 'talent_requisition' and user and user.is_authenticated
+            and enquiry.approval_required and enquiry.approval_status == 'pending'
+            and enquiry.status not in ('resolved', 'closed', 'spam')
+            and requisition_current_approver_id(enquiry) == user.pk):
+        return True
     positions = _department_head_positions(enquiry.department)
     return eligible_approver(
         user, 'enquiry_management',
@@ -159,7 +331,7 @@ def route_enquiry(enquiry, *, actor=None):
         inquiry_type=enquiry.inquiry_type, is_active=True,
     ).first()
     department, sla_hours = DEFAULT_ROUTING.get(enquiry.inquiry_type, DEFAULT_ROUTING['other'])
-    approval_required = enquiry.urgency in ('high', 'urgent')
+    approval_required = enquiry.urgency in ('high', 'urgent') or enquiry.inquiry_type == 'talent_requisition'
     representative = None
     if rule:
         department, sla_hours = rule.department, rule.sla_hours
@@ -171,6 +343,8 @@ def route_enquiry(enquiry, *, actor=None):
     if representative is None:
         candidates = _manager_candidates(department, approval_required=approval_required)
         representative = candidates[0] if candidates else None
+    if enquiry.inquiry_type == 'talent_requisition':
+        representative = _setup_requisition_stages(enquiry, representative)
 
     enquiry.department = department
     enquiry.due_at = enquiry.created_at + timedelta(hours=sla_hours)
@@ -182,7 +356,7 @@ def route_enquiry(enquiry, *, actor=None):
     enquiry.approval_status = 'pending' if enquiry.approval_required else 'not_required'
     enquiry.save(update_fields=[
         'department', 'due_at', 'assigned_to', 'assigned_by', 'assigned_at', 'status',
-        'approval_required', 'approval_status', 'updated_at',
+        'approval_required', 'approval_status', 'requisition_details', 'updated_at',
     ])
     EnquiryActivity.objects.create(
         enquiry=enquiry, actor=enquiry.assigned_by, action='auto_routed',
@@ -190,7 +364,10 @@ def route_enquiry(enquiry, *, actor=None):
                  'sla_hours': sla_hours,
                  'assignment_strategy': 'department_head' if representative else 'unassigned_no_department_head'},
     )
-    notify_enquiry_assignment(enquiry, sender=actor)
+    if enquiry.inquiry_type == 'talent_requisition':
+        _notify_requisition_stage_assignment(enquiry, sender=actor)
+    else:
+        notify_enquiry_assignment(enquiry, sender=actor)
     return enquiry
 
 

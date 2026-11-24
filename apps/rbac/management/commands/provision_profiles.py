@@ -47,14 +47,10 @@ class Command(BaseCommand):
                 
                 if not dry_run:
                     with transaction.atomic():
-                        organization, created = Organization.objects.get_or_create(
-                            code='DEFAULT_ORG',
-                            defaults={
-                                'name': 'Default Organization',
-                                'description': 'Auto-created default organization for profile provisioning',
-                                'is_active': True,
-                            }
-                        )
+                        # RADAI has two organizations; provision into Rejlers Abu Dhabi.
+                        from apps.rbac.organization_entities import ORGANIZATION_CODES, RAD, organization_for
+                        created = not Organization.objects.filter(code=ORGANIZATION_CODES[RAD]).exists()
+                        organization = organization_for(RAD)
                     if created:
                         self.stdout.write(self.style.SUCCESS(f'✅ Created organization: {organization.name}'))
                 else:

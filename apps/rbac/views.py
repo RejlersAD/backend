@@ -66,6 +66,13 @@ class OrganizationViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
 
     def perform_create(self, serializer):
+        # RADAI has exactly two organizations (apps.rbac.organization_entities).
+        from .organization_entities import ENTITY_NAMES, ORGANIZATION_CODES
+        name = str(serializer.validated_data.get('name', '')).strip().casefold()
+        code = str(serializer.validated_data.get('code', '')).strip().upper()
+        if name not in {n.casefold() for n in ENTITY_NAMES.values()} and code not in ORGANIZATION_CODES.values():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'name': 'RADAI uses two organizations: Rejlers Abu Dhabi and Rejlers India (RIN).'})
         org = serializer.save()
         create_audit_log(
             user=self.request.user,
@@ -1732,7 +1739,13 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 
             def find_organization(value):
                 key = str(value or '').strip().casefold()
-                return organizations_by_name.get(key) or organizations_by_code.get(key)
+                found = organizations_by_name.get(key) or organizations_by_code.get(key)
+                if found or not key:
+                    return found
+                # Legacy spellings ('Rejlers AB', 'Rejlers India', 'Abu Dhabi', ...) map
+                # to one of the two RADAI organizations.
+                from .organization_entities import ORGANIZATION_CODES, entity_for
+                return organizations_by_code.get(ORGANIZATION_CODES[entity_for(value)].casefold())
 
             def find_role(value):
                 key = str(value or '').strip().casefold()

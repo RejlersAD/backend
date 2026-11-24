@@ -61,14 +61,9 @@ class Command(BaseCommand):
         self.stdout.write(f'  • Staff:     {user.is_staff}')
 
         # ── 3. Ensure RBAC profile exists & is active ─────────────────
-        default_org, _ = Organization.objects.get_or_create(
-            code='default',
-            defaults={
-                'name': 'Default Organization',
-                'primary_contact_email': 'admin@rejlers.com',
-                'is_active': True,
-            },
-        )
+        # RADAI has two organizations; new profiles default to Rejlers Abu Dhabi.
+        from apps.rbac.organization_entities import RAD, organization_for
+        default_org = organization_for(RAD)
 
         profile, p_created = UserProfile.objects.get_or_create(
             user=user,

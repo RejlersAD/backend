@@ -203,3 +203,59 @@ class DailyAttendanceSummary(models.Model):
         # constraint on (employee_code, date) matches lookups correctly.
         self.employee_code = norm_code(self.employee_code)
         super().save(*args, **kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ValueFrame reconciliation: compare booked time (ValueFrame "Wage Type Report")
+# with real attendance (biometric, HR manual entries, approved WFH, site visits).
+# One import per uploaded monthly report; one entry per employee row.
+# ─────────────────────────────────────────────────────────────────────────────
+class ValueFrameImport(models.Model):
+    period_start  = models.DateField(db_index=True)
+    period_end    = models.DateField(db_index=True)
+    company       = models.CharField(max_length=255, blank=True, default='')
+    file_name     = models.CharField(max_length=255)
+    file_sha256   = models.CharField(max_length=64, db_index=True)
+    employee_count = models.PositiveIntegerField(default=0)
+    warnings      = models.JSONField(default=list, blank=True)
+    uploaded_by   = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name='valueframe_imports')
+    uploaded_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-period_start', '-uploaded_at']
+
+    def __str__(self):
+        return f'ValueFrame {self.period_start:%Y-%m-%d}..{self.period_end:%Y-%m-%d} ({self.file_name})'
+
+
+class ValueFrameEntry(models.Model):
+    """Hours one employee booked in ValueFrame for the import's period."""
+    vf_import       = models.ForeignKey(ValueFrameImport, on_delete=models.CASCADE, related_name='entries')
+    employee_code   = models.CharField(max_length=64, db_index=True)
+    employee_name   = models.CharField(max_length=255, blank=True, default='')
+    normal_hours    = models.FloatField(default=0.0)   # booked as worked
+    flex_hours      = models.FloatField(default=0.0)   # working time flexibility (time off)
+    sick_hours      = models.FloatField(default=0.0)
+    annual_hours    = models.FloatField(default=0.0)
+    paternity_hours = models.FloatField(default=0.0)
+    bank_holiday_hours = models.FloatField(default=0.0)
+    other_paid_hours   = models.FloatField(default=0.0)
+    other_unpaid_hours = models.FloatField(default=0.0)
+    billability     = models.FloatField(null=True, blank=True)
+    invoicing_hours = models.FloatField(default=0.0)
+    total_hours     = models.FloatField(default=0.0)
+    raw             = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        unique_together = [('vf_import', 'employee_code')]
+        ordering = ['employee_name', 'employee_code']
+
+    def save(self, *args, **kwargs):
+        self.employee_code = norm_code(self.employee_code)
+        super().save(*args, **kwargs)
+
+    @property
+    def leave_hours(self):
+        return (self.sick_hours + self.annual_hours + self.paternity_hours
+                + self.other_paid_hours + self.other_unpaid_hours)

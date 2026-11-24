@@ -36,6 +36,12 @@ class OvertimeRoutingTests(TestCase):
         HRWorkflowStage.objects.create(definition=definition, code='hr_review', name='HR / Finance', sequence=2, approver_type='role', approver_value='hr_manager', require_comment_on_reject=True)
         for target in ['apps.hr_core.workflows.HRWorkflowService._notify_task', 'apps.hr_core.overtime.notify_result']:
             mock = patch(target); mock.start(); self.addCleanup(mock.stop)
+        # Approvers need a current approve grant and the matching business
+        # position (rbac.approval_eligibility, since 2026-09-16).
+        from apps.procurement.tests.approval_fixtures import grant_approval, set_position
+        for name, title in (('manager', 'Project Manager'), ('hr', 'HR Manager'), ('finance', 'Finance Manager')):
+            grant_approval(self.users[name], 'payroll', 'hr_management')
+            set_position(self.users[name], title)
 
     def call(self, actor, action, data=None, pk=None):
         method = 'get' if action in {'list', 'retrieve', 'employees'} else 'post'
@@ -58,16 +64,24 @@ class OvertimeRoutingTests(TestCase):
         self.assertEqual(final.data['status'], 'approved'); self.assertEqual(final.data['approved_hours'], '2.50')
         self.assertEqual(self.call('hr', 'approve', pk=pk).status_code, 400)
 
-    def test_manager_submits_for_report_direct_final(self):
-        response = self.submit(actor='manager'); self.assertEqual(response.status_code, 201, response.data)
-        self.assertEqual(response.data['stage_code'], 'hr_review')
-        self.assertEqual(self.call('manager', 'approve', pk=response.data['id']).status_code, 403)
-        self.assertEqual(self.call('hr', 'approve', pk=response.data['id']).data['status'], 'approved')
+    # Since 2026-09-16 every request needs an active reporting manager, and a
+    # manager who submits for a report must still record the manager decision.
+    def give_hr_a_manager(self):
+        self.users['hr'].rbac_profile.manager = self.users['manager'].rbac_profile
+        self.users['hr'].rbac_profile.save()
 
-    def test_manager_submits_for_self_direct_final(self):
+    def test_manager_submission_for_report_still_needs_manager_decision(self):
+        response = self.submit(actor='manager'); self.assertEqual(response.status_code, 201, response.data)
+        pk = response.data['id']
+        self.assertEqual(response.data['stage_code'], 'manager_review')
+        self.assertEqual(self.call('hr', 'approve', pk=pk).status_code, 403)
+        self.assertEqual(self.call('manager', 'approve', pk=pk).data['stage_code'], 'hr_review')
+        self.assertEqual(self.call('hr', 'approve', pk=pk).data['status'], 'approved')
+
+    def test_manager_without_own_manager_cannot_submit_for_self(self):
         response = self.submit(actor='manager', employee='manager')
-        self.assertEqual(response.data['stage_code'], 'hr_review')
-        self.assertEqual(self.call('finance', 'approve', pk=response.data['id']).data['status'], 'approved')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('manager', response.data)
 
     def test_unrelated_submission_and_forged_approval_are_blocked(self):
         self.assertEqual(self.submit(employee='other').status_code, 403)
@@ -78,14 +92,18 @@ class OvertimeRoutingTests(TestCase):
         manager = self.users['manager']; manager.is_active = False; manager.save()
         self.assertEqual(self.submit().status_code, 400)
 
-    def test_no_manager_goes_direct_final(self):
+    def test_employee_without_manager_is_refused(self):
         response = self.submit(actor='other', employee='other')
-        self.assertEqual(response.data['stage_code'], 'hr_review')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('manager', response.data)
+        self.assertFalse(OvertimeRequest.objects.exists())
 
     def test_final_reviewer_cannot_self_approve(self):
-        response = self.submit(actor='hr', employee='hr')
-        self.assertEqual(self.call('hr', 'approve', pk=response.data['id']).status_code, 403)
-        self.assertEqual(self.call('finance', 'approve', pk=response.data['id']).status_code, 200)
+        self.give_hr_a_manager()
+        pk = self.submit(actor='hr', employee='hr').data['id']
+        self.assertEqual(self.call('manager', 'approve', pk=pk).status_code, 200)
+        self.assertEqual(self.call('hr', 'approve', pk=pk).status_code, 403)
+        self.assertEqual(self.call('finance', 'approve', pk=pk).status_code, 200)
 
     def test_reject_requires_note_and_cancel_stops_approval(self):
         response = self.submit(); pk = response.data['id']
@@ -108,9 +126,17 @@ class OvertimeRoutingTests(TestCase):
 
 
 class OvertimeBenefitTests(OvertimeRoutingTests):
+    def setUp(self):
+        super().setUp()
+        # These tests post benefits to the September 2026 payroll; adjustments
+        # may only target the current or a future month, so pin "today" there.
+        clock = patch('apps.payroll_engine.services.adjustment_period.timezone.localdate', return_value=date(2026, 9, 15))
+        clock.start(); self.addCleanup(clock.stop)
+
     def approved_request(self, benefit='cash'):
         response = self.submit(actor='manager', compensation_type=benefit)
         pk = response.data['id']
+        self.assertEqual(self.call('manager', 'approve', pk=pk).status_code, 200)
         self.assertEqual(self.call('finance', 'approve', pk=pk).status_code, 200)
         return pk
 
@@ -190,6 +216,7 @@ class OvertimeAttendanceTests(OvertimeRoutingTests):
 
 class OvertimePersonalScopeTests(OvertimeRoutingTests):
     def test_hr_profile_only_returns_own_requests(self):
+        self.give_hr_a_manager()
         other = self.submit(actor='manager').data['id']
         own = self.submit(actor='hr',employee='hr').data['id']
         request = APIRequestFactory().get('/overtime/', {'scope':'mine'})
@@ -215,9 +242,11 @@ class SuperAdminHRAccessTests(OvertimeRoutingTests):
             user.rbac_profile.roles.set([role])
             self.assertTrue(_is_hr_manager(user))
             self.assertTrue(_is_hr(user))
-            self.assertTrue(is_final_reviewer(user))
+            # Since 2026-09-16 an admin role grants HR access, not approval: the
+            # final reviewer needs an approve grant and an HR/Finance position.
+            self.assertFalse(is_final_reviewer(user))
         pk = self.submit(actor='manager').data['id']
-        self.assertEqual(self.call('other','approve',pk=pk).status_code,200)
+        self.assertNotEqual(self.call('other','approve',pk=pk).status_code,200)
 
 
 class OvertimeMultiDayTests(OvertimeRoutingTests):

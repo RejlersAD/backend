@@ -110,7 +110,8 @@ INDEPENDENT_WORKFLOWS = {
     *{('apps.core.views_enquiry', name) for name in (
         'submit_enquiry', 'enquiry_options', 'public_enquiry_feedback',
         'my_enquiries', 'my_enquiry_detail', 'my_enquiry_response',
-        'my_enquiry_resolution', 'my_enquiry_feedback', 'enquiry_attachment_download')},
+        'my_enquiry_resolution', 'my_enquiry_feedback', 'enquiry_attachment_download',
+        'requisition_approval')},
 }
 
 # Account bootstrap and owner-scoped profile operations do not require module grants.
@@ -139,6 +140,10 @@ SELF_SERVICE_ACTIONS = {
     'LeaveTypeViewSet': {'list', 'retrieve'},
     'LeaveRequestViewSet': {'list', 'retrieve', 'create', 'cancel', 'pending_for_me', 'manager_options', 'referral_options'},
     'EmployeeLeaveRecordViewSet': {'list', 'retrieve'},
+    # Payroll self-service: these two actions only ever return the requester's
+    # own payslips from released runs (PayslipViewSet._my_released_payslips).
+    # Every other payslip operation stays module-gated.
+    'PayslipViewSet': {'mine', 'mine_download'},
 }
 
 # These operations perform their own requester/stage-assignee checks. They do

@@ -22,6 +22,7 @@ from django.contrib.auth import get_user_model
 from django.db import models
 
 from apps.finance.salary_models import EmployeeSalaryInfo, PayrollRun, SalarySlip
+from apps.rbac.organization_entities import ENTITY_CHOICES
 
 User = get_user_model()
 
@@ -348,8 +349,8 @@ class EmployeeLeaveRecord(models.Model):
     # Carryforward from previous year
     carryforward        = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('0'))
 
-    # Branch / legal entity — RAD = Rejlers AB; RIN = Rejlers IN
-    BRANCH_CHOICES      = [('RAD', 'Rejlers AB'), ('RIN', 'Rejlers IN')]
+    # Branch / legal entity: the two RADAI organizations (apps.rbac.organization_entities)
+    BRANCH_CHOICES      = ENTITY_CHOICES
     branch              = models.CharField(
         max_length=10, choices=BRANCH_CHOICES, default='RAD', db_index=True,
     )

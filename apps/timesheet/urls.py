@@ -1,6 +1,7 @@
 from django.urls import path
 
 from . import views
+from . import valueframe_views
 
 app_name = 'timesheet'
 
@@ -20,6 +21,11 @@ urlpatterns = [
     path('daily/',                 views.daily,            name='daily'),
     path('monthly/',               views.monthly,          name='monthly'),
     path('manual-upload/',         views.manual_attendance_upload, name='manual-attendance-upload'),
+
+    # ValueFrame reconciliation (booked time vs real attendance)
+    path('valueframe/imports/',                     valueframe_views.valueframe_imports,       name='valueframe-imports'),
+    path('valueframe/imports/<int:pk>/',            valueframe_views.valueframe_import_detail, name='valueframe-import-detail'),
+    path('valueframe/imports/<int:pk>/comparison/', valueframe_views.valueframe_comparison,    name='valueframe-comparison'),
     path('user/',                  views.user_drill,       name='user'),
     path('lookup-by-code/',        views.lookup_by_code,   name='lookup-by-code'),
     path('lookup-debug/',          views.lookup_debug,     name='lookup-debug'),

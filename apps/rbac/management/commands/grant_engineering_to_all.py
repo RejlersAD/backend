@@ -144,14 +144,9 @@ class Command(BaseCommand):
 
         default_org = None
         if not dry_run:
-            default_org, _ = Organization.objects.get_or_create(
-                code='default',
-                defaults={
-                    'name': 'Default Organization',
-                    'primary_contact_email': 'admin@rejlers.com',
-                    'is_active': True,
-                },
-            )
+            # RADAI has two organizations; new profiles default to Rejlers Abu Dhabi.
+            from apps.rbac.organization_entities import RAD, organization_for
+            default_org = organization_for(RAD)
 
         total_users   = 0
         already_ok    = 0

@@ -1110,7 +1110,10 @@ class OffboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet
     """
     permission_classes = [IsAuthenticated]
     queryset = OffboardingRecord.objects.all()
-    
+    # Per-action override read by rbac.action_policy.operation_action; None keeps
+    # the normal mapping. The 'separate' action sets it to 'create'.
+    permission_action = None
+
     def get_serializer_class(self):
         """Use lightweight serializer for list, full serializer for detail"""
         if self.action == 'list':
@@ -1284,7 +1287,10 @@ class OffboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet
         record = OffboardingRecord.objects.select_for_update().get(pk=self.get_object().pk)
         require_approval(request.user, 'hr_onboarding', assigned=True,
                          current=record.status in OFFBOARDING_ACTIVE_STATUSES and record.project_manager_approval_status in {'approved', 'not_required'},
-                         positions={'hr_manager', 'hr_admin'})
+                         # human_resource (the HR position group: managers, admins, coordinators,
+                         # Head of HR Administration) restored 2026-11-24 after it was dropped
+                         # unintentionally on 2026-10-30.
+                         positions={'human_resource', 'hr_manager', 'hr_admin'})
         if record.status not in OFFBOARDING_ACTIVE_STATUSES:
             raise ValidationError({'detail': 'Only an active offboarding process can be rejected.'})
 
@@ -1500,9 +1506,44 @@ class OffboardingRecordViewSet(LifecycleCaseDeletionMixin, viewsets.ModelViewSet
         record.progress_percentage = 100
         record.actual_completion_date = timezone.now()
         record.save()
-        
+        # Offboarding complete: the login closes and the HR record shows Exited.
+        from .separation import close_separated_account
+        close_separated_account(record, actor=request.user, request=request)
+
         serializer = self.get_serializer(record)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='separate', permission_action='create')
+    def separate(self, request):
+        """Deactivate an employee for resignation or termination, aligned with offboarding.
+
+        Body: user_id, separation_type ('resignation' | 'termination'), last_working_day (YYYY-MM-DD),
+        reason, deactivate_now (optional; defaults to True for termination, False for resignation).
+        """
+        from datetime import date as _date
+        from .separation import separate_employee
+        if not can_manage_offboarding(request.user):
+            raise PermissionDenied('Only HR may deactivate employee accounts.')
+        target = get_user_model().objects.filter(pk=request.data.get('user_id')).first()
+        if target is None:
+            raise ValidationError({'user_id': 'Choose an employee.'})
+        try:
+            last_day = _date.fromisoformat(str(request.data.get('last_working_day') or ''))
+        except ValueError:
+            raise ValidationError({'last_working_day': 'Enter the last working day as YYYY-MM-DD.'})
+        raw_now = request.data.get('deactivate_now')
+        deactivate_now = None if raw_now in (None, '') else str(raw_now).lower() in ('true', '1', 'yes')
+        record, created, deactivated = separate_employee(
+            actor=request.user, user=target, separation_type=request.data.get('separation_type'),
+            last_working_day=last_day, reason=request.data.get('reason', ''),
+            deactivate_now=deactivate_now, request=request,
+        )
+        return Response({
+            'offboarding': self.get_serializer(record).data,
+            'offboarding_created': created,
+            'account_deactivated': deactivated,
+            'account_active': get_user_model().objects.filter(pk=target.pk, is_active=True).exists(),
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='start-checklist-stage')
     def start_checklist_stage(self, request, pk=None):

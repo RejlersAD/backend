@@ -89,6 +89,7 @@ class Enquiry(TimeStampedModel):
         ('partnership', 'Partnership'),
         ('legal', 'Legal'),
         ('hr', 'HR'),
+        ('talent_requisition', 'Talent Requisition'),
         ('it_request', 'IT Request'),
         ('finance_request', 'Finance Request'),
         ('procurement', 'Procurement'),
@@ -117,6 +118,7 @@ class Enquiry(TimeStampedModel):
     resolution_proposed_at = models.DateTimeField(null=True, blank=True)
     resolution_confirmed_at = models.DateTimeField(null=True, blank=True)
     approval_required = models.BooleanField(default=False)
+    requisition_details = models.JSONField(null=True, blank=True, default=None)
     approval_status = models.CharField(max_length=20, default='not_required', db_index=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     feedback_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)

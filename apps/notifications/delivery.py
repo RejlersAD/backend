@@ -46,6 +46,8 @@ def notification_action_url(notification):
     metadata = getattr(notification, 'metadata', None) or {}
     if isinstance(metadata, dict) and _is_approval_assignment(metadata):
         if metadata.get('enquiry_id'):
+            if metadata.get('event_type') == 'requisition_stage_assignment':
+                return safe_action_url(f"/requisition-approvals/{metadata['enquiry_id']}")
             return safe_action_url(f"/admin/enquiries/{metadata['enquiry_id']}")
         record_type, record_id = procurement_notification_target(metadata)
         if record_id:

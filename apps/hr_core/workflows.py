@@ -48,7 +48,10 @@ class HRWorkflowService:
             return False
         prior = instance.definition.stages.filter(sequence__lt=task.stage.sequence)
         approved_ids = instance.tasks.filter(status='approved').values_list('stage_id', flat=True)
-        return not prior.exclude(pk__in=approved_ids).exists()
+        # A manager stage recorded as skipped (no reporting manager; audited by a
+        # 'manager_skipped' event) is satisfied without a fabricated approval.
+        skipped_codes = instance.events.filter(event_type='manager_skipped').values_list('stage_code', flat=True)
+        return not prior.exclude(pk__in=approved_ids).exclude(code__in=skipped_codes).exists()
 
     @staticmethod
     def _role_codes(user):

@@ -17,6 +17,9 @@ INSTALLED_APPS = [
     'apps.notifications',
     'apps.planning_intelligence',
     'apps.project_control',
+    # apps.core project knowledge references crs.CRSRevision (since 2026-11-16),
+    # so every registry built on this base needs the CRS models to resolve.
+    'apps.crs',
 ]
 MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',

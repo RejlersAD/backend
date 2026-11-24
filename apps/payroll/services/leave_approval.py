@@ -131,6 +131,13 @@ def can_review(request, user):
         if request.workflow_instance_id and request.workflow_instance.current_stage.code != 'manager_review':
             return False
         return bool(manager.user_id == user.pk and user.is_active)
+    if request.status == 'PENDING' and not manager and request.workflow_instance_id:
+        # The reporting manager was removed after submission: HR completes the
+        # request (route_to_hr_when_manager_removed skips the manager stage). An
+        # assigned-but-inactive manager still counts as a manager and blocks this.
+        instance = request.workflow_instance
+        return bool(instance.status == 'pending' and instance.current_stage_id
+                    and instance.current_stage.code in ('manager_review', 'hr_review') and is_hr_approver(user))
     if request.status == 'PENDING' or not is_hr_approver(user):
         return False
     if request.workflow_instance_id:
@@ -138,6 +145,55 @@ def can_review(request, user):
         if instance.status != 'pending':
             return False
         return bool(instance.current_stage_id and instance.current_stage.code == 'hr_review')
+    return True
+
+
+def manager_decision_possible(request):
+    """Whether the reporting-manager actions (rm-approve / rm-reject) apply.
+
+    Not when there is no reporting manager: HR completes such requests. A task
+    referred to another reviewer stays actable by that reviewer.
+    """
+    if request.leave_type.code == 'FU' or manager_for_request(request) is not None:
+        return True
+    if request.workflow_instance_id:
+        instance = request.workflow_instance
+        task = instance.tasks.filter(stage_id=instance.current_stage_id, status='pending').select_related('stage', 'instance').first()
+        return bool(task and task_was_referred(task))
+    return False
+
+
+def route_to_hr_when_manager_removed(request, actor):
+    """Skip the manager stage of a pending request whose employee no longer has a manager.
+
+    Only when no reporting manager exists at all (removed after submission); an
+    assigned manager who is inactive still blocks HR. Cancels the open manager
+    task, records a 'manager_skipped' event and opens the HR review task.
+    Returns True when the request was rerouted. Caller holds the request lock.
+    """
+    from apps.hr_core.models import HRWorkflowEvent, HRWorkflowInstance
+    if request.leave_type.code == 'FU' or request.status != 'PENDING' or not request.workflow_instance_id:
+        return False
+    if manager_for_request(request) is not None:
+        return False
+    instance = HRWorkflowInstance.objects.select_for_update().get(pk=request.workflow_instance_id)
+    if instance.status != 'pending' or not instance.current_stage_id or instance.current_stage.code != 'manager_review':
+        return False
+    open_task = instance.tasks.filter(stage=instance.current_stage, status='pending').select_related('stage', 'instance').first()
+    if open_task and task_was_referred(open_task):
+        return False  # a referred review stays with the reviewer it was referred to
+    hr_stage = instance.definition.stages.filter(code='hr_review').first()
+    if hr_stage is None:
+        raise ValidationError({'workflow': 'HR must configure the manager-to-HR leave approval workflow before review.'})
+    instance.tasks.filter(status='pending', stage=instance.current_stage).update(status='cancelled')
+    HRWorkflowEvent.objects.create(
+        instance=instance, actor=actor, event_type='manager_skipped', stage_code='manager_review',
+        metadata={'reason': 'Reporting manager removed after submission'},
+    )
+    instance.current_stage = hr_stage
+    instance.save(update_fields=['current_stage'])
+    HRWorkflowService._create_task(instance, hr_stage)
+    request.workflow_instance = instance
     return True
 
 
@@ -157,7 +213,7 @@ def prepare_review_workflow(request):
         request.workflow_instance = instance
         return
     manager = manager_for_request(request)
-    if request.status == 'PENDING' and not manager:
+    if request.status == 'PENDING' and not manager and instance.current_stage.code == 'manager_review':
         raise ValidationError({'manager': 'Configure the reporting manager before review.'})
     if request.status == 'PENDING' and instance.current_stage.code == 'manager_review':
         instance.tasks.filter(status='pending', stage__code='manager_review').update(assigned_to_id=manager.user_id, assigned_role_code='')

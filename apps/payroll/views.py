@@ -837,6 +837,8 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             )
         if not can_review(req, request.user):
             raise PermissionDenied('This leave request is not awaiting your approval.')
+        from .services.leave_approval import route_to_hr_when_manager_removed
+        route_to_hr_when_manager_removed(req, request.user)
         if req.workflow_instance_id and req.workflow_instance.current_stage.code != 'hr_review':
             raise ValidationError({'workflow': 'Use the current intermediate-stage decision action.'})
         from .services.leave_approval import prepare_hr_approval
@@ -878,6 +880,8 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('This leave request is not awaiting your approval.')
         if not str(request.data.get('note', '')).strip():
             raise ValidationError({'note': 'A rejection reason is required.'})
+        from .services.leave_approval import route_to_hr_when_manager_removed
+        route_to_hr_when_manager_removed(req, request.user)
         if req.workflow_instance_id:
             prepare_review_workflow(req)
             from apps.hr_core.workflows import HRWorkflowService
@@ -912,7 +916,11 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {'error': f'Cannot approve a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if (not req.workflow_instance_id and req.leave_type.code != 'FU' and manager_for_request(req) is None) or not can_review(req, request.user):
+        # No reporting manager (none assigned, or removed after submission): there is no
+        # manager decision to record; HR completes the request through approve/reject.
+        # A referred task stays actable by the reviewer it was referred to.
+        from .services.leave_approval import manager_decision_possible
+        if not manager_decision_possible(req) or not can_review(req, request.user):
             raise PermissionDenied('This leave request is not awaiting your approval.')
         if req.workflow_instance_id:
             prepare_review_workflow(req)
@@ -945,7 +953,11 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {'error': f'Cannot reject a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if (not req.workflow_instance_id and req.leave_type.code != 'FU' and manager_for_request(req) is None) or not can_review(req, request.user):
+        # No reporting manager (none assigned, or removed after submission): there is no
+        # manager decision to record; HR completes the request through approve/reject.
+        # A referred task stays actable by the reviewer it was referred to.
+        from .services.leave_approval import manager_decision_possible
+        if not manager_decision_possible(req) or not can_review(req, request.user):
             raise PermissionDenied('This leave request is not awaiting your approval.')
         if not str(request.data.get('note', '')).strip():
             raise ValidationError({'note': 'A rejection reason is required.'})

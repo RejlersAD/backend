@@ -16,6 +16,7 @@ import uuid
 from django.db import models
 from django.utils import timezone
 from apps.core.models import TimeStampedModel
+from apps.rbac.organization_entities import ENTITY_CHOICES
 
 
 class RecruitmentOpening(TimeStampedModel):
@@ -247,10 +248,8 @@ class EmployeeMaster(TimeStampedModel):
     business_area = models.CharField(max_length=100, blank=True)
     office = models.CharField(max_length=100, blank=True)
     
-    BRANCH_CHOICES = [
-        ('RAD', 'Rejlers Abu Dhabi (RAD)'),
-        ('RIN', 'Rejlers India (RIN)'),
-    ]
+    # The two RADAI organizations (codes stay RAD / RIN): apps.rbac.organization_entities
+    BRANCH_CHOICES = ENTITY_CHOICES
     
     branch = models.CharField(
         max_length=20,

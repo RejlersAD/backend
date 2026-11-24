@@ -35,7 +35,7 @@ os.environ.update({
 from .settings_release_test import *  # noqa: E402,F403
 
 # core.ProjectKnowledgeSource references the split CRS revision model.
-INSTALLED_APPS = [*INSTALLED_APPS, 'apps.crs']  # noqa: F405
+INSTALLED_APPS = [*INSTALLED_APPS, *(['apps.crs'] if 'apps.crs' not in INSTALLED_APPS else [])]  # noqa: F405 (crs may come from settings_test)
 
 DATABASES = {
     'default': {

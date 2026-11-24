@@ -7,6 +7,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
+from apps.rbac.organization_entities import ENTITY_CHOICES
 
 User = get_user_model()
 
@@ -191,7 +192,7 @@ class OnboardingRecord(models.Model):
     position = models.CharField(max_length=255)
     department = models.CharField(max_length=255)
     reporting_manager = models.CharField(max_length=255, blank=True, null=True)
-    branch = models.CharField(max_length=50, default='RAD', choices=[('RAD', 'Rejlers Abu Dhabi'), ('RIN', 'Rejlers India')])
+    branch = models.CharField(max_length=50, default='RAD', choices=ENTITY_CHOICES)
     
     # Timeline
     joining_date = models.DateField()
@@ -316,7 +317,7 @@ class OffboardingRecord(models.Model):
     position = models.CharField(max_length=255)
     department = models.CharField(max_length=255)
     reporting_manager = models.CharField(max_length=255, blank=True, null=True)
-    branch = models.CharField(max_length=50, default='RAD', choices=[('RAD', 'Rejlers Abu Dhabi'), ('RIN', 'Rejlers India')])
+    branch = models.CharField(max_length=50, default='RAD', choices=ENTITY_CHOICES)
     
     # Exit Info
     exit_reason = models.CharField(max_length=50, choices=EXIT_REASONS)

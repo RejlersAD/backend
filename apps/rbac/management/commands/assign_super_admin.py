@@ -43,14 +43,10 @@ class Command(BaseCommand):
             return
         
         # Get or create default organization
-        default_org, org_created = Organization.objects.get_or_create(
-            code='default',
-            defaults={
-                'name': 'Default Organization',
-                'primary_contact_email': 'admin@rejlers.com',
-                'is_active': True
-            }
-        )
+        # RADAI has two organizations; new profiles default to Rejlers Abu Dhabi.
+        from apps.rbac.organization_entities import ORGANIZATION_CODES, RAD, organization_for
+        org_created = not Organization.objects.filter(code=ORGANIZATION_CODES[RAD]).exists()
+        default_org = organization_for(RAD)
         if org_created:
             self.stdout.write(f'✓ Created default organization: {default_org.name}')
         else:

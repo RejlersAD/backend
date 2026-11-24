@@ -5,6 +5,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 from apps.hr_core.models import EmployeeMaster, HRWorkflowDefinition, HRWorkflowStage, HRWorkflowTask
 from apps.payroll.models import LeaveRequest, LeaveType
+from apps.procurement.tests.approval_fixtures import grant_approval, set_position
 from apps.rbac.models import Role, UserProfile, Organization
 
 
@@ -28,14 +29,23 @@ class LeaveApprovalTests(TestCase):
         HRWorkflowStage.objects.create(definition=self.definition, code='hr_review', name='HR review', sequence=2, approver_type='role', approver_value='hr_manager', require_comment_on_reject=True)
         self.notifications = patch('apps.notifications.services.NotificationService.create_notification').start()
         self.addCleanup(patch.stopall)
+        # Approvers must hold a current payroll approve grant and the matching
+        # business position (rbac.approval_eligibility, since 2026-09-16).
+        for approver, title in ((self.manager, 'Project Manager'), (self.hr, 'HR Manager')):
+            grant_approval(approver, 'payroll')
+            set_position(approver, title)
 
+    # Approver notifications are delivered after commit (HRWorkflowService._notify_task);
+    # run those callbacks as a real request would.
     def submit(self, user=None, **extra):
         self.client.force_authenticate(user or self.employee)
-        return self.client.post('/api/v1/payroll/leave-requests/', {'leave_type': self.leave_type.pk, 'employee_name': 'Spoofed name', 'start_date': '2026-10-05', 'end_date': '2026-10-09', **extra}, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post('/api/v1/payroll/leave-requests/', {'leave_type': self.leave_type.pk, 'employee_name': 'Spoofed name', 'start_date': '2026-10-05', 'end_date': '2026-10-09', **extra}, format='json')
 
     def act(self, user, request_id, action, **data):
         self.client.force_authenticate(user)
-        return self.client.post(f'/api/v1/payroll/leave-requests/{request_id}/{action}/', data, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(f'/api/v1/payroll/leave-requests/{request_id}/{action}/', data, format='json')
 
     def queue(self, user):
         self.client.force_authenticate(user)
@@ -66,20 +76,25 @@ class LeaveApprovalTests(TestCase):
         self.assertIn(self.hr, recipients)
         self.assertIn(self.employee, recipients)
 
-    def test_hr_admin_role_can_receive_and_complete_manager_routed_leave(self):
-        self.hr.rbac_profile.roles.clear()
+    def use_hr_admin_role(self):
+        # Swap only the HR role; keep the payroll approve grant from setUp.
+        self.hr.rbac_profile.roles.remove(Role.objects.get(code='hr_manager'))
         self.hr.rbac_profile.roles.add(Role.objects.create(code='hr_admin', name='HR administrator'))
+
+    def test_hr_admin_role_can_receive_and_complete_manager_routed_leave(self):
+        self.use_hr_admin_role()
         self.test_manager_then_hr_and_duplicate_decision()
 
-    def test_hr_admin_can_approve_directly_when_no_manager(self):
-        self.hr.rbac_profile.roles.clear()
-        self.hr.rbac_profile.roles.add(Role.objects.create(code='hr_admin', name='HR administrator'))
+    def test_employee_without_manager_cannot_submit_leave(self):
+        # Since 2026-09-16 every leave type except Flex Utilization requires an
+        # active reporting manager; HR no longer receives manager-less requests.
+        self.use_hr_admin_role()
         self.employee_record.manager = None
         self.employee_record.save()
         response = self.submit()
-        self.assertEqual(response.status_code, 201, response.data)
-        self.assertEqual(len(self.queue(self.hr)), 1)
-        self.assertEqual(self.act(self.hr, response.data['id'], 'approve').status_code, 200)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('manager', response.data)
+        self.assertFalse(LeaveRequest.objects.exists())
 
     def test_inactive_or_self_hr_does_not_satisfy_route(self):
         self.hr.is_active = False
@@ -101,7 +116,7 @@ class LeaveApprovalTests(TestCase):
         self.client.force_authenticate(self.manager)
         detail = self.client.get(f"/api/v1/payroll/leave-requests/{response.data['id']}/")
         self.assertEqual(detail.data['employee_photo_url'], 'https://example.com/employee.jpg')
-        self.assertEqual(detail.data['employee_profile_id'], str(profile.pk))
+        self.assertEqual(str(detail.data['employee_profile_id']), str(profile.pk))
         self.employee_record.photo_url = ''
         self.employee_record.save()
         profile.profile_photo = 'profile_photos/employee.jpg'
@@ -121,13 +136,8 @@ class LeaveApprovalTests(TestCase):
     def test_missing_manager_and_missing_workflow_roll_back(self):
         self.employee_record.manager = None
         self.employee_record.save()
-        response = self.submit()
-        self.assertEqual(response.status_code, 201, response.data)
-        pk = response.data['id']
-        self.assertEqual(response.data['review_stage'], 'hr_review')
-        self.assertEqual(len(self.queue(self.hr)), 1)
-        self.assertEqual(self.act(self.hr, pk, 'approve').status_code, 200)
-        LeaveRequest.objects.all().delete()
+        self.assertEqual(self.submit().status_code, 400)  # an active reporting manager is required
+        self.assertEqual(LeaveRequest.objects.count(), 0)
         self.employee_record.manager = self.manager_record
         self.employee_record.save()
         self.definition.is_active = False
@@ -288,7 +298,7 @@ class LeaveApprovalTests(TestCase):
         self.employee_record.manager = None
         self.employee_record.save()
         organization = Organization.objects.first()
-        manager_profile = UserProfile.objects.create(user=self.manager, organization=organization)
+        manager_profile = self.manager.rbac_profile  # created with the approve grant in setUp
         UserProfile.objects.create(user=self.employee, organization=organization, manager=manager_profile)
         response = self.submit()
         self.assertEqual(response.status_code, 201, response.data)
@@ -302,7 +312,7 @@ class LeaveApprovalTests(TestCase):
     def test_legacy_request_without_master_uses_profile_manager(self):
         self.employee_record.delete()
         organization = Organization.objects.first()
-        manager_profile = UserProfile.objects.create(user=self.manager, organization=organization)
+        manager_profile = self.manager.rbac_profile  # created with the approve grant in setUp
         UserProfile.objects.create(user=self.employee, organization=organization, manager=manager_profile)
         leave = LeaveRequest.objects.create(employee=self.employee, employee_name='Test Employee', leave_type=self.leave_type, start_date=date(2026, 10, 5), end_date=date(2026, 10, 9))
         self.client.force_authenticate(self.employee)
@@ -311,9 +321,14 @@ class LeaveApprovalTests(TestCase):
         self.assertEqual(len(self.queue(self.manager)), 1)
         self.assertEqual(self.act(self.manager, leave.pk, 'rm-approve').status_code, 200)
 
+    def make_other_an_eligible_manager(self):
+        grant_approval(self.other, 'payroll')
+        set_position(self.other, 'Project Manager')
+        return self.other.rbac_profile
+
     def test_organization_profile_manager_takes_precedence(self):
         organization = Organization.objects.first()
-        wrong_manager = UserProfile.objects.create(user=self.other, organization=organization)
+        wrong_manager = self.make_other_an_eligible_manager()
         UserProfile.objects.create(user=self.employee, organization=organization, manager=wrong_manager)
         response = self.submit()
         self.assertEqual(response.status_code, 201, response.data)
@@ -343,7 +358,7 @@ class LeaveApprovalTests(TestCase):
     def test_changed_profile_manager_can_review_existing_task(self):
         pk = self.submit().data['id']
         organization = Organization.objects.first()
-        manager = UserProfile.objects.create(user=self.other, organization=organization)
+        manager = self.make_other_an_eligible_manager()
         UserProfile.objects.create(user=self.employee, organization=organization, manager=manager)
         self.assertEqual(self.queue(self.manager), [])
         self.assertEqual(len(self.queue(self.other)), 1)

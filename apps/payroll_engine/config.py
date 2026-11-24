@@ -132,6 +132,36 @@ ADJUSTMENT_WRITE_ROLE_CODES = [
     if code.strip()
 ]
 
+# ── RBAC: who may read payroll analytics (HR dashboard) ────────────
+# Company-wide salary totals and department cost breakdowns. Limited to
+# HR, payroll, finance and admin roles. Django superusers and is_staff
+# users are always allowed. Override via env without code changes.
+ANALYTICS_VIEW_ROLE_CODES = [
+    code.strip().lower()
+    for code in os.environ.get(
+        'PAYROLL_ANALYTICS_VIEW_ROLES',
+        'superadmin,super_admin,admin,hr_manager,senior_hr,hr,payroll,'
+        'payroll_manager,finance,finance_manager',
+    ).split(',')
+    if code.strip()
+]
+
+# Months shown by the dashboard payroll trend (choices offered to the UI)
+# and how many departments the latest-run breakdown lists.
+ANALYTICS_MONTH_CHOICES = (3, 6, 12)
+ANALYTICS_DEFAULT_MONTHS = _env_int('PAYROLL_ANALYTICS_DEFAULT_MONTHS', 6)
+ANALYTICS_TOP_DEPARTMENTS = _env_int('PAYROLL_ANALYTICS_TOP_DEPARTMENTS', 6)
+
+# ── ValueFrame → Payroll handoff ───────────────────────────────────
+# Days an employee booked in ValueFrame without being present (see
+# apps.timesheet.valueframe) become PENDING payroll adjustments for HR /
+# payroll to review — never applied automatically. Every knob is soft-coded.
+VALUEFRAME_GAP_COMPONENT_CODE = os.environ.get('PAYROLL_VF_GAP_COMPONENT', 'absent')   # catalog deduction code
+VALUEFRAME_GAP_LABEL = os.environ.get('PAYROLL_VF_GAP_LABEL', 'Absent (booked in ValueFrame, not present)')
+VALUEFRAME_GAP_MIN_DAYS = _env_decimal('PAYROLL_VF_GAP_MIN_DAYS', '1')       # smaller gaps are not proposed
+VALUEFRAME_GAP_MAX_DAYS = _env_decimal('PAYROLL_VF_GAP_MAX_DAYS', '26')      # cap per employee per month
+VALUEFRAME_GAP_STEP_DAYS = _env_decimal('PAYROLL_VF_GAP_STEP_DAYS', '0.5')   # round gaps down to this step
+
 # ── RBAC: who may FORCE-edit / FORCE-delete approved or released runs ──
 # This is an emergency override (e.g. correcting an erroneous approval).
 # Defaults to super-admins only. Django superusers are always allowed.

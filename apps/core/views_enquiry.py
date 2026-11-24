@@ -24,6 +24,7 @@ from django.db.models import Case, Count, F, IntegerField, Q, When
 from django.db.models.functions import TruncMonth
 from django.contrib.auth import get_user_model
 from datetime import timedelta
+import json
 import logging
 from pathlib import Path
 import re
@@ -139,7 +140,22 @@ def submit_enquiry(request):
         inquiry_type = normalize_inquiry_type(data.get('inquiry_type') or service)
         urgency = data.get('urgency', 'normal').strip()
         attachments = request.FILES.getlist('attachments')
-        
+
+        # Structured Talent Requisition payload (optional, JSON-encoded).
+        requisition_details = None
+        if inquiry_type == 'talent_requisition':
+            raw_requisition = data.get('requisition')
+            if raw_requisition:
+                try:
+                    parsed = json.loads(raw_requisition)
+                    if isinstance(parsed, dict):
+                        requisition_details = {
+                            str(key)[:60]: (str(value)[:2000] if not isinstance(value, bool) else value)
+                            for key, value in parsed.items()
+                        }
+                except (TypeError, ValueError):
+                    requisition_details = None
+
         # Validation
         errors = {}
         if not name:
@@ -187,6 +203,7 @@ def submit_enquiry(request):
                         message=message,
                         service=service,
                         inquiry_type=inquiry_type,
+                        requisition_details=requisition_details,
                         urgency=urgency if urgency in dict(Enquiry.URGENCY_CHOICES) else 'normal',
                         requester=request.user if request.user.is_authenticated else None,
                         source_ip=(request.META.get('HTTP_X_FORWARDED_FOR') or request.META.get('REMOTE_ADDR') or '').split(',')[0].strip() or None,
@@ -225,6 +242,7 @@ def submit_enquiry(request):
             'partnership': 'Partnership',
             'legal': 'Legal',
             'hr': 'HR',
+            'talent_requisition': 'Talent Requisition',
             'it_request': 'IT Request',
             'finance_request': 'Finance Request',
             'procurement': 'Procurement',
@@ -579,6 +597,7 @@ def _serialize_enquiry(e: Enquiry, *, detail=False, include_internal=False) -> d
             }
             for message in messages
         ]
+        payload['requisition'] = e.requisition_details
         payload['attachments'] = [
             {
                 'id': attachment.pk,
@@ -836,13 +855,26 @@ def enquiry_detail(request, pk: int):
             status=status.HTTP_400_BAD_REQUEST,
         )
     if 'approval_status' in payload:
-        from apps.core.enquiry_workflow import can_approve_enquiry
+        from apps.core.enquiry_workflow import can_approve_enquiry, decide_requisition_stage
         if not can_approve_enquiry(request.user, enquiry):
             return Response({'detail': 'Only the assigned department head with approval access may decide this pending request.'}, status=403)
         if payload['approval_status'] not in ('approved', 'rejected'):
             return Response({'detail': 'Invalid approval status.'}, status=status.HTTP_400_BAD_REQUEST)
         if set(payload) - {'approval_status', 'admin_notes'}:
             return Response({'detail': 'Approval cannot also change the request assignment or stage.'}, status=400)
+        if enquiry.inquiry_type == 'talent_requisition':
+            try:
+                decide_requisition_stage(
+                    enquiry, actor=request.user, decision=payload['approval_status'],
+                    comment=payload.get('admin_notes', ''), allow_override=True,
+                )
+            except ValueError as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except PermissionError as exc:
+                return Response({'detail': str(exc)}, status=403)
+            data = _serialize_enquiry(enquiry, detail=True, include_internal=True)
+            data['can_approve'] = can_approve_enquiry(request.user, enquiry)
+            return Response({'success': True, 'enquiry': data})
     if (payload.get('status') in ('resolved', 'closed', 'pending_confirmation')
             and enquiry.approval_required and enquiry.approval_status != 'approved'):
         return Response({'detail': 'Complete the assigned approval before resolving this request.'}, status=400)
@@ -1004,6 +1036,58 @@ def my_enquiry_feedback(request, pk: int):
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     enquiry.refresh_from_db()
     return Response({'success': True, 'enquiry': _serialize_enquiry(enquiry, detail=True)})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def requisition_approval(request, pk: int):
+    """Stage approval endpoint for talent requisitions.
+
+    Accessible to the requester, the current stage approver (e.g. the
+    reporting manager, who typically has no enquiry-management grant) and
+    enquiry administrators. POST records the current stage decision and
+    advances the Reporting Manager -> HR chain.
+    """
+    from apps.core.enquiry_workflow import (
+        can_approve_enquiry, decide_requisition_stage, requisition_stage_state,
+    )
+    enquiry = get_object_or_404(
+        Enquiry.objects.select_related('requester', 'assigned_to', 'approved_by'),
+        pk=pk, inquiry_type='talent_requisition',
+    )
+    is_approver = can_approve_enquiry(request.user, enquiry)
+    is_requester = enquiry.requester_id == request.user.pk
+    if not (is_approver or is_requester or user_has_enquiry_access(request.user)):
+        return Response({'detail': 'You do not have access to this requisition.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        data = _serialize_enquiry(enquiry, detail=True)
+        data['can_approve'] = bool(is_approver)
+        _, stage_index = requisition_stage_state(enquiry)
+        data['current_stage'] = stage_index
+        return Response({'success': True, 'enquiry': data})
+
+    if not is_approver:
+        return Response({'detail': 'Only the current stage approver may decide this requisition.'}, status=status.HTTP_403_FORBIDDEN)
+    decision = str(request.data.get('decision') or '').strip()
+    if decision not in ('approved', 'rejected'):
+        return Response({'detail': 'Decision must be "approved" or "rejected".'}, status=status.HTTP_400_BAD_REQUEST)
+    locked = Enquiry.objects.select_for_update().get(pk=enquiry.pk)
+    try:
+        decide_requisition_stage(
+            locked, actor=request.user, decision=decision,
+            comment=request.data.get('comment', ''),
+        )
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    data = _serialize_enquiry(locked, detail=True)
+    data['can_approve'] = can_approve_enquiry(request.user, locked)
+    _, stage_index = requisition_stage_state(locked)
+    data['current_stage'] = stage_index
+    return Response({'success': True, 'enquiry': data})
 
 
 @api_view(['GET'])
