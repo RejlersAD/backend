@@ -16,7 +16,8 @@ RADAI readiness adds `automatic_compression: "lossless_if_smaller"`. Each new
 private file exposes `storage_encoding` (`identity` or `gzip`) and `stored_size`.
 Existing `name`, `mime_type`, `size` and SHA-256 identity describe the **original**
 file. Fixed-size reads prepare disk-backed original/gzip streams; deterministic
-gzip is selected only when it saves bytes. Compressed formats may stay unchanged.
+gzip is selected only when it saves bytes. Archives (`.zip`, `.7z`, `.rar`, `.gz`) are always
+stored unchanged so ZIP extraction keeps random access.
 No document conversion, image resampling, text rewriting or archive extraction
 occurs. Downloads return the original filename and exact original bytes, after
 verifying both the stored representation and decoded size/hash in temporary

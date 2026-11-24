@@ -320,11 +320,16 @@ def download_private_file(opportunity, actor, key, file_id):
         raise
 
 
+def _compressible(uploaded):
+    """Archives are stored as uploaded: they barely shrink, and ZIP extraction needs fast random access."""
+    return not str(getattr(uploaded, 'name', '') or '').lower().endswith(('.zip', '.7z', '.rar', '.gz'))
+
+
 def upload_private_file(opportunity, actor, key, uploaded, request_id):
     require_access(actor, opportunity, 'create', 'update')
     _folder(key)
     try:
-        with prepare_upload(uploaded, compress=True) as prepared:
+        with prepare_upload(uploaded, compress=_compressible(uploaded)) as prepared:
             return _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared)
     except OSError:
         raise WorkspaceAPIError('private_storage_unavailable') from None
@@ -335,7 +340,7 @@ def upload_private_version(opportunity, actor, key, file_id, uploaded, request_i
     _identity(target)
     validate_version_input(expected_token, note)
     try:
-        with prepare_upload(uploaded, compress=True) as prepared:
+        with prepare_upload(uploaded, compress=_compressible(uploaded)) as prepared:
             return _upload_prepared(opportunity, actor, key, uploaded, request_id, prepared,
                                     target=target, expected_token=expected_token, note=note)
     except OSError:

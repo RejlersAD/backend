@@ -128,6 +128,21 @@ leases cannot overwrite a newer run. Automatic failed attempts are bounded to
 three; authorized explicit retry starts another attempt cycle. The management
 command `python manage.py process_document_classifications` can drain due work.
 
+Background dispatch (24 November 2026): a new classification run and a new ZIP import are
+sent to the worker as soon as their transaction commits, so extraction and tagging start
+without waiting for Beat. If the broker is unavailable the durable row stays due and the Beat
+dispatchers (`sales-opportunity-zip-imports`, `sales-document-classifications`) retry it.
+ZIP sources are stored without gzip because extraction needs random access; the built-in limits
+are 64 MiB per entry and 2 GiB per import (`SALES_ZIP_MAX_ENTRY_BYTES` / `SALES_ZIP_MAX_TOTAL_BYTES`
+override them). `GET /api/v1/sales/deals/{id}/workspace/zip-imports/` (workspace read access)
+lists the latest imports with status, counts and skipped-entry codes.
+`python manage.py process_zip_imports` extracts due imports without a broker.
+
+Runtime parity: local Docker runs one Celery worker and one Celery Beat container. On Railway
+the same processes start from `railway_runtime.py` when `CELERY_WORKER_ENABLED=true` (worker)
+and `CELERY_BEAT_ENABLED=true` (Beat; enable on exactly one replica) are set. Without a worker,
+uploads stay queued in both environments.
+
 Rules use filenames and leading extracted text. Ambiguity can call the configured
 Sales provider through the existing encrypted credential resolver and bounded
 transport, with document-specific system instructions/schema. An AI suggestion

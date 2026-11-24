@@ -22,22 +22,31 @@ from .private_attachments import _name, _read, _storage
 # (a short lease let concurrent runs collide on already-stored entries and fail large tender imports).
 LEASE_SECONDS = 1800
 MAX_ZIP_ENTRIES = 5000
-MAX_ENTRY_BYTES = 32 * 1024 * 1024
+MAX_ENTRY_BYTES = 64 * 1024 * 1024  # bid decks and drawings exceed 32 MiB
 
 
 def max_total_bytes():
-    """Total extracted size; SALES_ZIP_MAX_TOTAL_BYTES overrides the 512 MiB default (tender packages can exceed it)."""
+    """Total extracted size; SALES_ZIP_MAX_TOTAL_BYTES overrides the 2 GiB default (tender packages can exceed it)."""
     from django.conf import settings
     return int(getattr(settings, 'SALES_ZIP_MAX_TOTAL_BYTES', 0) or MAX_TOTAL_BYTES)
 
 
 def max_entry_bytes():
-    """Per-entry limit; SALES_ZIP_MAX_ENTRY_BYTES overrides the 32 MiB default (bid decks can exceed it)."""
+    """Per-entry limit; SALES_ZIP_MAX_ENTRY_BYTES overrides the 64 MiB default (bid decks can exceed it)."""
     from django.conf import settings
     return int(getattr(settings, 'SALES_ZIP_MAX_ENTRY_BYTES', 0) or MAX_ENTRY_BYTES)
-MAX_TOTAL_BYTES = 512 * 1024 * 1024
+MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024  # real tender packages exceed 512 MiB
 MAX_NESTING_DEPTH = 5
 MAX_COMPRESSION_RATIO = 200
+
+
+def dispatch_zip_import(zip_import_id):
+    """Start extraction now; the queued row stays due for the Beat dispatcher if the broker is unavailable."""
+    try:
+        from .tasks import import_opportunity_zip
+        import_opportunity_zip.delay(str(zip_import_id))
+    except Exception:
+        pass
 
 
 def due_zip_import_ids(limit=50):
@@ -190,4 +199,16 @@ def run_zip_import(zip_import_id):
     job.failed = failed
     job.lease_token = job.lease_until = None
     job.save()
+    if processed:
+        _start_analysis(opportunity, actor)
     return {'processed': bool(processed), 'status': status}
+
+
+def _start_analysis(opportunity, actor):
+    """Scan the newly extracted documents for the uploader so the Technical Proposal can be
+    drafted without a manual analysis step. Analysis failures never fail the import."""
+    try:
+        from .opportunity_analysis import request_analysis
+        request_analysis(opportunity, actor)
+    except Exception:
+        pass
