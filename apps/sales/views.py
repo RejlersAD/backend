@@ -691,7 +691,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                                            request.query_params.get('page', 1)),
                         headers={'Cache-Control': 'no-store, private'})
 
-    business_approval_actions = {'bid_decision', 'ceo_decision', 'approve_award', 'reject_award'}
+    business_approval_actions = {'bid_decision', 'approve_award', 'reject_award'}
     """
     ViewSet for Deal/Opportunity Management
     
@@ -751,6 +751,24 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             raise ValidationError({'offset': 'Use a nonnegative integer offset.'})
         return Response(analysis_projection(self.get_object(), request.user, offset),
                         headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path='analysis/registry')
+    def proposal_source_registry(self, request, pk=None):
+        from .proposal_workspace_service import source_registry
+        return Response(
+            source_registry(request.user, pk, request.query_params),
+            headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @action(detail=True, methods=['get', 'put'], url_path='analysis/source-selection')
+    def proposal_source_selection(self, request, pk=None):
+        from .proposal_workspace_service import save_source_selection, selected_source_projection
+        result = (
+            selected_source_projection(request.user, pk)
+            if request.method == 'GET'
+            else save_source_selection(request.user, pk, request.data)
+        )
+        return Response(result, headers={'Cache-Control': 'no-store, private'})
 
     @action(detail=True, methods=['get'], url_path='workspace')
     def workspace(self, request, pk=None):
@@ -816,6 +834,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/upload')
     def workspace_upload(self, request, pk=None, folder_key=None):
         from .opportunity_workspace import upload_workspace_file
+        from .models import OpportunityZipImport, OpportunityWorkspaceUpload
         opportunity = self.get_object()
         request_id = serializers.UUIDField().run_validation(request.data.get('upload_request_id'))
         provider = request.data.get('storage', 'sharepoint')
@@ -823,13 +842,21 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             raise ValidationError({'storage': 'Choose RADAI or SharePoint storage.'})
         if set(request.data) - {'file', 'upload_request_id', 'storage'} or len(request.FILES.getlist('file')) != 1:
             raise ValidationError({'file': 'Upload one file and its upload_request_id.'})
+        uploaded = request.FILES.get('file')
         if provider == 'radai':
             from .private_attachments import upload_private_file
             result, created = upload_private_file(opportunity, request.user, folder_key,
-                                                  request.FILES.get('file'), request_id)
+                                                  uploaded, request_id)
+            if created and str(getattr(uploaded, 'name', '') or '').lower().endswith('.zip'):
+                attempt = OpportunityWorkspaceUpload.objects.get(pk=result['id'][6:])
+                job = OpportunityZipImport.objects.create(
+                    opportunity=opportunity, source_upload=attempt,
+                    actor=request.user, folder_key=folder_key, status='queued',
+                )
+                result = {**result, 'zip_import': {'id': str(job.pk), 'status': job.status}}
             return Response(result, status=201 if created else 200)
         result, created = upload_workspace_file(opportunity, request.user, folder_key,
-                                                request.FILES.get('file'), request_id)
+                                                uploaded, request_id)
         return Response(result, status=201 if created else 200)
 
     @action(detail=True, methods=['post'], url_path=r'workspace/folders/(?P<folder_key>[a-z]+)/files/(?P<file_id>[^/]+)/versions/upload')
@@ -1515,6 +1542,121 @@ class QuoteViewSet(viewsets.ModelViewSet):
         result = draft_proposal_field(request.user, request.data, quote_id=pk)
         return Response(result, headers={'Cache-Control': 'private, no-store'})
 
+    @action(detail=True, methods=['get', 'patch'], url_path='workspace')
+    def technical_proposal_workspace(self, request, pk=None):
+        from .proposal_workspace_service import save_workspace, workspace
+        if request.query_params:
+            raise ValidationError({'detail': 'Use the workspace body and exact proposal version.'})
+        result = workspace(request.user, pk) if request.method == 'GET' else save_workspace(
+            request.user, pk, request.data,
+        )
+        return Response(result, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path='workspace/generate')
+    def technical_proposal_workspace_generate(self, request, pk=None):
+        from .proposal_engine_service import engine_enabled, request_build
+        from .proposal_workspace_service import generate_workspace
+        if engine_enabled():
+            if request.data not in ({}, None):
+                raise ValidationError({'detail': 'Generate the proposal from the explicit saved source selection.'})
+            job, _ = request_build(request.user, pk)
+            return Response({'job': job}, status=status.HTTP_202_ACCEPTED,
+                            headers={'Cache-Control': 'no-store, private'})
+        return Response(
+            generate_workspace(request.user, pk, request.data),
+            status=status.HTTP_201_CREATED,
+            headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @action(detail=True, methods=['post'], url_path=r'workspace/sections/(?P<section_key>[^/]+)/regenerate')
+    def technical_proposal_workspace_regenerate_section(self, request, pk=None, section_key=None):
+        from .proposal_engine_service import TEMPLATE_VERSION, engine_enabled, request_build
+        from .proposal_workspace_service import _quote, regenerate_section
+        if engine_enabled():
+            latest = _quote(request.user, pk).technical_proposal_versions.order_by('-version').first()
+            if latest is not None and latest.content.get('template_version') == TEMPLATE_VERSION:
+                payload = request.data
+                if not isinstance(payload, dict) or set(payload) != {'expected_version', 'reason'}:
+                    raise ValidationError({'detail': 'Provide expected_version and reason.'})
+                if payload.get('expected_version') != latest.version:
+                    raise ValidationError({'expected_version': 'The proposal workspace changed. Refresh before rebuilding.'})
+                reason = payload.get('reason')
+                if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+                    raise ValidationError({'reason': 'Provide a review reason of at most 500 characters.'})
+                job, _ = request_build(request.user, pk, section_key=section_key, reason=reason.strip())
+                return Response({'job': job}, status=status.HTTP_202_ACCEPTED,
+                                headers={'Cache-Control': 'no-store, private'})
+        return Response(
+            regenerate_section(request.user, pk, section_key, request.data),
+            status=status.HTTP_201_CREATED,
+            headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @action(detail=True, methods=['get'], url_path='workspace/plan')
+    def technical_proposal_workspace_plan(self, request, pk=None):
+        """Dry run of the standard builder: section mapping, facts and findings (no rendering)."""
+        from .proposal_engine_service import preview_plan
+        if request.query_params:
+            raise ValidationError({'detail': 'The plan uses the saved source selection only.'})
+        return Response(preview_plan(request.user, pk), headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['get'], url_path=r'workspace/jobs/(?P<job_id>[^/]+)')
+    def technical_proposal_workspace_job(self, request, pk=None, job_id=None):
+        """Standard build job status; `latest` returns the proposal's most recent job."""
+        from .models import ProposalBuildJob
+        from .proposal_engine_service import job_status
+        from .proposal_workspace_service import _quote
+        if job_id == 'latest':
+            latest = ProposalBuildJob.objects.filter(quote=_quote(request.user, pk)).order_by('-created_at').first()
+            if latest is None:
+                return Response({'job': None}, headers={'Cache-Control': 'no-store, private'})
+            job_id = str(latest.pk)
+        return Response({'job': job_status(request.user, pk, job_id)}, headers={'Cache-Control': 'no-store, private'})
+
+    @action(detail=True, methods=['post'], url_path='workspace/review')
+    def technical_proposal_workspace_review(self, request, pk=None):
+        from .proposal_workspace_service import review_workspace
+        return Response(
+            review_workspace(request.user, pk, request.data),
+            status=status.HTTP_201_CREATED,
+            headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @action(detail=True, methods=['get'], url_path=r'workspace/artifacts/(?P<artifact_name>[^/]+)')
+    def technical_proposal_workspace_artifact(self, request, pk=None, artifact_name=None):
+        from .proposal_workspace_service import artifact
+        if set(request.query_params) - {'version'}:
+            raise ValidationError({'detail': 'Only an exact workspace version is supported.'})
+        return Response(
+            artifact(request.user, pk, artifact_name, request.query_params.get('version')),
+            headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @action(detail=True, methods=['get'], url_path='workspace/pdf')
+    def technical_proposal_workspace_pdf(self, request, pk=None):
+        from django.http import FileResponse, HttpResponse
+        from .proposal_workspace_export import workspace_pdf
+        content, filename = workspace_pdf(request.user, pk, request.query_params.get('version'))
+        response = (FileResponse(content, content_type='application/pdf') if hasattr(content, 'read')
+                    else HttpResponse(content, content_type='application/pdf'))
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Cache-Control'] = 'no-store, private'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+    @action(detail=True, methods=['get'], url_path='workspace/docx')
+    def technical_proposal_workspace_docx(self, request, pk=None):
+        from django.http import FileResponse, HttpResponse
+        from .proposal_workspace_export import workspace_docx
+        content, filename = workspace_docx(request.user, pk, request.query_params.get('version'))
+        docx_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        response = (FileResponse(content, content_type=docx_type) if hasattr(content, 'read')
+                    else HttpResponse(content, content_type=docx_type))
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Cache-Control'] = 'no-store, private'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
+
     @action(detail=True, methods=['get'], url_path='preparation')
     def preparation(self, request, pk=None):
         from .bid_preparation import preparation_projection
@@ -1694,7 +1836,8 @@ class QuoteViewSet(viewsets.ModelViewSet):
         missing = [name for name, value in [
             ('scope', quote.scope), ('deliverables', quote.deliverables),
             ('estimated_hours', quote.estimated_hours), ('valid_until', quote.valid_until),
-        ] if not value]
+            ('total_amount', quote.total_amount), ('estimated_cost', quote.estimated_cost),
+        ] if value is None or value in ('', [], {})]
         if missing:
             raise ValidationError({'missing_fields': missing})
         if quote.total_amount <= 0:
@@ -1731,6 +1874,10 @@ class QuoteViewSet(viewsets.ModelViewSet):
         """
         quote = Quote.objects.select_for_update().get(pk=self.get_object().pk)
         from rest_framework.exceptions import ValidationError
+        from .proposal_workspace_service import publication_status
+        publication = publication_status(request.user, quote.pk)
+        if not publication.get('ready'):
+            raise ValidationError({'technical_proposal': publication.get('blockers')})
         if quote.status == 'submitted':
             raise ValidationError({'submission': 'This exact proposal version has already been submitted.'})
         if quote.status != 'ready_to_submit' or not quote.approved_at:

@@ -37,6 +37,10 @@ def refresh_opportunity_analysis(sender, instance, signal=None, raw=False, creat
         return
     if sender is OpportunityWorkspaceUpload and signal is post_delete and instance.status != 'ready':
         return
+    if sender is OpportunityWorkspaceUpload:
+        from .proposal_engine_service import is_generated_output
+        if is_generated_output(instance.folder_key, instance.name):
+            return  # generated proposal outputs never change the analysed sources
     if sender is OpportunityWorkspaceUpload and signal is post_save:
         previous = getattr(instance, '_analysis_previous', None)
         if not created and previous is None:

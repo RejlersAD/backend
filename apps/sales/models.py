@@ -16,6 +16,9 @@ from .bid_preparation_models import BidPreparation, QuotePreparationRevision, Bi
 from .letter_models import SalesLetterTemplate, SalesLetter  # noqa: F401
 from .analysis_models import OpportunityAnalysis, OpportunityAnalysisSource, OpportunityAnalysisChunk  # noqa: F401
 from .evidence_models import SalesEmailIntakeAttachment  # noqa: F401
+from .proposal_workspace_models import (  # noqa: F401
+    OpportunityProposalSourceSelection, ProposalBuildJob, QuoteTechnicalProposalVersion,
+)
 
 User = get_user_model()
 

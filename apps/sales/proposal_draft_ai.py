@@ -238,6 +238,13 @@ def _validate(proposal, field, facts):
 
 @sensitive_variables()
 def draft_proposal_field(actor, data, *, opportunity_id=None, quote_id=None):
+    raise ValidationError({
+        'code': 'local_proposal_authoring_only',
+        'detail': (
+            'AI technical-proposal authoring has been retired. '
+            'Use the local, source-traceable proposal workspace.'
+        ),
+    })
     if (opportunity_id is None) == (quote_id is None):
         raise ValidationError({'detail': 'Choose one opportunity or saved proposal.'})
     field, text, drafts = _request(data)

@@ -67,7 +67,10 @@ def _identity(attempt):
     return storage
 
 
-def _project(attempt, viewer=None):
+_UNSET = object()
+
+
+def _project(attempt, viewer=None, classification_state=_UNSET, classification_run=_UNSET):
     from .document_classification import classification_projection
     actor = attempt.actor
     actor_name = (actor.get_full_name() or actor.username) if actor else None
@@ -76,7 +79,10 @@ def _project(attempt, viewer=None):
             'modified_at': attempt.updated_at.isoformat(), 'created_by': actor_name, 'modified_by': actor_name,
             **version_projection(attempt, viewer), 'publication_level': None, 'is_folder': False, 'web_url': None,
             'storage_provider': 'radai', 'folder_key': attempt.folder_key,
-            'classification': classification_projection(attempt, viewer),
+            'classification': (classification_projection(attempt, viewer)
+                               if classification_state is _UNSET or classification_run is _UNSET
+                               else classification_projection(
+                                   attempt, viewer, state=classification_state, run=classification_run)),
             'storage_encoding': attempt.storage_encoding,
             'stored_size': attempt.stored_size if attempt.stored_size is not None else attempt.size}
 
@@ -162,12 +168,20 @@ def list_private_files(opportunity, actor, key, cursor=None):
     count = query.count()
     if after_id and after_updated:
         query = query.filter(Q(updated_at__lt=after_updated) | Q(updated_at=after_updated, pk__lt=after_id))
-    rows = list(query.select_related('actor', 'document__head_upload').order_by('-updated_at', '-pk')[:101])
+    rows = list(query.select_related(
+        'actor', 'workspace__opportunity__client', 'document__head_upload',
+    ).order_by('-updated_at', '-pk')[:101])
+    visible_rows = rows[:100]
+    states = {row.document_id: row for row in OpportunityDocumentClassification.objects.filter(
+        document_id__in=[row.document_id for row in visible_rows if row.document_id])}
+    runs = {row.upload_id: row for row in OpportunityDocumentClassificationRun.objects.filter(
+        upload_id__in=[row.pk for row in visible_rows])}
     next_cursor = signing.dumps({'opportunity': str(opportunity.pk), 'folder': key, 'provider': 'radai',
                                  'storage': fingerprint, 'after': str(rows[99].pk),
                                  'after_updated': rows[99].updated_at.isoformat()},
                                 salt='sales-private-attachments') if len(rows) > 100 else None
-    return {'folder_key': key, 'storage_provider': 'radai', 'files': [_project(row, actor) for row in rows[:100]],
+    return {'folder_key': key, 'storage_provider': 'radai', 'files': [
+        _project(row, actor, states.get(row.document_id), runs.get(row.pk)) for row in visible_rows],
             'item_count': count, 'next_cursor': next_cursor}
 
 

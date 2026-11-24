@@ -1,0 +1,128 @@
+# Rejlers technical proposal standard (DEC-TP-001).
+# Baseline: Q-101505 Technical Proposal Rev 0. Folder numbering never drives section numbering:
+# every section number below is explicit, and files reach sections only through `components`.
+standard:
+  id: rejlers-adnoc-technical-v1
+  baseline: Q-101505 Rev 0
+
+company:
+  name: Rejlers International Engineering Solutions AB
+  short_name: Rejlers
+
+templates:
+  # Paths are relative to this file. Either may be .docx or .dotx.
+  body: ../templates/rejlers/body_template.docx
+  divider: ../templates/rejlers/divider_template.docx
+  # Token in curated templates replaced with the bid's quote reference.
+  quote_token: "{{quote_ref}}"
+  # Company stamp applied to binder pages (PDF level, as in the baseline). Positions in points.
+  stamp:
+    image: ../templates/rejlers/company_stamp.png
+    exclude_sections: [cover, letter, qs]   # signed submissions keep their own signature/stamp
+    generated: {x: 414, y: 599, width: 131} # TOC and divider letterhead pages
+    components: {anchor: bottom-right, width: 119, margin: 0}
+
+# Explicitly numbered section tree. `divider: true` emits a letterhead divider page.
+sections:
+  - {key: cover, title: Cover Page, number: null, divider: false, toc: false, components: [cover]}
+  - {key: letter, title: Covering Letter, number: null, divider: false, toc: false, components: [letter]}
+  - {key: toc, title: Table of Contents, number: null, divider: false, toc: false, generated: toc}
+  - {key: qs, title: Qualification Statement, number: "1.", divider: true, required: true, components: [qualification_statement]}
+  - key: technical_bid
+    title: Technical Bid
+    number: "2."
+    divider: true
+    children:
+      - {key: experience, title: Previous Experience, number: "2.1", divider: true, required: true,
+         components: [experience_list_body, me_reference_list, experience_list_closing]}
+      - key: resources
+        title: Resources
+        number: "2.2"
+        divider: true
+        required: true
+        children:
+          - {key: corporate_org, title: Corporate Organization Chart, subdivider: true, components: [corporate_org_chart]}
+          - {key: key_personnel, title: Key Personnel List, subdivider: true, required: true, components: [key_personnel_list]}
+          - {key: project_org, title: Project Organization Chart, subdivider: true, required: true, components: [project_org_chart]}
+          - {key: cvs, title: "Key Personnel CV’s", subdivider: true, required: true, components: [cvs]}
+      - {key: execution, title: Method Statement / Execution, number: "2.3", divider: true, required: true,
+         components: [execution_plan, execution_workflow_appendix, deliverables_list]}
+      - {key: schedule, title: Work Schedule, number: "2.4", divider: true, required: true, components: [work_schedule]}
+      - {key: subcontractors, title: Proposed Subcontractors, number: "2.5", divider: true, components: [subcontractors]}
+      - {key: hse, title: Specific HSE Requirements, number: "2.6", divider: true, required: true, components: [hse_response]}
+  - {key: business_venture, title: Business Venture, number: "3.", divider: true, components: [business_venture], not_applicable: true}
+  - {key: investment_plan, title: Investment Plan, number: "4.", divider: true, components: [investment_plan], not_applicable: true}
+  - {key: taziz, title: "Ta’ziz Industrial Park Investments", number: "5.", divider: true, components: [taziz], not_applicable: true}
+  - {key: new_entity, title: Investment Plan as New Manufacturing Entity, number: "6.", divider: true, components: [new_entity_plan], not_applicable: true}
+
+# Explicit folder→component mapping. `match` is a case-insensitive regex on the path relative
+# to the scanned root. `prefer` lists formats in priority order when twins exist
+# (submitted/signed documents prefer PDF; authored documents prefer the editable source).
+# `pages` is a Python-style slice applied to the rendered component ("start:stop").
+components:
+  cover:                       {match: '0_Cover/Cov Page[^/]*$', prefer: [pdf, docx], role: submitted}
+  letter:                      {match: '0_Cover/Letter[^/]*$', prefer: [pdf, docx], role: submitted}
+  qualification_statement:     {match: '1_\s*QS/[^/]+$', prefer: [pdf, docx], role: submitted}
+  experience_list_body:        {match: 'Previous Experience/FEED Experience List[^/]*$', prefer: [pptx, pdf], pages: "0:-1"}
+  me_reference_list:           {match: 'Previous Experience/(?:\d+ RAD ME References|2507RA~1\.DOC)[^/]*$', prefer: [docx, pdf]}
+  experience_list_closing:     {match: 'Previous Experience/FEED Experience List[^/]*$', prefer: [pptx, pdf], pages: "-1:"}
+  corporate_org_chart:         {match: 'Organization and Resources/Corporate Org/[^/]+$', prefer: [pptx, pdf]}
+  key_personnel_list:          {match: 'Key Personnel/Key Personnel List[^/]*$', prefer: [docx, pdf]}
+  project_org_chart:           {match: 'Organization and Resources/Proj Org/[^/]+$', prefer: [docx, pdf]}
+  cvs:                         {match: "Organization and Resources/CV's/[^/]+$", prefer: [docx, pdf], multi: true, order: numeric_prefix, exclude_aggregate: "CV's\\.pdf$"}
+  execution_plan:              {match: 'Project Execution Strategy/(?:Execution Plan|EXECUT~1\.DOC)[^/]*$', prefer: [docx, pdf]}
+  execution_workflow_appendix: {match: 'Project Execution Strategy/Execution Work Flow[^/]*$', prefer: [pdf, vsd]}
+  deliverables_list:           {match: 'Project Execution Strategy/(?:List of Deliverables|LISTOF~1\.DOC)[^/]*$', prefer: [docx, pdf]}
+  work_schedule:               {match: 'Project Control requirements/[^/]+\.pdf$', prefer: [pdf]}
+  subcontractors:              {match: 'Proposed Subcontractors/[^/]+$', prefer: [docx, pdf]}
+  hse_response:                {match: 'HSE Management/HSE Bid Technical Evaluation Questionnaire Response[^/]*$', prefer: [pdf]}
+  business_venture:            {match: '3_BV/[^/]+$', prefer: [docx, pdf]}
+  investment_plan:             {match: '4_Investment plan/[^/]+$', prefer: [docx, pdf]}
+  taziz:                       {match: '5_Ta.ziz Industrial Park/[^/]+$', prefer: [docx, pdf]}
+  new_entity_plan:             {match: '6_Investment plan as a new Manufacturing entity/[^/]+$', prefer: [docx, pdf]}
+
+# Files that are recognised but deliberately not assembled (reported as INFO).
+reference_only:
+  - {match: 'Technical Proposal Rev \d+\.pdf$', reason: previously compiled proposal output}
+  - {match: 'Technical[ -]Proposal.* - (Client\.pdf|Master\.docx|build_report\.md)$', reason: output of an earlier engine build}
+  - {match: '0_Cover/TOC_Rejlers', reason: superseded by generated TOC and dividers}
+  - {match: 'Organization and Resources/TOC_Rejlers', reason: superseded by generated sub-dividers}
+  - {match: 'Organization and Resources/Resources\.pdf$', reason: compiled aggregate of section 2.2}
+  - {match: "Organization and Resources/CV's/CV's\\.pdf$", reason: compiled aggregate of individual CVs}
+  - {match: 'Key Personnel/Key Personnel List[^/]*REJ[^/]*\.pdf$', reason: client-stamped copy of key personnel list}
+  - {match: 'HSE Management/000\. HSE Bid Evaluation Questionnaire', reason: blank client questionnaire form}
+  - {match: 'HSE Management/Xerox Scan', reason: scanned supporting copy}
+  - {match: "Key personnel's/4\\. CVs/", reason: CV set prepared for another bid}
+  - {match: '^04_Internal/', reason: internal bid file (not client deliverable)}
+
+# Source folders whose emptiness must be flagged (spec: "flag missing inputs").
+expected_inputs:
+  - {match: '04_Internal/4\. Costing Sheet', label: Costing sheet, severity: WARN}
+  - {match: '04_Internal/3\. Sub-Contractor Quotes', label: Subcontractor quotes, severity: WARN}
+  - {match: '04_Internal/1\. Discipline Inputs', label: Discipline inputs, severity: WARN}
+  - {match: '03_Proposal/4\. Bid Review', label: Bid review record, severity: WARN}
+
+# Formats the engine can render into the binder.
+supported_formats: [pdf, docx, doc, pptx, ppt, xlsx, xls]
+# Filename markers for non-final variants (e.g. redline copies).
+variant_markers: ['\bred\b', '\bmarkup\b', '\bdraft\b', '\bold\b', '\bcopy\b', '\(\d\)$']
+
+# Deterministic fact patterns. Each fact is searched in the listed components in order;
+# the first match wins and is recorded with its source file and location.
+facts:
+  # Majority vote across submitted documents; the losing values are kept as alternatives.
+  quote_ref:      {pattern: '\bQ-?(\d{6})\b', components: [letter, cover, qualification_statement, execution_plan, project_org_chart], format: "Q-{0}", vote: true}
+  rft_number:     {pattern: '(?:RFT\s*(?:No\.?|Number)\s*:?|REFERENCE NUMBER)\s*(\d{8,12})', components: [qualification_statement, letter, cover]}
+  rft_title:      {pattern: 'RFT\s*Title\s*:\s*([^\n]+)', components: [qualification_statement, letter]}
+  client:         {pattern: 'SUBMITTED TO\s+([A-Z][A-Z &]+[A-Z])', components: [cover]}
+  revision:       {pattern: '\bREV\.?\s*(\d+)\b', components: [cover]}
+  submission_date: {pattern: '\bREV\.?\s*\d+\s*,\s*(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})', components: [cover], format: "{0} {1} {2}"}
+  validity_days:  {pattern: 'valid for[^()]{0,80}\((\d+)\)\s*days', components: [letter]}
+  signatory:      {pattern: 'Yours sincerely,?\s*\n+\s*([^\n]+)', components: [letter]}
+
+tables:
+  key_personnel: {component: key_personnel_list, header_contains: [Name, Nationality], columns: [name, age, nationality, qualification, years_experience, hse_training]}
+  qualifications: {component: qualification_statement, header_contains: [Qualification], min_columns: 3}
+  subcontractors: {component: subcontractors, header_contains: [VENDOR], columns: [sl_no, item, vendor]}
+scopes: {component: execution_plan, heading_pattern: '^SCOPE\s*\d+\s*:'}
+tq_logs: {match: 'TQ''?s?/[^/]+\.xlsx?$', header_first_cell: '^sl'}

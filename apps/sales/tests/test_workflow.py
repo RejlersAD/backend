@@ -13,6 +13,7 @@ from apps.rbac.models import UserProfile
 from apps.project_control.models import Estimate
 from apps.sales.models import Client, Deal, FrameworkAgreement, OpportunityAuditEvent, Quote
 from apps.sales.workspace_models import OpportunityWorkspace, OpportunityWorkspaceUpload
+from .access_fixtures import grant_sales_actions
 from apps.sales.workflow import (
     HANDOVER_REQUIRED_ITEMS, close_opportunity, convert_to_project, decide_award, decide_handover,
     enter_negotiation, record_bid_decision, record_ceo_decision, submit_award,
@@ -332,25 +333,34 @@ class OpportunityWorkflowTests(TestCase):
             opportunity=self.opportunity, event_type='opportunity_closed',
         ).exists())
 
-    def test_only_ceo_can_record_ceo_decision(self):
+    def test_any_sales_user_can_record_ceo_decision(self):
         ceo = get_user_model().objects.create_user(
             username='chief-exec', email='ceo@example.com', password='test',
         )
         grant_approval(ceo, 'sales_opportunities')
         set_position(ceo, 'Chief Executive Officer')
+        grant_sales_actions(self.owner, 'sales_opportunities')
         submit_qualification(self.opportunity, self.owner)
         self.opportunity = record_bid_decision(self.opportunity, self.approver, 'bid', 'Gate passed')
 
-        with self.assertRaises(PermissionDenied):
-            record_ceo_decision(self.opportunity, self.owner, 'go')
-
-        updated = record_ceo_decision(self.opportunity, ceo, 'go')
+        updated = record_ceo_decision(self.opportunity, self.owner, 'go')
         self.assertEqual(updated.stage, 'proposal')
         self.assertTrue(OpportunityAuditEvent.objects.filter(
             opportunity=self.opportunity,
             event_type='ceo_gate_decision',
             data__decision='approved',
+            actor=self.owner,
         ).exists())
+
+    def test_ceo_decision_still_requires_current_sales_read_access(self):
+        outsider = get_user_model().objects.create_user(
+            username='outside-sales', email='outside@example.com', password='test',
+        )
+        submit_qualification(self.opportunity, self.owner)
+        self.opportunity = record_bid_decision(self.opportunity, self.approver, 'bid', 'Gate passed')
+
+        with self.assertRaises(PermissionDenied):
+            record_ceo_decision(self.opportunity, outsider, 'go')
 
     def test_ceo_no_go_closes_as_no_bid_with_reason(self):
         ceo = get_user_model().objects.create_user(
@@ -358,6 +368,7 @@ class OpportunityWorkflowTests(TestCase):
         )
         grant_approval(ceo, 'sales_opportunities')
         set_position(ceo, 'Chief Executive Officer')
+        grant_sales_actions(ceo, 'sales_opportunities')
         submit_qualification(self.opportunity, self.owner)
         self.opportunity = record_bid_decision(self.opportunity, self.approver, 'conditional_bid', 'Pending commercial clarifications')
 

@@ -118,6 +118,24 @@ def delete_opportunity_with_workspace_guard(opportunity):
     Deal.objects.select_for_update(no_key=True).get(pk=opportunity.pk)
     if ProjectHandover.objects.filter(opportunity=opportunity).exists():
         raise WorkspaceAPIError('handover_retained', 409)
+    # Pre-award Planning records have an independent lifecycle, but their
+    # Sales-owned connection, commands and immutable captures otherwise protect
+    # both the Quote and Deal from deletion. Remove that opportunity-owned
+    # evidence in dependency order without deleting the Planning workspace or
+    # its technical proposal.
+    from .bid_preparation_models import (
+        BidPreparation, BidPreparationCommand, QuotePreparationRevision,
+    )
+    preparation = BidPreparation.objects.select_for_update().filter(
+        opportunity=opportunity,
+    ).first()
+    if preparation:
+        captures = QuotePreparationRevision.objects.select_for_update().filter(
+            preparation=preparation,
+        )
+        BidPreparationCommand.objects.filter(preparation=preparation).delete()
+        captures.delete()
+        preparation.delete()
     workspace = OpportunityWorkspace.objects.select_for_update().filter(opportunity=opportunity).first()
     if workspace:
         # Opportunity deletion is not restricted by workspace state: purge the
@@ -156,6 +174,13 @@ def _delete_stored_radai_objects(uploads):
 def _purge_workspace_storage(workspace):
     uploads = OpportunityWorkspaceUpload.objects.filter(workspace=workspace)
     _delete_stored_radai_objects(uploads)
+    # ZIP import jobs retain their source upload with PROTECT so a worker can
+    # always resume against the exact archive. They are opportunity-owned job
+    # state and must be removed before the workspace uploads during a permanent
+    # opportunity deletion.
+    from .workspace_models import OpportunityZipImport
+    uploads.update(zip_import=None)
+    OpportunityZipImport.objects.filter(source_upload__workspace=workspace).delete()
     # Classification rows PROTECT their document and upload; remove them first.
     OpportunityDocumentClassificationCommand.objects.filter(
         Q(document__workspace=workspace) | Q(upload__workspace=workspace)).delete()

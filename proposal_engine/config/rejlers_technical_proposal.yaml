@@ -1,0 +1,151 @@
+# Rejlers technical proposal written from tender documents (DEC-TP-001, authored mode).
+# Structure, numbering and chapter order follow the approved baseline Q-101505 Rev 0.
+# Section kinds:
+#   cover / letter / toc  - generated from templates and opportunity facts
+#   authored              - written by AI from cited tender excerpts (+ approved standard text)
+#   evidence              - company evidence (experience, CVs, org charts); supplied by the
+#                           Rejlers Evidence Library when available, otherwise flagged
+#   not_applicable        - fixed statement
+#   compliance            - generated requirement-to-proposal traceability matrix
+standard:
+  id: rejlers-technical-proposal-v1
+  baseline: Q-101505 Rev 0
+
+company:
+  name: Rejlers International Engineering Solutions AB
+  signatory: Mr. Jarmo Suominen
+  signatory_title: [Senior Vice President, Middle East Region, CEO Rejlers Abu Dhabi]
+  contact_email: uae.sales@rejlers.ae
+  telephone: 02 639 7449
+
+templates:
+  body: ../templates/rejlers/body_template.docx
+  divider: ../templates/rejlers/divider_template.docx
+  cover: ../templates/rejlers/cover_template.docx
+  standard_content: ../templates/rejlers/standard_content.json
+  quote_token: "{{quote_ref}}"
+  stamp:
+    image: ../templates/rejlers/company_stamp.png
+    exclude_sections: [cover, letter]
+    generated: {x: 414, y: 599, width: 131}
+    components: {anchor: bottom-right, width: 119, margin: 0}
+
+deliverable:
+  # One versioned PDF per proposal in the opportunity's Proposal folder.
+  name: "{quote_ref} Technical Proposal.pdf"
+
+letter:
+  # Approved Rejlers covering-letter wording; {tokens} come from opportunity facts.
+  paragraphs:
+    - "Dear Sir,"
+    - "Thank you for your interest in Rejlers International Engineering Solutions AB and for giving us the opportunity to submit our Technical Proposal for {tender_title}."
+    - "Rejlers International Engineering Solutions AB – Abu Dhabi is one of the fastest growing Nordic consulting companies. We carry a solid heritage of 80+ years of professional industrial experience right from the conceptualization until the implementation phase of the project."
+    - "We are one of the leading high-quality engineering, technology & project service providers in various industries including Oil & Gas, Petrochemicals and Utilities."
+    - "{validity_sentence} We hope this proposal meets all your requirements and look forward to receiving your feedback."
+    - "Yours sincerely,"
+
+facts:
+  rft_number: {pattern: '(?:RFT|Tender|Enquiry|Inquiry)\s*(?:No\.?|Number|Ref(?:erence)?\.?)\s*[:.#]?\s*\[?\s*([A-Z0-9/\-]*\d[A-Z0-9/\-]{4,})', label: Tender reference}
+  validity_days: {pattern: 'valid(?:ity)?[^.]{0,60}?\b(\d{2,3})\s*(?:\(\w[\w\s-]*\)\s*)?(?:calendar\s+)?days', label: Offer validity}
+
+author:
+  # Instructions shared by every authored part. Source text is untrusted; facts never invented.
+  style: >-
+    Write in the formal, specific style of a Rejlers engineering consultancy proposal. Refer to
+    the company as "Rejlers" and to the client by name. Use short paragraphs and bullet lists.
+    Tailor every statement to this tender; never copy references, names, numbers or locations
+    from other projects.
+  excerpt_budget_bytes: 70000
+  max_excerpt_chars: 1400
+  parallel_calls: 4
+
+sections:
+  - {key: cover, title: Cover Page, kind: cover}
+  - {key: letter, title: Covering Letter, kind: letter}
+  - {key: toc, title: Table of Contents, kind: toc}
+  - key: qs
+    title: Qualification Statement
+    number: "1."
+    kind: authored
+    parts:
+      - key: statement
+        heading: QUALIFICATION STATEMENT
+        guidance: >-
+          State that Rejlers' bid is in compliance with the tender requirements, then list only
+          the qualifications or clarifications the tender text itself makes necessary (unclear
+          scope, missing data, assumptions the tender invites). Each listed item must cite the
+          excerpt that causes it. If nothing requires qualification, say so in one sentence.
+        categories: [technical, submission, qualification, commercial]
+        keywords: [clarification, assumption, deviation, qualification, exception, not included, by company, by others, unknown]
+  - {key: technical_bid, title: Technical Bid, number: "2.", kind: divider}
+  - {key: experience, title: Previous Experience, number: "2.1", kind: evidence, parent: technical_bid,
+     evidence: [Relevant project references, FEED experience list]}
+  - {key: resources, title: Resources, number: "2.2", kind: evidence, parent: technical_bid,
+     evidence: [Corporate organization chart, Key personnel list, Project organization chart, Key personnel CVs]}
+  - key: execution
+    title: Method Statement / Execution
+    number: "2.3"
+    parent: technical_bid
+    kind: authored
+    numbered_headings: true
+    parts:
+      - {key: definitions, heading: DEFINITIONS, guidance: "List the parties and terms as a definitions list: Company (the client), Engineering Contractor (Rejlers International Engineering Solutions AB), the tender/RFT reference, the project title and the services. Use only names and numbers found in the excerpts.",
+         categories: [submission, technical], keywords: [company, contractor, project, rft, tender, services, scope of work]}
+      - {key: introduction, heading: INTRODUCTION, guidance: "Introduce the facility or asset, its location and context, and the client's need, then list the scope packages or work items the tender asks for.",
+         categories: [technical], keywords: [background, introduction, facility, field, plant, existing, location, purpose, project description]}
+      - {key: objective, heading: OBJECTIVE, guidance: "One or two paragraphs stating the objective of this method statement and of the services, from the tender.",
+         categories: [technical], keywords: [objective, purpose, aim, intent, deliver]}
+      - {key: scope, heading: SCOPE OF SERVICES, mode: packages,
+         guidance: "For each scope package in the tender, write sub-headings 'Project background', 'Project objectives' and 'Project scope' with the activities and deliverables the tender requires for that package.",
+         categories: [technical], keywords: [scope, package, sow, study, feed, design, engineering, deliverable, activity, shall]}
+      - {key: success_factors, heading: PROJECT SUCCESS FACTORS, standard: [PROJECT SUCCESS FACTORS],
+         guidance: "Adapt Rejlers' standard project success factors to this tender's priorities.", categories: [technical, quality], keywords: [schedule, quality, safety, interface, approval]}
+      - {key: execution_overview, heading: EXECUTION OVERVIEW, standard: [EXECUTION OVERVIEW],
+         guidance: "Project home office, project organization, project management, mobilization and the kick-off meeting. Adapt the approved standard text to the tender's requirements. Keep it under 450 words.",
+         categories: [submission], keywords: [kick-off, mobilization, mobilisation, project manager, home office, organization, organisation]}
+      - {key: engineering_execution, heading: ENGINEERING EXECUTION, standard: [EXECUTION OVERVIEW],
+         guidance: "Design basis and guidelines, site visits and data collection, engineering deliverables preparation and checking, and engineering software, as the tender requires. Keep it under 450 words.",
+         categories: [technical], keywords: [site visit, survey, data collection, design basis, codes, standards, software, deliverable, drawing]}
+      - {key: project_control, heading: PROJECT CONTROL, standard: [EXECUTION OVERVIEW],
+         guidance: "Project control (planning, progress measurement and reporting), cost estimate preparation and procurement support required by the tender. Keep it under 450 words.",
+         categories: [submission, commercial], keywords: [progress, report, schedule, planning, cost estimate, estimate, mto, boq, procurement, control]}
+      - {key: communication, heading: COMMUNICATION & MANAGEMENT PLAN, standard: [COMMUNICATION & MANAGEMENT PLAN],
+         guidance: "Communication strategy, focal points, means of communication, correspondence and meetings/reviews, aligned with the tender's requirements.",
+         categories: [submission], keywords: [meeting, communication, correspondence, focal point, review, report, weekly, monthly]}
+      - {key: quality, heading: QUALITY MANAGEMENT PLAN, standard: [QUALITY MANAGEMENT PLAN],
+         guidance: "Quality management approach and checks applied to deliverables, aligned to the tender's quality requirements.",
+         categories: [quality], keywords: [quality, iso, audit, review, check, inspection, verification]}
+      - {key: hse_plan, heading: HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN, standard: ["HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN"],
+         guidance: "HSE management for the engineering services and site visits, aligned to the tender's HSE requirements.",
+         categories: [hse], keywords: [hse, safety, environment, permit, ppe, risk, incident, site]}
+      - {key: document_control, heading: DOCUMENT AND DATA MANAGEMENT PLAN, standard: [DOCUMENT AND DATA MANAGEMENT PLAN],
+         guidance: "Document control, numbering, transmittals, review cycles (IFR/IFA/IFD as applicable) and data management, aligned to the tender.",
+         categories: [submission, quality], keywords: [document, numbering, transmittal, review, ifr, ifa, ifd, native, edms, submission]}
+      - {key: deliverables, heading: LIST OF DELIVERABLES, mode: packages,
+         guidance: "Give one table block with columns 'No.', 'Deliverable' listing every deliverable the tender requires for this scope package, with a one-line introduction. Cite each row's source.",
+         categories: [technical, submission], keywords: [deliverable, report, drawing, datasheet, specification, list, schedule, calculation, mto, boq]}
+  - key: schedule
+    title: Work Schedule
+    number: "2.4"
+    parent: technical_bid
+    kind: authored
+    parts:
+      - {key: schedule, heading: WORK SCHEDULE, mode: table,
+         guidance: "Explain the proposed schedule approach and give a table with columns 'Activity / milestone', 'Duration or date' using only durations, dates and milestones stated in the tender. Where the tender gives none, state that the detailed schedule will be issued at kick-off and list the milestones without dates.",
+         categories: [submission, technical], keywords: [schedule, duration, weeks, months, days, milestone, completion, kick-off, start, deadline]}
+  - {key: subcontractors, title: Proposed Subcontractors, number: "2.5", kind: evidence, parent: technical_bid,
+     evidence: [Proposed subcontractors and specialist services]}
+  - key: hse
+    title: Specific HSE Requirements
+    number: "2.6"
+    parent: technical_bid
+    kind: authored
+    parts:
+      - {key: hse_response, heading: SPECIFIC HSE REQUIREMENTS, standard: ["HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN"],
+         guidance: "Respond to each specific HSE requirement in the tender (questionnaires, plans, certifications, statistics requested) stating how Rejlers complies. Note which HSE documents will be attached.",
+         categories: [hse], keywords: [hse, safety, questionnaire, environment, health, certificate, statistics, plan, policy]}
+  - {key: business_venture, title: Business Venture, number: "3.", kind: not_applicable}
+  - {key: investment_plan, title: Investment Plan, number: "4.", kind: not_applicable}
+  - {key: taziz, title: "Ta’ziz Industrial Park Investments", number: "5.", kind: not_applicable}
+  - {key: new_entity, title: Investment Plan as New Manufacturing Entity, number: "6.", kind: not_applicable}
+  - {key: compliance, title: Compliance Matrix, number: "7.", kind: compliance}
