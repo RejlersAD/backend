@@ -26,7 +26,7 @@ templates:
   quote_token: "{{quote_ref}}"
   stamp:
     image: ../templates/rejlers/company_stamp.png
-    exclude_sections: [cover, letter]
+    exclude_sections: [cover]  # the covering letter carries the stamp, as in Q-101505 Rev 0
     generated: {x: 414, y: 599, width: 131}
     components: {anchor: bottom-right, width: 119, margin: 0}
 
@@ -115,7 +115,7 @@ sections:
       - {key: quality, heading: QUALITY MANAGEMENT PLAN, standard: [QUALITY MANAGEMENT PLAN],
          guidance: "Quality management approach and checks applied to deliverables, aligned to the tender's quality requirements.",
          categories: [quality], keywords: [quality, iso, audit, review, check, inspection, verification]}
-      - {key: hse_plan, heading: HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN, standard: ["HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN"],
+      - {key: hse_plan, heading: "HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN", standard: ["HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN"],
          guidance: "HSE management for the engineering services and site visits, aligned to the tender's HSE requirements.",
          categories: [hse], keywords: [hse, safety, environment, permit, ppe, risk, incident, site]}
       - {key: document_control, heading: DOCUMENT AND DATA MANAGEMENT PLAN, standard: [DOCUMENT AND DATA MANAGEMENT PLAN],

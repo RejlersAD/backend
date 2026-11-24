@@ -1613,6 +1613,25 @@ class QuoteViewSet(viewsets.ModelViewSet):
             headers={'Cache-Control': 'no-store, private'},
         )
 
+    @action(detail=True, methods=['get', 'post'], url_path=r'workspace/evidence/(?P<section_key>[a-z_]+)')
+    def technical_proposal_workspace_evidence(self, request, pk=None, section_key=None):
+        """Company evidence enclosed in an evidence section (list, or upload one file)."""
+        from .proposal_evidence import add_evidence, list_evidence
+        headers = {'Cache-Control': 'no-store, private'}
+        if request.method == 'GET':
+            return Response(list_evidence(request.user, pk, section_key), headers=headers)
+        if set(request.data) - {'file', 'upload_request_id'} or len(request.FILES.getlist('file')) != 1:
+            raise ValidationError({'file': 'Upload one file and its upload_request_id.'})
+        request_id = serializers.UUIDField().run_validation(request.data.get('upload_request_id'))
+        result, created = add_evidence(request.user, pk, section_key, request.FILES['file'], request_id)
+        return Response(result, status=201 if created else 200, headers=headers)
+
+    @action(detail=True, methods=['delete'], url_path=r'workspace/evidence/(?P<section_key>[a-z_]+)/(?P<file_id>[^/]+)')
+    def technical_proposal_workspace_evidence_remove(self, request, pk=None, section_key=None, file_id=None):
+        from .proposal_evidence import remove_evidence
+        return Response(remove_evidence(request.user, pk, section_key, file_id),
+                        headers={'Cache-Control': 'no-store, private'})
+
     @action(detail=True, methods=['get'], url_path='workspace/plan')
     def technical_proposal_workspace_plan(self, request, pk=None):
         """Dry run of the standard builder: section mapping, facts and findings (no rendering)."""

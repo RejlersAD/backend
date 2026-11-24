@@ -278,14 +278,14 @@ def _generate(quote, actor, job, report, selection):
     from .technical_proposal_authoring import draft_section, finding, paragraph_records, proposal_facts
 
     cfg = config()
-    from .technical_proposal_authoring import MAX_COMPLIANCE_ROWS, is_primary_requirement
+    from .technical_proposal_authoring import MAX_COMPLIANCE_ROWS, compliance_requirements, is_primary_requirement
 
     requirements, sources, pool, standard = _tender(quote, actor, selection)
     # Compliance and traceability cover the primary tender documents (RFT, SOW, TOR, bulletins,
     # clarifications); referenced standards and specifications remain background excerpts only.
     scope_first = re.compile(r'terms of reference|\btor\b|scope of work|\bsow\b', re.I)
     rft_doc = re.compile(r'request for tender|\brft\b', re.I)
-    requirements = sorted((item for item in requirements if is_primary_requirement(item)),
+    requirements = sorted(compliance_requirements(item for item in requirements if is_primary_requirement(item)),
                           key=lambda item: (not scope_first.search(item.get('source_file') or ''),
                                             bool(rft_doc.search(item.get('source_file') or ''))))[:MAX_COMPLIANCE_ROWS]
     requirement_ids = {item['id'] for item in requirements}
@@ -295,12 +295,21 @@ def _generate(quote, actor, job, report, selection):
     prior = {s['key']: s for s in (latest.content.get('sections') or [])} if (
         job.section_key and latest and latest.content.get('template_version') == TEMPLATE_VERSION) else {}
 
+    from .proposal_evidence import evidence_uploads, materialize
+
+    evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
     drafted, findings, excerpts_used = {}, [], set()
     for section in cfg['sections']:
         if section['kind'] not in ('authored', 'evidence', 'not_applicable'):
             continue
+        if evidence.get(section['key']):
+            # Enclosed company evidence replaces the placeholder; checked on every build.
+            names = ', '.join(upload.name for upload in evidence[section['key']])
+            drafted[section['key']] = {'blocks': []}
+            findings.append(finding('INFO', 'EVIDENCE_ATTACHED', f"{section['title']}: {names}") | {'section': section['key']})
+            continue
         previous = prior.get(section['key'])
-        if previous and section['key'] != job.section_key:
+        if previous and section['key'] != job.section_key and section['kind'] != 'evidence':
             drafted[section['key']] = {'blocks': previous.get('blocks') or []}
             findings.extend(previous.get('findings') or [])
             excerpts_used |= {c for b in previous.get('blocks') or [] for c in b.get('citations') or []}
@@ -340,8 +349,11 @@ def _generate(quote, actor, job, report, selection):
 
     with tempfile.TemporaryDirectory(prefix='proposal_build_') as workdir:
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
+        attachments = {key: materialize(uploads, Path(workdir) / 'evidence' / key)
+                        for key, uploads in evidence.items() if uploads}
         try:
-            rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir)
+            rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir,
+                              attachments=attachments)
         finally:
             converter.close()
         findings.extend(finding(s, c, m) for s, c, m in rendered['findings'])
@@ -366,6 +378,7 @@ def _generate(quote, actor, job, report, selection):
             'key': key, 'title': title, 'kind': kind, 'blocks': blocks, 'paragraphs': paragraphs, 'items': paragraphs,
             'findings': [f for f in findings if f.get('section') == key],
             'pages': rendered['section_pages'].get(key), 'requirement_ids': [],
+            'attachments': [{'id': f'radai-{u.pk}', 'name': u.name} for u in evidence.get(key) or []],
             'approved': bool(previous and previous.get('approved') and key != job.section_key),
             'status': 'approved' if previous and previous.get('approved') and key != job.section_key else 'draft',
         })
