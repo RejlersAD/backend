@@ -150,3 +150,25 @@ migrations across all apps, consistent migration history, no Sales model drift,
 review schema/unique constraint present and existing Quote/private attachment
 counts unchanged. The local check inserted no review data. Evidence:
 `artifacts/sales-proposal-review-local-migration.log`. Production was not migrated.
+
+## Technical Proposal company evidence and house style - 25 November 2026
+
+Evidence sections of the standard Technical Proposal (Previous Experience, Resources, Proposed
+Subcontractors) take company evidence inline from Evidence review:
+
+- `GET/POST /api/v1/sales/quotes/{id}/workspace/evidence/{section_key}/` lists or uploads one file
+  (`file`, `upload_request_id`); `DELETE .../evidence/{section_key}/{file_id}/` removes one.
+  Listing needs proposal read; upload and removal need proposal update and opportunity workspace
+  create/update access. Only sections of kind `evidence` accept files; PDF, Word, PowerPoint and
+  Excel are accepted, at most 20 per section.
+- Files are private RADAI documents in the opportunity's **Internal** folder with source path
+  `Proposal evidence/<section_key>/<name>`; the Proposal folder keeps only the deliverable.
+- Every build (full or a section rebuild) encloses the current evidence files as that section of
+  the PDF instead of the placeholder, records `attachments` on the section, and reports
+  `EVIDENCE_ATTACHED` (INFO) instead of `EVIDENCE_REQUIRED` (ERROR).
+
+Rendering follows the approved Execution Plan of Q-101505 Rev 0: Arial, justified body text with
+6 pt spacing, round bullets on a hanging indent, blue bold uppercase headings with Arial numbers,
+tables sized to their content with a shaded repeating header row, and the company stamp on the
+covering letter. Compliance-matrix rows exclude requirement fragments (fewer than six words or not
+starting a sentence) and duplicates from documents uploaded twice.

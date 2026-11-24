@@ -57,6 +57,29 @@ def is_primary_requirement(requirement):
     return bool(TENDER_SOURCE.search(str(requirement.get('source_file') or '')))
 
 
+GENERIC_HEADINGS = {'scopeofservices', 'listofdeliverables', 'deliverables'}
+MIN_REQUIREMENT_WORDS = 6
+
+
+def compliance_requirements(requirements):
+    """Rows a client reader can act on: whole requirement sentences, each listed once.
+
+    The extractor splits on obligation words, so it also yields fragments ("SHALL", "shall be
+    final.") and repeats every requirement of a document uploaded twice under another name.
+    """
+    seen, rows = set(), []
+    for item in requirements:
+        text = ' '.join(str(item.get('requirement_text') or '').split())
+        if len(text.split()) < MIN_REQUIREMENT_WORDS or not text[:1].isupper():
+            continue
+        key = re.sub(r'[^a-z0-9]', '', text.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(item)
+    return rows
+
+
 def finding(severity, code, message):
     return {'severity': severity, 'code': code, 'message': message}
 
@@ -191,13 +214,15 @@ def _call(payload, schema, instructions):
 
 def _clean_blocks(raw_blocks, allowed, part_heading=''):
     blocks, dropped, cited = [], 0, set()
-    repeated = {re.sub(r'[^a-z]', '', part_heading.casefold())} - {''}
+    repeated = re.sub(r'[^a-z0-9]', '', part_heading.casefold())
     for block in raw_blocks or []:
         kind = block.get('type')
         citations = [value for value in block.get('citations') or [] if value in allowed]
         text = str(block.get('text') or '').strip()
         if kind == 'heading':
-            if text and re.sub(r'[^a-z]', '', text.casefold()) not in repeated:  # never repeat the part heading
+            # Never restate the part or package heading the document already shows.
+            key = re.sub(r'[^a-z0-9]', '', text.casefold())
+            if key and key not in GENERIC_HEADINGS and not (repeated and repeated in key):
                 blocks.append({'type': 'heading', 'level': 2, 'text': text[:200]})
             continue
         if not citations:
