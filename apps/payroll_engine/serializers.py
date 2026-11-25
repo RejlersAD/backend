@@ -125,6 +125,13 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
             else attrs.get('employee')
         )
         if canonical:
+            duplicate = PayrollEmployee.objects.filter(employee=canonical, is_active=True)
+            if self.instance:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if attrs.get('is_active', getattr(self.instance, 'is_active', True)) and duplicate.exists():
+                raise serializers.ValidationError({
+                    'employee_no': 'This canonical employee already has an active payroll record.'
+                })
             attrs.update({
                 'full_name': canonical.get_full_name(),
                 'department': canonical.department or '',

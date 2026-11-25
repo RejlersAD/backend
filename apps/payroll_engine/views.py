@@ -499,7 +499,10 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
         if upload.size > EXCEL_MAX_UPLOAD_MB * 1024 * 1024:
             return Response({'error': f'File exceeds {EXCEL_MAX_UPLOAD_MB} MB.'},
                             status=http_status.HTTP_400_BAD_REQUEST)
-        summary = excel_import.import_master_roster(upload)
+        try:
+            summary = excel_import.import_master_roster(upload)
+        except excel_import.PayrollIdentityConflict as exc:
+            return Response({'error': str(exc)}, status=http_status.HTTP_409_CONFLICT)
         return Response(summary.as_dict())
 
     @action(detail=False, methods=['get'], url_path='export-xlsx')
@@ -913,7 +916,10 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             return Response({'error': "Missing 'file'."}, status=400)
         if upload.size > EXCEL_MAX_UPLOAD_MB * 1024 * 1024:
             return Response({'error': f'File exceeds {EXCEL_MAX_UPLOAD_MB} MB.'}, status=400)
-        summary = excel_import.import_adjustments(upload, run.year, run.month)
+        try:
+            summary = excel_import.import_adjustments(upload, run.year, run.month)
+        except excel_import.PayrollIdentityConflict as exc:
+            return Response({'error': str(exc)}, status=http_status.HTTP_409_CONFLICT)
         # Re-generate so the adjustments materialise into line items
         run = run_generator.generate_monthly_run(
             run.year, run.month, user=request.user, overwrite=True, note=run.notes,
@@ -932,7 +938,10 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             return Response({'error': "file, year, and month (1-12) required."}, status=400)
         if upload.size > EXCEL_MAX_UPLOAD_MB * 1024 * 1024:
             return Response({'error': f'File exceeds {EXCEL_MAX_UPLOAD_MB} MB.'}, status=400)
-        summary = excel_import.import_full_payroll(upload, year, month)
+        try:
+            summary = excel_import.import_full_payroll(upload, year, month)
+        except excel_import.PayrollIdentityConflict as exc:
+            return Response({'error': str(exc)}, status=http_status.HTTP_409_CONFLICT)
         try:
             run = run_generator.generate_monthly_run(
                 year, month, user=request.user, overwrite=True, note='Imported from Excel',

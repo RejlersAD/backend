@@ -66,6 +66,7 @@
       .meta-table {
         width: 100%;
         border-collapse: collapse;
+        table-layout: fixed;
         margin-bottom: 5px;
       }
       .meta-table td {
@@ -76,6 +77,10 @@
       .meta-label {
         width: 155px;
         padding-right: 8px;
+      }
+      .meta-value,
+      .meta-value a {
+        overflow-wrap: anywhere;
       }
       .meta-table .meta-group td { padding-top: 28px; }
       .meta-table .meta-recipient td { padding-top: 40px; }
@@ -160,7 +165,7 @@
           </div>
           <div>
             <span class="header-label">Confidential</span>
-            <span class="hl">{{ letterhead.confidential_date }}</span>
+            <span class="hl">{{ letterhead.confidential }}</span>
           </div>
         </div>
         <div class="header-right">
@@ -173,7 +178,7 @@
       <table class="meta-table">
         <tr>
           <td class="meta-label">From:</td>
-          <td>
+          <td class="meta-value">
             {{ letterhead.sender_name }}<br /><span
               class="meta-sub"
               >{{ letterhead.sender_company }}</span
@@ -182,20 +187,19 @@
         </tr>
         <tr class="meta-group">
           <td class="meta-label">Bid Focal Contact</td>
-          <td>{{ letterhead.focal_contact }}</td>
+          <td class="meta-value">{{ letterhead.focal_contact }}</td>
         </tr>
         <tr>
           <td class="meta-label">Contact Number:</td>
-          <td>{{ letterhead.contact_number }}</td>
+          <td class="meta-value">{{ letterhead.contact_number }}</td>
         </tr>
         <tr>
           <td class="meta-label">Fax:</td>
-          <td>{{ letterhead.fax }}</td>
+          <td class="meta-value">{{ letterhead.fax }}</td>
         </tr>
         <tr>
           <td class="meta-label">Email:</td>
-          <td>
-            E:
+          <td class="meta-value">
             <a
               href="mailto:{{ letterhead.email }}"
               style="color: #0066cc; text-decoration: underline"
@@ -205,7 +209,7 @@
         </tr>
         <tr class="meta-recipient">
           <td class="meta-label">To:</td>
-          <td>
+          <td class="meta-value">
             {{ letterhead.recipient_name }}<br />
             {% if letterhead.recipient_title %}{{ letterhead.recipient_title }}<br />{% endif %}
             {{ letterhead.recipient_company }}<br />
@@ -220,20 +224,20 @@
         </tr>
         <tr class="meta-reference">
           <td class="meta-label">Your Ref. No.:</td>
-          <td>{{ letterhead.your_ref|default:"—" }}</td>
+          <td class="meta-value">{{ letterhead.your_ref|default:"—" }}</td>
         </tr>
         <tr class="meta-late-group">
           <td class="meta-label">Our Ref. No.:</td>
-          <td>{{ letterhead.our_ref }}</td>
+          <td class="meta-value">{{ letterhead.our_ref }}</td>
         </tr>
         <tr class="meta-late-group">
           <td class="meta-label">Our ADNOC Unified<br />Code:</td>
-          <td>{{ letterhead.adnoc_unified_code }}</td>
+          <td class="meta-value">{{ letterhead.adnoc_unified_code }}</td>
         </tr>
       </table>
 
       <table class="meta-table subject-block">
-        <tr><td class="meta-label">Subject:</td><td class="subject-value">{{ subject }}
+        <tr><td class="meta-label">Subject:</td><td class="subject-value meta-value">{{ subject }}
           {% if subject_suffix %}<div class="subject-suffix">{{ subject_suffix }}</div>{% endif %}
         </td></tr>
       </table>

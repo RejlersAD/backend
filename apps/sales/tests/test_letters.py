@@ -242,14 +242,35 @@ class LetterGenerationTests(TestCase):
         self.assertGreater(page.search_for('Rejlers International Engineering Solutions AB')[-1].y0, 750)
         self.assertEqual(len(page.search_for('1 (1)')), 1)
         confidential = page.search_for('Confidential')[0]
+        self.assertEqual(len(page.search_for('Rev 0')), 1)
         sender = page.search_for('From:')[0]
         self.assertLess(sender.y0 - confidential.y1, 32)
+        header_code = page.search_for(letter.custom_data['letterhead']['response_code'])[0]
+        sender_name = page.search_for(letter.custom_data['letterhead']['sender_name'])[0]
+        self.assertAlmostEqual(header_code.x0, sender_name.x0, delta=3)
         recipient_email = page.search_for(letter.custom_data['letterhead']['recipient_email'])[0]
         your_reference = page.search_for('Your Ref. No.:')[0]
         self.assertLess(your_reference.y0 - recipient_email.y1, 45)
         signature = page.search_for('CEO, Rejlers Abu Dhabi')[0]
         footer_company = page.search_for('Rejlers International Engineering Solutions AB')[-1]
         self.assertLess(signature.y1 + 5, footer_company.y0)
+
+    @skipUnless(_weasyprint_available(), 'weasyprint not installed')
+    def test_pdf_cleans_encoded_subject_and_exchange_legacy_recipient(self):
+        from apps.sales.letter_pdf import generate_letter_pdf
+        import pymupdf
+        letter = self.prepare('eoi')
+        letter.subject = 'C &amp; F Study'
+        letter.custom_data['letterhead']['recipient_email'] = (
+            '/O=EXCHANGELABS/OU=EXCHANGE ADMINISTRATIVE GROUP/'
+            'CN=RECIPIENTS/CN=LEGACY USER'
+        )
+
+        document = pymupdf.open(stream=generate_letter_pdf(letter), filetype='pdf')
+        text = document[0].get_text()
+        self.assertIn('C & F Study', text)
+        self.assertNotIn('&amp;', text)
+        self.assertNotIn('EXCHANGELABS', text)
 
     @skipUnless(_docx_available(), 'python-docx not installed')
     def test_docx_uses_one_greeting_and_aligned_company_footer(self):

@@ -110,7 +110,7 @@ def generate_letter_docx(letter, custom_data=None):
     _strip_table_borders(header_table)
     _set_table_widths(header_table, (41, 95, 38))
     for row_idx, (label, value) in enumerate(((lh['response_label'], lh['response_code']),
-                                              ('Confidential', lh['confidential_date']))):
+                                              ('Confidential', lh['confidential']))):
         label_cell, value_cell = header_table.cell(row_idx, 0), header_table.cell(row_idx, 1)
         label_cell.text = value_cell.text = ''
         label_p, value_p = label_cell.paragraphs[0], value_cell.paragraphs[0]
@@ -151,7 +151,7 @@ def generate_letter_docx(letter, custom_data=None):
         ('Bid Focal Contact', [lh['focal_contact']]),
         ('Contact Number:', [lh['contact_number']]),
         ('Fax:', [lh['fax']]),
-        ('Email:', [f"E: {lh['email']}"]),
+        ('Email:', [lh['email']]),
         ('To:', recipient_lines),
         ('Your Ref. No.:', [lh['your_ref'] or '—']),
         ('Our Ref. No.:', [lh['our_ref']]),

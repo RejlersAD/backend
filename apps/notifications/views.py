@@ -7,6 +7,7 @@ from rest_framework import viewsets, status, filters, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from django.db.models import Q, Count
 from django.shortcuts import get_object_or_404
@@ -27,6 +28,14 @@ from .services import NotificationService
 # Import Data Visibility for Row-Level Security
 from apps.rbac.data_visibility_mixin import PersonalDataMixin
 logger = logging.getLogger(__name__)
+
+
+class NotificationInboxPagination(PageNumberPagination):
+    """Keep inbox reads small enough for interactive notification polling."""
+
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
@@ -53,6 +62,7 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
     search_fields = ['title', 'message']
     ordering_fields = ['created_at', 'priority', 'is_read']
     ordering = ['-created_at']
+    pagination_class = NotificationInboxPagination
     queryset = Notification.objects.all()
     visibility_logging = False
 

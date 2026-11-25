@@ -31,6 +31,10 @@ from ..models import PayrollAdjustment, PayrollEmployee
 from .calculator import to_decimal
 
 
+class PayrollIdentityConflict(ValueError):
+    """An import row conflicts with an existing canonical payroll identity."""
+
+
 @dataclass
 class ImportSummary:
     employees_created: int = 0
@@ -100,6 +104,17 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
     # every roster import instead of creating disconnected payroll records.
     from apps.hr_core.identity import EmployeeIdentityService
     canonical_employee = EmployeeIdentityService.resolve(emp_no)
+    if canonical_employee:
+        owner = (PayrollEmployee.objects
+                 .filter(employee=canonical_employee, is_active=True)
+                 .exclude(employee_no=emp_no)
+                 .first())
+        if owner:
+            raise PayrollIdentityConflict(
+                f'Employee number {emp_no} resolves to {canonical_employee.employee_number}, '
+                f'which is already owned by active payroll record {owner.employee_no}. '
+                'Correct the import employee number before retrying.'
+            )
     defaults = {
         'full_name':         _normalise_str(row.get('full_name')),
         'mol_no':            _normalise_str(row.get('mol_no'), 32),

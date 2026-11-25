@@ -97,6 +97,13 @@ class PayrollEmployee(models.Model):
         db_table = 'payroll_engine_employee'
         verbose_name = 'Payroll Employee'
         ordering = ('full_name',)
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee'],
+                condition=models.Q(employee__isnull=False, is_active=True),
+                name='uq_active_payroll_employee_canonical',
+            ),
+        ]
         indexes = [
             models.Index(fields=['department', 'is_active']),
             models.Index(fields=['is_active', 'employee_no']),
