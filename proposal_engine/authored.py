@@ -56,6 +56,61 @@ BODY_SPACING = Pt(6)
 BULLET_INDENT, BULLET_HANG = Pt(36), Pt(18)
 TABLE_HEADER_FILL = 'DCE6F1'
 TABLE_FONT = Pt(10)
+LIST_STEP = Pt(18)
+ALIGNMENT = {'left': WD_ALIGN_PARAGRAPH.LEFT, 'center': WD_ALIGN_PARAGRAPH.CENTER,
+             'right': WD_ALIGN_PARAGRAPH.RIGHT, 'justify': WD_ALIGN_PARAGRAPH.JUSTIFY}
+LIST_MARKS = ('\u2022', '\u2013', '\u25aa')
+GENERATED_KINDS = ('cover', 'letter', 'compliance')
+
+
+# --- reviewer formatting ----------------------------------------------------------------------
+# Blocks keep their plain `text` (traceability, search, validation). Optional formatting set by a
+# reviewer in the canvas editor: `runs` (character formatting), `align`, `indent` {left, first} in
+# points; bullets: `markers` ('bullet'|'number'), `levels` (0-2), `item_runs`; tables: `header`,
+# `column_runs`, `cell_runs` {"row:column": runs}.
+
+def _shade_run(run, fill):
+    properties = run._r.get_or_add_rPr()
+    shading = OxmlElement('w:shd')
+    shading.set(qn('w:val'), 'clear')
+    shading.set(qn('w:color'), 'auto')
+    shading.set(qn('w:fill'), fill.lstrip('#'))
+    properties.append(shading)
+
+
+def _write_runs(paragraph, text, runs=None, *, upper=False, bold=None, size=None, color=None):
+    for item in runs or [{'text': text}]:
+        run = paragraph.add_run(item['text'].upper() if upper else item['text'])
+        if bold or item.get('bold'):
+            run.bold = True
+        if item.get('italic'):
+            run.italic = True
+        if item.get('underline'):
+            run.underline = True
+        if item.get('strike'):
+            run.font.strike = True
+        if item.get('font'):
+            run.font.name = item['font']
+            run._r.get_or_add_rPr().get_or_add_rFonts().set(qn('w:eastAsia'), item['font'])
+        if item.get('size') or size:
+            run.font.size = Pt(item.get('size') or size.pt)
+        if item.get('color'):
+            run.font.color.rgb = RGBColor.from_string(item['color'].lstrip('#'))
+        elif color is not None:
+            run.font.color.rgb = color
+        if item.get('highlight'):
+            _shade_run(run, item['highlight'])
+    return paragraph
+
+
+def _format(paragraph, block):
+    if block and block.get('align') in ALIGNMENT:
+        paragraph.alignment = ALIGNMENT[block['align']]
+    indent = (block or {}).get('indent') or {}
+    if indent:
+        paragraph.paragraph_format.left_indent = Pt(indent.get('left') or 0)
+        paragraph.paragraph_format.first_line_indent = Pt(indent.get('first') or 0)
+    return paragraph
 
 
 def _arial_numbering(document):
@@ -112,44 +167,54 @@ def _spacing(paragraph, before=BODY_SPACING, after=BODY_SPACING):
     return paragraph
 
 
-def _body(document, text):
-    paragraph = _spacing(document.add_paragraph(text))
+def _body(document, text, block=None):
+    paragraph = _spacing(document.add_paragraph())
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    return paragraph
+    _write_runs(paragraph, text, (block or {}).get('runs'))
+    return _format(paragraph, block)
 
 
-def _plain_heading(document, text, size=12):
+def _plain_heading(document, text, size=12, block=None):
     paragraph = _spacing(document.add_paragraph(), Pt(12), BODY_SPACING)
-    run = paragraph.add_run(text.upper())
-    run.bold = True
-    run.font.size = Pt(size)
-    color = _heading_color(document)
-    run.font.color.rgb = color or RGBColor(0x00, 0x00, 0xFF)
+    color = _heading_color(document) or RGBColor(0x00, 0x00, 0xFF)
+    _write_runs(paragraph, text, (block or {}).get('runs'), upper=True, bold=True, size=Pt(size), color=color)
     paragraph.paragraph_format.keep_with_next = True
-    return paragraph
+    return _format(paragraph, block)
 
 
-def _heading(document, text, level, numbered):
+def _heading(document, text, level, numbered, block=None):
     style = _style(document, f'Heading {level}') if numbered else None
     if style:
-        paragraph = document.add_paragraph(text.upper(), style=style)
+        paragraph = document.add_paragraph(style=style)
+        _write_runs(paragraph, text, (block or {}).get('runs'), upper=True)
         paragraph.paragraph_format.keep_with_next = True
         if level >= 3:  # the template indents Heading 3; the baseline starts it at the margin
             paragraph.paragraph_format.left_indent = Pt(0)
             paragraph.paragraph_format.first_line_indent = Pt(0)
-        return paragraph
-    return _plain_heading(document, text, 13 if level == 1 else 11)
+        return _format(paragraph, block)
+    return _plain_heading(document, text, 13 if level == 1 else 11, block)
 
 
-def _bullets(document, items):
+def _bullets(document, items, block=None):
+    block = block or {}
+    markers, levels, item_runs = block.get('markers') or [], block.get('levels') or [], block.get('item_runs') or []
+    counters = [0, 0, 0]
     for index, item in enumerate(items):
+        level = levels[index] if index < len(levels) else 0
+        numbered = (markers[index] if index < len(markers) else 'bullet') == 'number'
+        counters[level] += 1
+        for deeper in range(level + 1, len(counters)):
+            counters[deeper] = 0
+        mark = f'{counters[level]}.' if numbered else LIST_MARKS[level]
         paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        paragraph.alignment = ALIGNMENT.get(block.get('align'), WD_ALIGN_PARAGRAPH.JUSTIFY)
         layout = paragraph.paragraph_format
-        layout.left_indent, layout.first_line_indent = BULLET_INDENT, -BULLET_HANG
-        layout.tab_stops.add_tab_stop(BULLET_INDENT)
+        indent = BULLET_INDENT + LIST_STEP * level
+        layout.left_indent, layout.first_line_indent = indent, -BULLET_HANG
+        layout.tab_stops.add_tab_stop(indent)
         _spacing(paragraph, Pt(2) if index else Pt(4), Pt(4))
-        paragraph.add_run('•\t' + item)
+        paragraph.add_run(mark + '\t')
+        _write_runs(paragraph, item, item_runs[index] if index < len(item_runs) else None)
 
 
 def _usable_width(document):
@@ -198,32 +263,34 @@ def _shade(cell, fill):
     properties.append(shading)
 
 
-def _cell_text(cell, text, bold=False):
+def _cell_text(cell, text, bold=False, runs=None):
     cell.text = ''
     paragraph = cell.paragraphs[0]
     _spacing(paragraph, Pt(2), Pt(2))
-    run = paragraph.add_run(str(text))
-    run.bold = bold
-    run.font.size = TABLE_FONT
+    _write_runs(paragraph, str(text), runs, bold=bold or None, size=TABLE_FONT)
 
 
-def _table(document, columns, rows):
+def _table(document, columns, rows, block=None):
+    block = block or {}
+    header = block.get('header', True) is not False
+    column_runs, cell_runs = block.get('column_runs') or [], block.get('cell_runs') or {}
     width = max([len(columns)] + [len(row) for row in rows]) or 1
-    table = document.add_table(rows=1, cols=width)
+    table = document.add_table(rows=1 if header else 0, cols=width)
     style = _style(document, 'Table Grid')
     if style:
         table.style = style
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
-    widths = _column_widths(document, columns, rows, width)
-    for cell, text in zip(table.rows[0].cells, columns + [''] * (width - len(columns))):
-        _cell_text(cell, text, bold=True)
-        _shade(cell, TABLE_HEADER_FILL)
-    repeat_header_row(table)
-    for row in rows:
+    widths = _column_widths(document, columns if header else [], rows, width)
+    if header:
+        for index, (cell, text) in enumerate(zip(table.rows[0].cells, columns + [''] * (width - len(columns)))):
+            _cell_text(cell, text, bold=True, runs=column_runs[index] if index < len(column_runs) else None)
+            _shade(cell, TABLE_HEADER_FILL)
+        repeat_header_row(table)
+    for row_index, row in enumerate(rows):
         cells = table.add_row().cells
-        for cell, text in zip(cells, list(row) + [''] * (width - len(row))):
-            _cell_text(cell, text)
+        for column, (cell, text) in enumerate(zip(cells, list(row) + [''] * (width - len(row)))):
+            _cell_text(cell, text, runs=cell_runs.get(f'{row_index}:{column}'))
     _fix_widths(table, widths)
     _spacing(document.add_paragraph(), Pt(0), Pt(4))
     return table
@@ -232,20 +299,21 @@ def _table(document, columns, rows):
 def write_blocks(document, blocks, *, numbered):
     for block in blocks:
         kind = block.get('type')
+        intro = {key: block[key] for key in ('runs', 'align', 'indent') if key in block}
         if kind == 'part':
             _heading(document, block['text'], 1, numbered)
         elif kind == 'heading':
-            _heading(document, block['text'], int(block.get('level') or 2), numbered)
+            _heading(document, block['text'], int(block.get('level') or 2), numbered, block)
         elif kind == 'paragraph' and block.get('text'):
-            _body(document, block['text'])
+            _body(document, block['text'], block)
         elif kind == 'bullets' and block.get('items'):
             if block.get('text'):
-                _body(document, block['text'])
-            _bullets(document, block['items'])
+                _body(document, block['text'], intro)
+            _bullets(document, block['items'], block)
         elif kind == 'table' and block.get('rows'):
             if block.get('text'):
-                _body(document, block['text'])
-            _table(document, list(block.get('columns') or []), block['rows'])
+                _body(document, block['text'], intro)
+            _table(document, list(block.get('columns') or []), block['rows'], block)
         elif kind == 'placeholder':
             paragraph = _spacing(document.add_paragraph())
             run = paragraph.add_run(block['text'])
@@ -318,6 +386,96 @@ def compliance_content(requirements, traceability, labels):
     ]}
 
 
+def cover_blocks(facts):
+    """The cover's text as editable blocks (used when a reviewer replaces the designed cover)."""
+    def line(text, size):
+        return {'type': 'paragraph', 'text': text, 'align': 'center', 'runs': [{'text': text, 'size': size, 'bold': True}]}
+    return [line('PROPOSAL', 14), line(facts['quote_ref'], 20), line(facts['tender_title'].upper(), 16),
+            line(f"REFERENCE NUMBER {facts.get('rft_number') or 'TO BE CONFIRMED'}", 12),
+            line('TECHNICAL PROPOSAL', 14), line(facts['revision_line'], 12),
+            line(f"SUBMITTED TO {facts['client'].upper()}", 12)]
+
+
+def letter_blocks(config, facts):
+    """The covering letter as editable blocks, matching `letter_document`."""
+    company = config['company']
+    validity = facts.get('validity_days')
+    validity_sentence = (f'Our offer is valid for {validity} days from the Technical Bid Submission date.' if validity
+                         else 'Our offer is valid for the period required by the tender.')
+    rows = [['From:', f"{company['signatory']}, {company['name']}"], ['Email:', company['contact_email']],
+            ['Telephone:', company['telephone']], ['To:', facts['client']],
+            ['Your Ref.:', facts.get('rft_number') or 'To be confirmed'],
+            ['Our Ref.:', f"{facts['quote_ref']} Rev. {facts['revision']} Technical Proposal"],
+            ['Date:', facts['date']], ['Subject:', f"{facts['tender_title'].upper()} – TECHNICAL PROPOSAL"]]
+    blocks = [{'type': 'table', 'text': '', 'header': False, 'columns': ['', ''], 'rows': rows,
+               'cell_runs': {f'{index}:0': [{'text': row[0], 'bold': True}] for index, row in enumerate(rows)}}]
+    blocks += [{'type': 'paragraph', 'text': text.format(tender_title=facts['tender_title'],
+                                                         validity_sentence=validity_sentence)}
+               for text in config['letter']['paragraphs']]
+    signatory = [company['signatory']] + list(company['signatory_title'])
+    blocks += [{'type': 'paragraph', 'text': line, 'align': 'left',
+                **({'runs': [{'text': line, 'bold': True}]} if index == 0 else {})} for index, line in enumerate(signatory)]
+    return blocks
+
+
+def _part_lines(document, header):
+    """Header or footer paragraphs of the first section (tables included), in order."""
+    part = document.sections[0].header if header else document.sections[0].footer
+    return list(part._element.iter(qn('w:p')))
+
+
+def _paragraph_text(element):
+    return ''.join(node.text or '' for node in element.iter(qn('w:t')))
+
+
+def template_layout(config):
+    """Editable header and footer lines of the body template (the quote reference stays automatic)."""
+    document = open_template(config['templates']['body'])
+    token = config['templates']['quote_token']
+    header = []
+    for element in _part_lines(document, True):
+        text = _paragraph_text(element).strip()
+        if text and token not in text and text not in header:
+            header.append(text)
+    footer = [text for text in (_paragraph_text(e).strip() for e in _part_lines(document, False)) if text]
+    return {'header_lines': header, 'footer_lines': footer}
+
+
+def _replace_lines(path, pairs, target):
+    """Copy a template with whole header/footer lines replaced (exact paragraph matches only)."""
+    document = open_template(path)
+    for package_part in document.part.package.iter_parts():
+        if not re.search(r'/word/(header|footer)\d*\.xml$', str(package_part.partname)) or not hasattr(package_part, 'element'):
+            continue
+        for element in package_part.element.iter(qn('w:p')):
+            text = _paragraph_text(element).strip()
+            nodes = list(element.iter(qn('w:t')))
+            if text not in pairs or not nodes:
+                continue
+            nodes[0].text = pairs[text]
+            nodes[0].set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            for node in nodes[1:]:
+                node.text = ''
+    document.save(str(target))
+    return str(target)
+
+
+def apply_layout(config, layout, workdir):
+    """Point the config at body/divider templates carrying the reviewer's header/footer lines."""
+    defaults = template_layout(config)
+    effective = {name: list(values) for name, values in defaults.items()}
+    pairs = {}
+    for name in ('header_lines', 'footer_lines'):
+        for index, new in enumerate((layout or {}).get(name) or []):
+            if index < len(defaults[name]) and isinstance(new, str) and new != defaults[name][index]:
+                pairs[defaults[name][index]] = new
+                effective[name][index] = new
+    if pairs:
+        for key in ('body', 'divider'):
+            config['templates'][key] = _replace_lines(config['templates'][key], pairs, Path(workdir) / f'{key}_layout.docx')
+    return effective
+
+
 # --- assembly -------------------------------------------------------------------------------
 
 def _row(path, key):
@@ -350,24 +508,38 @@ def build_plan(config, files):
     return plan
 
 
-def render(config, facts, sections, requirements, traceability, converter, workdir, attachments=None):
+def render(config, facts, sections, requirements, traceability, converter, workdir, attachments=None, layout=None):
     """Write every section document, compile the PDF binder and the Word master.
 
-    `sections` maps section key → {'blocks': [...]} for authored/evidence/not-applicable sections.
-    `attachments` maps an evidence section key → local files (PDF/Office) enclosed as that section.
-    Returns {'pdf', 'docx', 'section_pages', 'findings'}.
+    `sections` maps section key → {'blocks': [...]} for authored/evidence/not-applicable sections;
+    an entry may carry a reviewer `title`, and for cover/letter/compliance `override: True` replaces
+    the generated page with its blocks. `attachments` maps an evidence section key → local files
+    enclosed as that section. `layout` holds reviewer header/footer lines.
+    Returns {'pdf', 'docx', 'section_pages', 'findings', 'generated', 'layout'}.
     """
     from .binder import build_binder
     from .master import build_master
 
     workdir = Path(workdir)
     (workdir / 'sections').mkdir(parents=True, exist_ok=True)
+    config = deepcopy(config)
+    for section in config['sections']:
+        title = (sections.get(section['key']) or {}).get('title')
+        if isinstance(title, str) and title.strip():
+            section['title'] = title.strip()
+    effective_layout = apply_layout(config, layout, workdir)
     findings, files = [], {}
     labels = dict(review_units(config))
+    generated_blocks = {}
     for section in config['sections']:
         key, kind = section['key'], section['kind']
         path = workdir / 'sections' / f'{len(files) + 1:02d}-{key}.docx'
-        if kind == 'cover':
+        if kind in GENERATED_KINDS:
+            generated_blocks[key] = (cover_blocks(facts) if kind == 'cover' else letter_blocks(config, facts) if kind == 'letter'
+                              else compliance_content(requirements, traceability, labels)['blocks'])
+        if kind in GENERATED_KINDS and (sections.get(key) or {}).get('override'):
+            files[key] = section_document(config, section, sections[key], facts['quote_ref'], path)
+        elif kind == 'cover':
             files[key] = cover_document(config, facts, path)
         elif kind == 'letter':
             files[key] = letter_document(config, facts, path)
@@ -378,7 +550,6 @@ def render(config, facts, sections, requirements, traceability, converter, workd
             files[key] = list(attachments[key])
         elif kind in ('authored', 'evidence', 'not_applicable'):
             files[key] = section_document(config, section, sections.get(key) or {}, facts['quote_ref'], path)
-    config = deepcopy(config)
     config['_title'] = f"{facts['quote_ref']} Technical Proposal Rev {facts['revision']}"
     plan = build_plan(config, files)
     pdf = workdir / 'proposal.pdf'
@@ -392,7 +563,8 @@ def render(config, facts, sections, requirements, traceability, converter, workd
         section_pages[item['section']][1] = item['page']
     generated = [path for path in files.values() if not isinstance(path, list)]
     findings.extend(_reference_leaks(generated, facts['quote_ref']))
-    return {'pdf': pdf, 'docx': docx, 'section_pages': section_pages, 'findings': findings}
+    return {'pdf': pdf, 'docx': docx, 'section_pages': section_pages, 'findings': findings,
+            'generated': generated_blocks, 'layout': effective_layout}
 
 
 def _reference_leaks(paths, quote_ref):
