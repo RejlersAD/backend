@@ -214,6 +214,10 @@ the Word file.
     the generated page in every later rebuild and AI regeneration.
   - `{expected_version, reason, reset: true}` restores the generated page. The cover override is a
     plain text page that replaces the designed cover.
+  - **Documents in authored sections:** an authored section whose config lists `evidence` (2.6 Specific
+    HSE Requirements) also accepts uploads through `workspace/evidence/<key>/`. They follow the drafted
+    text in the PDF; the text stays editable. The workspace version lists these keys in
+    `evidence_sections`.
   - **Covering letter source:** when the opportunity's Correspondence folder (RADAI storage) holds an
     EOI letter (`<deal code>-eoi.pdf` / `.docx`), every build and edit uses its current version as the
     covering letter: the PDF goes into the proposal PDF, and the DOCX goes into the Word file and into

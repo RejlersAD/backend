@@ -19,11 +19,20 @@ EVIDENCE_TYPES = ('.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls')
 MAX_EVIDENCE_FILES = 20
 
 
+def accepts_evidence(section):
+    """Evidence sections, and authored sections that list documents a reviewer may enclose."""
+    return section['kind'] == 'evidence' or (section['kind'] == 'authored' and bool(section.get('evidence')))
+
+
+def evidence_section_keys(cfg):
+    return [section['key'] for section in cfg['sections'] if accepts_evidence(section)]
+
+
 def _evidence_section(section_key):
     from .proposal_engine_service import config
 
     section = next((item for item in config()['sections'] if item['key'] == section_key), None)
-    if section is None or section['kind'] != 'evidence':
+    if section is None or not accepts_evidence(section):
         raise ValidationError({'section_key': 'Choose a proposal section that takes company evidence.'})
     return section
 

@@ -469,7 +469,8 @@ def _render_edit(quote, job):
 
     from proposal_engine.authored import render, review_units
     from proposal_engine.convert import Converter
-    from .proposal_evidence import covering_letter, evidence_uploads, materialize, materialize_letter
+    from .proposal_evidence import (covering_letter, evidence_section_keys, evidence_uploads, materialize,
+                                    materialize_letter)
     from .technical_proposal_authoring import _ordinal, finding, paragraph_records
 
     cfg = config()
@@ -516,7 +517,7 @@ def _render_edit(quote, job):
     for citation in still_cited & requirement_ids:
         traceability.setdefault(citation, set()).add(key)
 
-    evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    evidence = evidence_uploads(quote.deal, evidence_section_keys(cfg))
     issued_letter = covering_letter(quote.deal)
     with tempfile.TemporaryDirectory(prefix='proposal_edit_') as workdir:
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
@@ -601,9 +602,10 @@ def _generate(quote, actor, job, report, selection):
     inputs = _reviewer_inputs(latest.content) if same_template else {}
     layout = latest.content.get('layout_override') if same_template else None
 
-    from .proposal_evidence import covering_letter, evidence_uploads, materialize, materialize_letter
+    from .proposal_evidence import (covering_letter, evidence_section_keys, evidence_uploads, materialize,
+                                    materialize_letter)
 
-    evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    evidence = evidence_uploads(quote.deal, evidence_section_keys(cfg))
     issued_letter = covering_letter(quote.deal)
     drafted, findings, excerpts_used = {}, [], set()
     letter_key = next((s['key'] for s in cfg['sections'] if s['kind'] == 'letter'), None)
@@ -614,7 +616,11 @@ def _generate(quote, actor, job, report, selection):
     for section in cfg['sections']:
         if section['kind'] not in ('authored', 'evidence', 'not_applicable'):
             continue
-        if evidence.get(section['key']):
+        if evidence.get(section['key']) and section['kind'] == 'authored':
+            # Documents enclosed after the drafted text (e.g. HSE questionnaire response).
+            names = ', '.join(upload.name for upload in evidence[section['key']])
+            findings.append(finding('INFO', 'EVIDENCE_ATTACHED', f"{section['title']}: {names}") | {'section': section['key']})
+        elif evidence.get(section['key']):
             # Enclosed company evidence replaces the placeholder; checked on every build.
             names = ', '.join(upload.name for upload in evidence[section['key']])
             drafted[section['key']] = {'blocks': []}
@@ -623,7 +629,7 @@ def _generate(quote, actor, job, report, selection):
         previous = prior.get(section['key'])
         if previous and section['key'] != job.section_key and section['kind'] != 'evidence':
             drafted[section['key']] = {'blocks': previous.get('blocks') or []}
-            findings.extend(previous.get('findings') or [])
+            findings.extend(f for f in previous.get('findings') or [] if f.get('code') != 'EVIDENCE_ATTACHED')
             excerpts_used |= {c for b in previous.get('blocks') or [] for c in b.get('citations') or []}
             continue
         outcome = draft_section(section, pool, standard, facts, cfg,

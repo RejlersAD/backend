@@ -593,6 +593,10 @@ def render(config, facts, sections, requirements, traceability, converter, workd
                                           facts['quote_ref'], path)
         elif kind == 'evidence' and (attachments or {}).get(key):
             files[key] = list(attachments[key])
+        elif kind == 'authored' and (attachments or {}).get(key):
+            # Drafted text first, then the documents the reviewer enclosed.
+            files[key] = [section_document(config, section, sections.get(key) or {}, facts['quote_ref'], path),
+                          *attachments[key]]
         elif kind in ('authored', 'evidence', 'not_applicable'):
             files[key] = section_document(config, section, sections.get(key) or {}, facts['quote_ref'], path)
     config['_title'] = f"{facts['quote_ref']} Technical Proposal Rev {facts['revision']}"

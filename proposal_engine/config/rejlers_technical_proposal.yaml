@@ -140,6 +140,9 @@ sections:
     number: "2.6"
     parent: technical_bid
     kind: authored
+    # Reviewers may also enclose HSE documents (questionnaire response, policy, certificates,
+    # statistics); they follow the drafted text in this section.
+    evidence: [HSE documents (questionnaire response, policy, certificates, statistics)]
     parts:
       - {key: hse_response, heading: SPECIFIC HSE REQUIREMENTS, standard: ["HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN"],
          guidance: "Respond to each specific HSE requirement in the tender (questionnaires, plans, certifications, statistics requested) stating how Rejlers complies. Note which HSE documents will be attached.",
