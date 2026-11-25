@@ -386,6 +386,43 @@ def compliance_content(requirements, traceability, labels):
     ]}
 
 
+def letter_file_blocks(path):
+    """The text of a covering letter document (DOCX) as editable blocks, in document order."""
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = Document(str(path))
+    blocks = []
+    for child in document.element.body.iterchildren():
+        if child.tag == qn('w:p'):
+            paragraph = Paragraph(child, document)
+            text = ' '.join(paragraph.text.split())[:4000]
+            if not text:
+                continue
+            block = {'type': 'paragraph', 'text': text}
+            runs = [run for run in paragraph.runs if run.text.strip()]
+            if runs and all(run.bold for run in runs):
+                block['runs'] = [{'text': text, 'bold': True}]
+            blocks.append(block)
+        elif child.tag == qn('w:tbl'):
+            rows = []
+            for row in Table(child, document).rows:
+                cells, seen = [], set()
+                for cell in row.cells:
+                    if id(cell._tc) in seen:   # merged cells repeat
+                        continue
+                    seen.add(id(cell._tc))
+                    cells.append(' '.join(cell.text.split())[:600])
+                if any(cells):
+                    rows.append(cells[:8])
+            if rows:
+                width = max(len(row) for row in rows)
+                rows = [row + [''] * (width - len(row)) for row in rows]
+                blocks.append({'type': 'table', 'text': '', 'header': False, 'columns': [''] * width, 'rows': rows})
+    return blocks[:400]
+
+
 def cover_blocks(facts):
     """The cover's text as editable blocks (used when a reviewer replaces the designed cover)."""
     def line(text, size):
@@ -508,13 +545,16 @@ def build_plan(config, files):
     return plan
 
 
-def render(config, facts, sections, requirements, traceability, converter, workdir, attachments=None, layout=None):
+def render(config, facts, sections, requirements, traceability, converter, workdir, attachments=None, layout=None,
+           letter=None):
     """Write every section document, compile the PDF binder and the Word master.
 
     `sections` maps section key → {'blocks': [...]} for authored/evidence/not-applicable sections;
     an entry may carry a reviewer `title`, and for cover/letter/compliance `override: True` replaces
     the generated page with its blocks. `attachments` maps an evidence section key → local files
-    enclosed as that section. `layout` holds reviewer header/footer lines.
+    enclosed as that section. `layout` holds reviewer header/footer lines. `letter` ({'pdf', 'docx'}
+    local paths) is the issued covering letter (the latest EOI from the Correspondence folder); when
+    given it is the letter page instead of the template letter, unless a reviewer override applies.
     Returns {'pdf', 'docx', 'section_pages', 'findings', 'generated', 'layout'}.
     """
     from .binder import build_binder
@@ -535,8 +575,13 @@ def render(config, facts, sections, requirements, traceability, converter, workd
         key, kind = section['key'], section['kind']
         path = workdir / 'sections' / f'{len(files) + 1:02d}-{key}.docx'
         if kind in GENERATED_KINDS:
-            generated_blocks[key] = (cover_blocks(facts) if kind == 'cover' else letter_blocks(config, facts) if kind == 'letter'
-                              else compliance_content(requirements, traceability, labels)['blocks'])
+            generated_blocks[key] = (cover_blocks(facts) if kind == 'cover' else compliance_content(
+                requirements, traceability, labels)['blocks'] if kind == 'compliance' else
+                letter_file_blocks(letter['docx']) if letter and letter.get('docx') else letter_blocks(config, facts))
+        if kind == 'letter' and letter and not (sections.get(key) or {}).get('override'):
+            # The issued letter keeps its own look: its PDF in the binder, its DOCX in the Word file.
+            files[key] = [letter.get('pdf') or letter['docx']]
+            continue
         if kind in GENERATED_KINDS and (sections.get(key) or {}).get('override'):
             files[key] = section_document(config, section, sections[key], facts['quote_ref'], path)
         elif kind == 'cover':
@@ -554,6 +599,11 @@ def render(config, facts, sections, requirements, traceability, converter, workd
     plan = build_plan(config, files)
     pdf = workdir / 'proposal.pdf'
     page_map = build_binder(plan, config, converter, workdir, pdf, findings)
+    if letter and letter.get('pdf') and letter.get('docx'):
+        for entry in plan:
+            for component in entry['components']:
+                if any(row['path'] == str(Path(letter['pdf'])) for row in component['files']):
+                    component['files'] = [_row(Path(letter['docx']), entry['key'])]
     docx = workdir / 'proposal.docx'
     build_master(plan, config, {'facts': {'quote_ref': {'value': facts['quote_ref']}}}, {}, [], docx, findings,
                  annex_index=False)

@@ -89,6 +89,31 @@ def evidence_uploads(deal, section_keys):
     return {key: list(_uploads(deal, key)) for key in section_keys}
 
 
+def covering_letter(deal):
+    """The latest EOI letter in the opportunity's Correspondence folder ({'pdf', 'docx'} uploads).
+
+    EOI letters are filed there as `<deal code>-eoi.pdf/.docx` (see `letter_attachments`); each
+    regeneration adds a version, and the current version is the proposal's covering letter.
+    """
+    from .document_versions import current_uploads
+    from .models import OpportunityWorkspaceUpload
+
+    found = {}
+    for kind in ('pdf', 'docx'):
+        upload = current_uploads(OpportunityWorkspaceUpload.objects.filter(
+            workspace__opportunity=deal, provider='radai', folder_key='correspondence', status='ready',
+            name__iexact=f'{deal.deal_code}-eoi.{kind}',
+        )).order_by('-created_at', '-pk').first()
+        if upload:
+            found[kind] = upload
+    return found
+
+
+def materialize_letter(letter, directory):
+    """Write the covering letter files locally for rendering; {'pdf', 'docx'} paths."""
+    return {kind: materialize([upload], Path(directory) / kind)[0] for kind, upload in letter.items()}
+
+
 def materialize(uploads, directory):
     """Write evidence documents to local files for rendering; returns their paths in order."""
     from .private_attachments import _identity, _read

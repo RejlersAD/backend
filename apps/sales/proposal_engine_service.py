@@ -469,7 +469,7 @@ def _render_edit(quote, job):
 
     from proposal_engine.authored import render, review_units
     from proposal_engine.convert import Converter
-    from .proposal_evidence import evidence_uploads, materialize
+    from .proposal_evidence import covering_letter, evidence_uploads, materialize, materialize_letter
     from .technical_proposal_authoring import _ordinal, finding, paragraph_records
 
     cfg = config()
@@ -517,12 +517,14 @@ def _render_edit(quote, job):
         traceability.setdefault(citation, set()).add(key)
 
     evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    issued_letter = covering_letter(quote.deal)
     with tempfile.TemporaryDirectory(prefix='proposal_edit_') as workdir:
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
         attachments = {k: materialize(u, Path(workdir) / 'evidence' / k) for k, u in evidence.items() if u}
+        letter = materialize_letter(issued_letter, Path(workdir) / 'letter') if issued_letter else None
         try:
             rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir,
-                              attachments=attachments, layout=layout)
+                              attachments=attachments, layout=layout, letter=letter)
         finally:
             converter.close()
         keep = Path(tempfile.mkdtemp(prefix='proposal_out_'))
@@ -599,10 +601,16 @@ def _generate(quote, actor, job, report, selection):
     inputs = _reviewer_inputs(latest.content) if same_template else {}
     layout = latest.content.get('layout_override') if same_template else None
 
-    from .proposal_evidence import evidence_uploads, materialize
+    from .proposal_evidence import covering_letter, evidence_uploads, materialize, materialize_letter
 
     evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    issued_letter = covering_letter(quote.deal)
     drafted, findings, excerpts_used = {}, [], set()
+    letter_key = next((s['key'] for s in cfg['sections'] if s['kind'] == 'letter'), None)
+    if issued_letter and letter_key:
+        newest = max(issued_letter.values(), key=lambda upload: upload.created_at)
+        findings.append(finding('INFO', 'LETTER_FROM_EOI', f'Covering letter: {newest.name} version '
+                                                          f'{newest.version_number} from Correspondence') | {'section': letter_key})
     for section in cfg['sections']:
         if section['kind'] not in ('authored', 'evidence', 'not_applicable'):
             continue
@@ -658,9 +666,10 @@ def _generate(quote, actor, job, report, selection):
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
         attachments = {key: materialize(uploads, Path(workdir) / 'evidence' / key)
                         for key, uploads in evidence.items() if uploads}
+        letter = materialize_letter(issued_letter, Path(workdir) / 'letter') if issued_letter else None
         try:
             rendered = render(cfg, facts, render_input, requirements, traceability, converter, workdir,
-                              attachments=attachments, layout=layout)
+                              attachments=attachments, layout=layout, letter=letter)
         finally:
             converter.close()
         findings.extend(finding(s, c, m) for s, c, m in rendered['findings'])

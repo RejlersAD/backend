@@ -214,6 +214,11 @@ the Word file.
     the generated page in every later rebuild and AI regeneration.
   - `{expected_version, reason, reset: true}` restores the generated page. The cover override is a
     plain text page that replaces the designed cover.
+  - **Covering letter source:** when the opportunity's Correspondence folder (RADAI storage) holds an
+    EOI letter (`<deal code>-eoi.pdf` / `.docx`), every build and edit uses its current version as the
+    covering letter: the PDF goes into the proposal PDF, and the DOCX goes into the Word file and into
+    the editable `letter` blocks. The build records a `LETTER_FROM_EOI` finding naming the version.
+    A reviewer's letter override still wins. Without an EOI, the template letter is used.
 - **Section titles:** `title` in the same payload sets a reviewer title (`custom_title`) that the
   contents page and divider use. The controlled `title` stays for approvals and traceability.
 - **Header and footer:**
