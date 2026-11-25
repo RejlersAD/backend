@@ -43,6 +43,10 @@ def _docx_available():
     return DOCX_AVAILABLE
 
 
+def _letter_files_available():
+    return WEASYPRINT_AVAILABLE and DOCX_AVAILABLE
+
+
 def seed_test_letter_templates():
     templates = import_module('apps.sales.migrations.0028_update_letter_templates').TEMPLATES
     for letter_type, content in templates.items():
@@ -200,6 +204,7 @@ class LetterGenerationTests(TestCase):
         head = letter.custom_data['letterhead']
         self.assertEqual(head['confidential'].split(' / ')[-1], 'Rev 0')
 
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_refresh_letter_files_bumps_revision(self):
         letter = self.prepare('eoi')
         letter.body += '\n\nReviewed clarification.'
@@ -334,7 +339,7 @@ class LetterAttachTests(TestCase):
             {'letterhead': {'recipient_name': self.contact.full_name}},
         )
 
-    @skipUnless(_docx_available(), 'python-docx not installed')
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_attach_uploads_pdf_and_docx_to_correspondence(self):
         letter = self.prepare('eoi')
         attachments = attach_letter_files(letter, self.actor)
@@ -373,7 +378,7 @@ class LetterAttachTests(TestCase):
             {'Q-101883-eoi.pdf', 'Q-101883-eoi.docx'},
         )
 
-    @skipUnless(_docx_available(), 'python-docx not installed')
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_attach_mirrors_manual_upload_single_call_per_file(self):
         """Letter attach makes one service call per file, exactly like the
         manual workspace upload endpoint — no cross-provider fallback. A
@@ -395,7 +400,7 @@ class LetterAttachTests(TestCase):
         self.assertEqual(event.data['storage_provider'], 'sharepoint')
         self.assertEqual(len(event.data['failed_files']), 2)
 
-    @skipUnless(_docx_available(), 'python-docx not installed')
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_prepare_and_refresh_via_api_attach_each_time(self):
         from rest_framework.test import APIClient
 

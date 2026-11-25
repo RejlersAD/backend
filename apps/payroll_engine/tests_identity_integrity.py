@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.test import TestCase
@@ -13,6 +15,7 @@ class PayrollIdentityIntegrityTests(TestCase):
         self.master = EmployeeMaster.objects.create(
             employee_number='22001', first_name='Test', last_name='Employee',
             email='test.employee@example.test', employment_status='active',
+            join_date=date(2026, 1, 1),
         )
 
     def test_database_rejects_two_active_records_for_canonical_employee(self):

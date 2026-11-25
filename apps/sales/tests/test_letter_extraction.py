@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from io import BytesIO
+from unittest import skipUnless
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -388,6 +390,10 @@ class LetterExtractionWorkflowTests(TestCase):
         self.assertEqual(repeated.custom_data['letterhead']['recipient_address'], '')
         self.assertEqual(pdf.call_count, 1)
 
+    @skipUnless(
+        all(find_spec(package) for package in ('weasyprint', 'fitz', 'docx')),
+        'PDF/Word rendering dependencies are not installed',
+    )
     def test_updated_source_fields_appear_in_real_pdf_and_word_output(self):
         import pymupdf
         from docx import Document
