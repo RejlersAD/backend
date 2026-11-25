@@ -237,10 +237,11 @@ def _selected_matrix(quote, actor):
 
 
 def _serialize_version(row, *, history=False):
+    from .proposal_engine_service import with_generated_pages
     value = {
         'id': str(row.pk),
         'version': row.version,
-        'content': row.content,
+        'content': row.content if history else with_generated_pages(row.content, row.version),
         'content_sha256': row.content_sha256,
         'created_at': row.created_at.isoformat(),
         'reason': row.reason,

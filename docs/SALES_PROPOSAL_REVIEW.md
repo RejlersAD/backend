@@ -225,3 +225,7 @@ the Word file.
     survive every later rebuild.
 - **Not reproduced:** true pagination and page breaks while editing, links, images, track changes,
   and template page margins (the margins are fixed).
+- Versions rendered before generated pages were stored as blocks show their cover, letter and
+  compliance text (and the template header/footer lines) on read: `with_generated_pages` rebuilds
+  them from the version's facts, requirements and traceability without changing the stored version.
+  Edits of such a page validate against the same rebuilt blocks.

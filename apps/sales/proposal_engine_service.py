@@ -236,7 +236,8 @@ def request_section_edit(actor, quote_id, section_key, payload):
         raise ValidationError({'detail': 'Provide the edited blocks or title.'})
 
     def prepare(latest):
-        section = next((s for s in latest.content.get('sections') or [] if s.get('key') == section_key), None)
+        shown = with_generated_pages(latest.content, latest.version)
+        section = next((s for s in shown.get('sections') or [] if s.get('key') == section_key), None)
         if section is None or section.get('kind') not in EDITABLE_KINDS:
             raise ValidationError({'section_key': 'This section cannot be edited here.'})
         generated = section['kind'] in GENERATED_KINDS
@@ -379,6 +380,55 @@ def _section_state(version, key):
         return version.content.get('layout_override')
     section = next((s for s in version.content.get('sections') or [] if s.get('key') == key), None)
     return section and (section.get('blocks'), section.get('custom_title'), bool(section.get('override')))
+
+
+GENERATED_PAGE_KINDS = ('cover', 'letter', 'compliance')
+
+
+def with_generated_pages(content, version_number):
+    """A copy of stored content with the generated pages' text and the header/footer lines filled in.
+
+    Versions rendered before generated pages were stored as blocks show an empty cover, letter and
+    compliance matrix in the canvas editor; their text is rebuilt here from the version's facts,
+    requirements and traceability (no rendering, no AI). Manual overrides are never touched.
+    """
+    import copy
+    from datetime import datetime
+
+    from proposal_engine.authored import compliance_content, cover_blocks, letter_blocks, review_units, template_layout
+    from .technical_proposal_authoring import _ordinal
+
+    if not isinstance(content, dict) or content.get('template_version') != TEMPLATE_VERSION:
+        return content
+    missing = [s for s in content.get('sections') or []
+               if s.get('kind') in GENERATED_PAGE_KINDS and not s.get('override') and not s.get('blocks')]
+    if not missing and content.get('layout'):
+        return content
+    cfg = config()
+    result = copy.deepcopy(content)
+    if not result.get('layout'):
+        result['layout'] = template_layout(cfg)
+    facts = {name: (item or {}).get('value') for name, item in ((result.get('build_meta') or {}).get('facts') or {}).items()}
+    if not missing or not all(facts.get(name) for name in ('quote_ref', 'tender_title', 'client')):
+        return result
+    try:
+        day = datetime.strptime(result.get('issue_date') or '', '%d %B %Y').date()
+    except ValueError:
+        day = timezone.now().date()
+    revision = max(0, int(version_number or 1) - 1)
+    facts.update({'company': cfg['company']['name'], 'revision': revision, 'date': day.strftime('%d %B %Y'),
+                  'revision_line': f'REV {revision}, {_ordinal(day.day)} {day.strftime("%B %Y").upper()}'})
+    traceability = {row['requirement_id']: set(row.get('sections') or [])
+                    for row in result.get('traceability_matrix') or [] if row.get('requirement_id')}
+    labels = dict(review_units(cfg))
+    for section in result['sections']:
+        if section not in missing and not (section.get('kind') in GENERATED_PAGE_KINDS and not section.get('override')
+                                           and not section.get('blocks')):
+            continue
+        kind = section['kind']
+        section['blocks'] = (cover_blocks(facts) if kind == 'cover' else letter_blocks(cfg, facts) if kind == 'letter'
+                             else compliance_content(result.get('requirement_matrix') or [], traceability, labels)['blocks'])
+    return result
 
 
 def _reviewer_inputs(content):
