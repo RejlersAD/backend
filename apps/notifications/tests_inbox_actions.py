@@ -73,6 +73,21 @@ class NotificationInboxActionsTests(TestCase):
         self.assertEqual(capped.status_code, 200, capped.data)
         self.assertEqual(len(capped.data['results']), 100)
 
+    def test_list_does_not_run_per_notification_workflow_validation(self):
+        Notification.objects.create(
+            recipient=self.owner, title='Approval required', message='Review this request.', status='SENT',
+            metadata={'requires_action': True, 'workflow_task_id': 999999},
+        )
+
+        with patch(
+            'apps.notifications.serializers.approval_assignment_issue',
+            side_effect=AssertionError('list performed live workflow validation'),
+        ):
+            response = self.client.get(f'{BASE}?page_size=25')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(len(response.data['results']), 3)
+
     def test_normal_user_marks_selected_read_and_persists_timestamp_status_and_audit(self):
         self.assertFalse(self.owner.is_staff)
         self.assertFalse(self.owner.rbac_profile.roles.exists())
