@@ -141,7 +141,7 @@ def _serialize_job(job):
     return {
         'id': str(job.pk), 'quote_id': str(job.quote_id), 'status': job.status,
         'section_key': job.section_key or None, 'attempts': job.attempts, 'error_code': job.error_code,
-        'summary': job.summary,
+        'summary': {key: value for key, value in (job.summary or {}).items() if key != 'blocks'},
         'result_version': job.result_version.version if job.result_version_id else None,
         'created_at': job.created_at.isoformat(), 'updated_at': job.updated_at.isoformat(),
     }
@@ -173,6 +173,50 @@ def request_build(actor, quote_id, *, section_key='', reason=''):
             return _serialize_job(ProposalBuildJob.objects.get(quote=quote, status__in=('queued', 'running'))), False
         _audit(quote.deal, actor, 'technical_proposal_build_requested', reason=reason or '',
                data={'quote_id': str(quote.pk), 'job_id': str(job.pk), 'section_key': section_key or None})
+        transaction.on_commit(lambda: _dispatch(job.pk))
+    return _serialize_job(job), True
+
+
+EDIT_MODE = 'edit'
+
+
+def request_section_edit(actor, quote_id, section_key, payload):
+    """Queue a reviewer's edit of one section: re-render the PDF from the edited blocks, no AI."""
+    from .proposal_workspace_service import _quote
+    from .technical_proposal_authoring import EDITABLE_KINDS, validate_section_blocks
+    from .workflow import _audit
+
+    _require_enabled()
+    if not isinstance(payload, dict) or set(payload) != {'expected_version', 'blocks', 'reason'}:
+        raise ValidationError({'detail': 'Provide expected_version, blocks and reason.'})
+    reason = payload.get('reason')
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+        raise ValidationError({'reason': 'Provide an edit reason of at most 500 characters.'})
+    with transaction.atomic():
+        quote = _quote(actor, quote_id, write=True, lock=True)
+        latest = quote.technical_proposal_versions.order_by('-version').first()
+        if latest is None or latest.content.get('template_version') != TEMPLATE_VERSION:
+            raise ValidationError({'detail': 'Generate the Technical Proposal before editing it.'})
+        if payload.get('expected_version') != latest.version:
+            raise ValidationError({'expected_version': 'The proposal changed. Refresh before editing.'})
+        section = next((s for s in latest.content.get('sections') or [] if s.get('key') == section_key), None)
+        if section is None or section.get('kind') not in EDITABLE_KINDS:
+            raise ValidationError({'section_key': 'This section cannot be edited here.'})
+        blocks = validate_section_blocks(section.get('blocks') or [], payload.get('blocks'))
+        if ProposalBuildJob.objects.filter(quote=quote, status__in=('queued', 'running')).exists():
+            raise ValidationError({'detail': 'The proposal is being updated. Try again when it finishes.'})
+        try:
+            with transaction.atomic():
+                job = ProposalBuildJob.objects.create(
+                    quote=quote, requested_by=actor, source_keys=list(latest.content.get('selected_source_keys') or []),
+                    source_snapshot=latest.content.get('source_snapshot') or '', section_key=section_key,
+                    reason=reason.strip(), summary={'mode': EDIT_MODE, 'base_version': latest.version, 'blocks': blocks},
+                )
+        except IntegrityError:
+            raise ValidationError({'detail': 'The proposal is being updated. Try again when it finishes.'}) from None
+        _audit(quote.deal, actor, 'technical_proposal_section_edited', reason=reason.strip(),
+               data={'quote_id': str(quote.pk), 'job_id': str(job.pk), 'section_key': section_key,
+                     'base_version': latest.version})
         transaction.on_commit(lambda: _dispatch(job.pk))
     return _serialize_job(job), True
 
@@ -241,11 +285,17 @@ def run_build_job(job_id):
         from .proposal_workspace_service import _quote
 
         quote = _quote(actor, job.quote_id, write=True)
-        selection, report, _ = _selection(quote, actor)
-        if report.snapshot != job.source_snapshot or list(selection.source_keys) != list(job.source_keys):
-            _finish(job, 'failed', error_code='selection_changed')
-            return {'processed': True, 'status': 'failed'}
-        content, rendered = _generate(quote, actor, job, report, selection)
+        if (job.summary or {}).get('mode') == EDIT_MODE:
+            content, rendered = _render_edit(quote, job)   # reviewer edit: no tender access, no AI
+            if content is None:
+                _finish(job, 'failed', error_code='version_changed')
+                return {'processed': True, 'status': 'failed'}
+        else:
+            selection, report, _ = _selection(quote, actor)
+            if report.snapshot != job.source_snapshot or list(selection.source_keys) != list(job.source_keys):
+                _finish(job, 'failed', error_code='selection_changed')
+                return {'processed': True, 'status': 'failed'}
+            content, rendered = _generate(quote, actor, job, report, selection)
         try:
             with open(rendered['pdf'], 'rb') as handle:
                 deliverable = _store_deliverable(quote, actor, job, handle)
@@ -267,8 +317,104 @@ def run_build_job(job_id):
             error_code='build_failed', lease_until=timezone.now(), updated_at=timezone.now())
         return {'processed': True, 'status': 'retry'}
     counts = {level: sum(1 for f in content['build_findings'] if f['severity'] == level) for level in ('ERROR', 'WARN', 'INFO')}
-    _finish(job, 'succeeded', summary={'counts': counts, 'version': version.version}, version=version)
+    summary = {'counts': counts, 'version': version.version}
+    if (job.summary or {}).get('mode') == EDIT_MODE:
+        summary['mode'] = EDIT_MODE
+    _finish(job, 'succeeded', summary=summary, version=version)
     return {'processed': True, 'status': 'succeeded', 'version': version.version}
+
+
+# Findings a reviewer's edit settles for the edited section.
+EDIT_SETTLES = {'OPEN_POINT', 'OPEN_POINTS_SUMMARISED', 'UNSUPPORTED_STATEMENT_REMOVED', 'SECTION_NOT_DRAFTED'}
+
+
+def _section_blocks(version, key):
+    return next((s.get('blocks') for s in version.content.get('sections') or [] if s.get('key') == key), None)
+
+
+def _render_edit(quote, job):
+    """Re-render the latest version with one section replaced by the reviewer's blocks.
+
+    Everything else (other sections and their approvals, requirements, facts, evidence) comes
+    from the latest version; the edited section returns to draft. Returns (None, None) when the
+    edited section changed after the edit was made.
+    """
+    import copy
+    from datetime import date
+
+    from proposal_engine.authored import render, review_units
+    from proposal_engine.convert import Converter
+    from .proposal_evidence import evidence_uploads, materialize
+    from .technical_proposal_authoring import _ordinal, finding, paragraph_records
+
+    cfg = config()
+    key = job.section_key
+    latest = QuoteTechnicalProposalVersion.objects.filter(quote=quote).order_by('-version').first()
+    base = QuoteTechnicalProposalVersion.objects.filter(quote=quote, version=job.summary.get('base_version')).first()
+    if latest is None or base is None or _section_blocks(latest, key) != _section_blocks(base, key):
+        return None, None
+    content = copy.deepcopy(latest.content)
+    edited = job.summary['blocks']
+    drafted = {s['key']: {'blocks': edited if s['key'] == key else s.get('blocks') or []} for s in content['sections']}
+
+    next_number = (QuoteTechnicalProposalVersion.objects.filter(quote=quote).aggregate(value=Max('version'))['value'] or 0) + 1
+    today, revision = date.today(), max(0, next_number - 1)
+    facts = {name: item.get('value') for name, item in (content['build_meta'].get('facts') or {}).items()}
+    facts.update({'company': cfg['company']['name'], 'revision': revision, 'date': today.strftime('%d %B %Y'),
+                  'revision_line': f'REV {revision}, {_ordinal(today.day)} {today.strftime("%B %Y").upper()}'})
+    requirements = content.get('requirement_matrix') or []
+    requirement_ids = {item['id'] for item in requirements}
+    # Other sections keep their requirement links; the edited section keeps its links while its
+    # blocks still cite tender sources, plus any requirement it cites directly.
+    still_cited = {c for block in edited for c in block.get('citations') or []}
+    traceability = {}
+    for row in content.get('traceability_matrix') or []:
+        for linked in row.get('sections') or []:
+            if linked != key or still_cited:
+                traceability.setdefault(row['requirement_id'], set()).add(linked)
+    for citation in still_cited & requirement_ids:
+        traceability.setdefault(citation, set()).add(key)
+
+    evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    with tempfile.TemporaryDirectory(prefix='proposal_edit_') as workdir:
+        converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
+        attachments = {k: materialize(u, Path(workdir) / 'evidence' / k) for k, u in evidence.items() if u}
+        try:
+            rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir,
+                              attachments=attachments)
+        finally:
+            converter.close()
+        keep = Path(tempfile.mkdtemp(prefix='proposal_out_'))
+        pdf, docx = keep / 'proposal.pdf', keep / 'proposal.docx'
+        pdf.write_bytes(Path(rendered['pdf']).read_bytes())
+        docx.write_bytes(Path(rendered['docx']).read_bytes())
+
+    findings = [f for f in content.get('build_findings') or []
+                if not (f.get('section') == key and f.get('code') in EDIT_SETTLES)
+                and not (f.get('severity') == 'INFO' and not f.get('section'))]
+    findings.extend(finding(s, c, m) for s, c, m in rendered['findings'])
+    label = dict(review_units(cfg)).get(key, key)
+    findings.append(finding('INFO', 'SECTION_EDITED', f'{label}: {job.reason}') | {'section': key})
+    for section in content['sections']:
+        section['pages'] = rendered['section_pages'].get(section['key'])
+        if section['key'] == key:
+            section['blocks'] = edited
+            section['paragraphs'] = section['items'] = paragraph_records(key, edited, requirement_ids)
+            section['findings'] = [f for f in findings if f.get('section') == key]
+            section['approved'], section['status'] = False, 'draft'
+    content['traceability_matrix'] = [{'requirement_id': rid, 'sections': sorted(keys), 'result': 'mapped'}
+                                      for rid, keys in traceability.items()]
+    for row in content.get('compliance_matrix') or []:
+        where = sorted(traceability.get(row.get('requirement_id')) or [])
+        row.update({'proposal_section': where[0] if where else '', 'sections': where,
+                    'compliance_status': 'Addressed' if where else 'To be confirmed',
+                    'evidence_reference': [row['requirement_id']] if where else []})
+    content['requirement_coverage'] = {**(content.get('requirement_coverage') or {}), 'addressed': len(traceability)}
+    content['issue_date'] = facts['date']
+    content['build_meta'] = {**content['build_meta'], 'job_id': str(job.pk), 'edited_section': key}
+    content['build_findings'] = findings
+    content['publication_validation'] = {'ready': False, 'blockers': []}
+    return content, {'pdf': pdf, 'docx': docx}
 
 
 def _generate(quote, actor, job, report, selection):

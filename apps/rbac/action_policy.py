@@ -298,7 +298,8 @@ def operation_action(request, view):
                              'technical_proposal_workspace_review': 'update',
                              'technical_proposal_workspace_plan': 'read',
                              'technical_proposal_workspace_job': 'read',
-                             'technical_proposal_workspace_evidence_remove': 'update'}
+                             'technical_proposal_workspace_evidence_remove': 'update',
+                             'technical_proposal_workspace_section_content': 'update'}
         if operation == 'technical_proposal_workspace_evidence':
             # Listing evidence reads the proposal; uploading changes it.
             return 'read' if method in ('GET', 'HEAD') else 'update'
