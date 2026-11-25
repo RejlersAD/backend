@@ -183,6 +183,8 @@ class PayslipSerializer(serializers.ModelSerializer):
             'hours', 'days', 'total_worked_days',
             'employee_category', 'hours_per_day',
             'public_holiday_days', 'annual_leave_days', 'unpaid_leave_days',
+            # Attendance facts captured for payroll review
+            'present_days', 'absent_days', 'ot_hours', 'attendance_status',
             'basic', 'housing', 'transport', 'home_leave',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
             'payment_mode',
@@ -196,6 +198,8 @@ class PayslipSerializer(serializers.ModelSerializer):
             'employee_category', 'hours_per_day',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
             'days', 'total_worked_days',
+            # Attendance is populated from the immutable snapshot at generation
+            'present_days', 'absent_days', 'ot_hours', 'attendance_status',
             'snapshot_full_name', 'snapshot_iban',
             'created_at', 'updated_at',
         ]
@@ -256,6 +260,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
             'total_hours', 'total_days',
             'working_days_in_month', 'public_holidays_in_month',
+            'attendance_snapshot_at', 'attendance_complete_pct',
             'generated_at', 'hr_approved_at', 'finance_approved_at', 'released_at',
             'hr_approved_by', 'finance_approved_by', 'released_by',
             'notes', 'created_at', 'updated_at', 'created_by',
@@ -265,6 +270,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
             'total_hours', 'total_days',
             'public_holidays_in_month',
+            'attendance_snapshot_at', 'attendance_complete_pct',
             'generated_at', 'hr_approved_at', 'finance_approved_at', 'released_at',
             'hr_approved_by', 'finance_approved_by', 'released_by',
             'created_at', 'updated_at', 'created_by',

@@ -578,7 +578,11 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         return qs
 
     def create(self, request, *args, **kwargs):
-        """POST { year, month, overwrite?, working_days? } → generates the run."""
+        """POST { year, month, overwrite?, working_days? } → generates the run.
+
+        The server captures attendance itself; client-supplied snapshots are
+        never trusted as a payroll or release-control basis.
+        """
         year = int(request.data.get('year') or 0)
         month = int(request.data.get('month') or 0)
         if not (year and 1 <= month <= 12):
@@ -593,11 +597,22 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
                 return Response({'error': 'working_days must be between 1 and 31.'}, status=400)
         except (ValueError, TypeError):
             working_days = DEFAULT_WORKING_DAYS_PER_MONTH
+
+        try:
+            from .services.attendance import get_attendance_summary
+            attendance_snapshot = get_attendance_summary(year, month)
+        except Exception:
+            return Response(
+                {'error': 'Attendance data is currently unavailable; the payroll run was not generated.'},
+                status=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         try:
             run = run_generator.generate_monthly_run(
                 year, month,
                 user=request.user, overwrite=overwrite, note=note,
                 working_days=working_days,
+                attendance_snapshot=attendance_snapshot,
             )
         except run_generator.GenerationError as exc:
             return Response({'error': str(exc)}, status=409)
@@ -1853,3 +1868,45 @@ class PayrollComparisonViewSet(viewsets.ModelViewSet):
             {'code': code, 'label': p['label']}
             for code, p in catalog.COMPARISON_PROFILES.items()
         ])
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def attendance_summary(request):
+    """
+    GET /api/v1/payroll-engine/attendance-summary/?year=2026&month=11
+
+    Returns payroll-ready attendance facts for every active employee in the
+    given month. This is the immutable basis used to generate a PayrollRun.
+
+    Attendance is the key input to payroll: nothing is paid without an
+    auditable attendance record.
+    """
+    from .services.attendance import get_attendance_summary
+
+    year = request.query_params.get('year')
+    month = request.query_params.get('month')
+    if not year or not month:
+        return Response(
+            {'error': 'year and month query parameters are required.'},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        year = int(year)
+        month = int(month)
+        if not (1 <= month <= 12):
+            raise ValueError
+    except (ValueError, TypeError):
+        return Response(
+            {'error': 'year and month must be valid integers (month 1-12).'},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        data = get_attendance_summary(year, month)
+    except Exception:
+        return Response(
+            {'error': 'Attendance data is currently unavailable.'},
+            status=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(data)

@@ -11,6 +11,7 @@ from .views import (
     PayrollComparisonViewSet,
     catalog_view, engine_dashboard_summary, engine_payroll_analytics,
     valueframe_payroll_proposal, valueframe_payroll_send,
+    attendance_summary,
 )
 
 router = DefaultRouter()
@@ -26,6 +27,7 @@ urlpatterns = [
     path('catalog/',           catalog_view,             name='payroll-engine-catalog'),
     path('dashboard-summary/', engine_dashboard_summary, name='payroll-engine-dashboard'),
     path('analytics/',         engine_payroll_analytics, name='payroll-engine-analytics'),
+    path('attendance-summary/', attendance_summary,     name='payroll-engine-attendance-summary'),
     path('valueframe/<int:import_id>/proposal/', valueframe_payroll_proposal, name='payroll-engine-vf-proposal'),
     path('valueframe/<int:import_id>/send/',     valueframe_payroll_send,     name='payroll-engine-vf-send'),
     path('', include(router.urls)),
