@@ -192,3 +192,36 @@ tables); method-statement chapter headings are fixed.
   section changed after the edit was made, the job fails with `version_changed`.
 - Reviewer-written paragraphs (`kind: "reviewer"`) are attributed to the reviewer and are not
   reported as untraceable to the tender; tender requirements still need cited content.
+
+## Word-style document editing, generated pages and header/footer - 25 November 2026
+
+The canvas opens generated Technical Proposals as an editable document (Tiptap, MIT). Structured
+blocks stay the source of truth; the renderer reproduces the reviewer's formatting in the PDF and
+the Word file.
+
+- **Formatting fields** (all optional; plain `text`, `items`, `columns` and `rows` are always kept for
+  traceability, search and validation):
+  - `runs`: `[{text, bold, italic, underline, strike, font, size, color, highlight}]`. Fonts are names
+    of letters, digits, spaces and hyphens, sizes are 6-72 pt, and colours are `#RRGGBB`. The plain
+    text is the runs joined; runs without formatting are dropped.
+  - `align` (`left|center|right|justify`) and `indent` `{left 0-288, first -144-288}` in points.
+  - Bullets: `markers` (`bullet|number` per item), `levels` (0-2 per item) and `item_runs`.
+  - Tables: `header: false` (no header row), `column_runs`, and `cell_runs` `{"row:column": runs}`.
+  - Headings: `level` 1-3.
+- **Generated pages:**
+  - Covered pages: `cover`, `letter` and `compliance` sections carry their generated text as blocks.
+  - Saving blocks for one of them stores a manual version (`override: true`). That version replaces
+    the generated page in every later rebuild and AI regeneration.
+  - `{expected_version, reason, reset: true}` restores the generated page. The cover override is a
+    plain text page that replaces the designed cover.
+- **Section titles:** `title` in the same payload sets a reviewer title (`custom_title`) that the
+  contents page and divider use. The controlled `title` stays for approvals and traceability.
+- **Header and footer:**
+  - Endpoint: `POST /api/v1/sales/quotes/{id}/workspace/layout/` with
+    `{expected_version, reason, layout: {header_lines, footer_lines}}` (proposal update).
+  - Lines replace the body template's header and footer lines one for one: the same number of lines,
+    plain text. The quote reference and page numbers stay automatic.
+  - Content keeps `layout` (the effective lines) and `layout_override` (the reviewer's lines). Both
+    survive every later rebuild.
+- **Not reproduced:** true pagination and page breaks while editing, links, images, track changes,
+  and template page margins (the margins are fixed).

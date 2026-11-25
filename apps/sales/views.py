@@ -1620,6 +1620,13 @@ class QuoteViewSet(viewsets.ModelViewSet):
         job, _ = request_section_edit(request.user, pk, section_key, request.data)
         return Response({'job': job}, status=status.HTTP_202_ACCEPTED, headers={'Cache-Control': 'no-store, private'})
 
+    @action(detail=True, methods=['post'], url_path='workspace/layout')
+    def technical_proposal_workspace_layout(self, request, pk=None):
+        """Reviewer header/footer text; every page is re-rendered (no AI)."""
+        from .proposal_engine_service import request_layout_edit
+        job, _ = request_layout_edit(request.user, pk, request.data)
+        return Response({'job': job}, status=status.HTTP_202_ACCEPTED, headers={'Cache-Control': 'no-store, private'})
+
     @action(detail=True, methods=['get', 'post'], url_path=r'workspace/evidence/(?P<section_key>[a-z_]+)')
     def technical_proposal_workspace_evidence(self, request, pk=None, section_key=None):
         """Company evidence enclosed in an evidence section (list, or upload one file)."""

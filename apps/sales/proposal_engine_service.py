@@ -180,18 +180,20 @@ def request_build(actor, quote_id, *, section_key='', reason=''):
 EDIT_MODE = 'edit'
 
 
-def request_section_edit(actor, quote_id, section_key, payload):
-    """Queue a reviewer's edit of one section: re-render the PDF from the edited blocks, no AI."""
-    from .proposal_workspace_service import _quote
-    from .technical_proposal_authoring import EDITABLE_KINDS, validate_section_blocks
-    from .workflow import _audit
-
-    _require_enabled()
-    if not isinstance(payload, dict) or set(payload) != {'expected_version', 'blocks', 'reason'}:
-        raise ValidationError({'detail': 'Provide expected_version, blocks and reason.'})
+def _edit_reason(payload):
     reason = payload.get('reason')
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
         raise ValidationError({'reason': 'Provide an edit reason of at most 500 characters.'})
+    return reason.strip()
+
+
+def _queue_edit(actor, quote_id, payload, prepare, audit_event, section_key=''):
+    """Lock the proposal, check the version, validate via `prepare(latest)` and queue an edit job."""
+    from .proposal_workspace_service import _quote
+    from .workflow import _audit
+
+    _require_enabled()
+    reason = _edit_reason(payload)
     with transaction.atomic():
         quote = _quote(actor, quote_id, write=True, lock=True)
         latest = quote.technical_proposal_versions.order_by('-version').first()
@@ -199,10 +201,7 @@ def request_section_edit(actor, quote_id, section_key, payload):
             raise ValidationError({'detail': 'Generate the Technical Proposal before editing it.'})
         if payload.get('expected_version') != latest.version:
             raise ValidationError({'expected_version': 'The proposal changed. Refresh before editing.'})
-        section = next((s for s in latest.content.get('sections') or [] if s.get('key') == section_key), None)
-        if section is None or section.get('kind') not in EDITABLE_KINDS:
-            raise ValidationError({'section_key': 'This section cannot be edited here.'})
-        blocks = validate_section_blocks(section.get('blocks') or [], payload.get('blocks'))
+        change = prepare(latest)
         if ProposalBuildJob.objects.filter(quote=quote, status__in=('queued', 'running')).exists():
             raise ValidationError({'detail': 'The proposal is being updated. Try again when it finishes.'})
         try:
@@ -210,15 +209,61 @@ def request_section_edit(actor, quote_id, section_key, payload):
                 job = ProposalBuildJob.objects.create(
                     quote=quote, requested_by=actor, source_keys=list(latest.content.get('selected_source_keys') or []),
                     source_snapshot=latest.content.get('source_snapshot') or '', section_key=section_key,
-                    reason=reason.strip(), summary={'mode': EDIT_MODE, 'base_version': latest.version, 'blocks': blocks},
+                    reason=reason, summary={'mode': EDIT_MODE, 'base_version': latest.version, **change},
                 )
         except IntegrityError:
             raise ValidationError({'detail': 'The proposal is being updated. Try again when it finishes.'}) from None
-        _audit(quote.deal, actor, 'technical_proposal_section_edited', reason=reason.strip(),
-               data={'quote_id': str(quote.pk), 'job_id': str(job.pk), 'section_key': section_key,
+        _audit(quote.deal, actor, audit_event, reason=reason,
+               data={'quote_id': str(quote.pk), 'job_id': str(job.pk), 'section_key': section_key or None,
                      'base_version': latest.version})
         transaction.on_commit(lambda: _dispatch(job.pk))
     return _serialize_job(job), True
+
+
+def request_section_edit(actor, quote_id, section_key, payload):
+    """Queue a reviewer's edit of one section: re-render the PDF from the edited blocks, no AI.
+
+    Payload: expected_version, reason, and blocks and/or title. A generated page (cover, letter,
+    compliance matrix) becomes a manual override; `reset: true` returns it to the generated page.
+    """
+    from .technical_proposal_authoring import EDITABLE_KINDS, GENERATED_KINDS, validate_section_blocks, validate_title
+
+    if not isinstance(payload, dict) or not {'expected_version', 'reason'} <= set(payload) \
+            or set(payload) - {'expected_version', 'reason', 'blocks', 'title', 'reset'}:
+        raise ValidationError({'detail': 'Provide expected_version, reason and blocks, title or reset.'})
+    reset = payload.get('reset') is True
+    if not reset and 'blocks' not in payload and 'title' not in payload:
+        raise ValidationError({'detail': 'Provide the edited blocks or title.'})
+
+    def prepare(latest):
+        section = next((s for s in latest.content.get('sections') or [] if s.get('key') == section_key), None)
+        if section is None or section.get('kind') not in EDITABLE_KINDS:
+            raise ValidationError({'section_key': 'This section cannot be edited here.'})
+        generated = section['kind'] in GENERATED_KINDS
+        change = {}
+        if reset:
+            if not generated or not section.get('override'):
+                raise ValidationError({'reset': 'Only an edited cover, letter or compliance matrix can be reset.'})
+            change['reset'] = True
+        elif 'blocks' in payload:
+            change['blocks'] = validate_section_blocks(section.get('blocks') or [], payload['blocks'], generated=generated)
+        if 'title' in payload:
+            change['title'] = validate_title(payload['title'])
+        return change
+
+    return _queue_edit(actor, quote_id, payload, prepare, 'technical_proposal_section_edited', section_key)
+
+
+def request_layout_edit(actor, quote_id, payload):
+    """Queue a reviewer's header/footer change; every page is re-rendered (no AI)."""
+    from proposal_engine.authored import template_layout
+    from .technical_proposal_authoring import validate_layout
+
+    if not isinstance(payload, dict) or set(payload) != {'expected_version', 'reason', 'layout'}:
+        raise ValidationError({'detail': 'Provide expected_version, reason and layout.'})
+    return _queue_edit(actor, quote_id, payload,
+                       lambda latest: {'layout': validate_layout(template_layout(config()), payload['layout'])},
+                       'technical_proposal_layout_edited')
 
 
 def _dispatch(job_id):
@@ -328,8 +373,38 @@ def run_build_job(job_id):
 EDIT_SETTLES = {'OPEN_POINT', 'OPEN_POINTS_SUMMARISED', 'UNSUPPORTED_STATEMENT_REMOVED', 'SECTION_NOT_DRAFTED'}
 
 
-def _section_blocks(version, key):
-    return next((s.get('blocks') for s in version.content.get('sections') or [] if s.get('key') == key), None)
+def _section_state(version, key):
+    """What an edit is based on: a section's blocks, title and override, or the header/footer."""
+    if not key:
+        return version.content.get('layout_override')
+    section = next((s for s in version.content.get('sections') or [] if s.get('key') == key), None)
+    return section and (section.get('blocks'), section.get('custom_title'), bool(section.get('override')))
+
+
+def _reviewer_inputs(content):
+    """Reviewer titles and generated-page overrides carried into the next render."""
+    inputs = {}
+    for section in content.get('sections') or []:
+        entry = {}
+        if section.get('custom_title'):
+            entry['title'] = section['custom_title']
+        if section.get('override'):
+            entry.update(override=True, blocks=section.get('blocks') or [])
+        if entry:
+            inputs[section['key']] = entry
+    return inputs
+
+
+def _apply_reviewer_state(cfg, sections, inputs, rendered):
+    """Record pages, generated blocks, overrides and titles on the stored sections."""
+    for section in sections:
+        key = section['key']
+        entry = inputs.get(key) or {}
+        section['override'] = bool(entry.get('override'))
+        if key in rendered['generated'] and not section['override']:
+            section['blocks'] = rendered['generated'][key]
+        # The controlled title stays (approvals, traceability); the PDF uses the reviewer's title.
+        section['custom_title'] = entry.get('title') or ''
 
 
 def _render_edit(quote, job):
@@ -351,11 +426,27 @@ def _render_edit(quote, job):
     key = job.section_key
     latest = QuoteTechnicalProposalVersion.objects.filter(quote=quote).order_by('-version').first()
     base = QuoteTechnicalProposalVersion.objects.filter(quote=quote, version=job.summary.get('base_version')).first()
-    if latest is None or base is None or _section_blocks(latest, key) != _section_blocks(base, key):
+    if latest is None or base is None or _section_state(latest, key) != _section_state(base, key):
         return None, None
     content = copy.deepcopy(latest.content)
-    edited = job.summary['blocks']
-    drafted = {s['key']: {'blocks': edited if s['key'] == key else s.get('blocks') or []} for s in content['sections']}
+    kinds = {s['key']: s['kind'] for s in cfg['sections']}
+    inputs = _reviewer_inputs(content)
+    current = next((s for s in content['sections'] if s['key'] == key), {}) if key else {}
+    edited = job.summary.get('blocks', current.get('blocks') or [])
+    if key:
+        entry = inputs.setdefault(key, {})
+        if 'title' in job.summary:
+            entry['title'] = job.summary['title']
+        if job.summary.get('reset'):
+            entry.pop('override', None)
+            entry.pop('blocks', None)
+        elif 'blocks' in job.summary and kinds.get(key) in ('cover', 'letter', 'compliance'):
+            entry.update(override=True, blocks=edited)
+    layout = job.summary['layout'] if 'layout' in job.summary else content.get('layout_override')
+    drafted = {s['key']: {'blocks': edited if s['key'] == key else s.get('blocks') or []} for s in content['sections']
+               if kinds.get(s['key']) in ('authored', 'evidence', 'not_applicable')}
+    for name, entry in inputs.items():
+        drafted.setdefault(name, {'blocks': []}).update(entry)
 
     next_number = (QuoteTechnicalProposalVersion.objects.filter(quote=quote).aggregate(value=Max('version'))['value'] or 0) + 1
     today, revision = date.today(), max(0, next_number - 1)
@@ -381,7 +472,7 @@ def _render_edit(quote, job):
         attachments = {k: materialize(u, Path(workdir) / 'evidence' / k) for k, u in evidence.items() if u}
         try:
             rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir,
-                              attachments=attachments)
+                              attachments=attachments, layout=layout)
         finally:
             converter.close()
         keep = Path(tempfile.mkdtemp(prefix='proposal_out_'))
@@ -393,15 +484,28 @@ def _render_edit(quote, job):
                 if not (f.get('section') == key and f.get('code') in EDIT_SETTLES)
                 and not (f.get('severity') == 'INFO' and not f.get('section'))]
     findings.extend(finding(s, c, m) for s, c, m in rendered['findings'])
-    label = dict(review_units(cfg)).get(key, key)
-    findings.append(finding('INFO', 'SECTION_EDITED', f'{label}: {job.reason}') | {'section': key})
+    if key:
+        label = dict(review_units(cfg)).get(key, key)
+        findings.append(finding('INFO', 'SECTION_EDITED', f'{label}: {job.reason}') | {'section': key})
+    else:
+        findings.append(finding('INFO', 'LAYOUT_EDITED', f'Header and footer: {job.reason}'))
     for section in content['sections']:
         section['pages'] = rendered['section_pages'].get(section['key'])
-        if section['key'] == key:
-            section['blocks'] = edited
-            section['paragraphs'] = section['items'] = paragraph_records(key, edited, requirement_ids)
+        if key and section['key'] == key:
+            if 'blocks' in job.summary and not job.summary.get('reset'):
+                section['blocks'] = edited
             section['findings'] = [f for f in findings if f.get('section') == key]
             section['approved'], section['status'] = False, 'draft'
+    _apply_reviewer_state(cfg, content['sections'], inputs, rendered)
+    for section in content['sections']:
+        if key and section['key'] == key:
+            if section.get('override') or kinds.get(key) not in ('cover', 'letter', 'compliance'):
+                section['paragraphs'] = section['items'] = paragraph_records(key, section['blocks'], requirement_ids)
+            else:
+                section['paragraphs'] = section['items'] = [
+                    {'id': f'PAR-{key}', 'kind': 'generated', 'text': f"{section['title']} (generated from the template)",
+                     'requirement_ids': [], 'evidence_ids': []}]
+    content['layout'], content['layout_override'] = rendered['layout'], layout
     content['traceability_matrix'] = [{'requirement_id': rid, 'sections': sorted(keys), 'result': 'mapped'}
                                       for rid, keys in traceability.items()]
     for row in content.get('compliance_matrix') or []:
@@ -411,7 +515,7 @@ def _render_edit(quote, job):
                     'evidence_reference': [row['requirement_id']] if where else []})
     content['requirement_coverage'] = {**(content.get('requirement_coverage') or {}), 'addressed': len(traceability)}
     content['issue_date'] = facts['date']
-    content['build_meta'] = {**content['build_meta'], 'job_id': str(job.pk), 'edited_section': key}
+    content['build_meta'] = {**content['build_meta'], 'job_id': str(job.pk), 'edited_section': key or 'layout'}
     content['build_findings'] = findings
     content['publication_validation'] = {'ready': False, 'blockers': []}
     return content, {'pdf': pdf, 'docx': docx}
@@ -440,6 +544,10 @@ def _generate(quote, actor, job, report, selection):
     latest = QuoteTechnicalProposalVersion.objects.filter(quote=quote).order_by('-version').first()
     prior = {s['key']: s for s in (latest.content.get('sections') or [])} if (
         job.section_key and latest and latest.content.get('template_version') == TEMPLATE_VERSION) else {}
+    # Reviewer titles, generated-page overrides and header/footer survive every regeneration.
+    same_template = bool(latest and latest.content.get('template_version') == TEMPLATE_VERSION)
+    inputs = _reviewer_inputs(latest.content) if same_template else {}
+    layout = latest.content.get('layout_override') if same_template else None
 
     from .proposal_evidence import evidence_uploads, materialize
 
@@ -493,13 +601,16 @@ def _generate(quote, actor, job, report, selection):
     if 'rft_number' not in facts:
         findings.append(finding('WARN', 'META_MISSING', 'Required fact `rft_number` could not be extracted'))
 
+    render_input = {key: dict(value) for key, value in drafted.items()}
+    for name, entry in inputs.items():
+        render_input.setdefault(name, {'blocks': []}).update(entry)
     with tempfile.TemporaryDirectory(prefix='proposal_build_') as workdir:
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
         attachments = {key: materialize(uploads, Path(workdir) / 'evidence' / key)
                         for key, uploads in evidence.items() if uploads}
         try:
-            rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir,
-                              attachments=attachments)
+            rendered = render(cfg, facts, render_input, requirements, traceability, converter, workdir,
+                              attachments=attachments, layout=layout)
         finally:
             converter.close()
         findings.extend(finding(s, c, m) for s, c, m in rendered['findings'])
@@ -513,9 +624,12 @@ def _generate(quote, actor, job, report, selection):
     labels = dict(review_units(cfg))
     sections = []
     for key, title in review_units(cfg):
-        blocks = drafted.get(key, {}).get('blocks') or []
-        paragraphs = paragraph_records(key, blocks, requirement_ids)
         kind = next(s['kind'] for s in cfg['sections'] if s['key'] == key)
+        override = (inputs.get(key) or {}).get('override')
+        blocks = (inputs[key]['blocks'] if override else rendered['generated'].get(key)) if kind in (
+            'cover', 'letter', 'compliance') else drafted.get(key, {}).get('blocks') or []
+        paragraphs = paragraph_records(key, blocks, requirement_ids) if kind not in (
+            'cover', 'letter', 'compliance') or override else []
         if kind in ('cover', 'letter', 'compliance') and not paragraphs:
             paragraphs = [{'id': f'PAR-{key}', 'kind': 'generated', 'text': f'{title} (generated from the template)',
                            'requirement_ids': [], 'evidence_ids': []}]
@@ -558,7 +672,9 @@ def _generate(quote, actor, job, report, selection):
         'build_findings': [{k: v for k, v in f.items() if k != 'section'} | ({'section': f['section']} if f.get('section') else {})
                            for f in findings],
         'build_inventory': [],
+        'layout': rendered['layout'], 'layout_override': layout,
     }
+    _apply_reviewer_state(cfg, sections, inputs, rendered)
     return content, {'pdf': pdf, 'docx': docx}
 
 
