@@ -79,6 +79,36 @@ def _selection(quote, actor):
     return selection, report, rows
 
 
+def planning_excerpt(quote, actor):
+    """The connected draft Planning project (Bid preparation) as a citable source, or (None, code).
+
+    Read through the existing preparation connection, so Planning access rules apply; awarded
+    portfolio projects are never created or changed here.
+    """
+    from .bid_preparation import _connection
+
+    try:
+        row, project = _connection(quote.deal, actor)
+    except PermissionDenied:
+        return None, 'PLANNING_NOT_ACCESSIBLE'
+    except Exception:   # a lineage conflict or a removed workspace must not stop the build
+        return None, 'PLANNING_NOT_ACCESSIBLE'
+    if not row or not project:
+        return None, 'PLANNING_NOT_CONNECTED'
+    duration = project.duration_months.normalize() if project.duration_months is not None else None
+    facts = [f'Planning project: {project.name}.']
+    for label, value in (('Phase', project.phase), ('Location', project.location),
+                         ('Planned duration', f'{duration} months' if duration else ''),
+                         ('Planned start', project.effective_date.isoformat() if project.effective_date else ''),
+                         ('Planned completion', project.planned_end_date.isoformat() if project.planned_end_date else ''),
+                         ('Scope summary', ' '.join((project.scope_summary or '').split())[:900])):
+        if value:
+            facts.append(f'{label}: {value}.')
+    return {'id': 'PLAN-1', 'kind': 'planning', 'source': f'Planning project: {project.name}',
+            'location': 'Bid preparation', 'text': ' '.join(facts), 'categories': ['submission', 'technical'],
+            'requirement': False, 'primary': True, 'name': project.name}, None
+
+
 def _tender(quote, actor, selection):
     from .technical_proposal_authoring import excerpt_pool, gather_tender, standard_pool
 
@@ -312,6 +342,10 @@ def _claim(job_id):
         return job
 
 
+class AIProviderUnavailable(Exception):
+    """Every AI drafting call of a build failed at the AI service (credential, credit, outage)."""
+
+
 def _finish(job, status, *, error_code='', summary=None, version=None):
     with transaction.atomic():
         updated = ProposalBuildJob.objects.filter(pk=job.pk, lease_token=job.lease_token).update(
@@ -353,6 +387,9 @@ def run_build_job(job_id):
         if review:
             content['build_findings'].append(review)
         version = _record_version(quote, actor, job, content)
+    except AIProviderUnavailable:
+        _finish(job, 'failed', error_code='ai_provider_unavailable')
+        return {'processed': True, 'status': 'failed'}
     except (PermissionDenied, ValidationError) as error:
         code = 'authority_changed' if isinstance(error, PermissionDenied) else 'invalid_selection'
         _finish(job, 'failed', error_code=code)
@@ -469,7 +506,8 @@ def _render_edit(quote, job):
 
     from proposal_engine.authored import render, review_units
     from proposal_engine.convert import Converter
-    from .proposal_evidence import evidence_uploads, materialize
+    from .proposal_evidence import (covering_letter, evidence_section_keys, evidence_uploads, materialize,
+                                    materialize_letter)
     from .technical_proposal_authoring import _ordinal, finding, paragraph_records
 
     cfg = config()
@@ -516,13 +554,15 @@ def _render_edit(quote, job):
     for citation in still_cited & requirement_ids:
         traceability.setdefault(citation, set()).add(key)
 
-    evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    evidence = evidence_uploads(quote.deal, evidence_section_keys(cfg))
+    issued_letter = covering_letter(quote.deal)
     with tempfile.TemporaryDirectory(prefix='proposal_edit_') as workdir:
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
         attachments = {k: materialize(u, Path(workdir) / 'evidence' / k) for k, u in evidence.items() if u}
+        letter = materialize_letter(issued_letter, Path(workdir) / 'letter') if issued_letter else None
         try:
             rendered = render(cfg, facts, drafted, requirements, traceability, converter, workdir,
-                              attachments=attachments, layout=layout)
+                              attachments=attachments, layout=layout, letter=letter)
         finally:
             converter.close()
         keep = Path(tempfile.mkdtemp(prefix='proposal_out_'))
@@ -599,14 +639,36 @@ def _generate(quote, actor, job, report, selection):
     inputs = _reviewer_inputs(latest.content) if same_template else {}
     layout = latest.content.get('layout_override') if same_template else None
 
-    from .proposal_evidence import evidence_uploads, materialize
+    from .proposal_evidence import (covering_letter, evidence_section_keys, evidence_uploads, materialize,
+                                    materialize_letter)
 
-    evidence = evidence_uploads(quote.deal, [s['key'] for s in cfg['sections'] if s['kind'] == 'evidence'])
+    evidence = evidence_uploads(quote.deal, evidence_section_keys(cfg))
+    issued_letter = covering_letter(quote.deal)
     drafted, findings, excerpts_used = {}, [], set()
+    ai_parts = ai_failed = 0
+    planning, planning_issue = planning_excerpt(quote, actor)
+    if planning:
+        pool.append(planning)   # its duration and dates feed the work schedule, with a citation
+        findings.append(finding('INFO', 'PLANNING_CONNECTED', f"Planning project used: {planning['name']}"))
+    else:
+        findings.append(finding('WARN', planning_issue, (
+            'No Planning project is connected to this opportunity; connect or create one under Preparation › '
+            'Planning workspace so the work schedule uses its duration and dates.') if planning_issue == 'PLANNING_NOT_CONNECTED'
+            else 'The connected Planning project could not be read with your access; the schedule uses the tender only.'))
+    latest_sections = {s['key']: s for s in (latest.content.get('sections') or [])} if same_template else {}
+    letter_key = next((s['key'] for s in cfg['sections'] if s['kind'] == 'letter'), None)
+    if issued_letter and letter_key:
+        newest = max(issued_letter.values(), key=lambda upload: upload.created_at)
+        findings.append(finding('INFO', 'LETTER_FROM_EOI', f'Covering letter: {newest.name} version '
+                                                          f'{newest.version_number} from Correspondence') | {'section': letter_key})
     for section in cfg['sections']:
         if section['kind'] not in ('authored', 'evidence', 'not_applicable'):
             continue
-        if evidence.get(section['key']):
+        if evidence.get(section['key']) and section['kind'] == 'authored' and section.get('evidence_mode') != 'replace':
+            # Documents enclosed after the drafted text (e.g. HSE questionnaire response).
+            names = ', '.join(upload.name for upload in evidence[section['key']])
+            findings.append(finding('INFO', 'EVIDENCE_ATTACHED', f"{section['title']}: {names}") | {'section': section['key']})
+        elif evidence.get(section['key']):
             # Enclosed company evidence replaces the placeholder; checked on every build.
             names = ', '.join(upload.name for upload in evidence[section['key']])
             drafted[section['key']] = {'blocks': []}
@@ -615,17 +677,24 @@ def _generate(quote, actor, job, report, selection):
         previous = prior.get(section['key'])
         if previous and section['key'] != job.section_key and section['kind'] != 'evidence':
             drafted[section['key']] = {'blocks': previous.get('blocks') or []}
-            findings.extend(previous.get('findings') or [])
+            findings.extend(f for f in previous.get('findings') or [] if f.get('code') != 'EVIDENCE_ATTACHED')
             excerpts_used |= {c for b in previous.get('blocks') or [] for c in b.get('citations') or []}
             continue
         outcome = draft_section(section, pool, standard, facts, cfg,
-                                reviewer_note=job.reason if section['key'] == job.section_key else '')
+                                reviewer_note=job.reason if section['key'] == job.section_key else '',
+                                previous_blocks=(latest_sections.get(section['key']) or {}).get('blocks'))
+        ai_parts += outcome.get('ai_parts', 0)
+        ai_failed += outcome.get('ai_failed', 0)
         drafted[section['key']] = {'blocks': outcome['blocks']}
         section_findings = outcome['findings']
         for item in section_findings:
             item.setdefault('section', section['key'])
         findings.extend(section_findings)
         excerpts_used |= outcome['cited']
+
+    if ai_parts and ai_failed == ai_parts:
+        # Every AI call failed: storing a version would replace the proposal with empty sections.
+        raise AIProviderUnavailable()
 
     # A requirement is addressed where a section cites it directly, or cites a tender excerpt
     # that contains the requirement's text.
@@ -648,6 +717,11 @@ def _generate(quote, actor, job, report, selection):
         findings.append(finding('WARN', 'REQUIREMENT_NOT_ADDRESSED',
                                 f'{unaddressed} of {len(requirement_ids)} tender requirements are not referenced '
                                 f'by any section; see the compliance matrix'))
+    if facts.get('client_record') and facts['client_record'].casefold() != facts['client'].casefold():
+        findings.append(finding('WARN', 'CLIENT_NAME_MISMATCH',
+                                f"The tender names the client {facts['client']}; the opportunity's client record is "
+                                f"{facts['client_record']}. The proposal uses the tender's name; correct the client "
+                                f"record if it is wrong."))
     if 'rft_number' not in facts:
         findings.append(finding('WARN', 'META_MISSING', 'Required fact `rft_number` could not be extracted'))
 
@@ -658,9 +732,10 @@ def _generate(quote, actor, job, report, selection):
         converter = Converter(Path(workdir) / 'cache', getattr(settings, 'SALES_PROPOSAL_CONVERTER', 'auto'))
         attachments = {key: materialize(uploads, Path(workdir) / 'evidence' / key)
                         for key, uploads in evidence.items() if uploads}
+        letter = materialize_letter(issued_letter, Path(workdir) / 'letter') if issued_letter else None
         try:
             rendered = render(cfg, facts, render_input, requirements, traceability, converter, workdir,
-                              attachments=attachments, layout=layout)
+                              attachments=attachments, layout=layout, letter=letter)
         finally:
             converter.close()
         findings.extend(finding(s, c, m) for s, c, m in rendered['findings'])

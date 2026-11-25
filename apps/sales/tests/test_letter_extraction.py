@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from io import BytesIO
+from unittest import skipUnless
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -388,6 +390,10 @@ class LetterExtractionWorkflowTests(TestCase):
         self.assertEqual(repeated.custom_data['letterhead']['recipient_address'], '')
         self.assertEqual(pdf.call_count, 1)
 
+    @skipUnless(
+        all(find_spec(package) for package in ('weasyprint', 'fitz', 'docx')),
+        'PDF/Word rendering dependencies are not installed',
+    )
     def test_updated_source_fields_appear_in_real_pdf_and_word_output(self):
         import pymupdf
         from docx import Document
@@ -412,17 +418,63 @@ class LetterExtractionWorkflowTests(TestCase):
             self.assertIn('Current Client Tower', text)
             self.assertNotIn('Aisha Ali', text)
 
-    def test_newest_incoming_email_is_preferred_over_an_older_upload(self):
+    def test_first_invitation_email_is_preferred_over_a_later_upload(self):
         from apps.sales.letter_extraction import extract_opportunity_letter_fields
         old = self.upload()
         current = OpportunityWorkspaceUpload.objects.create(
             workspace=old.workspace, request_id=uuid4(), actor=self.actor, folder_key='tender',
             name='latest-invitation.eml', size=120, sha256='b' * 64, provider='radai', status='ready')
-        with patch('apps.sales.private_attachments.download_private_file', return_value=(
-                BytesIO(b'From: Current Buyer <current@client.test>\n\nPlease quote.'), current.name)) as download:
+        def source(_deal, _actor, _folder, file_id):
+            if file_id == 'radai-' + str(old.pk):
+                return BytesIO(b'From: Initial Buyer <initial@client.test>\n\nPlease quote.'), old.name
+            return BytesIO(b'From: Current Buyer <current@client.test>\n\nPlease quote.'), current.name
+
+        with patch('apps.sales.private_attachments.download_private_file', side_effect=source) as download:
             fields = extract_opportunity_letter_fields(self.deal, self.actor)
-        self.assertEqual(fields['_source']['upload_id'], str(current.pk))
+        self.assertEqual(fields['_source']['upload_id'], str(old.pk))
+        self.assertEqual(fields['recipient_email'], 'initial@client.test')
         self.assertEqual(download.call_count, 1)
+
+    def test_first_business_message_id_wins_even_after_long_safe_link_text(self):
+        fields = extract_letter_fields(
+            'From: SAP Ariba <notification@ariba.com>\nDate: Thu, 26 Jun 2025 06:01:47 +0000\n\n'
+            + ('Safe Link tracking text ' * 300)
+            + '\nFrom: Abu Dhabi National Oil Company <notification@ariba.com>\n'
+            + 'Abu Dhabi National Oil Company sourcing site, Event Doc289737813, '
+              'Message ID: MSG54923009, later Message ID: MSG99999999'
+        )
+        self.assertIn('Message ID :MSG54923009', fields['your_ref'])
+        self.assertNotIn('MSG99999999', fields['your_ref'])
+
+    def test_business_message_id_replaces_prefilled_outlook_transport_reference(self):
+        self.upload()
+        old_ref = ('SAP Ariba email notifications dated: 30,07,2025 ,Message ID '
+                   ':<transport-id@outlook.example>')
+        self.letter.custom_data = {
+            'letterhead': {
+                'recipient_name': 'Aisha Ali', 'recipient_email': 'aisha@client.test',
+                'your_ref': old_ref,
+            },
+            'letterhead_manual_fields': ['your_ref'],
+            'letter_extraction': {
+                'fields': ['recipient_name', 'recipient_email', 'your_ref'],
+                'values': {
+                    'recipient_name': 'Aisha Ali', 'recipient_email': 'aisha@client.test',
+                    'your_ref': old_ref,
+                },
+                'source': {'upload_id': 'old-source'},
+            },
+        }
+        self.letter.preparation_fingerprint = 'existing-preparation'
+        self.letter.save(update_fields=['custom_data', 'preparation_fingerprint'])
+        with patch('apps.sales.letter_extraction.extract_opportunity_letter_fields', return_value={
+            'recipient_name': 'Aisha Ali', 'recipient_email': 'aisha@client.test',
+            'your_ref': 'SAP Ariba email notifications dated: 26,06,2025 ,Message ID :MSG54923009',
+            '_source': {'upload_id': 'initial-invitation'},
+        }):
+            letter = self.prepare()
+        self.assertIn('Message ID :MSG54923009', letter.custom_data['letterhead']['your_ref'])
+        self.assertNotIn('your_ref', letter.custom_data.get('letterhead_manual_fields', []))
 
     def test_manual_contact_identity_is_not_mixed_with_a_different_source_person(self):
         from apps.sales.workflow import refresh_letter_files

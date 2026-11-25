@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from django.db import transaction
+from django.db.models import Count
 from django.utils import timezone
 
 from ..catalog import (
@@ -28,6 +29,25 @@ from .calculator import recompute_payslip_totals, recompute_run_totals
 
 class GenerationError(Exception):
     """Raised when a run can't be generated (e.g. already exists)."""
+
+
+def _validate_unique_active_identities() -> None:
+    """Refuse to materialise two payslips for one canonical person/account."""
+    active = PayrollEmployee.objects.filter(is_active=True)
+    duplicate_canonical = (
+        active.filter(employee_id__isnull=False)
+        .values('employee_id').annotate(total=Count('id')).filter(total__gt=1)
+    )
+    duplicate_users = (
+        active.filter(user_id__isnull=False)
+        .values('user_id').annotate(total=Count('id')).filter(total__gt=1)
+    )
+    if duplicate_canonical.exists() or duplicate_users.exists():
+        raise GenerationError(
+            'Payroll generation stopped: multiple active payroll records are linked '
+            'to the same canonical employee or user account. Run the payroll identity '
+            'audit and resolve duplicates before generating the run.'
+        )
 
 
 def _cycle_code(year: int, month: int) -> str:
@@ -64,6 +84,7 @@ def generate_monthly_run(
       - ``overwrite=True`` AND the existing run is NOT Draft → raises
     """
     from ..catalog import DEFAULT_WORKING_DAYS_PER_MONTH
+    _validate_unique_active_identities()
     effective_working_days = int(working_days) if working_days is not None else DEFAULT_WORKING_DAYS_PER_MONTH
 
     if PayrollAdjustment.objects.filter(target_year=year, target_month=month, status=AdjustmentStatus.PENDING).exists():

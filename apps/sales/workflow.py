@@ -3,6 +3,7 @@
 import logging
 import hashlib
 import json
+import re
 
 from datetime import timedelta
 from decimal import Decimal
@@ -642,14 +643,33 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
         for key, value in previous_values.items():
             if saved_head.get(key) != value:
                 manual.add(key)
+            elif (key == 'your_ref'
+                    and re.search(r'\bMessage ID\s*:\s*MSG[A-Z0-9_-]+\b', str(value or ''), re.I)):
+                # This value is the extracted business reference, not a user
+                # override echoed back by the preparation form.
+                manual.discard(key)
         same_contact = all(
             not str(saved_head.get(key) or '').strip() or not extracted.get(key)
             or (key in previously_detected and key not in manual)
             or str(saved_head[key]).strip().casefold() == str(extracted[key]).strip().casefold()
             for key in ('recipient_name', 'recipient_email')
         )
+        if manual:
+            saved_data['letterhead_manual_fields'] = sorted(manual)
+        else:
+            saved_data.pop('letterhead_manual_fields', None)
         missing = {}
         if source and same_contact:
+            # A saved Outlook transport Message-ID is not the client's Ariba
+            # business reference. Once the initial solicitation supplies an
+            # MSG identifier, replace that technical fallback even when the
+            # preparation form echoed the prefilled value back as reviewed.
+            extracted_ref = str(extracted.get('your_ref') or '')
+            saved_ref = str(saved_head.get('your_ref') or '')
+            if (re.search(r'\bMessage ID\s*:\s*MSG[A-Z0-9_-]+\b', extracted_ref, re.I)
+                    and not re.search(r'\bMessage ID\s*:\s*MSG[A-Z0-9_-]+\b', saved_ref, re.I)):
+                manual.discard('your_ref')
+                missing['your_ref'] = extracted_ref
             for key in ('recipient_name', 'recipient_title', 'recipient_company',
                         'recipient_email', 'recipient_address', 'your_ref'):
                 if key not in manual and (key in previously_detected or not str(saved_head.get(key) or '').strip()):
@@ -666,6 +686,10 @@ def prepare_letter(opportunity, actor, letter_type, custom_data=None):
         if same_contact and missing:
             saved_head.update(missing)
             saved_data['letterhead'] = saved_head
+            if manual:
+                saved_data['letterhead_manual_fields'] = sorted(manual)
+            else:
+                saved_data.pop('letterhead_manual_fields', None)
             if source:
                 saved_data['letter_extraction'] = {
                     'source': source, 'fields': list(extracted), 'values': dict(extracted),
@@ -805,6 +829,7 @@ def refresh_letter_files(letter, actor, custom_data=None, *, automatic_fields=()
     require_recipient(head)
     manual_values = (stored.custom_data or {}).get('letterhead_manual_fields') or []
     manual = {value for value in manual_values if isinstance(value, str)} if isinstance(manual_values, list) else set()
+    manual.difference_update(automatic_fields)
     for key in ('recipient_name', 'recipient_title', 'recipient_company', 'recipient_email', 'recipient_address', 'your_ref'):
         if key in head and head.get(key) != ((stored.custom_data or {}).get('letterhead') or {}).get(key) and key not in automatic_fields:
             manual.add(key)

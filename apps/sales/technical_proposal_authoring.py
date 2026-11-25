@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -152,7 +153,7 @@ def standard_pool(path):
         data = json.load(handle)
     return [{'id': item['id'], 'kind': 'standard', 'source': 'Rejlers standard methodology',
              'location': ' / '.join(filter(None, (item['chapter'], item['section']))), 'text': item['text'],
-             'chapter': item['chapter']} for item in data['items']]
+             'chapter': item['chapter'], 'section': item.get('section') or ''} for item in data['items']]
 
 
 def select_excerpts(part, pool, standard, budget, extra_keywords=()):
@@ -199,11 +200,23 @@ def _payload(facts, part, excerpts, reviewer_note, package=None):
     }
 
 
+TRANSIENT_PROVIDER_ERRORS = {'provider_unavailable', 'provider_rate_limit', 'provider_timeout'}
+RETRY_DELAY_SECONDS = 3
+
+
+def _provider_failure(result):
+    """True when the AI service itself failed (as opposed to the tender lacking text)."""
+    return str(result.get('error_code') or '').startswith('provider_') or result.get('status') in ('unavailable', 'disabled')
+
+
 def _call(payload, schema, instructions):
     from .email_ai_provider import analyze_technical_proposal_sources
 
     try:
         result = analyze_technical_proposal_sources(payload, schema, instructions=instructions, output_token_limit=3500)
+        if result.get('error_code') in TRANSIENT_PROVIDER_ERRORS:   # one retry after a short pause
+            time.sleep(RETRY_DELAY_SECONDS)
+            result = analyze_technical_proposal_sources(payload, schema, instructions=instructions, output_token_limit=3500)
         if result.get('error_code') == 'provider_incomplete':  # output hit the cap: one shorter retry
             result = analyze_technical_proposal_sources(
                 payload, schema, output_token_limit=3500,
@@ -242,11 +255,17 @@ def _clean_blocks(raw_blocks, allowed, part_heading=''):
             if not record['rows']:
                 dropped += 1
                 continue
+            groups = {f'{index}:{column}': [{'text': cell, 'bold': True}]
+                      for index, row in enumerate(record['rows']) if row and GROUP_ROW.fullmatch(row[0].strip())
+                      for column, cell in enumerate(row) if cell}
+            if groups:
+                record['cell_runs'] = groups
         cited.update(citations)
         blocks.append(record)
     return blocks, dropped, cited
 
 
+GROUP_ROW = re.compile(r'[A-H]\.?')   # "A." Process, "B." HSE … in a deliverables list
 MAX_OPEN_POINTS = 5
 MAX_SECTION_OPEN_POINTS = 8
 _PACKAGES_LOCK = threading.Lock()
@@ -254,23 +273,118 @@ SCOPE_PART = {'heading': 'SCOPE OF SERVICES', 'categories': ['technical'],
               'keywords': ['scope', 'package', 'sow', 'terms of reference', 'study', 'feed', 'design', 'engineering']}
 
 
+# Tender packages are usually filed one folder per scope ("3. SOW - P11742/..."), and scopes added
+# later arrive as a stand-alone terms of reference ("TOR FOR MODIFICATION WORKS AT ...").
+_SOW_FOLDER = re.compile(r'(?:^|/)(\d{1,2})\s*\.\s*SOW\s*[-–]\s*(P\d{4,6}[A-Z]?)\s*/', re.I)
+_STANDALONE_TOR = re.compile(r'(?:^|/)(TOR\b[^/]*|Terms of Reference[^/]*)\.(?:pdf|docx?)$', re.I)
+
+
+def package_register(pool):
+    """Scope packages the tender files define, in tender order: [{'key', 'number', 'code', 'items'}].
+
+    Built from the document structure, not by the AI, so no package is missed or invented.
+    Duplicate copies of a stand-alone TOR (e.g. in the RFT and a bulletin) count once.
+    """
+    register, seen_tor = {}, {}
+    for item in pool:
+        source = str(item.get('source') or '').replace('\\', '/')
+        match = _SOW_FOLDER.search(source)
+        if match:
+            number, code = int(match.group(1)), match.group(2).upper()
+            entry = register.setdefault(code, {'key': code, 'number': number, 'code': code, 'items': []})
+            entry['items'].append(item)
+            continue
+        tor = _STANDALONE_TOR.search(source)
+        if tor:
+            name = re.sub(r'[-_ ]*\d*$', '', tor.group(1)).strip().casefold()
+            key = seen_tor.setdefault(name, f'TOR-{len(seen_tor) + 1}')
+            entry = register.setdefault(key, {'key': key, 'number': 1000 + len(seen_tor), 'code': '', 'items': [],
+                                              'name': tor.group(1)})
+            entry['items'].append(item)
+    for entry in register.values():   # copies of the same document (RFT and bulletin) count once
+        unique, texts = [], set()
+        for item in entry['items']:
+            text = ' '.join(item['text'].split())[:300]
+            if text not in texts:
+                texts.add(text)
+                unique.append(item)
+        # The package's own terms of reference / scope of work first, attachments and standards last.
+        entry['items'] = sorted(unique, key=lambda item: _main_document_rank(item['source']))
+    return sorted(register.values(), key=lambda entry: entry['number'])
+
+
+_MAIN_DOCUMENT = re.compile(r'\b(tor|sow|scope of work|terms of reference)\b|-0601\b', re.I)
+
+
+def _main_document_rank(source):
+    path = str(source or '').replace(chr(92), '/')
+    name = path.rsplit('/', 1)[-1]
+    return ('attachment' in path.casefold(), not _MAIN_DOCUMENT.search(name), name.casefold().startswith('master'))
+
+
+def _register_title(entry):
+    if entry['code']:
+        name = entry['items'][0]['source'].replace('\\', '/').rsplit('/', 1)[-1]
+        name = re.sub(r'\.(pdf|docx?)$', '', name, flags=re.I)
+        return f"{entry['code']} – {name}"
+    return re.sub(r'[-_ ]*\d*$', '', entry.get('name') or 'Terms of reference').strip()
+
+
 def scope_packages(pool, standard, facts, config, style):
     """The tender's scope packages, listed once per generation and shared by every part that
-    is written per package (scope of services, deliverables)."""
+    is written per package (scope of services, deliverables).
+
+    When the tender files are organised per scope package (SOW folders, stand-alone TORs), the
+    package list is exactly that register; the AI only supplies each package's title from its
+    own excerpts. Otherwise the AI lists the packages, and each must cite a tender excerpt.
+    """
     with _PACKAGES_LOCK:
         cached = facts.get('_scope_packages')
-        if cached is None:
-            excerpts = select_excerpts(SCOPE_PART, pool, standard, config['author']['excerpt_budget_bytes'] // 2)
+        if cached is not None:
+            return cached
+        register = package_register(pool)
+        if len(register) >= 2:
+            excerpts, owner = [], {}
+            for entry in register:
+                for item in entry['items'][:2]:          # the opening text of each package's documents
+                    excerpts.append(item)
+                    owner[item['id']] = entry['key']
+            listing = '\n'.join(f"- {entry['key']}: excerpts {', '.join(i['id'] for i in entry['items'][:2])}"
+                                for entry in register)
             result = _call(_payload(facts, SCOPE_PART, excerpts, ''), PACKAGE_SCHEMA,
-                           f'{style}\nList every separate scope package or work item the tender defines, in tender '
-                           f'order, each with the ids of the excerpts that define it. Titles only, no descriptions. '
-                           f'If the tender has one scope, return one package.') if excerpts else {
-                'status': 'completed', 'proposal': {'packages': []}}
-            allowed = {item['id'] for item in excerpts}
-            packages = [item for item in (result.get('proposal') or {}).get('packages') or []
-                        if str(item.get('title') or '').strip() and set(item.get('citations') or []) & allowed
-                        ][:MAX_PACKAGES] if result.get('status') == 'completed' else []
+                           f'{style}\nThe tender defines exactly these {len(register)} scope packages, in this '
+                           f'order:\n{listing}\nReturn one package per line above, in the same order, with the '
+                           f"package's full title as the tender states it (project number first when it has one) "
+                           f'and the ids of that package\'s excerpts as citations. Do not add, merge or split packages.')
+            titles = {}
+            if result.get('status') == 'completed':
+                for item in (result.get('proposal') or {}).get('packages') or []:
+                    keys = {owner.get(c) for c in item.get('citations') or []} - {None}
+                    title = ' '.join(str(item.get('title') or '').split())[:200]
+                    if len(keys) == 1 and title:
+                        titles.setdefault(keys.pop(), title)
+            packages = [{'title': titles.get(entry['key']) or _register_title(entry), 'key': entry['key'],
+                         'citations': [i['id'] for i in entry['items'][:2]], 'items': entry['items']}
+                        for entry in register][:MAX_PACKAGES]
+            if result.get('status') != 'completed' and not _provider_failure(result):
+                result = {'status': 'completed', 'proposal': {'packages': []}}
+            if result.get('status') == 'completed':
+                result = {**result, 'register': True, 'untitled': [e['key'] for e in register if e['key'] not in titles]}
             cached = facts['_scope_packages'] = (result, packages)
+            return cached
+        excerpts = select_excerpts(SCOPE_PART, pool, standard, config['author']['excerpt_budget_bytes'] // 2)
+        result = _call(_payload(facts, SCOPE_PART, excerpts, ''), PACKAGE_SCHEMA,
+                       f'{style}\nList every separate scope package or work item the tender defines, in tender '
+                       f'order, each with the ids of the excerpts that define it. Titles only, no descriptions. '
+                       f'If the tender has one scope, return one package.') if excerpts else {
+            'status': 'completed', 'proposal': {'packages': []}}
+        allowed = {item['id'] for item in excerpts}
+        listed = [item for item in (result.get('proposal') or {}).get('packages') or []
+                  if str(item.get('title') or '').strip()] if result.get('status') == 'completed' else []
+        packages = [item for item in listed if set(item.get('citations') or []) & allowed][:MAX_PACKAGES]
+        if result.get('status') == 'completed':
+            result = {**result, 'unconfirmed': [str(item['title'])[:120] for item in listed if item not in packages]}
+        cached = facts['_scope_packages'] = (result, packages)
         return cached
 
 
@@ -286,20 +400,42 @@ def draft_part(part, pool, standard, facts, config, reviewer_note=''):
     label = part['heading']
     findings, cited = [], set()
     style = author['style']
+    if part.get('mode') == 'fixed':
+        items = [item for item in standard if item['chapter'] in set(part.get('standard') or [])]
+        intro = [item for item in items if not item.get('section')]
+        rows = [item for item in items if item.get('section')]
+        blocks = [{'type': 'paragraph', 'text': item['text'], 'citations': [item['id']]} for item in intro]
+        if rows:
+            blocks.append({'type': 'table', 'text': '', 'columns': list(part.get('columns') or ['Phase', 'Activities']),
+                           'rows': [[item['section'], item['text']] for item in rows],
+                           'citations': [item['id'] for item in rows]})
+        return {'blocks': blocks, 'cited': {item['id'] for item in items}, 'findings': [] if items else [
+            finding('ERROR', 'SECTION_NOT_DRAFTED', f'{label}: the approved standard text is missing')]}
     if part.get('mode') == 'packages':
         result, packages = scope_packages(pool, standard, facts, config, style)
         if result.get('status') != 'completed':
-            return {'blocks': [], 'cited': set(), 'findings': [finding('ERROR', 'SECTION_NOT_DRAFTED',
+            return {'blocks': [], 'cited': set(), 'provider_failed': _provider_failure(result),
+                    'findings': [finding('ERROR', 'SECTION_NOT_DRAFTED',
                     f"{label}: could not be drafted ({result.get('error_code') or 'provider unavailable'})")]}
         if not packages:
             return {'blocks': [], 'cited': set(), 'findings': [finding('ERROR', 'SECTION_NOT_DRAFTED',
                     f'{label}: no tender text describes the scope packages')]}
         blocks = []
         jobs = []
+        failed_packages = 0
+        for title in result.get('unconfirmed') or []:
+            findings.append(finding('WARN', 'SCOPE_PACKAGE_UNCONFIRMED',
+                                    f'{label}: "{title}" is not described by any tender excerpt and was left out'))
         for number, package in enumerate(packages, 1):
             title = package['title'].strip()
             words = re.findall(r'[A-Za-z]{4,}', title)
-            package_excerpts = select_excerpts(part, pool, standard, budget // 2, extra_keywords=words * 3)
+            if package.get('items'):
+                package_excerpts = select_excerpts(part, list(package['items']), standard, budget // 2,
+                                                   extra_keywords=words * 3)
+                if not any(item in package['items'] for item in package_excerpts):
+                    package_excerpts = list(package['items'][:3]) + package_excerpts
+            else:
+                package_excerpts = select_excerpts(part, pool, standard, budget // 2, extra_keywords=words * 3)
             jobs.append((number, title, package_excerpts))
         with ThreadPoolExecutor(max_workers=author['parallel_calls']) as executor:
             futures = [(number, title, excerpts_, executor.submit(
@@ -310,6 +446,7 @@ def draft_part(part, pool, standard, facts, config, reviewer_note=''):
                 outcome = future.result()
                 blocks.append({'type': 'heading', 'level': 2, 'text': f'SCOPE {number}: {title.upper()}'})
                 if outcome.get('status') != 'completed':
+                    failed_packages += _provider_failure(outcome)
                     findings.append(finding('ERROR', 'SECTION_NOT_DRAFTED',
                                             f"{label} – scope {number}: could not be drafted ({outcome.get('error_code')})"))
                     continue
@@ -323,7 +460,8 @@ def draft_part(part, pool, standard, facts, config, reviewer_note=''):
                     findings.append(finding('WARN', 'UNSUPPORTED_STATEMENT_REMOVED',
                                             f'{label} – scope {number}: {dropped} statement(s) without a tender source were removed'))
                 findings.extend(_open_points(f'{label} – scope {number}', outcome['proposal'].get('open_points')))
-        return {'blocks': blocks, 'cited': cited, 'findings': findings}
+        return {'blocks': blocks, 'cited': cited, 'findings': findings,
+                'provider_failed': bool(jobs) and failed_packages == len(jobs)}
 
     excerpts = select_excerpts(part, pool, standard, budget)
     if not excerpts:
@@ -334,7 +472,8 @@ def draft_part(part, pool, standard, facts, config, reviewer_note=''):
     result = _call(_payload(facts, part, excerpts, reviewer_note), BLOCK_SCHEMA,
                    f"{style}\n{part['guidance']}\n{shape}")
     if result.get('status') != 'completed':
-        return {'blocks': [], 'cited': set(), 'findings': [finding('ERROR', 'SECTION_NOT_DRAFTED',
+        return {'blocks': [], 'cited': set(), 'provider_failed': _provider_failure(result),
+                'findings': [finding('ERROR', 'SECTION_NOT_DRAFTED',
                 f"{label}: could not be drafted ({result.get('error_code') or 'provider unavailable'})")]}
     blocks, dropped, cited = _clean_blocks(result['proposal'].get('blocks'), {item['id'] for item in excerpts}, label)
     if dropped:
@@ -344,8 +483,23 @@ def draft_part(part, pool, standard, facts, config, reviewer_note=''):
     return {'blocks': blocks, 'cited': cited, 'findings': findings}
 
 
-def draft_section(section, pool, standard, facts, config, reviewer_note=''):
-    """Content for one configured section: authored parts, evidence placeholder or fixed text."""
+def _previous_parts(blocks):
+    """Split a stored section's blocks into {part heading: [blocks after the part marker]}."""
+    parts, current = {}, None
+    for block in blocks or []:
+        if block.get('type') == 'part':
+            current = parts.setdefault(block.get('text') or '', [])
+        elif current is not None:
+            current.append(block)
+    return parts
+
+
+def draft_section(section, pool, standard, facts, config, reviewer_note='', previous_blocks=None):
+    """Content for one configured section: authored parts, evidence placeholder or fixed text.
+
+    A part the AI service could not draft keeps its text from `previous_blocks` (the latest
+    version) when there is one. The result counts `ai_parts` and `ai_failed` (provider failures).
+    """
     kind, label = section['kind'], section['title']
     if kind == 'evidence':
         items = ', '.join(section.get('evidence') or [])
@@ -358,6 +512,8 @@ def draft_section(section, pool, standard, facts, config, reviewer_note=''):
                            {'type': 'paragraph', 'text': 'Not Applicable'}], 'cited': set(), 'findings': []}
     blocks, cited, findings = [], set(), []
     outcomes = []
+    previous = _previous_parts(previous_blocks)
+    ai_failed = 0
     with ThreadPoolExecutor(max_workers=config['author']['parallel_calls']) as executor:
         futures = [(part, executor.submit(draft_part, part, pool, standard, facts, config, reviewer_note))
                    for part in section.get('parts') or []]
@@ -365,6 +521,16 @@ def draft_section(section, pool, standard, facts, config, reviewer_note=''):
             outcomes.append((part, future.result()))
     for part, outcome in outcomes:
         blocks.append({'type': 'part', 'text': part['heading']})
+        kept = previous.get(part['heading']) if outcome.get('provider_failed') else None
+        if outcome.get('provider_failed'):
+            ai_failed += 1
+        if kept:
+            blocks.extend(kept)
+            cited |= {c for block in kept for c in block.get('citations') or []}
+            findings.append(finding('WARN', 'PART_KEPT_FROM_PREVIOUS',
+                                    f"{part['heading']}: the AI service was unavailable, so the previous "
+                                    f"version's text is kept"))
+            continue
         blocks.extend(outcome['blocks'])
         cited |= outcome['cited']
         findings.extend(outcome['findings'])
@@ -376,7 +542,8 @@ def draft_section(section, pool, standard, facts, config, reviewer_note=''):
         findings = [item for item in findings if item['code'] != 'OPEN_POINT' or id(item) in keep]
         findings.append(finding('WARN', 'OPEN_POINTS_SUMMARISED',
                                 f"{section['title']}: {extra} further open points were noted while writing"))
-    return {'blocks': blocks, 'cited': cited, 'findings': findings}
+    return {'blocks': blocks, 'cited': cited, 'findings': findings,
+            'ai_parts': sum(1 for part, _ in outcomes if part.get('mode') != 'fixed'), 'ai_failed': ai_failed}
 
 
 # --- facts ----------------------------------------------------------------------------------
@@ -401,13 +568,37 @@ def proposal_facts(quote, pool, config, version):
     ordered = sorted(pool, key=lambda item: (not RFT_SOURCE.search(item['source'] or ''), not item.get('primary'),
                                              not item.get('requirement')))
     for name, rule in (config.get('facts') or {}).items():
+        if rule.get('mode') == 'most_frequent':
+            counts, first = {}, {}
+            for item in ordered:
+                for match in re.finditer(rule['pattern'], item['text'], re.I):
+                    value = _name_case(match.group(1))
+                    counts[value] = counts.get(value, 0) + 1
+                    first.setdefault(value, item)
+            if counts:
+                value = max(counts, key=lambda key: (counts[key], len(key)))
+                facts[name] = value
+                provenance[name] = {'value': value, 'source': first[value]['source'],
+                                    'location': first[value]['location']}
+            continue
         for item in ordered:
             match = re.search(rule['pattern'], item['text'], re.I)
             if match:
                 facts[name] = match.group(1).strip().rstrip('.')
                 provenance[name] = {'value': facts[name], 'source': item['source'], 'location': item['location']}
                 break
+    if facts.get('company_name'):
+        # The proposal addresses the client as the tender names it; the CRM record is kept for review.
+        facts['client_record'] = facts['client']
+        facts['client'] = facts['company_name']
+        provenance['client'] = dict(provenance['company_name'])
     return facts, provenance
+
+
+def _name_case(value):
+    """'ADNOC ONSHORE' / 'adnoc onshore' -> 'ADNOC Onshore' (acronyms stay upper case)."""
+    words = ' '.join(str(value).replace('-', ' ').split()).split(' ')
+    return ' '.join(word.upper() if word.upper() in {'ADNOC', 'LLC', 'PJSC'} else word.capitalize() for word in words)
 
 
 # --- full proposal --------------------------------------------------------------------------

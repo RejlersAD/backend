@@ -178,7 +178,14 @@ def extract_letter_fields(text, *, sender_name='', sender_email='', date=None, m
                     continue
     message_id = _label(headers, r'Message[ -]?ID') or message_id
     if ariba:
-        portal_id = re.search(r'\bsourcing site,[\s\S]{0,1500}?\bMessage ID\s*:\s*(MSG[A-Z0-9_-]+)\b', body, re.I)
+        # The client reference is the first Ariba business message identifier,
+        # not Outlook's transport Message-ID. It can appear near the end of a
+        # long invitation after Safe Links, so do not impose a proximity cap.
+        # Forwarded Outlook .msg files place the original Ariba invitation
+        # after a quoted ``From:`` block. Contact extraction intentionally
+        # excludes quoted signatures, but the business reference must search
+        # the complete bounded message projection.
+        portal_id = re.search(r'\bMessage ID\s*:\s*(MSG[A-Z0-9_-]+)\b', text, re.I)
         if portal_id:
             message_id = portal_id.group(1)
     if date:
@@ -241,12 +248,17 @@ def extract_opportunity_letter_fields(deal, actor):
         folder_key__in=('tender', 'correspondence'), size__lte=SOURCE_BYTES,
     ).exclude(Q(pk__in=generated_uploads) | Q(document__root_upload_id__in=generated_uploads)).filter(
         Q(document__isnull=True) | Q(document__head_upload_id=F('pk')),
-    ).order_by('-created_at', '-pk')
+    )
     email_files = Q(name__iendswith='.eml') | Q(name__iendswith='.msg')
-    # Prioritize incoming email across the complete inventory, rather than
-    # cutting off the listing before a later uploaded email is considered.
-    candidates = chain(uploads.filter(email_files).iterator(chunk_size=100),
-                       uploads.exclude(email_files).iterator(chunk_size=100))
+    invitation_name = Q(name__iregex=r'(^|[^a-z])(invitation|rft|rfq|rfp|eoi|itt)([^a-z]|$)')
+    # The outgoing response refers to the initial solicitation, not a later
+    # bulletin, extension or TQ. Prefer the first invitation-like email, then
+    # the first remaining email, before considering other document formats.
+    candidates = chain(
+        uploads.filter(email_files & invitation_name).order_by('created_at', 'pk').iterator(chunk_size=100),
+        uploads.filter(email_files).exclude(invitation_name).order_by('created_at', 'pk').iterator(chunk_size=100),
+        uploads.exclude(email_files).order_by('created_at', 'pk').iterator(chunk_size=100),
+    )
     for upload in candidates:
         suffix = PurePosixPath(upload.name.lower()).suffix
         if suffix not in {'.eml', '.msg', '.txt', '.pdf', '.docx', '.html', '.htm', '.md'}:
@@ -284,7 +296,7 @@ def extract_opportunity_letter_fields(deal, actor):
     from .email_permissions import visible_email_intakes
     if not module_action_allowed(actor, 'sales_email_intake', 'read'):
         return {}
-    intakes = visible_email_intakes(actor).filter(opportunity=deal).order_by('-received_at', '-pk')
+    intakes = visible_email_intakes(actor).filter(opportunity=deal).order_by('received_at', 'pk')
     for intake in intakes.iterator(chunk_size=100):
         fields = extract_letter_fields(
             intake.body_preview, sender_name=intake.sender_name, sender_email=intake.sender_email,

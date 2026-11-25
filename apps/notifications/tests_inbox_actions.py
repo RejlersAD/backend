@@ -59,6 +59,20 @@ class NotificationInboxActionsTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         return response.data['unread_count']
 
+    def test_list_honors_bounded_page_size_for_fast_inbox_loading(self):
+        for _ in range(120):
+            self.notice()
+
+        response = self.client.get(f'{BASE}?page_size=25')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['count'], 122)
+        self.assertEqual(len(response.data['results']), 25)
+        self.assertIsNotNone(response.data['next'])
+
+        capped = self.client.get(f'{BASE}?page_size=1000')
+        self.assertEqual(capped.status_code, 200, capped.data)
+        self.assertEqual(len(capped.data['results']), 100)
+
     def test_normal_user_marks_selected_read_and_persists_timestamp_status_and_audit(self):
         self.assertFalse(self.owner.is_staff)
         self.assertFalse(self.owner.rbac_profile.roles.exists())

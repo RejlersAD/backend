@@ -10,6 +10,8 @@ from .decision_terminology import decision_text
 import html
 import re
 
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.utils import timezone
 from django.utils.html import strip_tags
 
@@ -31,6 +33,16 @@ def format_date_ordinal(value):
         value = timezone.localtime(value)
     day = value.day
     return f"{day}{ordinal_suffix(day)} {value.strftime('%B %Y')}"
+
+
+def valid_recipient_email(value):
+    """Return a deliverable address, never an Exchange legacy directory ID."""
+    value = html.unescape(str(value or '')).strip()
+    try:
+        validate_email(value)
+    except ValidationError:
+        return ''
+    return value
 
 
 def normalize_body_text(body):
@@ -142,6 +154,7 @@ def build_letterhead(deal, custom_data=None):
             letterhead[key] = value
     if isinstance(letterhead.get('signature_titles'), str):
         letterhead['signature_titles'] = [line for line in letterhead['signature_titles'].split('\n') if line.strip()]
+    letterhead['recipient_email'] = valid_recipient_email(letterhead.get('recipient_email'))
     letterhead['confidential'] = f"{letterhead['confidential_date']} / Rev {letterhead['rev']}"
     return letterhead
 
@@ -200,7 +213,7 @@ def build_letter_context(deal, letter=None, custom_data=None):
 
     if letter is not None:
         context.update({
-            'subject': letter.subject,
+            'subject': html.unescape(str(letter.subject or '')),
             'salutation': letter_salutation(letter.body),
             'body_paragraphs': [
                 {'field': f'body_p{i + 1}', 'content': para, 'is_first': i == 0}

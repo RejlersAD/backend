@@ -43,6 +43,10 @@ def _docx_available():
     return DOCX_AVAILABLE
 
 
+def _letter_files_available():
+    return WEASYPRINT_AVAILABLE and DOCX_AVAILABLE
+
+
 def seed_test_letter_templates():
     templates = import_module('apps.sales.migrations.0028_update_letter_templates').TEMPLATES
     for letter_type, content in templates.items():
@@ -200,6 +204,7 @@ class LetterGenerationTests(TestCase):
         head = letter.custom_data['letterhead']
         self.assertEqual(head['confidential'].split(' / ')[-1], 'Rev 0')
 
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_refresh_letter_files_bumps_revision(self):
         letter = self.prepare('eoi')
         letter.body += '\n\nReviewed clarification.'
@@ -242,14 +247,35 @@ class LetterGenerationTests(TestCase):
         self.assertGreater(page.search_for('Rejlers International Engineering Solutions AB')[-1].y0, 750)
         self.assertEqual(len(page.search_for('1 (1)')), 1)
         confidential = page.search_for('Confidential')[0]
+        self.assertEqual(len(page.search_for('Rev 0')), 1)
         sender = page.search_for('From:')[0]
         self.assertLess(sender.y0 - confidential.y1, 32)
+        header_code = page.search_for(letter.custom_data['letterhead']['response_code'])[0]
+        sender_name = page.search_for(letter.custom_data['letterhead']['sender_name'])[0]
+        self.assertAlmostEqual(header_code.x0, sender_name.x0, delta=3)
         recipient_email = page.search_for(letter.custom_data['letterhead']['recipient_email'])[0]
         your_reference = page.search_for('Your Ref. No.:')[0]
         self.assertLess(your_reference.y0 - recipient_email.y1, 45)
         signature = page.search_for('CEO, Rejlers Abu Dhabi')[0]
         footer_company = page.search_for('Rejlers International Engineering Solutions AB')[-1]
         self.assertLess(signature.y1 + 5, footer_company.y0)
+
+    @skipUnless(_weasyprint_available(), 'weasyprint not installed')
+    def test_pdf_cleans_encoded_subject_and_exchange_legacy_recipient(self):
+        from apps.sales.letter_pdf import generate_letter_pdf
+        import pymupdf
+        letter = self.prepare('eoi')
+        letter.subject = 'C &amp; F Study'
+        letter.custom_data['letterhead']['recipient_email'] = (
+            '/O=EXCHANGELABS/OU=EXCHANGE ADMINISTRATIVE GROUP/'
+            'CN=RECIPIENTS/CN=LEGACY USER'
+        )
+
+        document = pymupdf.open(stream=generate_letter_pdf(letter), filetype='pdf')
+        text = document[0].get_text()
+        self.assertIn('C & F Study', text)
+        self.assertNotIn('&amp;', text)
+        self.assertNotIn('EXCHANGELABS', text)
 
     @skipUnless(_docx_available(), 'python-docx not installed')
     def test_docx_uses_one_greeting_and_aligned_company_footer(self):
@@ -313,7 +339,7 @@ class LetterAttachTests(TestCase):
             {'letterhead': {'recipient_name': self.contact.full_name}},
         )
 
-    @skipUnless(_docx_available(), 'python-docx not installed')
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_attach_uploads_pdf_and_docx_to_correspondence(self):
         letter = self.prepare('eoi')
         attachments = attach_letter_files(letter, self.actor)
@@ -352,7 +378,7 @@ class LetterAttachTests(TestCase):
             {'Q-101883-eoi.pdf', 'Q-101883-eoi.docx'},
         )
 
-    @skipUnless(_docx_available(), 'python-docx not installed')
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_attach_mirrors_manual_upload_single_call_per_file(self):
         """Letter attach makes one service call per file, exactly like the
         manual workspace upload endpoint — no cross-provider fallback. A
@@ -374,7 +400,7 @@ class LetterAttachTests(TestCase):
         self.assertEqual(event.data['storage_provider'], 'sharepoint')
         self.assertEqual(len(event.data['failed_files']), 2)
 
-    @skipUnless(_docx_available(), 'python-docx not installed')
+    @skipUnless(_letter_files_available(), 'weasyprint or python-docx not installed')
     def test_prepare_and_refresh_via_api_attach_each_time(self):
         from rest_framework.test import APIClient
 

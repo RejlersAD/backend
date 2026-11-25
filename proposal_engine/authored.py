@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Emu, Pt, RGBColor
@@ -320,12 +320,96 @@ def write_blocks(document, blocks, *, numbered):
             run.italic = True
 
 
-def section_document(config, section, content, quote_ref, path):
+def contents_entries(blocks):
+    """(number, title, level) for each part and heading, numbered as the heading styles number them."""
+    counters, entries = [0, 0, 0], []
+    for block in blocks or []:
+        if block.get('type') == 'part':
+            level = 1
+        elif block.get('type') == 'heading':
+            level = max(1, min(3, int(block.get('level') or 2)))
+        else:
+            continue
+        counters[level - 1] += 1
+        for deeper in range(level, 3):
+            counters[deeper] = 0
+        title = ' '.join(str(block.get('text') or '').split()).upper()
+        if title:
+            entries.append(('.'.join(str(value) for value in counters[:level]), title, level))
+    return entries
+
+
+def _contents(document, title, entries, pages):
+    """A section's own table of contents (as in the baseline method statement), then a page break."""
+    for text in (title, 'TABLE OF CONTENTS'):
+        paragraph = _spacing(document.add_paragraph(), Pt(6), Pt(6))
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = paragraph.add_run(text)
+        run.bold, run.font.size = True, Pt(12)
+    width = _usable_width(document)
+    for index, (number, text, level) in enumerate(entries):
+        paragraph = _spacing(document.add_paragraph(), Pt(3 if level == 1 else 0), Pt(1))
+        layout = paragraph.paragraph_format
+        layout.left_indent = Pt(12 * (level - 1))
+        layout.tab_stops.add_tab_stop(Pt(12 * (level - 1) + 36))
+        layout.tab_stops.add_tab_stop(width, WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+        page = (pages or {}).get(index)
+        run = paragraph.add_run(f'{number}\t{text}\t{page or ""}')
+        run.font.size = Pt(9 if level > 1 else 10)
+        run.bold = level == 1
+    document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+
+
+def _has_contents(section, content):
+    return bool(section.get('contents_title') and section.get('numbered_headings')
+                and len(contents_entries((content or {}).get('blocks'))) >= 3)
+
+
+def section_document(config, section, content, quote_ref, path, pages=None):
     # The section title is carried by its divider page (PDF) and section heading (Word master).
     document = _body_document(config, quote_ref)
+    if _has_contents(section, content):
+        _contents(document, section['contents_title'], contents_entries(content.get('blocks')), pages)
     write_blocks(document, content.get('blocks') or [], numbered=bool(section.get('numbered_headings')))
     document.save(str(path))
     return path
+
+
+def heading_pages(pdf, entries):
+    """{entry index: page number} where each contents entry's heading starts (first match after
+    the contents pages, in order). Text is compared without spaces or punctuation, so wrapped
+    headings and heading numbers do not matter."""
+    import pymupdf
+
+    def key(text):
+        return re.sub(r'[^A-Z0-9]', '', text.upper())
+
+    with pymupdf.open(str(pdf)) as document:
+        texts = [key(page.get_text()) for page in document]
+    if not entries:
+        return {}
+    last = key(entries[-1][1])[:40]
+    start = next((index + 1 for index, text in enumerate(texts) if last and last in text), 0)
+    pages, cursor = {}, start
+    for index, (_, title, _) in enumerate(entries):
+        wanted = key(title)[:40]
+        found = next((page for page in range(cursor, len(texts)) if wanted and wanted in texts[page]), None)
+        if found is not None:
+            pages[index] = found + 1
+            cursor = found
+    return pages
+
+
+def _paged_section_document(config, section, content, quote_ref, path, converter):
+    """Write the section; when it has its own contents, render once to find the heading pages."""
+    path = section_document(config, section, content, quote_ref, path)
+    if not _has_contents(section, content):
+        return path
+    try:
+        pages = heading_pages(converter.to_pdf(path), contents_entries(content.get('blocks')))
+    except Exception:   # a converter problem must not stop the build; the contents keep no numbers
+        return path
+    return section_document(config, section, content, quote_ref, path, pages=pages)
 
 
 def cover_document(config, facts, path):
@@ -384,6 +468,43 @@ def compliance_content(requirements, traceability, labels):
                                       'proposal section that responds to it.'},
         {'type': 'table', 'columns': ['No.', 'Tender requirement', 'Tender source', 'Response in', 'Status'], 'rows': rows},
     ]}
+
+
+def letter_file_blocks(path):
+    """The text of a covering letter document (DOCX) as editable blocks, in document order."""
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = Document(str(path))
+    blocks = []
+    for child in document.element.body.iterchildren():
+        if child.tag == qn('w:p'):
+            paragraph = Paragraph(child, document)
+            text = ' '.join(paragraph.text.split())[:4000]
+            if not text:
+                continue
+            block = {'type': 'paragraph', 'text': text}
+            runs = [run for run in paragraph.runs if run.text.strip()]
+            if runs and all(run.bold for run in runs):
+                block['runs'] = [{'text': text, 'bold': True}]
+            blocks.append(block)
+        elif child.tag == qn('w:tbl'):
+            rows = []
+            for row in Table(child, document).rows:
+                cells, seen = [], set()
+                for cell in row.cells:
+                    if id(cell._tc) in seen:   # merged cells repeat
+                        continue
+                    seen.add(id(cell._tc))
+                    cells.append(' '.join(cell.text.split())[:600])
+                if any(cells):
+                    rows.append(cells[:8])
+            if rows:
+                width = max(len(row) for row in rows)
+                rows = [row + [''] * (width - len(row)) for row in rows]
+                blocks.append({'type': 'table', 'text': '', 'header': False, 'columns': [''] * width, 'rows': rows})
+    return blocks[:400]
 
 
 def cover_blocks(facts):
@@ -508,13 +629,16 @@ def build_plan(config, files):
     return plan
 
 
-def render(config, facts, sections, requirements, traceability, converter, workdir, attachments=None, layout=None):
+def render(config, facts, sections, requirements, traceability, converter, workdir, attachments=None, layout=None,
+           letter=None):
     """Write every section document, compile the PDF binder and the Word master.
 
     `sections` maps section key → {'blocks': [...]} for authored/evidence/not-applicable sections;
     an entry may carry a reviewer `title`, and for cover/letter/compliance `override: True` replaces
     the generated page with its blocks. `attachments` maps an evidence section key → local files
-    enclosed as that section. `layout` holds reviewer header/footer lines.
+    enclosed as that section. `layout` holds reviewer header/footer lines. `letter` ({'pdf', 'docx'}
+    local paths) is the issued covering letter (the latest EOI from the Correspondence folder); when
+    given it is the letter page instead of the template letter, unless a reviewer override applies.
     Returns {'pdf', 'docx', 'section_pages', 'findings', 'generated', 'layout'}.
     """
     from .binder import build_binder
@@ -535,8 +659,13 @@ def render(config, facts, sections, requirements, traceability, converter, workd
         key, kind = section['key'], section['kind']
         path = workdir / 'sections' / f'{len(files) + 1:02d}-{key}.docx'
         if kind in GENERATED_KINDS:
-            generated_blocks[key] = (cover_blocks(facts) if kind == 'cover' else letter_blocks(config, facts) if kind == 'letter'
-                              else compliance_content(requirements, traceability, labels)['blocks'])
+            generated_blocks[key] = (cover_blocks(facts) if kind == 'cover' else compliance_content(
+                requirements, traceability, labels)['blocks'] if kind == 'compliance' else
+                letter_file_blocks(letter['docx']) if letter and letter.get('docx') else letter_blocks(config, facts))
+        if kind == 'letter' and letter and not (sections.get(key) or {}).get('override'):
+            # The issued letter keeps its own look: its PDF in the binder, its DOCX in the Word file.
+            files[key] = [letter.get('pdf') or letter['docx']]
+            continue
         if kind in GENERATED_KINDS and (sections.get(key) or {}).get('override'):
             files[key] = section_document(config, section, sections[key], facts['quote_ref'], path)
         elif kind == 'cover':
@@ -548,12 +677,24 @@ def render(config, facts, sections, requirements, traceability, converter, workd
                                           facts['quote_ref'], path)
         elif kind == 'evidence' and (attachments or {}).get(key):
             files[key] = list(attachments[key])
+        elif kind == 'authored' and (attachments or {}).get(key) and section.get('evidence_mode') == 'replace':
+            files[key] = list(attachments[key])     # e.g. the signed qualification statement
+        elif kind == 'authored' and (attachments or {}).get(key):
+            # Drafted text first, then the documents the reviewer enclosed.
+            files[key] = [_paged_section_document(config, section, sections.get(key) or {}, facts['quote_ref'], path,
+                                                  converter), *attachments[key]]
         elif kind in ('authored', 'evidence', 'not_applicable'):
-            files[key] = section_document(config, section, sections.get(key) or {}, facts['quote_ref'], path)
+            files[key] = _paged_section_document(config, section, sections.get(key) or {}, facts['quote_ref'], path,
+                                                 converter)
     config['_title'] = f"{facts['quote_ref']} Technical Proposal Rev {facts['revision']}"
     plan = build_plan(config, files)
     pdf = workdir / 'proposal.pdf'
     page_map = build_binder(plan, config, converter, workdir, pdf, findings)
+    if letter and letter.get('pdf') and letter.get('docx'):
+        for entry in plan:
+            for component in entry['components']:
+                if any(row['path'] == str(Path(letter['pdf'])) for row in component['files']):
+                    component['files'] = [_row(Path(letter['docx']), entry['key'])]
     docx = workdir / 'proposal.docx'
     build_master(plan, config, {'facts': {'quote_ref': {'value': facts['quote_ref']}}}, {}, [], docx, findings,
                  annex_index=False)
