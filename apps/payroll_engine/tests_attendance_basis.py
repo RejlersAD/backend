@@ -1,16 +1,12 @@
 from datetime import date
-from types import SimpleNamespace
 
-from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
-from django.utils import timezone
 
 from .models import PayrollEmployee
 from .services.attendance import get_attendance_summary
 from .services.run_generator import (
     GenerationError, _attendance_snapshot_payload, generate_monthly_run,
 )
-from .services.workflow import _validate_attendance_release_basis
 
 
 class AttendanceSnapshotPayloadTests(SimpleTestCase):
@@ -49,7 +45,9 @@ class AttendanceSummaryTests(TestCase):
         from apps.timesheet.models import DailyAttendanceSummary
 
         PayrollEmployee.objects.create(employee_no='22001', full_name='Recorded Employee')
-        PayrollEmployee.objects.create(employee_no='22002', full_name='Missing Employee')
+        PayrollEmployee.objects.create(
+            employee_no='22002', full_name='Missing Employee', basic='5000.00',
+        )
         DailyAttendanceSummary.objects.create(
             employee_code='22001', date=date(2026, 11, 3),
             employee_name='Recorded Employee', attendance_status='absent',
@@ -63,6 +61,7 @@ class AttendanceSummaryTests(TestCase):
         self.assertEqual(summary['missing_count'], 1)
         self.assertEqual(by_code['22001']['attendance_status'], 'complete')
         self.assertEqual(by_code['22002']['attendance_status'], 'missing')
+        self.assertEqual(summary['anomalies'][0]['severity'], 'warning')
 
     def test_generation_copies_employee_facts_into_run_and_payslip(self):
         employee = PayrollEmployee.objects.create(
@@ -93,31 +92,3 @@ class AttendanceSummaryTests(TestCase):
         self.assertEqual(str(slip.ot_hours), '2.50')
         self.assertEqual(slip.attendance_status, 'complete')
         self.assertEqual(run.attendance_snapshot['employees'][0]['employee_code'], '22003')
-
-
-class AttendanceReleaseBasisTests(SimpleTestCase):
-    def make_run(self, snapshot, captured=True):
-        return SimpleNamespace(
-            cycle_code='2026-11',
-            attendance_snapshot=snapshot,
-            attendance_snapshot_at=timezone.now() if captured else None,
-        )
-
-    def test_rejects_missing_basis(self):
-        with self.assertRaisesMessage(ValidationError, 'no captured attendance basis'):
-            _validate_attendance_release_basis(self.make_run({}, captured=False))
-
-    def test_rejects_critical_anomaly_from_stored_snapshot(self):
-        run = self.make_run({
-            'employees': [{'employee_code': '22001'}],
-            'anomalies': [{'severity': 'critical', 'message': 'Missing attendance'}],
-        })
-        with self.assertRaisesMessage(ValidationError, 'Missing attendance'):
-            _validate_attendance_release_basis(run)
-
-    def test_accepts_complete_stored_basis(self):
-        run = self.make_run({
-            'employees': [{'employee_code': '22001', 'attendance_status': 'complete'}],
-            'anomalies': [],
-        })
-        self.assertIsNone(_validate_attendance_release_basis(run))

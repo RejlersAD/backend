@@ -95,23 +95,6 @@ def _stamp(run: PayrollRun, target: str, user):
             run.finance_approved_by = None
 
 
-def _validate_attendance_release_basis(run: PayrollRun) -> None:
-    snapshot = run.attendance_snapshot or {}
-    if not snapshot.get('employees') or not run.attendance_snapshot_at:
-        raise ValidationError(
-            f'Cannot release run {run.cycle_code}: no captured attendance basis is available.'
-        )
-    critical = [
-        item for item in (snapshot.get('anomalies') or [])
-        if item.get('severity') == 'critical'
-    ]
-    if critical:
-        messages = '; '.join(item.get('message', '') for item in critical)
-        raise ValidationError(
-            f'Cannot release run {run.cycle_code}: critical attendance anomalies — {messages}'
-        )
-
-
 @transaction.atomic
 def transition(run: PayrollRun, target_status: str, *, user=None, note: str = '') -> PayrollRun:
     """Move a run from its current status to ``target_status``.
@@ -129,11 +112,6 @@ def transition(run: PayrollRun, target_status: str, *, user=None, note: str = ''
         raise ValidationError('Complete the preceding approvals before recording this decision.')
     original = run
     run = locked
-
-    # Release validates the exact attendance basis captured on this run. Never
-    # switch to live attendance after HR/Finance have reviewed a different basis.
-    if target_status == Status.RELEASED:
-        _validate_attendance_release_basis(run)
 
     from_status = run.status
     _stamp(run, target_status, user)

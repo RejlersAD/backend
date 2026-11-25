@@ -182,8 +182,8 @@ class PayrollRun(models.Model):
 
     # ════════════════════════════════════════════════════════════════════
     # Attendance snapshot — auditable basis captured for this Draft run.
-    # Draft regeneration may replace it; approvals and release validate the
-    # stored basis rather than switching to live attendance.
+    # Draft regeneration may replace it. Attendance anomalies are advisory
+    # review warnings and do not block workflow transitions.
     # ════════════════════════════════════════════════════════════════════
     attendance_snapshot = models.JSONField(
         default=dict, blank=True,

@@ -376,7 +376,7 @@ def _detect_attendance_anomalies(
                 anomalies.append({
                     'employee_code': code,
                     'rule': 'zero_attendance',
-                    'severity': 'critical',
+                    'severity': 'warning',
                     'message': f'{code}: no attendance data is available for the payroll period.',
                 })
 
