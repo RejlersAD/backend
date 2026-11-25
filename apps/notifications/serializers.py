@@ -41,6 +41,11 @@ class NotificationActionSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data['action_url'] = notification_action_url(instance)
+        # Inbox pages must remain a bounded read. Live approval validation can
+        # traverse several workflow tables per row, so the list endpoint skips
+        # it; detail and delivery paths still validate before an action is used.
+        if not self.context.get('validate_actions', True):
+            return data
         reason = approval_assignment_issue(instance)
         if reason:
             metadata = data.get('metadata')

@@ -70,7 +70,13 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
         """Return only the current user's notifications using the recipient index."""
         queryset = Notification.objects.filter(
             recipient_id=self.request.user.id,
-        ).select_related('category', 'recipient', 'recipient__rbac_profile', 'sender')
+        )
+        if self.action == 'list':
+            queryset = queryset.select_related('category')
+        else:
+            queryset = queryset.select_related(
+                'category', 'recipient', 'recipient__rbac_profile', 'sender',
+            )
 
         status_filter = self.request.query_params.get('status')
         if status_filter == 'unread':
@@ -92,6 +98,12 @@ class NotificationViewSet(PersonalDataMixin, mixins.ListModelMixin, mixins.Retri
             )
 
         return queryset.order_by('-created_at')
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if self.action == 'list':
+            context['validate_actions'] = False
+        return context
 
     def get_serializer_class(self):
         if self.action == 'list':
