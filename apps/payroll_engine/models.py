@@ -180,6 +180,27 @@ class PayrollRun(models.Model):
         help_text='Official public holidays in this payroll month (auto-computed from PH register at generation).',
     )
 
+    # ════════════════════════════════════════════════════════════════════
+    # Attendance snapshot — auditable basis captured for this Draft run.
+    # Draft regeneration may replace it; approvals and release validate the
+    # stored basis rather than switching to live attendance.
+    # ════════════════════════════════════════════════════════════════════
+    attendance_snapshot = models.JSONField(
+        default=dict, blank=True,
+        help_text='Per-employee attendance facts captured for this run '
+                  '(present_days, absent_days, ot_hours, status, '
+                  'last_synced_at).',
+    )
+    attendance_snapshot_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the attendance snapshot was captured for this run.',
+    )
+    attendance_complete_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+        help_text='% of active employees with complete attendance data for '
+                  'this run month (0-100).',
+    )
+
     # Timestamps for each transition
     generated_at = models.DateTimeField(null=True, blank=True)
     hr_approved_at = models.DateTimeField(null=True, blank=True)
@@ -249,6 +270,29 @@ class Payslip(models.Model):
     # Live work-days derived from hours (hours ÷ HOURS_PER_WORKDAY).
     # Recomputed whenever ``hours`` changes via the calculator service.
     days = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal('0.00'))
+
+    # ════════════════════════════════════════════════════════════════════
+    # Attendance facts — captured input for payroll review and release control.
+    # Populated from the immutable attendance snapshot at generation time.
+    # ════════════════════════════════════════════════════════════════════
+    present_days = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal('0.00'),
+        help_text='Days present (biometric + approved WFH + site visits) '
+                  'from the attendance snapshot.',
+    )
+    absent_days = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal('0.00'),
+        help_text='Days absent from the attendance snapshot.',
+    )
+    ot_hours = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal('0.00'),
+        help_text='Overtime hours from the attendance snapshot.',
+    )
+    attendance_status = models.CharField(
+        max_length=16, default='missing', db_index=True,
+        help_text='complete / partial / missing — whether attendance data '
+                  'exists for this employee in the snapshot.',
+    )
 
     # Leave days sourced from the Leave module (apps.payroll.LeaveRequest) for
     # the payroll month.  Populated at run generation from approved leave requests

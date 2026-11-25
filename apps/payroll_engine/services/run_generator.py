@@ -10,6 +10,7 @@ by services.excel_import.import_adjustments) which is also materialised
 on the next call to refresh_run_from_adjustments.
 """
 from __future__ import annotations
+from decimal import Decimal
 from typing import Optional
 
 from django.db import transaction
@@ -29,6 +30,36 @@ from .calculator import recompute_payslip_totals, recompute_run_totals
 
 class GenerationError(Exception):
     """Raised when a run can't be generated (e.g. already exists)."""
+
+
+def _attendance_snapshot_payload(summary: dict, year: int, month: int) -> dict:
+    """Keep the auditable payroll facts while excluding punch-level detail."""
+    if int(summary.get('year') or 0) != int(year) or int(summary.get('month') or 0) != int(month):
+        raise GenerationError('Attendance snapshot period does not match the payroll run period.')
+    employees = [{
+        'employee_code': str(item.get('employee_code') or '').strip(),
+        'full_name': item.get('full_name') or '',
+        'department': item.get('department') or '',
+        'present_days': str(item.get('present_days') or '0.00'),
+        'absent_days': str(item.get('absent_days') or '0.00'),
+        'ot_hours': str(item.get('ot_hours') or '0.00'),
+        'attendance_status': item.get('attendance_status') or 'missing',
+        'open_shift': bool(item.get('open_shift')),
+    } for item in (summary.get('employees') or []) if item.get('employee_code')]
+    return {
+        'year': int(year),
+        'month': int(month),
+        'last_synced_at': summary.get('last_synced_at'),
+        'last_event_time': summary.get('last_event_time'),
+        'employee_count': summary.get('employee_count', len(employees)),
+        'complete_count': summary.get('complete_count', 0),
+        'partial_count': summary.get('partial_count', 0),
+        'missing_count': summary.get('missing_count', 0),
+        'attendance_complete_pct': str(summary.get('attendance_complete_pct') or '0.00'),
+        'employees': employees,
+        'anomalies': list(summary.get('anomalies') or []),
+        'captured_at': timezone.now().isoformat(),
+    }
 
 
 def _validate_unique_active_identities() -> None:
@@ -70,13 +101,20 @@ def generate_monthly_run(
     note: str = '',
     working_days: Optional[int] = None,
     source_type: str = 'system',
+    attendance_snapshot: Optional[dict] = None,
 ) -> PayrollRun:
     """Create a Draft PayrollRun for (year, month) with one Payslip per
     active PayrollEmployee. Apply any pending PayrollAdjustments.
 
+    When ``attendance_snapshot`` is provided it is stored on the Draft run
+    and used to populate each Payslip's attendance fields
+    (present_days, absent_days, ot_hours, attendance_status).
+
     Args:
         working_days: Total working days for this month (HR-supplied).
                       Defaults to catalog.DEFAULT_WORKING_DAYS_PER_MONTH (22).
+        attendance_snapshot: Payroll-ready attendance facts from
+            ``services.attendance.get_attendance_summary()``.
 
     If a run for the period already exists:
       - ``overwrite=False`` (default) → raises GenerationError
@@ -110,7 +148,34 @@ def generate_monthly_run(
         run.notes = note or run.notes
         run.working_days_in_month = effective_working_days
         run.source_type = source_type
-    else:
+    # Capture the auditable attendance basis. Draft regeneration may replace
+    # it; approved/released runs cannot be overwritten by this service.
+    snapshot_payload = None
+    if attendance_snapshot is not None:
+        snapshot_payload = _attendance_snapshot_payload(attendance_snapshot, year, month)
+    elif existing and existing.attendance_snapshot:
+        snapshot_payload = existing.attendance_snapshot
+
+    if snapshot_payload is None:
+        # Internal callers that do not supply a snapshot still receive a
+        # server-captured basis. Source failures abort the transaction.
+        try:
+            from .attendance import get_attendance_summary
+            snapshot_payload = _attendance_snapshot_payload(
+                get_attendance_summary(year, month), year, month,
+            )
+        except GenerationError:
+            raise
+        except Exception as exc:
+            raise GenerationError('Attendance snapshot could not be captured.') from exc
+
+    # Index snapshot employees by employee_code for payslip lookup
+    snapshot_by_code = {
+        str(e.get('employee_code') or '').strip(): e
+        for e in snapshot_payload.get('employees', [])
+    }
+
+    if not existing:
         run = PayrollRun.objects.create(
             year=year,
             month=month,
@@ -120,6 +185,24 @@ def generate_monthly_run(
             notes=note,
             working_days_in_month=effective_working_days,
             source_type=source_type,
+            attendance_snapshot=snapshot_payload,
+            attendance_snapshot_at=timezone.now(),
+            attendance_complete_pct=(
+                Decimal(str(snapshot_payload.get('attendance_complete_pct') or '0'))
+                if snapshot_payload.get('attendance_complete_pct') is not None
+                else Decimal('0')
+            ),
+        )
+    else:
+        run.notes = note or run.notes
+        run.working_days_in_month = effective_working_days
+        run.source_type = source_type
+        run.attendance_snapshot = snapshot_payload
+        run.attendance_snapshot_at = timezone.now()
+        run.attendance_complete_pct = (
+            Decimal(str(snapshot_payload.get('attendance_complete_pct') or '0'))
+            if snapshot_payload.get('attendance_complete_pct') is not None
+            else Decimal('0')
         )
 
     # Auto-compute public holidays for this month from the PH register.
@@ -183,6 +266,16 @@ def generate_monthly_run(
         from decimal import Decimal as _D
         _emp_leave = leave_lookup.get(str(emp.employee_no).strip(), {})
 
+        # ── Attendance facts from the immutable snapshot ─────────────────────
+        # Attendance is the key input to payroll. Each payslip records the
+        # present/absent/ot days/hours from the snapshot so the calculation
+        # basis is auditable and reproducible.
+        _snap = snapshot_by_code.get(str(emp.employee_no).strip(), {})
+        _present = Decimal(str(_snap.get('present_days') or '0.00'))
+        _absent = Decimal(str(_snap.get('absent_days') or '0.00'))
+        _ot = Decimal(str(_snap.get('ot_hours') or '0.00'))
+        _att_status = _snap.get('attendance_status') or 'missing'
+
         slip = Payslip(
             run=run,
             employee=emp,
@@ -197,7 +290,11 @@ def generate_monthly_run(
             snapshot_designation=emp.designation,
             snapshot_iban=emp.iban,
             snapshot_joining_date=emp.joining_date,
-        annual_leave_days=_emp_leave.get('annual_leave_days', _D('0.00')),
+            present_days=_present,
+            absent_days=_absent,
+            ot_hours=_ot,
+            attendance_status=_att_status,
+            annual_leave_days=_emp_leave.get('annual_leave_days', _D('0.00')),
             unpaid_leave_days=_emp_leave.get('unpaid_leave_days', _D('0.00')),
             # Seed public holiday days from the run-level count; HR can override per payslip
             public_holiday_days=_D(str(run.public_holidays_in_month)),
