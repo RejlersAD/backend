@@ -412,9 +412,15 @@ def proposal_facts(quote, pool, config, version):
 
 # --- full proposal --------------------------------------------------------------------------
 
-EDITABLE_KINDS = ('authored', 'not_applicable')
+EDITABLE_KINDS = ('authored', 'not_applicable', 'cover', 'letter', 'compliance')
+GENERATED_KINDS = ('cover', 'letter', 'compliance')
 MAX_EDIT_BLOCKS = 400
+MAX_RUNS = 400
 _MARKUP = re.compile(r'<\s*[a-zA-Z/!?]')
+_FONT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 \-]{0,62}$')
+_COLOR = re.compile(r'^#[0-9A-Fa-f]{6}$')
+_ALIGN = ('left', 'center', 'right', 'justify')
+_RUN_KEYS = {'text', 'bold', 'italic', 'underline', 'strike', 'font', 'size', 'color', 'highlight'}
 
 
 def _edit_text(value, field, limit, required=True):
@@ -430,13 +436,85 @@ def _edit_text(value, field, limit, required=True):
     return text
 
 
-def validate_section_blocks(original, edited):
+def _number(value, low, high, field):
+    if type(value) not in (int, float) or value != value or not low <= value <= high:
+        raise ValidationError({'blocks': f'{field} must be a number between {low} and {high}.'})
+    return round(float(value), 1)
+
+
+def _edit_runs(value, text, field, limit, required=True):
+    """Character formatting of one text: returns (plain text, runs or None).
+
+    The plain text is the runs joined and trimmed; runs without formatting are dropped so plain
+    blocks stay plain. Fonts, sizes and colours are whitelisted shapes, never markup."""
+    if value is None:
+        return _edit_text(text if text is not None else '', field, limit, required), None
+    if not isinstance(value, list) or not value or len(value) > MAX_RUNS:
+        raise ValidationError({'blocks': f'{field}: provide between 1 and {MAX_RUNS} formatted runs.'})
+    runs = []
+    for run in value:
+        if not isinstance(run, dict) or not isinstance(run.get('text'), str) or set(run) - _RUN_KEYS:
+            raise ValidationError({'blocks': f'{field}: a formatted run is invalid.'})
+        item = {'text': run['text']}
+        for flag in ('bold', 'italic', 'underline', 'strike'):
+            if run.get(flag) is True:
+                item[flag] = True
+        if run.get('font') is not None:
+            if not isinstance(run['font'], str) or not _FONT.match(run['font']):
+                raise ValidationError({'blocks': f'{field}: the font name is invalid.'})
+            item['font'] = run['font']
+        if run.get('size') is not None:
+            item['size'] = _number(run['size'], 6, 72, f'{field} font size')
+        for name in ('color', 'highlight'):
+            if run.get(name) is not None:
+                if not isinstance(run[name], str) or not _COLOR.match(run[name]):
+                    raise ValidationError({'blocks': f'{field}: colours are #RRGGBB values.'})
+                item[name] = run[name].upper()
+        if runs and {k: v for k, v in runs[-1].items() if k != 'text'} == {k: v for k, v in item.items() if k != 'text'}:
+            runs[-1]['text'] += item['text']
+        else:
+            runs.append(item)
+    runs[0]['text'] = runs[0]['text'].lstrip()
+    runs[-1]['text'] = runs[-1]['text'].rstrip()
+    runs = [run for run in runs if run['text']]
+    plain = _edit_text(''.join(run['text'] for run in runs), field, limit, required)
+    return plain, (runs if any(len(run) > 1 for run in runs) else None)
+
+
+def _paragraph_format(block, record, field):
+    align = block.get('align')
+    if align is not None:
+        if align not in _ALIGN:
+            raise ValidationError({'blocks': f'{field}: alignment is left, center, right or justify.'})
+        record['align'] = align
+    indent = block.get('indent')
+    if indent is not None:
+        if not isinstance(indent, dict) or set(indent) - {'left', 'first'}:
+            raise ValidationError({'blocks': f'{field}: indent has left and first values in points.'})
+        left = _number(indent.get('left', 0), 0, 288, f'{field} left indent')
+        first = _number(indent.get('first', 0), -144, 288, f'{field} first-line indent')
+        if left or first:
+            record['indent'] = {'left': left, 'first': first}
+
+
+def _runs_list(value, count, field):
+    if value is None:
+        return [None] * count
+    if not isinstance(value, list) or len(value) != count:
+        raise ValidationError({'blocks': f'{field}: formatting must match the number of entries.'})
+    return value
+
+
+def validate_section_blocks(original, edited, generated=False):
     """A reviewer's edit of one section, made safe to render.
 
     Each edited block may name the original block it came from (`ref`, its index). A block that
     keeps its origin keeps that origin's tender citations: the reviewer reworded sourced content.
     New blocks carry no citations and are marked as reviewer-written. Part headings (the fixed
-    method-statement chapters) cannot be renamed, removed or reordered.
+    method-statement chapters) cannot be renamed, removed or reordered. Optional formatting
+    (runs, alignment, indents, list markers and levels, table header and cell formatting) is
+    validated here and reproduced by the renderer. `generated` sections (cover, letter,
+    compliance) have no tender citations.
     """
     if not isinstance(edited, list) or not edited or len(edited) > MAX_EDIT_BLOCKS:
         raise ValidationError({'blocks': f'Provide between 1 and {MAX_EDIT_BLOCKS} blocks.'})
@@ -457,31 +535,75 @@ def validate_section_blocks(original, edited):
         label = f'Block {position}'
         record = {'type': kind}
         if kind == 'heading':
-            record['text'] = _edit_text(block.get('text'), label, 200)
-            record['level'] = 3 if block.get('level') == 3 else 2
+            record['text'], runs = _edit_runs(block.get('runs'), block.get('text'), label, 200)
+            record['level'] = block.get('level') if block.get('level') in (1, 2, 3) else 2
         elif kind == 'paragraph':
-            record['text'] = _edit_text(block.get('text'), label, 4000)
+            record['text'], runs = _edit_runs(block.get('runs'), block.get('text'), label, 4000)
         elif kind == 'bullets':
             items = block.get('items')
             if not isinstance(items, list) or not items or len(items) > 100:
                 raise ValidationError({'blocks': f'{label}: provide between 1 and 100 bullet items.'})
-            record['text'] = _edit_text(block.get('text') or '', f'{label} introduction', 4000, required=False)
-            record['items'] = [_edit_text(item, f'{label} item', 1000) for item in items]
+            record['text'], runs = _edit_runs(block.get('runs'), block.get('text') or '', f'{label} introduction', 4000, required=False)
+            item_runs = _runs_list(block.get('item_runs'), len(items), f'{label} items')
+            pairs = [_edit_runs(item_runs[i], item, f'{label} item', 1000) for i, item in enumerate(items)]
+            record['items'] = [plain for plain, _ in pairs]
+            if any(formatted for _, formatted in pairs):
+                record['item_runs'] = [formatted for _, formatted in pairs]
+            markers = block.get('markers')
+            if markers is not None:
+                if not isinstance(markers, list) or len(markers) != len(items) or set(markers) - {'bullet', 'number'}:
+                    raise ValidationError({'blocks': f'{label}: list markers are bullet or number, one per item.'})
+                if 'number' in markers:
+                    record['markers'] = list(markers)
+            levels = block.get('levels')
+            if levels is not None:
+                if not isinstance(levels, list) or len(levels) != len(items) or any(level not in (0, 1, 2) for level in levels):
+                    raise ValidationError({'blocks': f'{label}: list levels are 0, 1 or 2, one per item.'})
+                if any(levels):
+                    record['levels'] = list(levels)
         else:
             columns, rows = block.get('columns'), block.get('rows')
+            header = block.get('header', True) is not False
             if not isinstance(columns, list) or not 1 <= len(columns) <= 8:
                 raise ValidationError({'blocks': f'{label}: a table has 1 to 8 columns.'})
             if not isinstance(rows, list) or not 1 <= len(rows) <= 300:
                 raise ValidationError({'blocks': f'{label}: a table has 1 to 300 rows.'})
-            record['text'] = _edit_text(block.get('text') or '', f'{label} introduction', 4000, required=False)
-            record['columns'] = [_edit_text(value, f'{label} column', 120) for value in columns]
-            record['rows'] = []
-            for row in rows:
+            record['text'], runs = _edit_runs(block.get('runs'), block.get('text') or '', f'{label} introduction', 4000, required=False)
+            column_runs = _runs_list(block.get('column_runs'), len(columns), f'{label} columns')
+            pairs = [_edit_runs(column_runs[i], value, f'{label} column', 120, required=header)
+                     for i, value in enumerate(columns)]
+            record['columns'] = [plain for plain, _ in pairs]
+            if header and any(formatted for _, formatted in pairs):
+                record['column_runs'] = [formatted for _, formatted in pairs]
+            if not header:
+                record['header'] = False
+            cell_runs = block.get('cell_runs') or {}
+            if not isinstance(cell_runs, dict) or len(cell_runs) > 2400:
+                raise ValidationError({'blocks': f'{label}: cell formatting is invalid.'})
+            record['rows'], formatted_cells = [], {}
+            for row_index, row in enumerate(rows):
                 if not isinstance(row, list) or len(row) > len(columns):
                     raise ValidationError({'blocks': f'{label}: each row has at most one cell per column.'})
-                record['rows'].append([_edit_text(cell, f'{label} cell', 600, required=False) for cell in row])
+                cells = []
+                for column, cell in enumerate(row):
+                    key = f'{row_index}:{column}'
+                    plain, formatted = _edit_runs(cell_runs.get(key), cell, f'{label} cell', 600, required=False)
+                    cells.append(plain)
+                    if formatted:
+                        formatted_cells[key] = formatted
+                record['rows'].append(cells)
+            unknown = set(cell_runs) - {f'{r}:{c}' for r, row in enumerate(rows) for c in range(len(row))}
+            if unknown:
+                raise ValidationError({'blocks': f'{label}: cell formatting refers to a missing cell.'})
+            if formatted_cells:
+                record['cell_runs'] = formatted_cells
+        if runs:
+            record['runs'] = runs
+        _paragraph_format(block, record, label)
         if kind != 'heading':
-            if source is not None:
+            if generated:
+                record['citations'], record['source'] = [], 'reviewer'
+            elif source is not None:
                 record['citations'] = list(source.get('citations') or [])
                 if source.get('source'):
                     record['source'] = source['source']
@@ -492,6 +614,23 @@ def validate_section_blocks(original, edited):
     if parts(blocks) != parts(original):
         raise ValidationError({'blocks': 'Chapter headings must stay in their original order.'})
     return blocks
+
+
+def validate_layout(defaults, layout):
+    """Reviewer header/footer lines: same number of lines as the template, plain text."""
+    if not isinstance(layout, dict) or set(layout) - {'header_lines', 'footer_lines'}:
+        raise ValidationError({'layout': 'Provide header_lines and footer_lines.'})
+    clean = {}
+    for name in ('header_lines', 'footer_lines'):
+        lines = layout.get(name, defaults.get(name) or [])
+        if not isinstance(lines, list) or len(lines) != len(defaults.get(name) or []):
+            raise ValidationError({'layout': f'{name} must keep {len(defaults.get(name) or [])} lines.'})
+        clean[name] = [_edit_text(line, f'{name} line', 200, required=False) for line in lines]
+    return clean
+
+
+def validate_title(value):
+    return _edit_text(value, 'Section title', 200)
 
 
 def paragraph_records(section_key, blocks, requirement_ids):

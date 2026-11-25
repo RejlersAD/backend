@@ -15,6 +15,8 @@ _TOP_LEVEL_FIELDS = {
     'evidence_registry', 'publication_validation', 'sections', 'document_registry',
     'amendments', 'requirements_included', 'requirements_truncated',
     'build_meta', 'build_findings', 'build_inventory',
+    # Reviewer header/footer lines (effective, and the reviewer's override) for the rendered pages.
+    'layout', 'layout_override',
 }
 
 
