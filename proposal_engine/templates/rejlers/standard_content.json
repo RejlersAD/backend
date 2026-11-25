@@ -1206,6 +1206,48 @@
    "chapter": "DOCUMENT AND DATA MANAGEMENT PLAN",
    "section": "",
    "text": "Upon completion and approval of all amendments to the Tender Documents shall be submitted to COMPANY"
+  },
+  {
+   "id": "STD-APX-1",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "",
+   "text": "The execution approach below shows how the SERVICES move from contract award to close-out, with COMPANY review and approval at each stage."
+  },
+  {
+   "id": "STD-APX-2",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "Early phase – contract award and mobilisation",
+   "text": "Contract signed; kick-off meeting (safety moment, common project objectives, project scope, schedule, milestones, initial data received and further data requirements, project organisation, project team working methods, reporting and communication matrix) with agenda and minutes of meeting; mobilisation of the team; planning package preparation and COMPANY approval; project execution and quality plan preparation and COMPANY approval."
+  },
+  {
+   "id": "STD-APX-3",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "Doing phase – data acquisition and site visit",
+   "text": "Data acquisition, existing data and native files; site visit after LOA and CNIA pass readiness; site visit report and COMPANY approval; review of all data received for the development works; interface with ongoing projects."
+  },
+  {
+   "id": "STD-APX-4",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "Doing phase – STUDY / FEED works and deliverables",
+   "text": "Project design basis; process works; HSE / loss prevention works; piping / pipeline works; civil / structural works; electrical works; mechanical works; instrumentation and control works; MTOs and BOQs for all disciplines; inputs such as HSE studies, NDT testing, topographical / underground survey report, OEM adequacy report, CP design and FIV."
+  },
+  {
+   "id": "STD-APX-5",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "Doing phase – cost estimate (ASSESS ±15%)",
+   "text": "Cost estimate methodology preparation and COMPANY approval; database for bulk items and local (UAE) construction and maintenance cost; cost of all long-lead items from vendors / OEMs; cost estimate preparation and submission."
+  },
+  {
+   "id": "STD-APX-6",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "COMPANY approval – engineering package",
+   "text": "Draft engineering package submission; COMPANY comments incorporated; final engineering package and COMPANY approval; STUDY / FEED dossier submission."
+  },
+  {
+   "id": "STD-APX-7",
+   "chapter": "APPENDIX I – EXECUTION OVERVIEW",
+   "section": "Closing phase – project close-out",
+   "text": "Project close-out report; EPC scope of work; implementation schedule Level II; ITB preparation; lessons learned and readiness for the next phase."
   }
  ]
 }

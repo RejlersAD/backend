@@ -46,6 +46,9 @@ letter:
 
 facts:
   rft_number: {pattern: '(?:RFT|Tender|Enquiry|Inquiry)\s*(?:No\.?|Number|Ref(?:erence)?\.?)\s*[:.#]?\s*\[?\s*([A-Z0-9/\-]*\d[A-Z0-9/\-]{4,})', label: Tender reference}
+  # The client as the tender itself names it (e.g. ADNOC Onshore); used on the cover, letter and
+  # definitions instead of the CRM client record when found. The most frequent mention wins.
+  company_name: {pattern: '\b(ADNOC[ \-](?:Onshore|Offshore|Gas Processing|Sour Gas|Refining|Drilling|Distribution|Logistics(?: & Services)?|Gas)|ADNOC)\b', label: Client named in the tender, mode: most_frequent}
   validity_days: {pattern: 'valid(?:ity)?[^.]{0,60}?\b(\d{2,3})\s*(?:\(\w[\w\s-]*\)\s*)?(?:calendar\s+)?days', label: Offer validity}
 
 author:
@@ -67,6 +70,9 @@ sections:
     title: Qualification Statement
     number: "1."
     kind: authored
+    # A signed qualification statement, once uploaded, replaces the drafted text.
+    evidence: [Signed and stamped qualification statement]
+    evidence_mode: replace
     parts:
       - key: statement
         heading: QUALIFICATION STATEMENT
@@ -88,6 +94,7 @@ sections:
     parent: technical_bid
     kind: authored
     numbered_headings: true
+    contents_title: PROJECT EXECUTION METHODOLOGY   # the section's own contents page, as in the baseline
     parts:
       - {key: definitions, heading: DEFINITIONS, guidance: "List the parties and terms as a definitions list: Company (the client), Engineering Contractor (Rejlers International Engineering Solutions AB), the tender/RFT reference, the project title and the services. Use only names and numbers found in the excerpts.",
          categories: [submission, technical], keywords: [company, contractor, project, rft, tender, services, scope of work]}
@@ -107,7 +114,7 @@ sections:
          guidance: "Design basis and guidelines, site visits and data collection, engineering deliverables preparation and checking, and engineering software, as the tender requires. Keep it under 450 words.",
          categories: [technical], keywords: [site visit, survey, data collection, design basis, codes, standards, software, deliverable, drawing]}
       - {key: project_control, heading: PROJECT CONTROL, standard: [EXECUTION OVERVIEW],
-         guidance: "Project control (planning, progress measurement and reporting), cost estimate preparation and procurement support required by the tender. Keep it under 450 words.",
+         guidance: "Project control as the tender requires it, with these sub-headings where the tender or the approved text supports them: 'Weekly progress report', 'Monthly progress report', 'Schedule', 'Change control', 'Project close-out report', 'Project control tools', 'Cost estimate' (cost breakdown structure, cost estimate preparation plan) and 'Contracts and procurement management'. Keep it under 600 words.",
          categories: [submission, commercial], keywords: [progress, report, schedule, planning, cost estimate, estimate, mto, boq, procurement, control]}
       - {key: communication, heading: COMMUNICATION & MANAGEMENT PLAN, standard: [COMMUNICATION & MANAGEMENT PLAN],
          guidance: "Communication strategy, focal points, means of communication, correspondence and meetings/reviews, aligned with the tender's requirements.",
@@ -121,17 +128,22 @@ sections:
       - {key: document_control, heading: DOCUMENT AND DATA MANAGEMENT PLAN, standard: [DOCUMENT AND DATA MANAGEMENT PLAN],
          guidance: "Document control, numbering, transmittals, review cycles (IFR/IFA/IFD as applicable) and data management, aligned to the tender.",
          categories: [submission, quality], keywords: [document, numbering, transmittal, review, ifr, ifa, ifd, native, edms, submission]}
-      - {key: deliverables, heading: LIST OF DELIVERABLES, mode: packages,
-         guidance: "Give one table block with columns 'No.', 'Deliverable' listing every deliverable the tender requires for this scope package, with a one-line introduction. Cite each row's source.",
+      - {key: appendix_execution, heading: "APPENDIX I – EXECUTION OVERVIEW", mode: fixed,
+         standard: ["APPENDIX I – EXECUTION OVERVIEW"], columns: [Phase, Activities and deliverables]}
+      - {key: deliverables, heading: "APPENDIX II – LIST OF DELIVERABLES", mode: packages,
+         guidance: "Give a one-line introduction and one table block with columns 'Sr. No', 'Deliverable Title', 'Remarks' listing every deliverable the tender requires for this scope package. Group the rows by discipline, in this order where the tender requires them: A. Process, B. HSE, C. Piping, D. Mechanical, E. Civil & Structural, F. Electrical, G. Instrumentation & Control, H. Cost estimate and others. A discipline row has only its letter in 'Sr. No' (for example 'A.') and the discipline in 'Deliverable Title', with 'Remarks' empty; deliverables are numbered from 1 within their discipline. 'Remarks' only states what the tender says about the deliverable (format, revision, approval), otherwise it is empty. Cite each row's source.",
          categories: [technical, submission], keywords: [deliverable, report, drawing, datasheet, specification, list, schedule, calculation, mto, boq]}
   - key: schedule
     title: Work Schedule
     number: "2.4"
     parent: technical_bid
     kind: authored
+    # The detailed schedule (e.g. a Primavera Gantt export) follows the milestone table.
+    evidence: [Detailed work schedule (Primavera / Gantt export)]
+    evidence_mode: append
     parts:
       - {key: schedule, heading: WORK SCHEDULE, mode: table,
-         guidance: "Explain the proposed schedule approach and give a table with columns 'Activity / milestone', 'Duration or date' using only durations, dates and milestones stated in the tender. Where the tender gives none, state that the detailed schedule will be issued at kick-off and list the milestones without dates.",
+         guidance: "Explain the proposed schedule approach and give a table with columns 'Activity / milestone', 'Duration or date' using only durations, dates and milestones stated in the tender. Where the tender gives none, state that the detailed schedule will be issued at kick-off and list the milestones without dates. A 'planning' excerpt is Rejlers' own planning project for this bid: use its duration and dates for the overall schedule and cite it.",
          categories: [submission, technical], keywords: [schedule, duration, weeks, months, days, milestone, completion, kick-off, start, deadline]}
   - {key: subcontractors, title: Proposed Subcontractors, number: "2.5", kind: evidence, parent: technical_bid,
      evidence: [Proposed subcontractors and specialist services]}
@@ -143,6 +155,7 @@ sections:
     # Reviewers may also enclose HSE documents (questionnaire response, policy, certificates,
     # statistics); they follow the drafted text in this section.
     evidence: [HSE documents (questionnaire response, policy, certificates, statistics)]
+    evidence_mode: append
     parts:
       - {key: hse_response, heading: SPECIFIC HSE REQUIREMENTS, standard: ["HEALTH, SAFETY AND ENVIRONMENT (HSE) PLAN"],
          guidance: "Respond to each specific HSE requirement in the tender (questionnaires, plans, certifications, statistics requested) stating how Rejlers complies. Note which HSE documents will be attached.",

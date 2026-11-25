@@ -28,6 +28,12 @@ def evidence_section_keys(cfg):
     return [section['key'] for section in cfg['sections'] if accepts_evidence(section)]
 
 
+def replacing_section_keys(cfg):
+    """Authored sections whose uploaded document replaces the drafted text (signed statements)."""
+    return [section['key'] for section in cfg['sections']
+            if accepts_evidence(section) and section.get('evidence_mode') == 'replace']
+
+
 def _evidence_section(section_key):
     from .proposal_engine_service import config
 

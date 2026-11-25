@@ -341,7 +341,8 @@ def analyze_technical_proposal_sources(payload, schema, *, instructions='', outp
                            system_instructions=(
         'You write one part of an engineering consultancy technical proposal for human review. '
         'Use only the supplied excerpts: kind "tender" is the client\'s tender text, kind "standard" '
-        'is approved company wording that you adapt to this tender. Every paragraph, bullet list and '
+        'is approved company wording that you adapt to this tender, kind "planning" is Rejlers\' own '
+        'planning data for this bid (duration, dates). Every paragraph, bullet list and '
         'table must list in "citations" the ids of the excerpts it relies on; statements without a '
         'supporting excerpt are not allowed. Never invent names, numbers, dates, durations, quantities, '
         'locations, experience, staff, certifications, prices or client commitments, and never copy '

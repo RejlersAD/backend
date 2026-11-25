@@ -79,6 +79,36 @@ def _selection(quote, actor):
     return selection, report, rows
 
 
+def planning_excerpt(quote, actor):
+    """The connected draft Planning project (Bid preparation) as a citable source, or (None, code).
+
+    Read through the existing preparation connection, so Planning access rules apply; awarded
+    portfolio projects are never created or changed here.
+    """
+    from .bid_preparation import _connection
+
+    try:
+        row, project = _connection(quote.deal, actor)
+    except PermissionDenied:
+        return None, 'PLANNING_NOT_ACCESSIBLE'
+    except Exception:   # a lineage conflict or a removed workspace must not stop the build
+        return None, 'PLANNING_NOT_ACCESSIBLE'
+    if not row or not project:
+        return None, 'PLANNING_NOT_CONNECTED'
+    duration = project.duration_months.normalize() if project.duration_months is not None else None
+    facts = [f'Planning project: {project.name}.']
+    for label, value in (('Phase', project.phase), ('Location', project.location),
+                         ('Planned duration', f'{duration} months' if duration else ''),
+                         ('Planned start', project.effective_date.isoformat() if project.effective_date else ''),
+                         ('Planned completion', project.planned_end_date.isoformat() if project.planned_end_date else ''),
+                         ('Scope summary', ' '.join((project.scope_summary or '').split())[:900])):
+        if value:
+            facts.append(f'{label}: {value}.')
+    return {'id': 'PLAN-1', 'kind': 'planning', 'source': f'Planning project: {project.name}',
+            'location': 'Bid preparation', 'text': ' '.join(facts), 'categories': ['submission', 'technical'],
+            'requirement': False, 'primary': True, 'name': project.name}, None
+
+
 def _tender(quote, actor, selection):
     from .technical_proposal_authoring import excerpt_pool, gather_tender, standard_pool
 
@@ -312,6 +342,10 @@ def _claim(job_id):
         return job
 
 
+class AIProviderUnavailable(Exception):
+    """Every AI drafting call of a build failed at the AI service (credential, credit, outage)."""
+
+
 def _finish(job, status, *, error_code='', summary=None, version=None):
     with transaction.atomic():
         updated = ProposalBuildJob.objects.filter(pk=job.pk, lease_token=job.lease_token).update(
@@ -353,6 +387,9 @@ def run_build_job(job_id):
         if review:
             content['build_findings'].append(review)
         version = _record_version(quote, actor, job, content)
+    except AIProviderUnavailable:
+        _finish(job, 'failed', error_code='ai_provider_unavailable')
+        return {'processed': True, 'status': 'failed'}
     except (PermissionDenied, ValidationError) as error:
         code = 'authority_changed' if isinstance(error, PermissionDenied) else 'invalid_selection'
         _finish(job, 'failed', error_code=code)
@@ -608,6 +645,17 @@ def _generate(quote, actor, job, report, selection):
     evidence = evidence_uploads(quote.deal, evidence_section_keys(cfg))
     issued_letter = covering_letter(quote.deal)
     drafted, findings, excerpts_used = {}, [], set()
+    ai_parts = ai_failed = 0
+    planning, planning_issue = planning_excerpt(quote, actor)
+    if planning:
+        pool.append(planning)   # its duration and dates feed the work schedule, with a citation
+        findings.append(finding('INFO', 'PLANNING_CONNECTED', f"Planning project used: {planning['name']}"))
+    else:
+        findings.append(finding('WARN', planning_issue, (
+            'No Planning project is connected to this opportunity; connect or create one under Preparation › '
+            'Planning workspace so the work schedule uses its duration and dates.') if planning_issue == 'PLANNING_NOT_CONNECTED'
+            else 'The connected Planning project could not be read with your access; the schedule uses the tender only.'))
+    latest_sections = {s['key']: s for s in (latest.content.get('sections') or [])} if same_template else {}
     letter_key = next((s['key'] for s in cfg['sections'] if s['kind'] == 'letter'), None)
     if issued_letter and letter_key:
         newest = max(issued_letter.values(), key=lambda upload: upload.created_at)
@@ -616,7 +664,7 @@ def _generate(quote, actor, job, report, selection):
     for section in cfg['sections']:
         if section['kind'] not in ('authored', 'evidence', 'not_applicable'):
             continue
-        if evidence.get(section['key']) and section['kind'] == 'authored':
+        if evidence.get(section['key']) and section['kind'] == 'authored' and section.get('evidence_mode') != 'replace':
             # Documents enclosed after the drafted text (e.g. HSE questionnaire response).
             names = ', '.join(upload.name for upload in evidence[section['key']])
             findings.append(finding('INFO', 'EVIDENCE_ATTACHED', f"{section['title']}: {names}") | {'section': section['key']})
@@ -633,13 +681,20 @@ def _generate(quote, actor, job, report, selection):
             excerpts_used |= {c for b in previous.get('blocks') or [] for c in b.get('citations') or []}
             continue
         outcome = draft_section(section, pool, standard, facts, cfg,
-                                reviewer_note=job.reason if section['key'] == job.section_key else '')
+                                reviewer_note=job.reason if section['key'] == job.section_key else '',
+                                previous_blocks=(latest_sections.get(section['key']) or {}).get('blocks'))
+        ai_parts += outcome.get('ai_parts', 0)
+        ai_failed += outcome.get('ai_failed', 0)
         drafted[section['key']] = {'blocks': outcome['blocks']}
         section_findings = outcome['findings']
         for item in section_findings:
             item.setdefault('section', section['key'])
         findings.extend(section_findings)
         excerpts_used |= outcome['cited']
+
+    if ai_parts and ai_failed == ai_parts:
+        # Every AI call failed: storing a version would replace the proposal with empty sections.
+        raise AIProviderUnavailable()
 
     # A requirement is addressed where a section cites it directly, or cites a tender excerpt
     # that contains the requirement's text.
@@ -662,6 +717,11 @@ def _generate(quote, actor, job, report, selection):
         findings.append(finding('WARN', 'REQUIREMENT_NOT_ADDRESSED',
                                 f'{unaddressed} of {len(requirement_ids)} tender requirements are not referenced '
                                 f'by any section; see the compliance matrix'))
+    if facts.get('client_record') and facts['client_record'].casefold() != facts['client'].casefold():
+        findings.append(finding('WARN', 'CLIENT_NAME_MISMATCH',
+                                f"The tender names the client {facts['client']}; the opportunity's client record is "
+                                f"{facts['client_record']}. The proposal uses the tender's name; correct the client "
+                                f"record if it is wrong."))
     if 'rft_number' not in facts:
         findings.append(finding('WARN', 'META_MISSING', 'Required fact `rft_number` could not be extracted'))
 

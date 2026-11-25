@@ -217,7 +217,28 @@ the Word file.
   - **Documents in authored sections:** an authored section whose config lists `evidence` (2.6 Specific
     HSE Requirements) also accepts uploads through `workspace/evidence/<key>/`. They follow the drafted
     text in the PDF; the text stays editable. The workspace version lists these keys in
-    `evidence_sections`.
+    `evidence_sections`. `evidence_mode: replace` (1. Qualification Statement: a signed statement)
+    makes the upload replace the drafted text and skips AI drafting; `append` (2.4 Work Schedule,
+    2.6 HSE) keeps the text first. Keys that replace are listed in `evidence_replaces`.
+  - **AI service failures:** a part the AI service cannot draft (`provider_*` errors, after one
+    retry for transient errors) keeps the latest version's text with a `PART_KEPT_FROM_PREVIOUS`
+    warning. When every AI call of a build fails, the job fails with `ai_provider_unavailable` and
+    no version is stored, so the current proposal is never replaced by empty sections.
+  - **Client name and scope packages:** the client is addressed as the tender names it (fact
+    `company_name`, most frequent mention, e.g. ADNOC Onshore); a different CRM client name raises
+    `CLIENT_NAME_MISMATCH`. When the tender files are organised per scope (`N. SOW - Pxxxxx/` folders
+    and stand-alone `TOR …` documents) the scope packages are exactly that register, in SOW order;
+    the AI only titles them, and each package is written from its own documents. Otherwise packages
+    the AI lists without a supporting excerpt are dropped (`SCOPE_PACKAGE_UNCONFIRMED`).
+  - **2.3 structure:** sections with `contents_title` and numbered headings start with their own
+    numbered contents page (page numbers found by rendering the section once). Appendix I
+    (execution overview) is fixed approved wording (`mode: fixed`, `STD-APX-*` in
+    `standard_content.json`, no AI). Appendix II lists deliverables per scope as
+    `Sr. No / Deliverable Title / Remarks`, grouped by discipline rows (bold).
+  - **Planning project:** when the opportunity has a Bid preparation connection (Preparation ›
+    Planning workspace), the draft Planning project's phase, location, duration and dates are a
+    citable `planning` excerpt (`PLAN-1`) for the work schedule (`PLANNING_CONNECTED`); otherwise
+    `PLANNING_NOT_CONNECTED`. Planning access rules apply; no portfolio project is created.
   - **Covering letter source:** when the opportunity's Correspondence folder (RADAI storage) holds an
     EOI letter (`<deal code>-eoi.pdf` / `.docx`), every build and edit uses its current version as the
     covering letter: the PDF goes into the proposal PDF, and the DOCX goes into the Word file and into
