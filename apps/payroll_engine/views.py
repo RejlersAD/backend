@@ -204,8 +204,10 @@ def engine_dashboard_summary(request):
         'currency':           CURRENCY,
         'year':               year,
         'month':              month,
-        'active_employees':   PayrollEmployee.objects.filter(is_active=True).count(),
-        'total_employees':    PayrollEmployee.objects.count(),
+        'active_employees':   PayrollEmployee.objects.filter(
+            is_active=True, employee_id__isnull=False,
+        ).count(),
+        'total_employees':    PayrollEmployee.objects.filter(employee_id__isnull=False).count(),
         'current_run': PayrollRunSerializer(current).data if current else None,
         'current_month_gross':       str(current.total_gross if current else Decimal('0')),
         'current_month_net':         str(current.total_net if current else Decimal('0')),
@@ -434,7 +436,9 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
         self._sync_to_draft_payslips(employee, serializer.validated_data)
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # The HR employee directory is authoritative. Payroll-only orphan
+        # records remain available in database history but are not roster rows.
+        qs = super().get_queryset().filter(employee_id__isnull=False)
         is_active = self.request.query_params.get('is_active')
         if is_active in ('true', '1'):
             qs = qs.filter(is_active=True)

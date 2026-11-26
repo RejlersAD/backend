@@ -64,7 +64,7 @@ def _attendance_snapshot_payload(summary: dict, year: int, month: int) -> dict:
 
 def _validate_unique_active_identities() -> None:
     """Refuse to materialise two payslips for one canonical person/account."""
-    active = PayrollEmployee.objects.filter(is_active=True)
+    active = PayrollEmployee.objects.filter(is_active=True, employee_id__isnull=False)
     duplicate_canonical = (
         active.filter(employee_id__isnull=False)
         .values('employee_id').annotate(total=Count('id')).filter(total__gt=1)
@@ -223,7 +223,9 @@ def generate_monthly_run(
 
     # Active employees only
     from apps.hr_core.organization import payroll_eligible
-    employees = payroll_eligible(PayrollEmployee.objects.filter(is_active=True)).order_by('full_name')
+    employees = payroll_eligible(
+        PayrollEmployee.objects.filter(is_active=True, employee_id__isnull=False)
+    ).order_by('full_name')
 
     # Pull live "Total Hours" from the biometric Time Sheet Summary.
     # Keyed by employee_code which matches PayrollEmployee.employee_no.

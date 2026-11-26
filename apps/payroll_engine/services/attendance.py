@@ -274,7 +274,9 @@ def get_attendance_summary(year: int, month: int) -> dict:
         from apps.hr_core.organization import payroll_eligible
         active_emps = {
             str(e.employee_no).strip(): e
-            for e in payroll_eligible(PayrollEmployee.objects.filter(is_active=True))
+            for e in payroll_eligible(PayrollEmployee.objects.filter(
+                is_active=True, employee_id__isnull=False,
+            ))
         }
     except Exception as exc:
         raise AttendanceUnavailable('Payroll-eligible employees could not be loaded.') from exc
