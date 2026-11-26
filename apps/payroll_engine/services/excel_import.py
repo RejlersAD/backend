@@ -104,17 +104,11 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
     # every roster import instead of creating disconnected payroll records.
     from apps.hr_core.identity import EmployeeIdentityService
     canonical_employee = EmployeeIdentityService.resolve(emp_no)
-    if canonical_employee:
-        owner = (PayrollEmployee.objects
-                 .filter(employee=canonical_employee, is_active=True)
-                 .exclude(employee_no=emp_no)
-                 .first())
-        if owner:
-            raise PayrollIdentityConflict(
-                f'Employee number {emp_no} resolves to {canonical_employee.employee_number}, '
-                f'which is already owned by active payroll record {owner.employee_no}. '
-                'Correct the import employee number before retrying.'
-            )
+    if not canonical_employee:
+        raise PayrollIdentityConflict(
+            f'Employee number {emp_no} does not exist in the Employee Directory. '
+            'Create or correct the canonical employee before importing payroll data.'
+        )
     defaults = {
         'full_name':         _normalise_str(row.get('full_name')),
         'mol_no':            _normalise_str(row.get('mol_no'), 32),
@@ -135,15 +129,23 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
         'default_payment_mode': catalog.normalise_payment_mode(row.get('payment_mode')),
         'is_active':         True,
     }
-    # Never erase a pre-existing manual link when an imported employee number
-    # has no RADAI match; only set the relation when the match is exact.
-    if canonical_employee:
-        defaults['employee'] = canonical_employee
-        if canonical_employee.user_id:
-            defaults['user'] = canonical_employee.user
-    employee, created = PayrollEmployee.objects.update_or_create(
-        employee_no=emp_no, defaults=defaults,
-    )
+    was_enabled = canonical_employee.payroll_enabled
+    field_map = {
+        'full_name': 'payroll_full_name', 'mol_no': 'payroll_mol_no',
+        'routing_code': 'payroll_routing_code', 'discipline': 'payroll_discipline',
+        'grade': 'payroll_grade', 'nationality_group': 'payroll_nationality_group',
+        'hours': 'payroll_hours', 'basic': 'payroll_basic', 'housing': 'payroll_housing',
+        'transport': 'payroll_transport', 'home_leave': 'payroll_home_leave',
+        'default_payment_mode': 'payroll_payment_mode', 'is_active': 'payroll_enabled',
+    }
+    for source, value in defaults.items():
+        target = field_map.get(source, source)
+        if source == 'joining_date':
+            target = 'join_date'
+        setattr(canonical_employee, target, value)
+    canonical_employee.save()
+    employee = PayrollEmployee.objects.get(pk=canonical_employee.pk)
+    created = not was_enabled
     if created:
         summary.employees_created += 1
     else:
@@ -174,7 +176,7 @@ def _materialise_adjustments(
             description = _normalise_str(row.get(detail_field), 255)
         label = description.split(' - ')[0].strip() if description else default_label
         PayrollAdjustment.objects.create(
-            employee=employee,
+            employee_id=employee.pk,
             target_year=target_year,
             target_month=target_month,
             kind=catalog.LineItemKind.EARNING,
@@ -192,7 +194,7 @@ def _materialise_adjustments(
         description = _normalise_str(row.get('deduction_details'), 255)
         label = description.split(' - ')[0].strip() if description else 'Deduction'
         PayrollAdjustment.objects.create(
-            employee=employee,
+            employee_id=employee.pk,
             target_year=target_year,
             target_month=target_month,
             kind=catalog.LineItemKind.DEDUCTION,

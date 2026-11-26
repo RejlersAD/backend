@@ -8,8 +8,9 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from apps.hr_core.models import EmployeeMaster
 from apps.payroll_engine import catalog
-from apps.payroll_engine.models import PayrollEmployee, PayrollRun, Payslip
+from apps.payroll_engine.models import PayrollRun, Payslip
 
 BASE = '/api/v1/payroll-engine/payslips/'
 
@@ -19,8 +20,8 @@ class PayslipSelfServiceTests(TestCase):
         users = get_user_model().objects
         self.me = users.create_user(username='employee-me', email='employee-me@example.test')
         self.colleague = users.create_user(username='employee-other', email='employee-other@example.test')
-        self.mine = PayrollEmployee.objects.create(employee_no='S1', full_name='Self Service', user=self.me)
-        self.theirs = PayrollEmployee.objects.create(employee_no='S2', full_name='Colleague', user=self.colleague)
+        self.mine = self.employee('S1', 'Self', 'Service', self.me)
+        self.theirs = self.employee('S2', 'Other', 'Colleague', self.colleague)
         self.released = self.make_run(8, catalog.Status.RELEASED)
         self.draft = self.make_run(9, catalog.Status.DRAFT)
         self.finance_approved = self.make_run(7, catalog.Status.FINANCE_APPROVED)
@@ -28,6 +29,14 @@ class PayslipSelfServiceTests(TestCase):
         self.slip(self.draft, self.mine)
         self.slip(self.finance_approved, self.mine)
         self.their_released = self.slip(self.released, self.theirs)
+
+    def employee(self, number, first_name, last_name, user):
+        return EmployeeMaster.objects.create(
+            employee_number=number, employee_code=number, emp_code=number,
+            first_name=first_name, last_name=last_name, user=user, email=user.email,
+            join_date='2025-01-01', payroll_enabled=True,
+            payroll_full_name=f'{first_name} {last_name}',
+        )
 
     def make_run(self, month, status):
         return PayrollRun.objects.create(year=2026, month=month, cycle_code=f'2026-{month:02d}', status=status,
@@ -60,13 +69,9 @@ class PayslipSelfServiceTests(TestCase):
         self.assertEqual(client.get(f'{BASE}{draft_slip.pk}/mine-download/').status_code, 404)
 
     def test_link_through_hr_employee_record_counts(self):
-        from apps.hr_core.models import EmployeeMaster
         linked_user = get_user_model().objects.create_user(username='linked', email='linked@example.test')
-        master = EmployeeMaster.objects.create(first_name='Linked', last_name='Person', user=linked_user,
-                                               employee_code='HRL1', email='linked@example.test',
-                                               join_date='2025-01-01')
-        payroll = PayrollEmployee.objects.create(employee_no='HRL1', full_name='Linked Person', employee=master)
-        slip = self.slip(self.released, payroll)
+        master = self.employee('HRL1', 'Linked', 'Person', linked_user)
+        slip = self.slip(self.released, master)
         response = self.client_for(linked_user).get(f'{BASE}mine/')
         self.assertEqual([row['id'] for row in response.data['results']], [slip.pk])
 

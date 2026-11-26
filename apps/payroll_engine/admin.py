@@ -44,7 +44,7 @@ class PayslipAdmin(admin.ModelAdmin):
     list_display = ('snapshot_full_name', 'run', 'gross_earnings',
                     'total_deductions', 'net_payable', 'status', 'payment_mode')
     list_filter = ('run', 'status', 'payment_mode')
-    search_fields = ('snapshot_full_name', 'employee__employee_no')
+    search_fields = ('snapshot_full_name', 'employee__employee_number')
     inlines = [PayslipLineItemInline]
 
 
@@ -60,7 +60,7 @@ class PayrollAdjustmentAdmin(admin.ModelAdmin):
     list_display = ('employee', 'target_year', 'target_month', 'kind',
                     'component_code', 'amount', 'status')
     list_filter = ('status', 'target_year', 'target_month', 'kind')
-    search_fields = ('employee__employee_no', 'employee__full_name', 'label')
+    search_fields = ('employee__employee_number', 'employee__first_name', 'employee__last_name', 'label')
 
 
 @admin.register(PayrollWorkflowLog)
@@ -74,7 +74,7 @@ class PayrollWorkflowLogAdmin(admin.ModelAdmin):
 class PayslipLineItemChangeLogAdmin(admin.ModelAdmin):
     list_display = ('payslip', 'action', 'actor', 'at', 'get_item_label')
     list_filter = ('action', 'at')
-    search_fields = ('payslip__snapshot_full_name', 'payslip__employee__employee_no', 'actor__email')
+    search_fields = ('payslip__snapshot_full_name', 'payslip__employee__employee_number', 'actor__email')
     readonly_fields = ('payslip', 'line_item', 'action', 'actor', 'old_values', 'new_values', 'at', 'note')
     ordering = ('-at',)
     

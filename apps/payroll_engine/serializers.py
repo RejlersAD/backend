@@ -31,6 +31,7 @@ class PayrollAccountingExportSerializer(serializers.ModelSerializer):
 
 
 class PayrollEmployeeSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source='pk', read_only=True)
     default_gross = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     employee_email = serializers.EmailField(source='user.email', read_only=True, allow_null=True)
     hr_profile_id = serializers.SerializerMethodField()

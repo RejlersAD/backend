@@ -441,8 +441,8 @@ def run_comparison(run: PayrollRun, file_obj, *,
             ))
             continue
 
-        matched_employee_ids.add(emp.id)
-        slip = slips_by_emp.get(emp.id)
+        matched_employee_ids.add(emp.pk)
+        slip = slips_by_emp.get(emp.pk)
         our_values = _our_values_from_slip(slip, emp)
 
         # Only diff fields the external file actually carries. Fields
@@ -478,7 +478,7 @@ def run_comparison(run: PayrollRun, file_obj, *,
 
         rows_to_create.append(PayrollComparisonRow(
             comparison=comparison,
-            payroll_employee=emp,
+            payroll_employee_id=emp.pk,
             external_employee_no=ext_emp_no_str,
             external_name=ext_name_str,
             matched_by=matched_by,
@@ -490,15 +490,15 @@ def run_comparison(run: PayrollRun, file_obj, *,
 
     # Payroll employees not seen in the external file
     for emp in employees:
-        if emp.id in matched_employee_ids:
+        if emp.pk in matched_employee_ids:
             continue
-        slip = slips_by_emp.get(emp.id)
+        slip = slips_by_emp.get(emp.pk)
         if slip is None:
             continue
         summary['payroll_only'] += 1
         rows_to_create.append(PayrollComparisonRow(
             comparison=comparison,
-            payroll_employee=emp,
+            payroll_employee_id=emp.pk,
             external_employee_no='',
             external_name='',
             our_values=_our_values_from_slip(slip, emp),

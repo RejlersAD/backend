@@ -65,15 +65,11 @@ def _attendance_snapshot_payload(summary: dict, year: int, month: int) -> dict:
 def _validate_unique_active_identities() -> None:
     """Refuse to materialise two payslips for one canonical person/account."""
     active = PayrollEmployee.objects.filter(is_active=True, employee_id__isnull=False)
-    duplicate_canonical = (
-        active.filter(employee_id__isnull=False)
-        .values('employee_id').annotate(total=Count('id')).filter(total__gt=1)
-    )
     duplicate_users = (
         active.filter(user_id__isnull=False)
-        .values('user_id').annotate(total=Count('id')).filter(total__gt=1)
+        .values('user_id').annotate(total=Count('pk')).filter(total__gt=1)
     )
-    if duplicate_canonical.exists() or duplicate_users.exists():
+    if duplicate_users.exists():
         raise GenerationError(
             'Payroll generation stopped: multiple active payroll records are linked '
             'to the same canonical employee or user account. Run the payroll identity '
@@ -280,7 +276,7 @@ def generate_monthly_run(
 
         slip = Payslip(
             run=run,
-            employee=emp,
+            employee_id=emp.pk,
             hours=resolved_hours,
             basic=emp.basic,
             housing=emp.housing,
@@ -305,8 +301,8 @@ def generate_monthly_run(
         slip.save()
 
         # Carry-forward line items from prior period
-        if emp.id in carry_map:
-            for src in carry_map[emp.id]:
+        if emp.pk in carry_map:
+            for src in carry_map[emp.pk]:
                 PayslipLineItem.objects.create(
                     payslip=slip,
                     kind=src.kind,
@@ -318,7 +314,7 @@ def generate_monthly_run(
                 )
 
         # Apply pending adjustments for this employee/period
-        for adj in adj_map.get(emp.id, []):
+        for adj in adj_map.get(emp.pk, []):
             PayslipLineItem.objects.create(
                 payslip=slip,
                 kind=adj.kind,
