@@ -5,7 +5,23 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [('payroll_engine', '0023_copy_employee_master_relationships')]
     operations = [
-        migrations.RemoveConstraint(model_name='payslip', name='uq_payslip_run_employee'),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        'ALTER TABLE payroll_engine_payslip '
+                        'DROP CONSTRAINT IF EXISTS uq_payslip_run_employee'
+                    ),
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
+            state_operations=[
+                migrations.RemoveConstraint(
+                    model_name='payslip',
+                    name='uq_payslip_run_employee',
+                ),
+            ],
+        ),
         migrations.RemoveField(model_name='payslip', name='employee'),
         migrations.RemoveField(model_name='payrolladjustment', name='employee'),
         migrations.RemoveField(model_name='payrollcomparisonrow', name='payroll_employee'),
