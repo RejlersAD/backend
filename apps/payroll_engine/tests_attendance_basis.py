@@ -56,11 +56,11 @@ class AttendanceSummaryTests(TestCase):
             first_name='Missing', last_name='Employee',
             email='missing@example.test', employment_status='active', join_date=date(2026, 1, 1),
         )
-        PayrollEmployee.objects.create(
-            employee_no='22001', full_name='Recorded Employee', employee=recorded,
+        EmployeeMaster.objects.filter(pk=recorded.pk).update(
+            payroll_enabled=True, payroll_full_name='Recorded Employee',
         )
-        PayrollEmployee.objects.create(
-            employee_no='22002', full_name='Missing Employee', basic='5000.00', employee=missing,
+        EmployeeMaster.objects.filter(pk=missing.pk).update(
+            payroll_enabled=True, payroll_full_name='Missing Employee', payroll_basic='5000.00',
         )
         DailyAttendanceSummary.objects.create(
             employee_code='22001', date=date(2026, 11, 3),
@@ -83,9 +83,10 @@ class AttendanceSummaryTests(TestCase):
             first_name='Snapshot', last_name='Employee',
             email='snapshot@example.test', employment_status='active', join_date=date(2026, 1, 1),
         )
-        employee = PayrollEmployee.objects.create(
-            employee_no='22003', full_name='Snapshot Employee', basic='5000.00', employee=master,
+        EmployeeMaster.objects.filter(pk=master.pk).update(
+            payroll_enabled=True, payroll_full_name='Snapshot Employee', payroll_basic='5000.00',
         )
+        employee = EmployeeMaster.objects.get(pk=master.pk)
         run = generate_monthly_run(2099, 11, attendance_snapshot={
             'year': 2099,
             'month': 11,

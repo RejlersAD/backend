@@ -404,6 +404,17 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
     ordering_fields = ['full_name', 'employee_no', 'department', 'basic']
     ordering = ['full_name']
 
+    def create(self, request, *args, **kwargs):
+        return Response({
+            'error': 'Employees must be created in the Employee Directory before payroll is enabled.'
+        }, status=http_status.HTTP_400_BAD_REQUEST)
+
+    def destroy(self, request, *args, **kwargs):
+        employee = self.get_object()
+        from apps.hr_core.models import EmployeeMaster
+        EmployeeMaster.objects.filter(pk=employee.pk).update(payroll_enabled=False)
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
+
     def _sync_to_draft_payslips(self, employee, changed_data: dict) -> None:
         """
         When an employee's org/identity fields change, cascade the update to
@@ -1212,13 +1223,13 @@ class PayslipViewSet(viewsets.ModelViewSet):
             # Lets callers that only know the employee's biometric/HR code
             # (not the PayrollEmployee PK) filter directly — e.g. the
             # Employee Self-Service payroll tab.
-            qs = qs.filter(employee__employee_no=emp_no)
+            qs = qs.filter(employee__employee_number=emp_no)
         if st:
             qs = qs.filter(status=st)
         if q:
             qs = qs.filter(
                 Q(snapshot_full_name__icontains=q)
-                | Q(employee__employee_no__icontains=q)
+                | Q(employee__employee_number__icontains=q)
                 | Q(snapshot_department__icontains=q)
             )
         return qs.order_by('snapshot_full_name')
@@ -1295,7 +1306,7 @@ class PayslipViewSet(viewsets.ModelViewSet):
         user = request.user
         return (Payslip.objects.select_related('employee', 'run').prefetch_related('line_items')
                 .filter(run__status=catalog.Status.RELEASED)
-                .filter(Q(employee__user=user) | Q(employee__employee__user=user))
+                .filter(employee__user=user)
                 .order_by('-run__year', '-run__month'))
 
     @action(detail=False, methods=['get'], url_path='mine')
@@ -1553,8 +1564,10 @@ class PayrollAdjustmentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(kind=kind)
         if search:
             qs = qs.filter(
-                Q(employee__full_name__icontains=search)
-                | Q(employee__employee_no__icontains=search)
+                Q(employee__payroll_full_name__icontains=search)
+                | Q(employee__first_name__icontains=search)
+                | Q(employee__last_name__icontains=search)
+                | Q(employee__employee_number__icontains=search)
                 | Q(label__icontains=search)
                 | Q(description__icontains=search)
                 | Q(component_code__icontains=search)
@@ -1755,8 +1768,10 @@ class PayrollComparisonViewSet(viewsets.ModelViewSet):
             rows_qs = rows_qs.filter(
                 Q(external_name__icontains=search)
                 | Q(external_employee_no__icontains=search)
-                | Q(payroll_employee__full_name__icontains=search)
-                | Q(payroll_employee__employee_no__icontains=search)
+                | Q(payroll_employee__payroll_full_name__icontains=search)
+                | Q(payroll_employee__first_name__icontains=search)
+                | Q(payroll_employee__last_name__icontains=search)
+                | Q(payroll_employee__employee_number__icontains=search)
             )
         page = self.paginate_queryset(rows_qs)
         ser = PayrollComparisonRowSerializer

@@ -338,6 +338,23 @@ class EmployeeMaster(TimeStampedModel):
         default='AED',
         help_text='Salary currency code (ISO 4217)'
     )
+    payroll_emirates_id = models.CharField(max_length=32, blank=True, default='')
+    payroll_full_name = models.CharField(max_length=255, blank=True, default='')
+    payroll_mol_no = models.CharField(max_length=32, blank=True, default='')
+    payroll_routing_code = models.CharField(max_length=64, blank=True, default='')
+    payroll_discipline = models.CharField(max_length=128, blank=True, default='')
+    payroll_grade = models.CharField(max_length=128, blank=True, default='')
+    payroll_nationality_group = models.CharField(max_length=64, blank=True, default='')
+    payroll_hours = models.DecimalField(max_digits=8, decimal_places=2, default=176)
+    payroll_basic = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payroll_housing = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payroll_transport = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payroll_home_leave = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payroll_payment_mode = models.CharField(max_length=32, default='bank_transfer')
+    payroll_enabled = models.BooleanField(default=False, db_index=True)
+    payroll_effective_from = models.DateField(null=True, blank=True)
+    payroll_effective_to = models.DateField(null=True, blank=True)
+    payroll_notes = models.TextField(blank=True, default='')
     
     # ========================================
     # CONTACT INFORMATION
@@ -484,6 +501,29 @@ class EmployeeMaster(TimeStampedModel):
     def get_full_name(self):
         """Return full name."""
         return f"{self.first_name} {self.last_name}".strip()
+
+    # Payroll compatibility aliases. They expose the former payroll roster
+    # vocabulary without creating a second employee record or table.
+    employee_no = property(lambda self: self.employee_number)
+    full_name = property(lambda self: self.payroll_full_name or self.get_full_name())
+    emirates_id = property(lambda self: self.payroll_emirates_id)
+    mol_no = property(lambda self: self.payroll_mol_no)
+    routing_code = property(lambda self: self.payroll_routing_code)
+    discipline = property(lambda self: self.payroll_discipline)
+    grade = property(lambda self: self.payroll_grade)
+    nationality_group = property(lambda self: self.payroll_nationality_group)
+    hours = property(lambda self: self.payroll_hours)
+    basic = property(lambda self: self.payroll_basic)
+    housing = property(lambda self: self.payroll_housing)
+    transport = property(lambda self: self.payroll_transport)
+    home_leave = property(lambda self: self.payroll_home_leave)
+    default_payment_mode = property(lambda self: self.payroll_payment_mode)
+    is_active = property(lambda self: self.payroll_enabled)
+    effective_from = property(lambda self: self.payroll_effective_from)
+    effective_to = property(lambda self: self.payroll_effective_to)
+    notes = property(lambda self: self.payroll_notes)
+    joining_date = property(lambda self: self.join_date)
+    leaving_date = property(lambda self: self.exit_date)
     
     def get_display_name(self):
         """Return preferred name or full name."""

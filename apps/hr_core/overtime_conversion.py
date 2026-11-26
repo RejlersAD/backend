@@ -60,7 +60,7 @@ def apply_benefit(request_id, actor, data):
             raise ValidationError('This employee is not included in the selected payroll run.')
         rate = payroll.basic / Decimal('30') / Decimal('8')
         amount = (rate * ot.approved_hours * multiplier).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
-        adjustment = PayrollAdjustment.objects.create(employee=payroll, target_year=year, target_month=month,
+        adjustment = PayrollAdjustment.objects.create(employee_id=payroll.pk, target_year=year, target_month=month,
             kind=catalog.LineItemKind.EARNING, component_code='overtime', label='Overtime',
             description=f'OT {ot.pk}: {ot.approved_hours} hours x {multiplier}', amount=amount, created_by=actor)
         if slip:

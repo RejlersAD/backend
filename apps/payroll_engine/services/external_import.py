@@ -160,7 +160,7 @@ def apply_external_file(
     payslip_lookup: dict[str, Payslip] = {}
     for slip in (Payslip.objects.filter(run=run)
                  .select_related('employee')
-                 .only('id', 'employee__employee_no',
+                 .only('id', 'employee__employee_number',
                        'hours', 'days', 'annual_leave_days', 'unpaid_leave_days',
                        'basic', 'housing', 'transport', 'home_leave')):
         emp_no = (slip.employee.employee_no or '').strip().lower()

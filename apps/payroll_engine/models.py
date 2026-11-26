@@ -31,58 +31,60 @@ class PayrollEmployee(models.Model):
     monthly run generator. Decoupled from auth.User so contractors and
     historical employees can also be tracked.
     """
-    employee_no = models.CharField(max_length=32, unique=True, db_index=True)
-    employee = models.ForeignKey(
-        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
-        related_name='payroll_records',
-        help_text='Canonical employee identity for this payroll-domain extension.',
+    employee_no = models.CharField(max_length=50, unique=True, db_index=True,
+                                   db_column='employee_number')
+    employee = models.OneToOneField(
+        'hr_core.EmployeeMaster', db_column='id', primary_key=True,
+        on_delete=models.DO_NOTHING, related_name='+',
+        help_text='Canonical EmployeeMaster row exposed through the payroll API.',
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True, blank=True,
         on_delete=models.SET_NULL,
-        related_name='payroll_profile',
+        related_name='+',
     )
 
-    full_name = models.CharField(max_length=255, db_index=True)
-    emirates_id = models.CharField(max_length=32, blank=True, default='')
-    mol_no = models.CharField(max_length=32, blank=True, default='')
+    full_name = models.CharField(max_length=255, db_index=True, db_column='payroll_full_name')
+    emirates_id = models.CharField(max_length=32, blank=True, default='', db_column='payroll_emirates_id')
+    mol_no = models.CharField(max_length=32, blank=True, default='', db_column='payroll_mol_no')
 
     # Banking
     iban = models.CharField(max_length=64, blank=True, default='')
     bank_name = models.CharField(max_length=128, blank=True, default='')
-    routing_code = models.CharField(max_length=64, blank=True, default='')
+    routing_code = models.CharField(max_length=64, blank=True, default='', db_column='payroll_routing_code')
 
     # Org
     department = models.CharField(max_length=128, blank=True, default='', db_index=True)
-    discipline = models.CharField(max_length=128, blank=True, default='')
+    discipline = models.CharField(max_length=128, blank=True, default='', db_column='payroll_discipline')
     designation = models.CharField(max_length=128, blank=True, default='')
-    grade = models.CharField(max_length=128, blank=True, default='')
-    nationality_group = models.CharField(max_length=64, blank=True, default='')
+    grade = models.CharField(max_length=128, blank=True, default='', db_column='payroll_grade')
+    nationality_group = models.CharField(max_length=64, blank=True, default='', db_column='payroll_nationality_group')
 
-    joining_date = models.DateField(null=True, blank=True)
-    leaving_date = models.DateField(null=True, blank=True)
+    joining_date = models.DateField(null=True, blank=True, db_column='join_date')
+    leaving_date = models.DateField(null=True, blank=True, db_column='exit_date')
 
     # Contracted hours per month (soft-coded default in config.DEFAULT_EMPLOYEE_HOURS)
-    hours = models.DecimalField(max_digits=8, decimal_places=2, default=DEFAULT_EMPLOYEE_HOURS)
+    hours = models.DecimalField(max_digits=8, decimal_places=2, default=DEFAULT_EMPLOYEE_HOURS, db_column='payroll_hours')
 
     # Fixed earnings (monthly defaults)
-    basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
-    housing = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
-    transport = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
-    home_leave = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO, db_column='payroll_basic')
+    housing = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO, db_column='payroll_housing')
+    transport = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO, db_column='payroll_transport')
+    home_leave = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO, db_column='payroll_home_leave')
 
     default_payment_mode = models.CharField(
         max_length=32,
         choices=_choices_from(catalog.PAYMENT_MODES),
         default=catalog.DEFAULT_PAYMENT_MODE,
+        db_column='payroll_payment_mode',
     )
 
-    is_active = models.BooleanField(default=True, db_index=True)
-    effective_from = models.DateField(null=True, blank=True)
-    effective_to = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True, db_column='payroll_enabled')
+    effective_from = models.DateField(null=True, blank=True, db_column='payroll_effective_from')
+    effective_to = models.DateField(null=True, blank=True, db_column='payroll_effective_to')
 
-    notes = models.TextField(blank=True, default='')
+    notes = models.TextField(blank=True, default='', db_column='payroll_notes')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -94,20 +96,10 @@ class PayrollEmployee(models.Model):
     )
 
     class Meta:
-        db_table = 'payroll_engine_employee'
+        managed = False
+        db_table = 'hr_employee_master'
         verbose_name = 'Payroll Employee'
         ordering = ('full_name',)
-        constraints = [
-            models.UniqueConstraint(
-                fields=['employee'],
-                condition=models.Q(employee__isnull=False, is_active=True),
-                name='uq_active_payroll_employee_canonical',
-            ),
-        ]
-        indexes = [
-            models.Index(fields=['department', 'is_active']),
-            models.Index(fields=['is_active', 'employee_no']),
-        ]
 
     def __str__(self) -> str:
         return f'{self.employee_no} — {self.full_name}'
@@ -254,6 +246,21 @@ class PayrollRun(models.Model):
         return catalog.is_terminal(self.status)
 
 
+class PayrollConsolidationArchive(models.Model):
+    """Immutable evidence for duplicate payslips removed during consolidation."""
+    run = models.ForeignKey(PayrollRun, on_delete=models.PROTECT,
+                            related_name='consolidation_archives')
+    employee = models.ForeignKey('hr_core.EmployeeMaster', on_delete=models.PROTECT,
+                                 related_name='+')
+    legacy_payslip_id = models.BigIntegerField()
+    snapshot = models.JSONField(default=dict)
+    archived_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'payroll_engine_consolidation_archive'
+        ordering = ('-archived_at',)
+
+
 # ════════════════════════════════════════════════════════════════════
 # Payslip (one per run × employee)
 # ════════════════════════════════════════════════════════════════════
@@ -262,7 +269,7 @@ class Payslip(models.Model):
         PayrollRun, on_delete=models.CASCADE, related_name='payslips',
     )
     employee = models.ForeignKey(
-        PayrollEmployee, on_delete=models.PROTECT, related_name='payslips',
+        'hr_core.EmployeeMaster', on_delete=models.PROTECT, related_name='payroll_payslips',
     )
 
     # Snapshot of contracted hours at run time
@@ -425,7 +432,7 @@ class PayrollAdjustment(models.Model):
     Materialised into PayslipLineItem by run_generator.
     """
     employee = models.ForeignKey(
-        PayrollEmployee, on_delete=models.CASCADE, related_name='adjustments',
+        'hr_core.EmployeeMaster', on_delete=models.CASCADE, related_name='payroll_adjustments',
     )
     target_year = models.PositiveSmallIntegerField(db_index=True)
     target_month = models.PositiveSmallIntegerField(db_index=True)
@@ -661,7 +668,7 @@ class PayrollComparisonRow(models.Model):
         PayrollComparison, on_delete=models.CASCADE, related_name='rows',
     )
     payroll_employee = models.ForeignKey(
-        PayrollEmployee, null=True, blank=True, on_delete=models.SET_NULL,
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='+',
     )
 
