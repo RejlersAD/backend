@@ -1,3 +1,5 @@
+import json
+
 from django.db import migrations
 from django.db.models import Count
 
@@ -7,12 +9,63 @@ def copy_payroll_attributes(apps, schema_editor):
     PayrollEmployee = apps.get_model('payroll_engine', 'PayrollEmployee')
     alias = schema_editor.connection.alias
 
-    unresolved = PayrollEmployee.objects.using(alias).filter(employee_id__isnull=True).count()
-    if unresolved:
-        raise RuntimeError(
-            f'Payroll EmployeeMaster consolidation blocked: {unresolved} payroll row(s) '
-            'have no canonical EmployeeMaster.'
-        )
+    Payslip = apps.get_model('payroll_engine', 'Payslip')
+    Adjustment = apps.get_model('payroll_engine', 'PayrollAdjustment')
+
+    # The approved authority rule is strict: an employee absent from the
+    # Employee Directory must not survive in payroll. Preserve a complete JSON
+    # audit snapshot before removing orphan payroll data.
+    if schema_editor.connection.vendor == 'postgresql':
+        schema_editor.execute('''
+            CREATE TABLE IF NOT EXISTS payroll_engine_orphan_archive (
+                id BIGSERIAL PRIMARY KEY,
+                employee_no VARCHAR(50) NOT NULL,
+                snapshot JSONB NOT NULL,
+                archived_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+    else:
+        schema_editor.execute('''
+            CREATE TABLE IF NOT EXISTS payroll_engine_orphan_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_no VARCHAR(50) NOT NULL,
+                snapshot TEXT NOT NULL,
+                archived_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+    for orphan in PayrollEmployee.objects.using(alias).filter(employee_id__isnull=True).iterator():
+        payslips = list(Payslip.objects.using(alias).filter(employee_id=orphan.pk).values())
+        for payslip in payslips:
+            payslip['line_items'] = list(
+                apps.get_model('payroll_engine', 'PayslipLineItem').objects.using(alias)
+                .filter(payslip_id=payslip['id']).values()
+            )
+        snapshot = json.dumps({
+            'payroll_employee': {
+                field.name: getattr(orphan, field.name)
+                for field in orphan._meta.concrete_fields
+            },
+            'payslips': payslips,
+            'adjustments': list(
+                Adjustment.objects.using(alias).filter(employee_id=orphan.pk).values()
+            ),
+            'reason': 'No canonical EmployeeMaster matched during consolidation',
+        }, default=str)
+        with schema_editor.connection.cursor() as cursor:
+            if schema_editor.connection.vendor == 'postgresql':
+                cursor.execute(
+                    'INSERT INTO payroll_engine_orphan_archive (employee_no, snapshot) '
+                    'VALUES (%s, %s::jsonb)', [orphan.employee_no, snapshot],
+                )
+            else:
+                cursor.execute(
+                    'INSERT INTO payroll_engine_orphan_archive (employee_no, snapshot) '
+                    'VALUES (%s, %s)', [orphan.employee_no, snapshot],
+                )
+        Payslip.objects.using(alias).filter(employee_id=orphan.pk).delete()
+        Adjustment.objects.using(alias).filter(employee_id=orphan.pk).delete()
+        orphan.delete()
 
     duplicate_ids = list(
         PayrollEmployee.objects.using(alias).filter(is_active=True)
