@@ -2,6 +2,8 @@ from datetime import date
 
 from django.test import SimpleTestCase, TestCase
 
+from apps.hr_core.models import EmployeeMaster
+
 from .models import PayrollEmployee
 from .services.attendance import get_attendance_summary
 from .services.run_generator import (
@@ -44,9 +46,21 @@ class AttendanceSummaryTests(TestCase):
     def test_recorded_absence_is_complete_and_missing_employee_is_missing(self):
         from apps.timesheet.models import DailyAttendanceSummary
 
-        PayrollEmployee.objects.create(employee_no='22001', full_name='Recorded Employee')
+        recorded = EmployeeMaster.objects.create(
+            employee_number='22001', employee_code='22001', emp_code='22001',
+            first_name='Recorded', last_name='Employee',
+            email='recorded@example.test', employment_status='active', join_date=date(2026, 1, 1),
+        )
+        missing = EmployeeMaster.objects.create(
+            employee_number='22002', employee_code='22002', emp_code='22002',
+            first_name='Missing', last_name='Employee',
+            email='missing@example.test', employment_status='active', join_date=date(2026, 1, 1),
+        )
         PayrollEmployee.objects.create(
-            employee_no='22002', full_name='Missing Employee', basic='5000.00',
+            employee_no='22001', full_name='Recorded Employee', employee=recorded,
+        )
+        PayrollEmployee.objects.create(
+            employee_no='22002', full_name='Missing Employee', basic='5000.00', employee=missing,
         )
         DailyAttendanceSummary.objects.create(
             employee_code='22001', date=date(2026, 11, 3),
@@ -64,8 +78,13 @@ class AttendanceSummaryTests(TestCase):
         self.assertEqual(summary['anomalies'][0]['severity'], 'warning')
 
     def test_generation_copies_employee_facts_into_run_and_payslip(self):
+        master = EmployeeMaster.objects.create(
+            employee_number='22003', employee_code='22003', emp_code='22003',
+            first_name='Snapshot', last_name='Employee',
+            email='snapshot@example.test', employment_status='active', join_date=date(2026, 1, 1),
+        )
         employee = PayrollEmployee.objects.create(
-            employee_no='22003', full_name='Snapshot Employee', basic='5000.00',
+            employee_no='22003', full_name='Snapshot Employee', basic='5000.00', employee=master,
         )
         run = generate_monthly_run(2099, 11, attendance_snapshot={
             'year': 2099,

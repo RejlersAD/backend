@@ -52,7 +52,11 @@ def build_proposal(vf_import, codes=None):
     comparison = compare_import(vf_import)
     flagged = [r for r in comparison['rows'] if r['status'] == 'flagged' and (codes is None or r['employee_code'] in codes)]
     entries = {e.employee_code: e for e in vf_import.entries.filter(employee_code__in=[r['employee_code'] for r in flagged])}
-    payroll = {p.employee_no: p for p in PayrollEmployee.objects.filter(employee_no__in=list(entries), is_active=True)}
+    payroll = {
+        p.employee_no: p for p in PayrollEmployee.objects.filter(
+            employee_no__in=list(entries), is_active=True, employee_id__isnull=False,
+        )
+    }
     sent = {a.employee.employee_no: a for a in PayrollAdjustment.objects.select_related('employee')
             .filter(description__startswith=marker(vf_import), status=catalog.AdjustmentStatus.PENDING)}
 
