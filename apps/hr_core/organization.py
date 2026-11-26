@@ -26,8 +26,8 @@ def payroll_eligible(queryset):
 def require_payroll_eligible_run(run):
     """Do not process an older draft containing an employee later assigned to EDC."""
     from rest_framework.exceptions import ValidationError
-    if run.payslips.alias(_hr_unit=Lower(Trim('employee__employee__business_unit')),
-                         _hr_code=Lower(Trim('employee__employee_no'))).filter(
+    if run.payslips.alias(_hr_unit=Lower(Trim('employee__business_unit')),
+                         _hr_code=Lower(Trim('employee__employee_number'))).filter(
         Q(_hr_unit='edc') | Q(_hr_code__in=edc_employee_codes())
     ).exists():
         raise ValidationError({'payroll': 'This run contains EDC profile-only employees. Regenerate the draft without them before payroll processing.'})
