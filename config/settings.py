@@ -184,7 +184,7 @@ INSTALLED_APPS = [
     'apps.api',
     'apps.rbac',
     'apps.hr_core',  # HR Core - Unified Employee Master System (Phase 1: Parallel to existing tables)
-    'apps.enterprise',  # Team & Enterprise tiers: teams, org governance policy, audit (off unless ENABLE_ENTERPRISE_TEAMS=true)
+    'apps.enterprise',  # Team & Enterprise tiers: teams, org governance policy, audit (on by default; set ENABLE_ENTERPRISE_TEAMS=false to disable)
     
     # Local apps - Features (Plugin Architecture)
     'apps.pid_analysis',

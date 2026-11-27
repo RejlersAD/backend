@@ -22,7 +22,7 @@ FULL_ACCESS_TEAM_ROLES = ('admin', 'lead', 'engineer')
 def enterprise_enabled():
     value = getattr(settings, 'ENABLE_ENTERPRISE_TEAMS', None)
     if value is None:
-        value = os.environ.get('ENABLE_ENTERPRISE_TEAMS', 'false')
+        value = os.environ.get('ENABLE_ENTERPRISE_TEAMS', 'true')
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
