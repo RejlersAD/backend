@@ -101,6 +101,15 @@ class ValueFrameHandoffTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['draft_run_id'], run.pk)
 
+    def test_send_is_refused_when_attendance_is_unavailable(self):
+        DailyAttendanceSummary.objects.all().delete()  # no matrix (mocked None) and no stored rows
+        client = self.api(self.payroll)
+        self.assertFalse(client.get(f'{BASE}{self.item.pk}/proposal/').data['attendance_available'])
+        response = client.post(f'{BASE}{self.item.pk}/send/', self.target, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('not available', str(response.data))
+        self.assertFalse(PayrollAdjustment.objects.exists())
+
     def test_access(self):
         self.assertEqual(self.api(self.staff).get(f'{BASE}{self.item.pk}/proposal/').status_code, 403)
         self.assertEqual(self.api(self.staff).post(f'{BASE}{self.item.pk}/send/', self.target, format='json').status_code, 403)

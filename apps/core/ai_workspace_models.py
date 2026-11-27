@@ -12,6 +12,10 @@ class AIWorkspace(models.Model):
     visibility = models.CharField(max_length=12, choices=[('private', 'Private'), ('shared', 'Shared')], default='private')
     folder = models.CharField(max_length=120, blank=True)
     enterprise_project = models.ForeignKey('core.Project', null=True, blank=True, on_delete=models.SET_NULL)
+    # Models the project owner allows members to chat with: [{'provider': 'openai', 'model_id': 'gpt-4o'}, ...].
+    # Empty means the organization's default chat models.
+    chat_models = models.JSONField(default=list, blank=True)
+    default_chat_model = models.CharField(max_length=160, blank=True)  # a model_id from chat_models
     archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -25,6 +29,11 @@ class AIWorkspaceMember(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     role = models.CharField(max_length=12, choices=[('editor', 'Editor'), ('viewer', 'Viewer')])
     added_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    # A person the owner adds is 'invited' until they accept in Approvals; only 'active' members get access.
+    # Existing members and Team & Enterprise grants are 'active'.
+    status = models.CharField(max_length=10, choices=[('invited', 'Invited'), ('active', 'Active')], default='active')
+    invited_at = models.DateTimeField(null=True, blank=True)
+    responded_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

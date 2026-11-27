@@ -31,6 +31,28 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     'claude-3-5-sonnet-20241022': {'input': 3.00,  'output': 15.00},
     'claude-3-5-haiku-20241022':  {'input': 0.80,  'output': 4.00},
     'claude-3-opus-20240229':     {'input': 15.00, 'output': 75.00},
+
+    # Newer families (list prices, USD per 1M tokens). Model names that start with one of these
+    # keys use it, so dated or minor versions (e.g. gpt-5-mini-2025-08-07) are priced too.
+    'gpt-4.1':                {'input': 2.00,  'output': 8.00},
+    'gpt-4.1-mini':           {'input': 0.40,  'output': 1.60},
+    'gpt-4.1-nano':           {'input': 0.10,  'output': 0.40},
+    'gpt-5':                  {'input': 1.25,  'output': 10.00},
+    'gpt-5-mini':             {'input': 0.25,  'output': 2.00},
+    'gpt-5-nano':             {'input': 0.05,  'output': 0.40},
+    'o3':                     {'input': 2.00,  'output': 8.00},
+    'o4-mini':                {'input': 1.10,  'output': 4.40},
+    'claude-opus-4':          {'input': 15.00, 'output': 75.00},
+    'claude-opus-4-5':        {'input': 5.00,  'output': 25.00},
+    'claude-sonnet-4':        {'input': 3.00,  'output': 15.00},
+    'claude-haiku-4':         {'input': 1.00,  'output': 5.00},
+
+    # Google Gemini
+    'gemini-2.5-pro':         {'input': 1.25,  'output': 10.00},
+    'gemini-2.5-flash':       {'input': 0.30,  'output': 2.50},
+    'gemini-2.5-flash-lite':  {'input': 0.10,  'output': 0.40},
+    'gemini-3-pro':           {'input': 2.00,  'output': 12.00},
+    'gemini-3-flash':         {'input': 0.50,  'output': 3.00},
 }
 
 # Fallback used when neither AIPricingConfig nor MODEL_PRICING_PER_1M
@@ -38,6 +60,8 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
 PROVIDER_DEFAULT_PRICING: dict[str, dict[str, float]] = {
     'openai': {'input': 2.50,  'output': 10.00},
     'claude': {'input': 3.00,  'output': 15.00},
+    'anthropic': {'input': 3.00,  'output': 15.00},
+    'gemini': {'input': 0.50,  'output': 3.00},
 }
 
 PER_MILLION = Decimal('1000000')
@@ -99,6 +123,11 @@ def price_lookup(provider: str, model_name: str) -> dict[str, float]:
         return override
     if model_name in MODEL_PRICING_PER_1M:
         return MODEL_PRICING_PER_1M[model_name]
+    # Longest known prefix: 'gemini-2.5-flash-preview-09' -> 'gemini-2.5-flash'.
+    family = max((key for key in MODEL_PRICING_PER_1M if model_name and model_name.startswith(key + '-')),
+                 key=len, default=None)
+    if family:
+        return MODEL_PRICING_PER_1M[family]
     return PROVIDER_DEFAULT_PRICING.get(
         provider, {'input': 0.0, 'output': 0.0},
     )

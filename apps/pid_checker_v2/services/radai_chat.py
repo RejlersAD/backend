@@ -20,7 +20,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ─── Soft-coded knobs ─────────────────────────────────────────────────
-SUPPORTED_PROVIDERS = ('openai', 'claude', 'ollama')
+SUPPORTED_PROVIDERS = ('openai', 'claude', 'gemini', 'ollama')
 
 # Default chat models per provider. These MUST be models the configured
 # account can actually call — using the platform's proven Vision models
@@ -30,7 +30,10 @@ SUPPORTED_PROVIDERS = ('openai', 'claude', 'ollama')
 CHAT_MODELS = {
     'openai': 'gpt-4o',
     'claude': 'claude-sonnet-4-5-20250929',
+    'gemini': 'gemini-2.5-flash',
 }
+# Gemini counts its hidden reasoning against the output limit, so it gets more room.
+GEMINI_MAX_OUTPUT_TOKENS = 4096
 
 # Context caps — keep prompts small so chat stays cheap and responsive.
 MAX_CONTEXT_ROWS      = 200     # max extracted rows forwarded
@@ -183,12 +186,15 @@ def answer_question(
     general_chat: bool = False,
     web_search: bool = False,
     skill_prompt: str = '',
+    on_delta=None,
 ) -> dict:
     """Answer a question grounded in page context via BYOK Claude/OpenAI.
 
     Returns {'answer', 'provider', 'model', 'token_usage', 'web_sources', 'web_searches'}.
     `web_search` adds Anthropic's server-side web search tool (Claude only; the caller enforces policy).
     Raises ChatConfigurationError for missing provider/key.
+    `on_delta(text)`, when given, receives answer text as the provider streams it
+    (Claude, OpenAI, Gemini and Ollama); the return value is the same complete result either way.
     """
     from apps.core.ai_consumer_clients import lazy_provider_client, provider_api_key
 
@@ -232,13 +238,27 @@ def answer_question(
         with requests.Session() as session:
             session.trust_env = False
             response = session.post(f'{base_url}/api/chat', json={
-                'model': resolved_model, 'stream': False, 'think': False,
+                'model': resolved_model, 'stream': bool(on_delta), 'think': False,
                 'messages': [{'role': 'system', 'content': system_prompt}] + messages,
                 'options': {'num_predict': min(MAX_ANSWER_TOKENS,
                     max(32, int((context or {}).get('max_output_tokens') or 256)))},
-            }, timeout=(5, 180))
+            }, timeout=(5, 180), stream=bool(on_delta))
             response.raise_for_status()
-            result = response.json()
+            if on_delta:
+                # Native Ollama streaming: one JSON object per line; the last one carries the counts.
+                import json
+                parts, result = [], {}
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    result = json.loads(line)
+                    piece = str((result.get('message') or {}).get('content') or '')
+                    if piece:
+                        parts.append(piece)
+                        on_delta(piece)
+                result = {**result, 'message': {'content': ''.join(parts)}}
+            else:
+                result = response.json()
         answer = str((result.get('message') or {}).get('content') or '').strip()
         in_t = int(result.get('prompt_eval_count') or 0)
         out_t = int(result.get('eval_count') or 0)
@@ -251,13 +271,54 @@ def answer_question(
             client = lazy_provider_client('openai', openai.OpenAI,
                                           api_key=lambda: resolved_key,
                                           timeout=CHAT_REQUEST_TIMEOUT_S)
-        resp = client.chat.completions.create(
-            model=resolved_model,
-            max_tokens=MAX_ANSWER_TOKENS,
-            messages=[{'role': 'system', 'content': system_prompt}] + messages,
-        )
-        answer = (resp.choices[0].message.content or '').strip()
-        in_t, out_t = read_openai_usage(resp)
+        request = {'model': resolved_model, 'messages': [{'role': 'system', 'content': system_prompt}] + messages}
+        # Reasoning models (o-series, GPT-5) take max_completion_tokens instead of max_tokens.
+        limit_field = 'max_completion_tokens' if resolved_model.startswith(('o1', 'o3', 'o4', 'gpt-5')) else 'max_tokens'
+        request[limit_field] = MAX_ANSWER_TOKENS
+        if on_delta:
+            parts, final = [], None
+            for chunk in client.chat.completions.create(stream=True, stream_options={'include_usage': True}, **request):
+                if getattr(chunk, 'usage', None):
+                    final = chunk
+                for choice in getattr(chunk, 'choices', None) or []:
+                    piece = getattr(getattr(choice, 'delta', None), 'content', None) or ''
+                    if piece:
+                        parts.append(piece)
+                        on_delta(piece)
+            answer = ''.join(parts).strip()
+            in_t, out_t = read_openai_usage(final)
+        else:
+            resp = client.chat.completions.create(**request)
+            answer = (resp.choices[0].message.content or '').strip()
+            in_t, out_t = read_openai_usage(resp)
+    elif provider == 'gemini':
+        from google import genai
+        from google.genai import types
+        # Preview models (e.g. gemini-3-flash-preview) exist only on v1beta, which the admin connection test also uses.
+        http_options = {'api_version': 'v1beta'}
+        if byok_key:
+            client = genai.Client(api_key=byok_key, http_options=http_options)
+        else:
+            client = lazy_provider_client('gemini', genai.Client, api_key=lambda: resolved_key, http_options=http_options)
+        contents = [types.Content(role='model' if turn['role'] == 'assistant' else 'user',
+                                  parts=[types.Part(text=turn['content'])]) for turn in messages]
+        config = types.GenerateContentConfig(system_instruction=system_prompt,
+                                             max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS)
+        if on_delta:
+            parts, final = [], None
+            for chunk in client.models.generate_content_stream(model=resolved_model, contents=contents, config=config):
+                final = chunk
+                piece = getattr(chunk, 'text', None) or ''
+                if piece:
+                    parts.append(piece)
+                    on_delta(piece)
+            answer = ''.join(parts).strip()
+        else:
+            final = client.models.generate_content(model=resolved_model, contents=contents, config=config)
+            answer = (getattr(final, 'text', None) or '').strip()
+        usage = getattr(final, 'usage_metadata', None)
+        in_t = int(getattr(usage, 'prompt_token_count', 0) or 0)
+        out_t = int(getattr(usage, 'candidates_token_count', 0) or 0)
     else:
         import anthropic
         if byok_key:
@@ -271,7 +332,16 @@ def answer_question(
         if web_search:
             request['system'] = system_prompt + WEB_SEARCH_INSTRUCTIONS
             request['tools'] = [{'type': web_search_tool_type(resolved_model), 'name': 'web_search', 'max_uses': WEB_SEARCH_MAX_USES}]
-        resp = client.messages.create(messages=messages, **request)
+        def create(message_list):
+            if not on_delta:
+                return client.messages.create(messages=message_list, **request)
+            with client.messages.stream(messages=message_list, **request) as stream:
+                for text in stream.text_stream:
+                    if text:
+                        on_delta(text)
+                return stream.get_final_message()
+
+        resp = create(messages)
         in_t, out_t = read_claude_usage(resp)
         # A long server-tool turn can pause; send it back unchanged and the server resumes it.
         continuation = list(messages)
@@ -279,7 +349,7 @@ def answer_question(
             if getattr(resp, 'stop_reason', None) != 'pause_turn':
                 break
             continuation = continuation + [{'role': 'assistant', 'content': resp.content}]
-            resp = client.messages.create(messages=continuation, **request)
+            resp = create(continuation)
             more_in, more_out = read_claude_usage(resp)
             in_t, out_t = in_t + more_in, out_t + more_out
         # Anthropic returns a list of content blocks; only text blocks are the answer.

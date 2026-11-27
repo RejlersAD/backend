@@ -55,24 +55,152 @@ def chat_models(user=None, with_restriction=False):
         cloud = get_provider_configuration('anthropic')
     except AICredentialUnavailable:
         cloud = None
+    cloud_models = []
     if cloud and cloud['managed'] and cloud['ready']:
         model_id = cloud['model'] or 'claude-sonnet-4-6'
-        enabled.insert(0, {'provider': 'anthropic', 'model_id': model_id,
-                           'label': f'Claude ({model_id})'})
+        cloud_models.append({'provider': 'anthropic', 'model_id': model_id,
+                             'label': f'Claude ({model_id})'})
+    cloud_models.extend(extra_cloud_chat_models())
+    enabled = cloud_models + enabled
     # Team & Enterprise: an organization's approved-model list narrows what members can use.
     from apps.enterprise.enforcement import filter_chat_models
     enabled, restricted = filter_chat_models(user, enabled)
+    if len(enabled) > 1:  # with a choice, RADAI can pick and fall back by itself
+        enabled.insert(0, dict(AUTO_MODEL))
     return (enabled, restricted) if with_restriction else enabled
+
+
+AUTO_MODEL = {'provider': 'auto', 'model_id': 'auto', 'label': 'Auto (RADAI picks)'}
+
+
+def conversation_models(user, workspace=None):
+    """(menu, pool, restricted) for one chat: the models offered and the ones RADAI may fall back to.
+
+    General chat always runs on Gemini Flash, the low-cost model, and only falls back to the others
+    if it fails. In a project whose owner chose models, members pick from that list (default first).
+    """
+    from apps.enterprise.enforcement import filter_chat_models
+    from .ai_model_catalog import general_chat_model, model_label
+    base, restricted = chat_models(user, with_restriction=True)
+    real = [row for row in base if row['provider'] != 'auto']
+    if workspace is None:
+        gemini = next((row for row in real if row['provider'] == 'gemini'), None)
+        flash, _policy = filter_chat_models(user, [general_chat_model(gemini)]) if gemini else ([], False)
+        if flash:
+            return flash, flash + [row for row in real if row['provider'] != 'gemini'], restricted
+        return base, real, restricted
+    ready = {row['provider'] for row in real}
+    chosen = [{'provider': row['provider'], 'model_id': row['model_id'], 'label': model_label(row['provider'], row['model_id'])}
+              for row in (workspace.chat_models or []) if isinstance(row, dict) and row.get('provider') in ready]
+    chosen, policy = filter_chat_models(user, chosen)
+    if not chosen:  # nothing the owner picked is usable right now: keep the organization's models
+        return base, real, restricted or policy
+    chosen.sort(key=lambda row: row['model_id'] != workspace.default_chat_model)
+    return chosen + ([dict(AUTO_MODEL)] if len(chosen) > 1 else []), chosen, restricted or policy
+# Provider id in the model list -> engine name in radai_chat.answer_question.
+CHAT_ENGINES = {'anthropic': 'claude', 'openai': 'openai', 'gemini': 'gemini', 'ollama': 'ollama'}
+
+
+def extra_cloud_chat_models():
+    """OpenAI and Gemini, each when an administrator has set it up in AI API keys (as for Claude)."""
+    from apps.pid_checker_v2.services.radai_chat import CHAT_MODELS
+    rows = []
+    for provider, label in (('openai', 'OpenAI'), ('gemini', 'Gemini')):
+        try:
+            config = get_provider_configuration(provider)
+        except AICredentialUnavailable:
+            continue
+        if config.get('provider') != provider or not (config.get('managed') and config.get('ready')):
+            continue
+        model_id = config.get('model') or CHAT_MODELS[provider]
+        rows.append({'provider': provider, 'model_id': model_id, 'label': f'{label} ({model_id})'})
+    return rows
+
+
+def chat_candidates(models, provider, model_id, web_search=False):
+    """Models to try, in order: the chosen one first, then every other available one.
+
+    Auto tries them in list order. Web search only runs on Claude, so it never falls back elsewhere.
+    """
+    real = [row for row in models if row['provider'] != 'auto']
+    if web_search:
+        real = [row for row in real if row['provider'] == 'anthropic']
+    if provider == 'auto':
+        return real
+    chosen = [row for row in real if row['provider'] == provider and row['model_id'] == model_id]
+    return chosen + [row for row in real if row not in chosen]
+
+
+def failure_reason(exc):
+    """Short, key-free reason a provider could not answer: limit, credentials, not_configured or unavailable."""
+    from apps.pid_checker_v2.services.radai_chat import ChatConfigurationError
+    if isinstance(exc, (AICredentialUnavailable, ChatConfigurationError)):
+        return 'not_configured'
+    status = getattr(exc, 'status_code', None)
+    code = getattr(exc, 'code', None)
+    text = str(exc).lower()
+    if status in (402, 429) or code == 'rate_limit' or any(word in text for word in (
+            'quota', 'credit balance', 'insufficient', 'resource_exhausted', 'rate limit', 'usage limit')):
+        return 'limit'
+    if status in (401, 403) or code in ('authentication_failed', 'permission_denied'):
+        return 'credentials'
+    return 'unavailable'
 
 
 class AIWorkspaceModelsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        models, restricted = chat_models(request.user, with_restriction=True)
+        workspace = None
+        if request.query_params.get('project'):
+            workspace, _ = workspace_for(request.user, whole_number(request.query_params['project'], 'project'))
+        models, pool, restricted = conversation_models(request.user, workspace)
         return Response({'models': models, 'policy_restricted': restricted,
                          'default_model': models[0]['model_id'] if models else None,
-                         'web_search': web_search_status(request.user, models)})
+                         'scope': 'project' if workspace else 'general',
+                         'project_choice': bool(workspace and workspace.chat_models),
+                         'web_search': web_search_status(request.user, pool)})
+
+
+def whole_number(value, field):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValidationError({field: 'Use a whole number.'})
+
+
+class AIChatModelCatalogView(APIView):
+    """Latest chat models each configured provider offers, for a project owner to choose from."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .ai_model_catalog import latest_chat_models
+        real = [row for row in chat_models(request.user) if row['provider'] != 'auto']
+        return Response({'models': latest_chat_models(real)})
+
+
+class AIWorkspaceUsageView(APIView):
+    """Tokens and estimated cost (USD and AED): this chat, your month, and the project (owner only)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .ai_model_catalog import AED_PER_USD, usage_totals
+        start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        data = {'aed_per_usd': str(AED_PER_USD), 'month_start': start.date().isoformat(),
+                'month': usage_totals(AIWorkspaceMessage.objects.filter(conversation__owner=request.user,
+                                                                        created_at__gte=start))}
+        workspace, role = None, None
+        if request.query_params.get('project'):
+            workspace, role = workspace_for(request.user, whole_number(request.query_params['project'], 'project'))
+        if request.query_params.get('conversation'):
+            conversation_id = whole_number(request.query_params['conversation'], 'conversation')
+            row = (conversation_for(request.user, workspace.pk, conversation_id)[1] if workspace
+                   else general_conversation_for(request.user, conversation_id))
+            data['conversation'] = usage_totals(AIWorkspaceMessage.objects.filter(conversation=row))
+        if workspace and role == 'owner':
+            data['project'] = {'name': workspace.name, **usage_totals(AIWorkspaceMessage.objects.filter(
+                conversation__workspace=workspace, created_at__gte=start))}
+        return Response(data)
 
 
 def web_search_status(user, models):
@@ -90,7 +218,18 @@ def role_for(user, workspace):
         return 'owner'
     if workspace.visibility != 'shared':
         return None
-    return AIWorkspaceMember.objects.filter(workspace=workspace, user=user).values_list('role', flat=True).first()
+    role = AIWorkspaceMember.objects.filter(workspace=workspace, user=user, status='active').values_list(
+        'role', flat=True).first()
+    return role if role and module_allowed(user) else None
+
+
+RADAI_MODULE = 'radai_intelligence'
+
+
+def module_allowed(user):
+    """RBAC: the person's roles include the RADAI Intelligence module."""
+    from apps.rbac.utils import check_module_access
+    return bool(user and user.is_active and check_module_access(user, RADAI_MODULE))
 
 
 def workspace_for(user, workspace_id, *, minimum='viewer'):
@@ -120,6 +259,7 @@ def project_payload(workspace, user):
     data = {'id': workspace.pk, 'name': workspace.name, 'description': workspace.description,
             'visibility': workspace.visibility, 'folder': workspace.folder,
             'enterprise_project_id': workspace.enterprise_project_id,
+            'chat_models': workspace.chat_models or [], 'default_chat_model': workspace.default_chat_model,
             'owner_id': workspace.owner_id, 'role': role_for(user, workspace),
             'created_at': workspace.created_at.isoformat(), 'updated_at': workspace.updated_at.isoformat()}
     # Card statistics, present when the list view annotated them.
@@ -177,7 +317,7 @@ class AIWorkspaceListView(APIView):
 
     def get(self, request):
         rows = AIWorkspace.objects.filter(archived_at__isnull=True).filter(
-            Q(owner=request.user) | Q(visibility='shared', members__user=request.user)).distinct().order_by('-updated_at', '-pk')
+            Q(owner=request.user) | Q(visibility='shared', members__user=request.user, members__status='active')).distinct().order_by('-updated_at', '-pk')
         rows = project_list_stats(rows, request.user)
         return Response({'results': [project_payload(row, request.user) for row in rows[:100]]})
 
@@ -197,6 +337,27 @@ class AIWorkspaceListView(APIView):
         return Response(project_payload(workspace, request.user), status=201)
 
 
+def set_project_models(workspace, data):
+    """Owner's choice of chat models for the project: a short list of {provider, model_id} and a default."""
+    from .ai_model_catalog import CLOUD_PROVIDERS
+    chosen = data.get('chat_models', workspace.chat_models or [])
+    if not isinstance(chosen, list) or len(chosen) > 24:
+        raise ValidationError({'chat_models': 'Choose at most 24 models.'})
+    clean, seen = [], set()
+    for row in chosen:
+        provider = row.get('provider') if isinstance(row, dict) else None
+        model_id = str(row.get('model_id') or '').strip() if isinstance(row, dict) else ''
+        if provider not in CLOUD_PROVIDERS or not model_id or len(model_id) > 160 or not re.fullmatch(r'[\w.:/-]+', model_id):
+            raise ValidationError({'chat_models': 'Each model needs a provider (OpenAI, Gemini or Claude) and a model ID.'})
+        if model_id not in seen:
+            seen.add(model_id)
+            clean.append({'provider': provider, 'model_id': model_id})
+    default = str(data.get('default_chat_model', workspace.default_chat_model) or '')
+    if default and default not in seen:
+        default = clean[0]['model_id'] if clean else ''
+    workspace.chat_models, workspace.default_chat_model = clean, (default or (clean[0]['model_id'] if clean else ''))
+
+
 class AIWorkspaceDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -206,7 +367,8 @@ class AIWorkspaceDetailView(APIView):
 
     def patch(self, request, workspace_id):
         workspace, _ = workspace_for(request.user, workspace_id, minimum='owner')
-        permitted = {'name', 'description', 'visibility', 'folder', 'enterprise_project_id'}
+        permitted = {'name', 'description', 'visibility', 'folder', 'enterprise_project_id', 'chat_models',
+                     'default_chat_model'}
         if set(request.data) - permitted:
             raise ValidationError('Unsupported AI project field.')
         with transaction.atomic():
@@ -226,6 +388,8 @@ class AIWorkspaceDetailView(APIView):
                 workspace.visibility = request.data['visibility']
             if 'enterprise_project_id' in request.data:
                 workspace.enterprise_project = enterprise_link(request.user, request.data['enterprise_project_id'])
+            if 'chat_models' in request.data or 'default_chat_model' in request.data:
+                set_project_models(workspace, request.data)
             workspace.save()
             audit(request.user, 'update', workspace)
         return Response(project_payload(workspace, request.user))
@@ -244,10 +408,14 @@ class AIWorkspaceMembersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, _ = workspace_for(request.user, workspace_id)
-        rows = [{'user_id': workspace.owner_id, 'email': workspace.owner.email, 'role': 'owner'}]
-        rows.extend({'user_id': row.user_id, 'email': row.user.email, 'role': row.role}
-                    for row in workspace.members.select_related('user').order_by('pk'))
+        workspace, role = workspace_for(request.user, workspace_id)
+        rows = [{'user_id': workspace.owner_id, 'email': workspace.owner.email, 'role': 'owner', 'status': 'active'}]
+        members = workspace.members.select_related('user').order_by('pk')
+        if role != 'owner':
+            members = members.filter(status='active')
+        rows.extend({'user_id': row.user_id, 'email': row.user.email, 'role': row.role, 'status': row.status,
+                     'invited_at': row.invited_at.isoformat() if row.invited_at else None,
+                     'rbac_access': module_allowed(row.user)} for row in members)
         return Response({'results': rows})
 
     def post(self, request, workspace_id):
@@ -269,14 +437,27 @@ class AIWorkspaceMembersView(APIView):
             raise ValidationError({'user_id': 'Choose another active employee.'})
         with transaction.atomic():
             AIWorkspace.objects.select_for_update().get(pk=workspace.pk)
-            member, created = AIWorkspaceMember.objects.update_or_create(
-                workspace=workspace, user=user, defaults={'role': role, 'added_by': request.user})
+            member = AIWorkspaceMember.objects.select_for_update().filter(workspace=workspace, user=user).first()
+            created = member is None
+            if created:
+                member = AIWorkspaceMember.objects.create(workspace=workspace, user=user, role=role, added_by=request.user,
+                                                          status='invited', invited_at=timezone.now())
+            else:
+                member.role, member.added_by = role, request.user
+                member.save(update_fields=['role', 'added_by'])
             if workspace.visibility != 'shared':
                 workspace.visibility = 'shared'
                 workspace.save(update_fields=['visibility', 'updated_at'])
             audit(request.user, 'create' if created else 'update', workspace,
-                  {'member_user_id': user.pk, 'role': role})
-        return Response({'user_id': member.user_id, 'email': user.email, 'role': role}, status=201 if created else 200)
+                  {'member_user_id': user.pk, 'role': role, 'invitation': member.status == 'invited'})
+            if created:
+                transaction.on_commit(lambda: notify_invitation(member.pk))
+        rbac = module_allowed(user)
+        return Response({'user_id': member.user_id, 'email': user.email, 'role': role, 'status': member.status,
+                         'rbac_access': rbac,
+                         'warning': '' if rbac else (f'{user.email} has no RADAI Intelligence access in RBAC yet. They can '
+                                                     'accept the invitation once an administrator grants it in Roles & Access.')},
+                        status=201 if created else 200)
 
 
 class AIWorkspaceMemberDetailView(APIView):
@@ -291,6 +472,132 @@ class AIWorkspaceMemberDetailView(APIView):
                 raise NotFound('Member not found.')
             audit(request.user, 'delete', workspace, {'member_user_id': user_id})
         return Response(status=204)
+
+
+def person_name(user):
+    return (user.get_full_name() or '').strip() or user.email or 'A colleague'
+
+
+ROLE_ACCESS = {
+    'viewer': ['Read the project instructions and knowledge files', 'Chat with RADAI about the project'],
+    'editor': ['Read the project instructions and knowledge files', 'Chat with RADAI about the project',
+               'Edit the project instructions', 'Upload and remove knowledge files'],
+}
+
+
+def invitation_payload(member):
+    """Everything an invitee needs to decide, shaped for the Approvals queue."""
+    workspace = member.workspace
+    rule = AIWorkspaceInstructions.objects.filter(workspace=workspace).first()
+    sections = [field.replace('_', ' ').capitalize() for field in INSTRUCTION_FIELDS
+                if rule and (getattr(rule, field, '') or '').strip()]
+    documents = AIWorkspaceDocument.objects.filter(workspace=workspace, archived_at__isnull=True)
+    link = workspace.enterprise_project
+    return {
+        'id': member.pk, 'status': 'pending', 'role': member.role,
+        'title': f'Join the AI project "{workspace.name}" as {member.role}',
+        'reference': f'AI project #{workspace.pk}',
+        'requester_name': person_name(member.added_by), 'requester_email': member.added_by.email,
+        'created_at': (member.invited_at or member.created_at).isoformat(),
+        'department': workspace.folder,
+        'access': ROLE_ACCESS.get(member.role, []),
+        'rbac_access': module_allowed(member.user),
+        'project': {
+            'id': workspace.pk, 'name': workspace.name, 'description': workspace.description,
+            'folder': workspace.folder, 'visibility': workspace.visibility,
+            'owner_name': person_name(workspace.owner), 'owner_email': workspace.owner.email,
+            'created_at': workspace.created_at.isoformat(), 'updated_at': workspace.updated_at.isoformat(),
+            'enterprise_project': getattr(link, 'name', None) if link else None,
+            'members': workspace.members.filter(status='active').count() + 1,
+            'documents': documents.count(),
+            'document_names': list(documents.order_by('-created_at').values_list('name', flat=True)[:8]),
+            'instruction_sections': sections,
+            'goals': ((rule.goals if rule else '') or '')[:600],
+            'role_behavior': ((rule.role_behavior if rule else '') or '')[:600],
+            'chat_models': [row.get('model_id') for row in (workspace.chat_models or []) if isinstance(row, dict)],
+        },
+    }
+
+
+def notify(recipient, **fields):
+    try:
+        from apps.notifications.services import NotificationService
+        NotificationService.create_notification(recipient=recipient, **fields)
+    except Exception:  # noqa: BLE001 - a notification failure must not undo the membership change
+        import logging
+        logging.getLogger(__name__).warning('RADAI project notification failed', exc_info=True)
+
+
+def notify_invitation(member_id):
+    member = AIWorkspaceMember.objects.select_related('workspace', 'user', 'added_by').filter(
+        pk=member_id, status='invited').first()
+    if not member:
+        return
+    workspace = member.workspace
+    details = invitation_payload(member)['project']
+    lines = [f'{person_name(member.added_by)} invited you to the RADAI Intelligence project "{workspace.name}" as {member.role}.']
+    if workspace.description:
+        lines.append(workspace.description[:300])
+    lines.append(f"Owner: {details['owner_name']} - {details['members']} member(s), {details['documents']} knowledge file(s).")
+    lines.append('Open Approvals to review the project details and accept or decline.')
+    if not module_allowed(member.user):
+        lines.append('You need RADAI Intelligence access in RBAC before you can accept; ask an administrator.')
+    notify(member.user, sender=member.added_by, title=f'Project invitation: {workspace.name}', message='\n'.join(lines),
+           category='APPROVAL', priority='HIGH', send_email=True, action_url='/approvals',
+           action_label='Review invitation',
+           metadata={'type': 'ai_project_invitation', 'invitation_id': member.pk, 'workspace_id': workspace.pk,
+                     'role': member.role})
+
+
+class AIWorkspaceInvitationListView(APIView):
+    """Your pending project invitations (the Approvals queue for AI projects)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rows = (AIWorkspaceMember.objects.filter(user=request.user, status='invited', workspace__archived_at__isnull=True)
+                .select_related('workspace', 'workspace__owner', 'workspace__enterprise_project', 'added_by', 'user')
+                .order_by('-invited_at', '-pk'))
+        results = [invitation_payload(row) for row in rows]
+        return Response({'results': results, 'count': len(results), 'pending_count': len(results)})
+
+
+class AIWorkspaceInvitationDecisionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, invitation_id, decision):
+        if decision not in ('accept', 'decline'):
+            raise NotFound('Choose accept or decline.')
+        with transaction.atomic():
+            member = (AIWorkspaceMember.objects.select_for_update()
+                      .select_related('workspace', 'added_by').filter(
+                          pk=invitation_id, user=request.user, status='invited',
+                          workspace__archived_at__isnull=True).first())
+            if not member:
+                raise NotFound('This invitation is no longer pending.')
+            workspace = member.workspace
+            if decision == 'accept':
+                if not module_allowed(request.user):
+                    raise PermissionDenied('You need RADAI Intelligence access in RBAC to join this project. '
+                                           'Ask an administrator to grant it in Roles & Access, then accept again.')
+                member.status, member.responded_at = 'active', timezone.now()
+                member.save(update_fields=['status', 'responded_at'])
+                audit(request.user, 'update', workspace, {'member_user_id': request.user.pk, 'invitation': 'accepted'})
+                message = f'{person_name(request.user)} accepted your invitation to "{workspace.name}" as {member.role}.'
+            else:
+                reason = str(request.data.get('reason') or request.data.get('note') or '').strip()[:500]
+                member.delete()
+                audit(request.user, 'delete', workspace, {'member_user_id': request.user.pk, 'invitation': 'declined'})
+                message = f'{person_name(request.user)} declined your invitation to "{workspace.name}".' + (
+                    f' Reason: {reason}' if reason else '')
+            owner = workspace.owner
+            transaction.on_commit(lambda: notify(
+                owner, sender=request.user, title=f"Project invitation {'accepted' if decision == 'accept' else 'declined'}: {workspace.name}", message=message,
+                category='PROJECT', priority='NORMAL', action_url='/radai-intelligence', action_label='Open RADAI Intelligence',
+                metadata={'type': 'ai_project_invitation_response', 'workspace_id': workspace.pk, 'decision': decision}))
+        payload = {'decision': decision, 'workspace_id': workspace.pk}
+        if decision == 'accept':
+            payload['project'] = project_payload(workspace, request.user)
+        return Response(payload)
 
 
 def instruction_payload(workspace, role):
@@ -575,7 +882,7 @@ def recent_conversation_rows(user, term='', limit=50):
     from django.db.models.functions import Coalesce
     from .ai_workspace_models import AIWorkspaceAttachment
     open_projects = AIWorkspace.objects.filter(archived_at__isnull=True).filter(
-        Q(owner=user) | Q(members__user=user)).values('pk')
+        Q(owner=user) | Q(members__user=user, members__status='active')).values('pk')
     rows = AIWorkspaceConversation.objects.filter(owner=user, archived_at__isnull=True).filter(
         Q(workspace__isnull=True) | Q(workspace__in=open_projects))
     if term:
@@ -746,7 +1053,7 @@ class AIWorkspaceConversationShareView(APIView):
         if row.attachments.exists():
             raise PermissionDenied('A conversation with private attachments cannot be shared.')
         user_id = request.data.get('user_id')
-        if not AIWorkspaceMember.objects.filter(workspace=workspace, user_id=user_id).exists():
+        if not AIWorkspaceMember.objects.filter(workspace=workspace, user_id=user_id, status='active').exists():
             raise ValidationError({'user_id': 'The recipient must be an AI project member.'})
         with transaction.atomic():
             AIWorkspaceConversationShare.objects.get_or_create(conversation=row, user_id=user_id)
@@ -765,7 +1072,7 @@ class AIWorkspaceConversationShareView(APIView):
 
 
 @sensitive_variables('api_key')
-def send_conversation(request, row, workspace=None):
+def send_conversation(request, row, workspace=None, on_delta=None):
     question = text_field(request.data, 'question', 8000)
     if not question:
         raise ValidationError({'question': 'Question is required.'})
@@ -794,11 +1101,13 @@ def send_conversation(request, row, workspace=None):
             if original.content != question:
                 raise Conflict('This request ID belongs to a different question.')
             return Response({'conversation': conversation_payload(row, detail=True), 'idempotent_replay': True})
-        models = chat_models(request.user)
+        models, pool, _restricted = conversation_models(request.user, workspace)
         selected_model = str(request.data.get('model') or (models[0]['model_id'] if models else ''))
         selected_provider = request.data.get('provider') or (models[0]['provider'] if models else '')
         if not any(row['provider'] == selected_provider and row['model_id'] == selected_model for row in models):
             raise ValidationError({'model': 'Choose an available chat model.'})
+        if selected_provider == 'auto' and str(request.data.get('web_search', '')).lower() in ('1', 'true', 'yes', 'on'):
+            selected_provider = 'anthropic'  # web search runs on Claude only; chat_candidates keeps it there
         from .ai_skills import resolve_skill, skill_prompt
         skill = None
         if request.data.get('skill_id'):
@@ -807,7 +1116,7 @@ def send_conversation(request, row, workspace=None):
                 raise ValidationError({'skill_id': 'Unknown skill.'})
         use_web = str(request.data.get('web_search', '')).lower() in ('1', 'true', 'yes', 'on')
         if use_web:
-            status_row = web_search_status(request.user, models)
+            status_row = web_search_status(request.user, pool)
             if not status_row['allowed']:
                 raise ValidationError({'web_search': status_row['reason']})
             if selected_provider != 'anthropic':
@@ -876,22 +1185,42 @@ def send_conversation(request, row, workspace=None):
                     context['project'] = {'id': workspace.pk, 'name': workspace.name}
             else:
                 context['notes'] = 'General chat. No project or document evidence is available. Do not claim access to project records.'
-            api_key = ''
-            if selected_provider == 'anthropic':
-                api_key, _metadata = resolve_provider_credential('anthropic')
-                if not api_key or not get_provider_configuration('anthropic')['ready']:
-                    raise ChatConfigurationError('The configured Claude credential is unavailable.')
-            result = answer_question(question=question, context=context,
-                provider='claude' if selected_provider == 'anthropic' else 'ollama',
-                model=selected_model, api_key=api_key,
-                history=[{'role': msg.role, 'content': msg.content} for msg in history],
-                project_instructions=preferences, general_chat=workspace is None and not sources and not use_web,
-                web_search=use_web, skill_prompt=skill_prompt(skill) if skill else '')
+            candidates = chat_candidates(pool, selected_provider, selected_model, use_web)
+            skipped = []  # providers that could not answer before the one that did
+            result = None
+            for index, candidate in enumerate(candidates):
+                streamed = []
+
+                def forward(text, _streamed=streamed):
+                    _streamed.append(True)
+                    on_delta(text)
+                try:
+                    api_key = ''
+                    if candidate['provider'] == 'anthropic':
+                        api_key, _metadata = resolve_provider_credential('anthropic')
+                        if not api_key or not get_provider_configuration('anthropic')['ready']:
+                            raise ChatConfigurationError('The configured Claude credential is unavailable.')
+                    result = answer_question(question=question, context=context,
+                        provider=CHAT_ENGINES[candidate['provider']],
+                        model=candidate['model_id'], api_key=api_key,
+                        history=[{'role': msg.role, 'content': msg.content} for msg in history],
+                        project_instructions=preferences, general_chat=workspace is None and not sources and not use_web,
+                        web_search=use_web, skill_prompt=skill_prompt(skill) if skill else '',
+                        on_delta=forward if on_delta else None)
+                    if not result.get('answer'):
+                        raise ChatUnavailable()
+                    break
+                except Exception as exc:
+                    # Once text has reached the reader, another model can't take over mid-answer.
+                    if streamed or index == len(candidates) - 1:
+                        raise
+                    skipped.append({'provider': candidate['provider'], 'model': candidate['model_id'],
+                                    'reason': failure_reason(exc)})
+            if result is None:
+                raise ChatUnavailable()
         except ChatConfigurationError as exc:
             raise ValidationError({'provider': str(exc)})
         except Exception:
-            raise ChatUnavailable()
-        if not result.get('answer'):
             raise ChatUnavailable()
         attachment_refs = []
         for attachment in attachments:
@@ -907,8 +1236,11 @@ def send_conversation(request, row, workspace=None):
         if row.title in DEFAULT_TITLES:  # name the chat after its first question
             row.title = title_from_question(question)
         usage = result.get('token_usage') or {}
+        if skipped:  # kept with the answer so the page can say which model stepped in and why
+            usage = {**usage, 'fallback_from': skipped}
+        usage_provider = {'ollama': 'local', 'gemini': 'google'}.get(result.get('provider'), result.get('provider', 'other'))
         AIUsageLog.objects.create(
-            user=request.user, provider='local' if result.get('provider') == 'ollama' else result.get('provider', 'other'),
+            user=request.user, provider=usage_provider,
             model_name=result.get('model') or 'unknown', application='radai-intelligence',
             feature='knowledge-chat', request_id=str(request_id), provenance='server',
             tokens_input=int(usage.get('input_tokens') or 0),
@@ -930,6 +1262,8 @@ def send_conversation(request, row, workspace=None):
                    'token_usage': usage}
         if skill:
             details['skill_id'] = skill['id']
+        if skipped:
+            details['model_fallback'] = skipped
         if use_web:  # every web search is visible in the audit log
             details.update({'web_search': True, 'web_searches': result.get('web_searches', 0),
                             'web_urls': [item['url'] for item in web_sources]})
@@ -940,6 +1274,70 @@ def send_conversation(request, row, workspace=None):
     return Response({'conversation': conversation_payload(row, detail=True), 'token_usage': usage})
 
 
+def wants_stream(request):
+    return str(request.data.get('stream', '')).lower() in ('1', 'true', 'yes', 'on')
+
+
+def stream_send_conversation(request, row, workspace=None):
+    """Run send_conversation unchanged, but forward answer text to the client as it is generated.
+
+    The body is newline-delimited JSON: {"type": "delta", "text": ...} lines, then one
+    {"type": "done", ...the usual send payload} or {"type": "error", "status", "detail"} line.
+    Anything that fails before the first text (validation, permissions, provider setup) is
+    raised here, so it returns the usual JSON error response with its status code.
+    """
+    import json
+    import queue
+    import threading
+    from django.db import connections
+    from django.http import StreamingHttpResponse
+
+    events = queue.Queue()
+    _ = request.user, request.data  # authenticate and parse on this thread
+
+    def work():
+        try:
+            response = send_conversation(request, row, workspace,
+                                         on_delta=lambda text: events.put(('delta', text)))
+            events.put(('done', response.data))
+        except Exception as exc:  # handed to the request thread below
+            events.put(('error', exc))
+        finally:
+            connections.close_all()
+
+    threading.Thread(target=work, name='radai-chat-stream', daemon=True).start()
+    kind, value = events.get()
+    if kind == 'error':
+        raise value
+    if kind == 'done':  # nothing streamed (replayed request or a non-streaming provider)
+        return Response(value)
+
+    def line(payload):
+        return json.dumps(payload, default=str) + '\n'
+
+    def body(first):
+        yield line({'type': 'delta', 'text': first})
+        while True:
+            kind, value = events.get()
+            if kind == 'delta':
+                yield line({'type': 'delta', 'text': value})
+                continue
+            if kind == 'done':
+                yield line({'type': 'done', **value})
+            else:
+                if isinstance(value, APIException):
+                    detail, code = value.detail, value.status_code
+                else:
+                    detail, code = ChatUnavailable.default_detail, ChatUnavailable.status_code
+                yield line({'type': 'error', 'status': code, 'detail': detail})
+            return
+
+    response = StreamingHttpResponse(body(value), content_type='application/x-ndjson; charset=utf-8')
+    response['Cache-Control'] = 'no-cache, no-transform'
+    response['X-Accel-Buffering'] = 'no'  # proxies must pass each line straight through
+    return response
+
+
 class AIWorkspaceConversationSendView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -947,6 +1345,8 @@ class AIWorkspaceConversationSendView(APIView):
         workspace, row = conversation_for(request.user, workspace_id, conversation_id)
         if row.owner_id != request.user.pk:
             raise PermissionDenied('Shared conversations are read only to recipients.')
+        if wants_stream(request):
+            return stream_send_conversation(request, row, workspace)
         return send_conversation(request, row, workspace)
 
 
@@ -955,6 +1355,8 @@ class AIWorkspaceGeneralConversationSendView(APIView):
 
     def post(self, request, conversation_id):
         row = general_conversation_for(request.user, conversation_id)
+        if wants_stream(request):
+            return stream_send_conversation(request, row)
         return send_conversation(request, row)
 
 

@@ -1237,6 +1237,7 @@ for _app_config_module in (
     'apps.finance.config',
     'apps.dashboard.config',
     'apps.payroll.config',
+    'apps.usage_tracking.config',
 ):
     try:
         import importlib as _importlib

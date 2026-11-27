@@ -6,7 +6,7 @@ All endpoints accept ?range=1d|7d|30d|90d (default 7d).
 from datetime import timedelta, date
 import calendar
 
-from django.db.models import Avg, Count, Max, Q, Sum
+from django.db.models import Avg, Count, Max
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, TruncQuarter
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -337,22 +337,30 @@ class DbEventsView(APIView):
 
     def get(self, request):
         from apps.activity.models import SystemActivity
+        from .retention import day_bounds
         start, _ = _parse_range(request)
+        # Whole calendar days: older days may only exist as daily summaries.
+        start = day_bounds(timezone.localtime(start).date())[0]
         category = request.query_params.get('category', '')
         severity = request.query_params.get('severity', '')
         limit    = min(int(request.query_params.get('limit', 50)), 500)
 
         base_qs = SystemActivity.objects.filter(timestamp__gte=start)
-        total   = base_qs.count()
 
-        # Category summary (always over full unfiltered set)
+        # Category summary (always over full unfiltered set). Counts include days
+        # whose raw rows the retention job already rolled into daily summaries.
+        from .history import activity_counts
+        by_category = {}
+        for (_day, _email, _kind, cat), n in activity_counts(start, timezone.now()).items():
+            by_category[cat] = by_category.get(cat, 0) + n
+        total = sum(by_category.values())
         cat_summary = [
             {
-                'category': c['category'],
-                'label':    _CATEGORY_LABELS.get(c['category'], c['category'].replace('_', ' ').title()),
-                'count':    c['count'],
+                'category': cat,
+                'label':    _CATEGORY_LABELS.get(cat, cat.replace('_', ' ').title()),
+                'count':    n,
             }
-            for c in base_qs.values('category').annotate(count=Count('id')).order_by('-count')
+            for cat, n in sorted(by_category.items(), key=lambda x: x[1], reverse=True)
         ]
 
         # Apply optional filters for event list
@@ -555,47 +563,41 @@ class UtilisationReportView(APIView):
         # ── department + job lookup ───────────────────────────────────────────
         dept_map, job_map = self._build_dept_map()
 
-        # ── base UsageLog queryset ───────────────────────────────────────────
-        base_qs = UsageLog.objects.filter(timestamp__gte=start, timestamp__lte=end)
-        if dept_filter:
-            # collect emails in that department
-            dept_emails = [e for e, d in dept_map.items() if d == dept_filter]
-            base_qs = base_qs.filter(user_email__in=dept_emails)
+        # ── Usage per day / user / discipline ────────────────────────────────
+        # history.* merges daily summaries (days already rolled up by the
+        # retention job) with raw rows, so past months report the same numbers.
+        from .history import activity_counts, bucket_start, usage_rows
+        dept_emails = [e for e, d in dept_map.items() if d == dept_filter] if dept_filter else None
+        rows = usage_rows(start, end, emails=dept_emails)
 
         # ── AI events from SystemActivity ────────────────────────────────────
         try:
-            from apps.activity.models import SystemActivity
-            ai_qs = SystemActivity.objects.filter(
-                timestamp__gte=start,
-                timestamp__lte=end,
-                activity_type__in=AI_COST_CONFIG['activity_types'],
-            )
-            if dept_filter:
-                ai_qs = ai_qs.filter(user_email__in=dept_emails)
+            ai_counts = activity_counts(start, end, types=AI_COST_CONFIG['activity_types'], emails=dept_emails)
         except Exception:
-            ai_qs = None
+            ai_counts = None
 
-        # ── Per-user UsageLog aggregation ────────────────────────────────────
-        user_usage = {
-            r['user_email']: r
-            for r in (
-                base_qs
-                .values('user_email', 'user_full_name')
-                .annotate(
-                    requests=Count('id'),
-                    success_count=Count('id', filter=Q(success=True)),
-                    avg_ms=Avg('response_time_ms'),
-                    last_seen=Max('timestamp'),
-                    disciplines_used=Count('discipline_key', distinct=True),
-                )
-            )
-        }
+        # ── Per-user usage aggregation ───────────────────────────────────────
+        user_usage = {}
+        for r in rows:
+            u = user_usage.setdefault(r['user_email'], {
+                'user_email': r['user_email'], 'user_full_name': '', 'requests': 0, 'success_count': 0,
+                'ms_sum': 0, 'ms_count': 0, 'last_seen': None, 'disciplines': set()})
+            u['user_full_name'] = u['user_full_name'] or r['name']
+            u['requests'] += r['requests']
+            u['success_count'] += r['success']
+            u['ms_sum'] += r['ms_sum']
+            u['ms_count'] += r['ms_count']
+            u['disciplines'].add(r['discipline_key'])
+            if r['last_seen'] and (u['last_seen'] is None or r['last_seen'] > u['last_seen']):
+                u['last_seen'] = r['last_seen']
+        for u in user_usage.values():
+            u['avg_ms'] = u['ms_sum'] / u['ms_count'] if u['ms_count'] else None
+            u['disciplines_used'] = len(u['disciplines'])
 
         # ── Per-user AI aggregation ──────────────────────────────────────────
         ai_per_user = {}
-        if ai_qs is not None:
-            for r in ai_qs.values('user_email').annotate(ai_calls=Count('id')):
-                ai_per_user[r['user_email']] = r['ai_calls']
+        for (_day, email, _kind, _cat), n in (ai_counts or {}).items():
+            ai_per_user[email] = ai_per_user.get(email, 0) + n
 
         # ── Build by_user list ────────────────────────────────────────────────
         all_emails = set(user_usage) | set(ai_per_user)
@@ -655,61 +657,51 @@ class UtilisationReportView(APIView):
             })
 
         # ── By discipline ─────────────────────────────────────────────────────
-        by_discipline = [
+        disc_agg = {}
+        for r in rows:
+            d = disc_agg.setdefault((r['discipline_key'], r['label']), {
+                'requests': 0, 'users': set(), 'ms_sum': 0, 'ms_count': 0})
+            d['requests'] += r['requests']
+            d['users'].add(r['user_email'])
+            d['ms_sum'] += r['ms_sum']
+            d['ms_count'] += r['ms_count']
+        by_discipline = sorted([
             {
-                'discipline_key':   r['discipline_key'],
-                'discipline_label': r['discipline_label'] or r['discipline_key'],
-                'requests':         r['requests'],
-                'unique_users':     r['unique_users'],
-                'avg_response_ms':  round(r['avg_ms'] or 0),
+                'discipline_key':   key,
+                'discipline_label': label or key,
+                'requests':         d['requests'],
+                'unique_users':     len(d['users']),
+                'avg_response_ms':  round(d['ms_sum'] / d['ms_count']) if d['ms_count'] else 0,
             }
-            for r in (
-                base_qs
-                .values('discipline_key', 'discipline_label')
-                .annotate(
-                    requests=Count('id'),
-                    unique_users=Count('user_email', distinct=True),
-                    avg_ms=Avg('response_time_ms'),
-                )
-                .order_by('-requests')
-            )
-        ]
+            for (key, label), d in disc_agg.items()
+        ], key=lambda x: x['requests'], reverse=True)
 
         # ── Trend series ──────────────────────────────────────────────────────
-        trunc_fn = period_cfg['trunc_fn']
-        fmt_fn   = period_cfg['fmt']
-        trend_qs = (
-            base_qs
-            .annotate(bucket=trunc_fn('timestamp'))
-            .values('bucket')
-            .annotate(
-                requests=Count('id'),
-                unique_users=Count('user_email', distinct=True),
-                avg_ms=Avg('response_time_ms'),
-            )
-            .order_by('bucket')
-        )
+        fmt_fn = period_cfg['fmt']
+        buckets = {}
+        for r in rows:
+            b = buckets.setdefault(bucket_start(r['day'], period), {
+                'requests': 0, 'users': set(), 'ms_sum': 0, 'ms_count': 0})
+            b['requests'] += r['requests']
+            b['users'].add(r['user_email'])
+            b['ms_sum'] += r['ms_sum']
+            b['ms_count'] += r['ms_count']
 
         # AI trend (by same buckets)
         ai_trend_map = {}
-        if ai_qs is not None:
-            for r in (
-                ai_qs
-                .annotate(bucket=trunc_fn('timestamp'))
-                .values('bucket')
-                .annotate(ai_calls=Count('id'))
-            ):
-                ai_trend_map[r['bucket']] = r['ai_calls']
+        for (day, _email, _kind, _cat), n in (ai_counts or {}).items():
+            key = bucket_start(day, period)
+            ai_trend_map[key] = ai_trend_map.get(key, 0) + n
 
         trends = []
-        for row in trend_qs:
-            bucket = row['bucket']
+        for bucket in sorted(buckets):
+            b = buckets[bucket]
             ai_cnt = ai_trend_map.get(bucket, 0)
             trends.append({
-                'label':           fmt_fn(bucket) if bucket else '—',
-                'requests':        row['requests'],
-                'unique_users':    row['unique_users'],
-                'avg_response_ms': round(row['avg_ms'] or 0),
+                'label':           fmt_fn(bucket),
+                'requests':        b['requests'],
+                'unique_users':    len(b['users']),
+                'avg_response_ms': round(b['ms_sum'] / b['ms_count']) if b['ms_count'] else 0,
                 'ai_calls':        ai_cnt,
                 'estimated_cost':  round(ai_cnt * cost_per_call, 4),
             })

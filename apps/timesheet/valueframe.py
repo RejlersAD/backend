@@ -170,6 +170,7 @@ def _days(start, end):
 
 MATRIX_SOURCE_LABEL = 'Monthly matrix (real-time attendance)'
 FALLBACK_SOURCE_LABEL = 'Stored daily attendance (Monthly matrix source unavailable)'
+UNAVAILABLE_SOURCE_LABEL = 'Unavailable: the Monthly matrix source is not reachable and no stored attendance exists for this period'
 
 
 def _months(start, end):
@@ -195,10 +196,18 @@ def _matrix_office_days(codes, start, end):
         return None
     wanted = set(codes)
     found = defaultdict(dict)
+    matrix_rows = 0
     try:
         service = get_service()
         for year, month in _months(start, end):
             report = service.monthly_report(year=year, month=month)
+            # Source down: an empty matrix must not read as 'nobody came to the office'.
+            # cache_miss marks the timesheet cache's fallback reply after a failed query
+            # (circuit_open is only set once the breaker has tripped).
+            if (report.get('circuit_open') or report.get('cache_miss')
+                    or report.get('configured') is False or report.get('error')):
+                return None
+            matrix_rows += len(report.get('rows') or [])
             for row in report.get('rows') or []:
                 code = norm_code(row.get('employee_code'))
                 if code not in wanted:
@@ -213,11 +222,15 @@ def _matrix_office_days(codes, start, end):
                         found[code][when] = max(found[code].get(when, 0.0), hours)
     except Exception:
         return None
-    return found
+    # A matrix with nobody in it for the whole period has no attendance to compare against.
+    return found if matrix_rows else None
 
 
 def _presence(codes, start, end):
-    """({code: {'office', 'manual', 'wfh', 'site': set(dates)}}, source label) within [start, end].
+    """({code: {'office', 'manual', 'wfh', 'site': set(dates)}}, source label, available) within [start, end].
+
+    `available` is False when neither the Monthly matrix nor stored badge rows
+    cover the period: the comparison would then flag everyone, so it must not be acted on.
 
     Office presence comes from the Monthly matrix source; HR manual corrections,
     approved Work From Home and site visit check-ins are added on top.
@@ -241,6 +254,9 @@ def _presence(codes, start, end):
         elif matrix is None and ((hours or 0) > 0 or first_in is not None):
             found[code]['office'].add(day)  # fallback only: matrix source unreachable
             found[code]['office_hours'][day] = float(hours or 0)
+    available = matrix is not None or any(v['office'] for v in found.values())
+    if not available:
+        source_label = UNAVAILABLE_SOURCE_LABEL
 
     try:  # approved Work From Home (working days only)
         from apps.payroll.models import LeaveRequest
@@ -262,7 +278,7 @@ def _presence(codes, start, end):
             found[norm_code(code)]['site'].add(moment.date())
     except Exception:
         pass
-    return found, source_label
+    return found, source_label, available
 
 
 def compare_import(vf_import):
@@ -271,7 +287,7 @@ def compare_import(vf_import):
     hours_per_day = workday_hours()
     entries = list(vf_import.entries.all())
     codes = [e.employee_code for e in entries]
-    presence, source_label = _presence(codes, vf_import.period_start, vf_import.period_end)
+    presence, source_label, available = _presence(codes, vf_import.period_start, vf_import.period_end)
     enrolled = set(BiometricUserMaster.objects.filter(employee_code__in=codes).values_list('employee_code', flat=True))
 
     rows = []
@@ -324,5 +340,6 @@ def compare_import(vf_import):
         'gap_days': round(sum(r['gap_days'] for r in flagged), 1),
         'hours_per_day': hours_per_day, 'flag_threshold_days': GAP_FLAG_DAYS,
         'attendance_source': source_label,
+        'attendance_available': available,
     }
     return {'summary': summary, 'rows': rows}

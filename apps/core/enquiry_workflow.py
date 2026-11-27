@@ -71,6 +71,46 @@ def _user_label(user):
     return (user.get_full_name() or user.username) if user else ''
 
 
+# When nobody holds Head of HR & Administration, the HR stage goes to these HR positions.
+# Holders still need the RBAC 'approve' action on Enquiry Management.
+HR_STAGE_FALLBACK_POSITIONS = ('hr_manager', 'hr_admin')
+
+
+def _hr_stage_candidates():
+    users = _manager_candidates('Human Resources', approval_required=True)
+    if users:
+        return users
+    from apps.rbac.approval_eligibility import position_users
+    return _by_workload(list(position_users(HR_STAGE_FALLBACK_POSITIONS, 'enquiry_management')))
+
+
+def assign_unassigned_requisition_stage(enquiry, *, actor=None):
+    """Give a pending requisition stage that has no approver one now (e.g. after HR access is granted).
+
+    Returns the approver assigned, or None when there is still nobody eligible.
+    """
+    if enquiry.inquiry_type != 'talent_requisition' or enquiry.approval_status != 'pending':
+        return None
+    stages, index = requisition_stage_state(enquiry)
+    if not (0 <= index < len(stages)) or stages[index].get('approver_id'):
+        return None
+    candidates = _hr_stage_candidates() if stages[index].get('key') == 'hr' else []
+    approver = candidates[0] if candidates else None
+    if approver is None:
+        return None
+    details = dict(enquiry.requisition_details or {})
+    stages = [dict(stage) for stage in stages]
+    stages[index].update(approver_id=approver.pk, approver_name=_user_label(approver))
+    details['approval_stages'] = stages
+    enquiry.requisition_details = details
+    enquiry.assigned_to, enquiry.assigned_by, enquiry.assigned_at = approver, actor, timezone.now()
+    enquiry.save(update_fields=['requisition_details', 'assigned_to', 'assigned_by', 'assigned_at', 'updated_at'])
+    EnquiryActivity.objects.create(enquiry=enquiry, actor=actor, action='requisition_stage_assigned',
+                                   details={'stage': stages[index].get('key'), 'approver_id': approver.pk})
+    _notify_requisition_stage_assignment(enquiry, sender=actor)
+    return approver
+
+
 def _setup_requisition_stages(enquiry, hr_representative):
     """Initialise the approval stage chain; returns the first-stage assignee."""
     manager = _requester_manager(enquiry)
@@ -160,7 +200,8 @@ def decide_requisition_stage(enquiry, *, actor, decision, comment='', allow_over
         if next_stage.get('approver_id'):
             approver = get_user_model().objects.filter(pk=next_stage['approver_id'], is_active=True).first()
         if approver is None:
-            candidates = _manager_candidates(enquiry.department, approval_required=True)
+            candidates = (_hr_stage_candidates() if next_stage.get('key') == 'hr'
+                          else _manager_candidates(enquiry.department, approval_required=True))
             approver = candidates[0] if candidates else None
         next_stage['approver_id'] = approver.pk if approver else None
         next_stage['approver_name'] = _user_label(approver)
@@ -177,6 +218,11 @@ def decide_requisition_stage(enquiry, *, actor, decision, comment='', allow_over
 
     enquiry.requisition_details = details
     enquiry.save(update_fields=update_fields)
+    opening = None
+    if enquiry.approval_status == 'approved':
+        # Every stage approved: the vacancy (and any named candidate) lands in Talent Acquisition.
+        from apps.hr_core.requisition_handoff import open_requisition_position
+        opening = open_requisition_position(enquiry, actor=actor)
     EnquiryActivity.objects.create(
         enquiry=enquiry, actor=actor, action='requisition_stage_decision',
         details={'stage': stage['key'], 'decision': decision, 'comment': stage['comment']},
@@ -189,7 +235,8 @@ def decide_requisition_stage(enquiry, *, actor, decision, comment='', allow_over
             enquiry.requester, sender=actor,
             title=f'Requisition {decision}: {enquiry.reference}',
             message=(f'{stage["label"]} {stage_word} your talent requisition "{enquiry.subject}".'
-                     + (f' Comments: {stage["comment"]}' if stage['comment'] else '')),
+                     + (f' Comments: {stage["comment"]}' if stage['comment'] else '')
+                     + (' It is now an open position in Talent Acquisition.' if opening else '')),
             action_url=f'/my-enquiries/{enquiry.pk}',
             priority='HIGH' if decision == 'rejected' else 'NORMAL',
             metadata={'enquiry_id': enquiry.pk, 'requires_action': False,
@@ -250,6 +297,11 @@ def _manager_candidates(department, *, approval_required=False):
         ))
         users = [profile.user for profile in profiles
                  if _is_department_head(profile) and _profile_matches_department(profile, department)]
+    return _by_workload(users)
+
+
+def _by_workload(users):
+    """Least-loaded first, so approvals spread across eligible people."""
     workload = dict(
         Enquiry.objects.filter(assigned_to_id__in=[user.pk for user in users]).exclude(
             status__in=['resolved', 'closed', 'spam'],
@@ -344,6 +396,9 @@ def route_enquiry(enquiry, *, actor=None):
         candidates = _manager_candidates(department, approval_required=approval_required)
         representative = candidates[0] if candidates else None
     if enquiry.inquiry_type == 'talent_requisition':
+        if representative is None:
+            fallback = _hr_stage_candidates()
+            representative = fallback[0] if fallback else None
         representative = _setup_requisition_stages(enquiry, representative)
 
     enquiry.department = department

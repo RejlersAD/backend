@@ -285,7 +285,9 @@ class _ProviderClient(_Resource):
                 options.update(base_url='https://api.anthropic.com',
                                default_headers={'Authorization': Omit(), 'X-Api-Key': key})
             elif self._provider == 'gemini':
-                options.update(vertexai=False, http_options={'base_url': 'https://generativelanguage.googleapis.com'})
+                # Keep the caller's other HTTP options (such as api_version); only the endpoint is pinned.
+                options.update(vertexai=False, http_options={**(options.get('http_options') or {}),
+                                                             'base_url': 'https://generativelanguage.googleapis.com'})
         client = None
         try:
             with _private_provider_logs():

@@ -124,6 +124,30 @@ class ValueFrameComparisonTests(TestCase):
         self.assertEqual(rows['100']['pattern'], 'whole_period')
         self.assertEqual(result['summary']['attendance_source'], 'Monthly matrix (real-time attendance)')
 
+    def test_unreachable_source_is_reported_not_read_as_absence(self):
+        from apps.timesheet import valueframe
+        self.matrix.stop()  # exercise the real helper against each reply the attendance service gives when down
+        replies = {
+            'breaker open': {'rows': [], 'circuit_open': True},
+            # timesheet cache fallback after a failed query, before the breaker trips
+            'query failed': {'configured': True, 'rows': [], 'summary': {}, 'cache_miss': True, 'circuit_open': False},
+            'matrix empty': {'configured': True, 'rows': []},
+        }
+        working = {'configured': True, 'rows': [{'employee_code': '200', 'days_detail': [{'date': '2026-08-03', 'hours': 8.0}]}]}
+        period = (date(2026, 8, 1), date(2026, 8, 31))
+        with mock.patch('apps.timesheet.config.is_configured', return_value=True):
+            for label, reply in replies.items():
+                service = mock.Mock(monthly_report=mock.Mock(return_value=reply))
+                with self.subTest(label), mock.patch('apps.timesheet.get_service', return_value=service):
+                    self.assertIsNone(valueframe._matrix_office_days(['200'], *period))
+            service = mock.Mock(monthly_report=mock.Mock(return_value=working))
+            with mock.patch('apps.timesheet.get_service', return_value=service):
+                self.assertEqual(valueframe._matrix_office_days(['200'], *period), {'200': {date(2026, 8, 3): 8.0}})
+        self.matrix.start()
+        summary = compare_import(self.item)['summary']
+        self.assertFalse(summary['attendance_available'])
+        self.assertIn('Unavailable', summary['attendance_source'])
+
     def test_attendance_outside_the_period_is_ignored(self):
         DailyAttendanceSummary.objects.create(employee_code='200', date=date(2026, 9, 1), effective_hours=9)
         rows = {r['employee_code']: r for r in compare_import(self.item)['rows']}

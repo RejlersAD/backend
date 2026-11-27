@@ -60,6 +60,7 @@ def build_proposal(vf_import, codes=None):
     sent = {a.employee.employee_no: a for a in PayrollAdjustment.objects.select_related('employee')
             .filter(description__startswith=marker(vf_import), status=catalog.AdjustmentStatus.PENDING)}
 
+    available = comparison['summary'].get('attendance_available', True)
     lines = []
     for row in flagged:
         code = row['employee_code']
@@ -99,6 +100,7 @@ def build_proposal(vf_import, codes=None):
                   'step_days': str(VALUEFRAME_GAP_STEP_DAYS),
                   'formula': 'gap days × (monthly gross ÷ standard workdays), same as unpaid leave'},
         'lines': lines,
+        'attendance_available': available, 'attendance_source': comparison['summary'].get('attendance_source', ''),
         'summary': {'flagged': len(lines), 'ready': len(ready),
                     'already_sent': sum(1 for l in lines if l['status'] == 'already_sent'),
                     'no_payroll_record': sum(1 for l in lines if l['status'] == 'no_payroll_record'),
@@ -118,6 +120,10 @@ def send_to_payroll(vf_import, *, user, target_year, target_month, codes=None):
         raise ValidationError({'target_month': f'The {target_year}-{target_month:02d} payroll run is already '
                                                f'"{run.status}". Choose the next payroll month.'})
     proposal = build_proposal(vf_import, codes=codes)
+    if not proposal['attendance_available']:
+        # Without attendance every booked day looks like a gap: never turn that into deductions.
+        raise ValidationError({'detail': 'Real-time attendance is not available for this period '
+                                         '(Monthly matrix source unreachable). Try again once it is back.'})
     period = f'{vf_import.period_start:%d %b} – {vf_import.period_end:%d %b %Y}'
     created = updated = 0
     for line in proposal['lines']:

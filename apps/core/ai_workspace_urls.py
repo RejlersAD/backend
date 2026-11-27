@@ -1,5 +1,5 @@
 from django.urls import path
-from .ai_workspace_views import (AIWorkspaceListView, AIWorkspaceModelsView, AIWorkspaceDetailView, AIWorkspaceMembersView,
+from .ai_workspace_views import (AIWorkspaceListView, AIWorkspaceModelsView, AIChatModelCatalogView, AIWorkspaceInvitationListView, AIWorkspaceInvitationDecisionView, AIWorkspaceUsageView, AIWorkspaceDetailView, AIWorkspaceMembersView,
     AIWorkspaceMemberDetailView, AIWorkspaceInstructionsView, AIWorkspaceActivityView,
     AIWorkspaceKnowledgeView, AIWorkspaceKnowledgeDetailView, AIWorkspaceKnowledgeDownloadView,
     AIWorkspaceConversationView, AIWorkspaceConversationDetailView,
@@ -13,6 +13,10 @@ from .ai_workspace_views import (AIWorkspaceListView, AIWorkspaceModelsView, AIW
 
 urlpatterns = [
     path('models/', AIWorkspaceModelsView.as_view()),
+    path('models/catalog/', AIChatModelCatalogView.as_view()),
+    path('usage/', AIWorkspaceUsageView.as_view()),
+    path('invitations/', AIWorkspaceInvitationListView.as_view()),
+    path('invitations/<int:invitation_id>/<str:decision>/', AIWorkspaceInvitationDecisionView.as_view()),
     path('conversations/recent/', AIRecentConversationsView.as_view()),
     path('skills/', AISkillListView.as_view()),
     path('skills/<str:skill_id>/', AISkillDetailView.as_view()),

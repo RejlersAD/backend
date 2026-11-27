@@ -85,3 +85,60 @@ class UsageLog(models.Model):
             f"{self.user_email} → {self.discipline_label} "
             f"[{self.response_status}] ({self.timestamp:%Y-%m-%d %H:%M})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Daily roll-ups written by retention.py before old raw rows are deleted.
+# Reports combine these (older days) with raw rows (recent days).
+# ---------------------------------------------------------------------------
+class UsageDailySummary(models.Model):
+    """usage_log rolled up per calendar day (settings.TIME_ZONE), user and discipline."""
+
+    date             = models.DateField()
+    user_email       = models.EmailField(blank=True)
+    user_full_name   = models.CharField(max_length=255, blank=True)
+    discipline_key   = models.CharField(max_length=80)
+    discipline_label = models.CharField(max_length=120, blank=True)
+    requests         = models.PositiveIntegerField(default=0)
+    success_count    = models.PositiveIntegerField(default=0)
+    # Avg response time = response_ms_sum / response_ms_count (rows with a time only).
+    response_ms_sum   = models.BigIntegerField(default=0)
+    response_ms_count = models.PositiveIntegerField(default=0)
+    last_seen        = models.DateTimeField(null=True, blank=True)
+    created_at       = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'usage_daily_summary'
+        ordering = ['-date']
+        constraints = [
+            models.UniqueConstraint(fields=['date', 'user_email', 'discipline_key'], name='uq_usage_daily_summary_day_user_disc'),
+        ]
+        indexes = [models.Index(fields=['user_email', 'date'], name='usage_daily_user_date_idx')]
+
+    def __str__(self):
+        return f'{self.date} {self.user_email} {self.discipline_key}: {self.requests}'
+
+
+class ActivityDailySummary(models.Model):
+    """system_activity rolled up per calendar day, user, type, category and severity."""
+
+    date          = models.DateField()
+    user_email    = models.EmailField(blank=True)
+    activity_type = models.CharField(max_length=50)
+    category      = models.CharField(max_length=50, blank=True)
+    severity      = models.CharField(max_length=20, blank=True)
+    count         = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    created_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'activity_daily_summary'
+        ordering = ['-date']
+        constraints = [
+            models.UniqueConstraint(fields=['date', 'user_email', 'activity_type', 'category', 'severity'],
+                                    name='uq_activity_daily_summary_key'),
+        ]
+        indexes = [models.Index(fields=['date', 'activity_type'], name='activity_daily_date_type_idx')]
+
+    def __str__(self):
+        return f'{self.date} {self.user_email} {self.activity_type}: {self.count}'

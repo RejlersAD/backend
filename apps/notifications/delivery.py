@@ -121,6 +121,16 @@ def _hr_assignment_issue(notification, metadata):
     return '' if request and can_review(request, notification.recipient) else 'approval_no_longer_assigned'
 
 
+def _ai_project_invitation_issue(notification, metadata):
+    """An AI project invitation is current while it is still pending for this recipient."""
+    from apps.core.ai_workspace_models import AIWorkspaceMember
+    pending = AIWorkspaceMember.objects.filter(
+        pk=int(metadata['invitation_id']), user_id=notification.recipient_id, status='invited',
+        workspace__archived_at__isnull=True,
+    ).exists()
+    return '' if pending else 'approval_no_longer_current'
+
+
 def _proposal_assignment_issue(notification, metadata):
     from apps.planning_intelligence.access import can_decide_proposal_task
     from apps.planning_intelligence.models import TechnicalProposal
@@ -204,6 +214,11 @@ def approval_assignment_issue(notification):
         try:
             return _offboarding_assignment_issue(notification, metadata)
         except (KeyError, TypeError, ValueError, DjangoValidationError, ValidationError):
+            return 'approval_context_invalid'
+    if metadata.get('type') == 'ai_project_invitation':
+        try:
+            return _ai_project_invitation_issue(notification, metadata)
+        except (KeyError, TypeError, ValueError):
             return 'approval_context_invalid'
     if metadata.get('proposal_id'):
         try:

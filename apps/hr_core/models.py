@@ -29,6 +29,12 @@ class RecruitmentOpening(TimeStampedModel):
     source_id = models.PositiveBigIntegerField(null=True, blank=True, unique=True)
     source_url = models.URLField(max_length=1000, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
+    # Openings created when a talent requisition completes its approval workflow.
+    requisition = models.OneToOneField('core.Enquiry', null=True, blank=True, on_delete=models.SET_NULL,
+                                       related_name='talent_opening')
+    positions = models.PositiveIntegerField(default=1)
+    hiring_manager = models.CharField(max_length=200, blank=True)
+    target_join_date = models.DateField(null=True, blank=True)
 
 
 class RecruitmentPositionSync(models.Model):

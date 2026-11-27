@@ -22,10 +22,18 @@ class RecruitmentPagination(PageNumberPagination):
 
 
 class OpeningSerializer(serializers.ModelSerializer):
+    requisition_reference = serializers.SerializerMethodField()
+
     class Meta:
         model = RecruitmentOpening
-        fields = ['id', 'title', 'department', 'location', 'source', 'source_id', 'source_url', 'last_seen_at', 'is_open', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'source', 'source_id', 'source_url', 'last_seen_at', 'created_at', 'updated_at']
+        fields = ['id', 'title', 'department', 'location', 'source', 'source_id', 'source_url', 'last_seen_at', 'is_open',
+                  'requisition', 'requisition_reference', 'positions', 'hiring_manager', 'target_join_date',
+                  'created_at', 'updated_at']
+        read_only_fields = ['id', 'source', 'source_id', 'source_url', 'last_seen_at', 'requisition',
+                            'requisition_reference', 'created_at', 'updated_at']
+
+    def get_requisition_reference(self, opening):
+        return opening.requisition.reference if opening.requisition_id and opening.requisition else None
 
     def validate(self, attrs):
         if self.instance and self.instance.source == 'rejlers_careers' and {'title', 'location', 'is_open'} & set(attrs):
